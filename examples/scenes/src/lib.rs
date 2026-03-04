@@ -90,13 +90,6 @@ pub struct Arguments {
 
 impl Arguments {
     pub fn select_scene_set(&self) -> anyhow::Result<Option<SceneSet>> {
-        // There is no file access on WASM, and on Android we haven't set up the assets
-        // directory.
-        // TODO: Upload the assets directory on Android
-        // Therefore, only render the `test_scenes` (including one SVG example)
-        #[cfg(any(target_arch = "wasm32", target_os = "android"))]
-        return Ok(Some(test_scenes()));
-        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
         if self.test_scenes {
             Ok(test_scenes())
         } else if let Some(svgs) = &self.svgs {

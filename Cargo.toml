@@ -109,7 +109,6 @@ image = { version = "0.25.9", default-features = false }
 clap = "4.5.54"
 anyhow = "1.0.100"
 pollster = "0.4.0"
-web-time = "1.1.0"
 wgpu-profiler = "0.25.0"
 winit = "0.30.12"
 scenes = { path = "examples/scenes" }

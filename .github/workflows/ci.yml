@@ -12,9 +12,6 @@ env:
   # List of packages that will be checked with the minimum supported Rust version.
   # This should be limited to packages that are intended for publishing.
   RUST_MIN_VER_PKGS: "-p vello -p vello_encoding -p vello_shaders"
-  # List of packages that can not target Wasm.
-  # `vello_tests` uses `nv-flip`, which doesn't support Wasm.
-  NO_WASM_PKGS: "--exclude vello_tests --exclude xtask"
   # The files stored in LFS the tests need to access, in JSON format
   LFS_FILES: '["vello_tests/snapshots/*.png"]'
 
@@ -116,10 +113,6 @@ jobs:
         with:
           tool: cargo-hack
 
-      - name: install native dependencies
-        if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libudev-dev
-
       - name: restore cache
         uses: Swatinem/rust-cache@v2
         with:
@@ -202,10 +195,6 @@ jobs:
         with:
           toolchain: ${{ env.RUST_STABLE_VER }}
 
-      - name: install native dependencies
-        if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libudev-dev
-
       # Adapted from https://github.com/bevyengine/bevy/blob/b446374392adc70aceb92621b080d1a6cf7a7392/.github/workflows/validation-jobs.yml#L74-L79
       - name: install xvfb, llvmpipe and lavapipe
         if: matrix.os == 'ubuntu-latest'
@@ -248,32 +237,6 @@ jobs:
       - name: cargo test --doc
         run: cargo test --doc --workspace --locked --all-features --no-fail-fast
 
-  check-stable-android:
-    name: cargo check (aarch64-android)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: install stable toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_STABLE_VER }}
-          targets: aarch64-linux-android
-
-      - name: restore cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.event_name != 'merge_group' }}
-
-      - name: install cargo apk
-        run: cargo install cargo-apk
-
-      - name: cargo apk check (android)
-        run: cargo apk check -p simple --lib
-        env:
-          # This is a bit of a hack, but cargo apk doesn't seem to allow customising this
-          RUSTFLAGS: '-D warnings'
-
   check-msrv:
     name: cargo check (msrv)
     runs-on: ${{ matrix.os }}
@@ -287,10 +250,6 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_MIN_VER }}
-
-      - name: install native dependencies
-        if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libudev-dev
 
       - name: restore cache
         uses: Swatinem/rust-cache@v2
