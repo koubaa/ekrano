@@ -52,6 +52,7 @@ env:
 name: CI
 
 on:
+  workflow_dispatch:
   pull_request:
   merge_group:
   # We run on push, even though the commit is the same as when we ran in merge_group.
