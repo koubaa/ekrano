@@ -13,9 +13,9 @@ use std::cmp::Ordering;
 
 use rand::Rng;
 use rand::seq::IndexedRandom;
-use vello::Scene;
-use vello::kurbo::{Affine, BezPath, CubicBez, Line, ParamCurve, PathSeg, Point, QuadBez, Stroke};
-use vello::peniko::Color;
+use ekrano::Scene;
+use ekrano::kurbo::{Affine, BezPath, CubicBez, Line, ParamCurve, PathSeg, Point, QuadBez, Stroke};
+use ekrano::peniko::Color;
 
 use crate::{SceneParams, TestScene};
 

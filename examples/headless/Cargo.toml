@@ -10,7 +10,7 @@ publish = false
 workspace = true
 
 [dependencies]
-vello = { workspace = true }
+ekrano = { workspace = true }
 scenes = { workspace = true }
 
 anyhow = { workspace = true }

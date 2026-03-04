@@ -18,14 +18,14 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use scenes::{ImageCache, SceneParams, SceneSet, SimpleText};
-use vello::kurbo::{Affine, Vec2};
-use vello::peniko::color::palette;
-use vello::util::RenderContext;
-use vello::wgpu::{
+use ekrano::kurbo::{Affine, Vec2};
+use ekrano::peniko::color::palette;
+use ekrano::util::RenderContext;
+use ekrano::wgpu::{
     self, BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Extent3d, TexelCopyBufferInfo,
     TextureDescriptor, TextureFormat, TextureUsages,
 };
-use vello::{RendererOptions, Scene, util::block_on_wgpu};
+use ekrano::{RendererOptions, Scene, util::block_on_wgpu};
 
 fn main() -> Result<()> {
     #[cfg(not(target_arch = "wasm32"))]
@@ -96,12 +96,12 @@ async fn render(mut scenes: SceneSet, index: usize, args: &Args) -> Result<()> {
     let device_handle = &mut context.devices[device_id];
     let device = &device_handle.device;
     let queue = &device_handle.queue;
-    let mut renderer = vello::Renderer::new(
+    let mut renderer = ekrano::Renderer::new(
         device,
         RendererOptions {
             use_cpu: args.use_cpu,
             num_init_threads: NonZeroUsize::new(1),
-            antialiasing_support: vello::AaSupport::area_only(),
+            antialiasing_support: ekrano::AaSupport::area_only(),
             ..Default::default()
         },
     )
@@ -143,7 +143,7 @@ async fn render(mut scenes: SceneSet, index: usize, args: &Args) -> Result<()> {
             (Some(x), Some(y)) => (x, y),
         }
     };
-    let render_params = vello::RenderParams {
+    let render_params = ekrano::RenderParams {
         base_color: args
             .args
             .base_color
@@ -151,7 +151,7 @@ async fn render(mut scenes: SceneSet, index: usize, args: &Args) -> Result<()> {
             .unwrap_or(palette::css::BLACK),
         width,
         height,
-        antialiasing_method: vello::AaConfig::Area,
+        antialiasing_method: ekrano::AaConfig::Area,
     };
     let mut scene = Scene::new();
     scene.append(&fragment, Some(transform));

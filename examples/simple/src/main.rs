@@ -5,18 +5,18 @@
 
 use anyhow::Result;
 use std::sync::Arc;
-use vello::kurbo::{Affine, Circle, Ellipse, Line, RoundedRect, Stroke};
-use vello::peniko::Color;
-use vello::peniko::color::palette;
-use vello::util::{RenderContext, RenderSurface};
-use vello::{AaConfig, Renderer, RendererOptions, Scene};
+use ekrano::kurbo::{Affine, Circle, Ellipse, Line, RoundedRect, Stroke};
+use ekrano::peniko::Color;
+use ekrano::peniko::color::palette;
+use ekrano::util::{RenderContext, RenderSurface};
+use ekrano::{AaConfig, Renderer, RendererOptions, Scene};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::Window;
 
-use vello::wgpu;
+use ekrano::wgpu;
 
 #[derive(Debug)]
 enum RenderState {
@@ -148,7 +148,7 @@ impl ApplicationHandler for SimpleVelloApp {
                         &device_handle.queue,
                         &self.scene,
                         &surface.target_view,
-                        &vello::RenderParams {
+                        &ekrano::RenderParams {
                             base_color: palette::css::BLACK, // Background color
                             width,
                             height,
@@ -237,7 +237,7 @@ fn add_shapes_to_scene(scene: &mut Scene) {
     let circle = Circle::new((420.0, 200.0), 120.0);
     let circle_fill_color = Color::new([0.9529, 0.5451, 0.6588, 1.]);
     scene.fill(
-        vello::peniko::Fill::NonZero,
+        ekrano::peniko::Fill::NonZero,
         Affine::IDENTITY,
         circle_fill_color,
         None,
@@ -248,7 +248,7 @@ fn add_shapes_to_scene(scene: &mut Scene) {
     let ellipse = Ellipse::new((250.0, 420.0), (100.0, 160.0), -90.0);
     let ellipse_fill_color = Color::new([0.7961, 0.651, 0.9686, 1.]);
     scene.fill(
-        vello::peniko::Fill::NonZero,
+        ekrano::peniko::Fill::NonZero,
         Affine::IDENTITY,
         ellipse_fill_color,
         None,

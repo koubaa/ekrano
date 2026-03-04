@@ -10,9 +10,9 @@ workspace = true
 
 # The dependencies here are independent from the workspace versions
 [dependencies]
-# When using this example outside of the original Vello workspace,
-# remove the path property of the following Vello dependency requirement.
-vello = { version = "0.7.0", path = "../../vello" }
+# When using this example outside of the original Ekrano workspace,
+# remove the path property of the following ekrano dependency requirement.
+ekrano = { version = "0.7.0", path = "../../ekrano" }
 anyhow = "1.0.100"
 pollster = "0.4.0"
 winit = "0.30.12"

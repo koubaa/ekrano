@@ -55,7 +55,7 @@ impl Actions for ActionsImpl {
         Command::new(&cargo)
             .arg("nextest")
             .arg("run")
-            .env("VELLO_TEST_GENERATE_ALL", "1")
+            .env("EKRANO_TEST_GENERATE_ALL", "1")
             .status()?;
         Ok(())
     }

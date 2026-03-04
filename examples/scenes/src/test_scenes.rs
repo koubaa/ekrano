@@ -19,7 +19,7 @@
 //! `export_scenes`.
 
 use crate::{ExampleScene, SceneConfig, SceneSet};
-use vello::{
+use ekrano::{
     kurbo::{Affine, Cap},
     peniko::ImageQuality,
 };
@@ -126,12 +126,12 @@ mod impls {
     use kurbo::RoundedRect;
     use rand::Rng;
     use rand::{SeedableRng, rngs::StdRng};
-    use vello::kurbo::{
+    use ekrano::kurbo::{
         Affine, BezPath, Cap, Circle, Ellipse, Join, PathEl, Point, Rect, Shape, Stroke, Vec2,
     };
-    use vello::peniko::color::{AlphaColor, Lch, palette};
-    use vello::peniko::*;
-    use vello::*;
+    use ekrano::peniko::color::{AlphaColor, Lch, palette};
+    use ekrano::peniko::*;
+    use ekrano::*;
 
     const FLOWER_IMAGE: &[u8] = include_bytes!("../../assets/splash-flower.jpg");
 

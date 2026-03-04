@@ -10,7 +10,7 @@ use std::time::Instant;
 use web_time::Instant;
 
 use anyhow::Result;
-use vello::{
+use ekrano::{
     Scene,
     kurbo::{Affine, Rect, Stroke, Vec2},
     peniko::{Fill, color::palette},

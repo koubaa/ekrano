@@ -11,9 +11,9 @@ use skrifa::{
     MetadataProvider,
     raw::{FileRef, FontRef},
 };
-use vello::kurbo::Affine;
-use vello::peniko::{Blob, Brush, BrushRef, Fill, FontData, StyleRef, color::palette};
-use vello::{Glyph, Scene};
+use ekrano::kurbo::Affine;
+use ekrano::peniko::{Blob, Brush, BrushRef, Fill, FontData, StyleRef, color::palette};
+use ekrano::{Glyph, Scene};
 
 // This is very much a hack to get things working.
 // On Windows, can set this to "c:\\Windows\\Fonts\\seguiemj.ttf" to get color emoji

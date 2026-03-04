@@ -10,7 +10,7 @@ publish = false
 workspace = true
 
 [dependencies]
-vello = { workspace = true }
+ekrano = { workspace = true }
 skrifa = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
