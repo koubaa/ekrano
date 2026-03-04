@@ -11,17 +11,12 @@ env:
   RUST_MIN_VER: "1.88"
   # List of packages that will be checked with the minimum supported Rust version.
   # This should be limited to packages that are intended for publishing.
-  RUST_MIN_VER_PKGS: "-p vello -p vello_encoding -p vello_shaders -p vello_api -p vello_common -p vello_cpu -p vello_hybrid"
-  # List of packages that will be checked for `no_std` builds.
-  # This should be limited to packages that are intended for publishing.
-  RUST_NO_STD_PKGS: "-p vello_api -p vello_common -p vello_cpu"
-  # List of features that depend on the standard library and will be excluded from no_std checks.
-  FEATURES_DEPENDING_ON_STD: "std,default,png,pico_svg,multithreading"
+  RUST_MIN_VER_PKGS: "-p vello -p vello_encoding -p vello_shaders"
   # List of packages that can not target Wasm.
   # `vello_tests` uses `nv-flip`, which doesn't support Wasm.
   NO_WASM_PKGS: "--exclude vello_tests --exclude xtask"
   # The files stored in LFS the tests need to access, in JSON format
-  LFS_FILES: '["vello_tests/snapshots/*.png", "sparse_strips/vello_sparse_tests/snapshots/*.png"]'
+  LFS_FILES: '["vello_tests/snapshots/*.png"]'
 
 
 # Rationale
@@ -100,23 +95,6 @@ jobs:
 
       - name: check copyright headers
         run: bash .github/copyright.sh
-      
-      - name: Install cargo-rdme
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-rdme
-
-      - name: Run cargo rdme (vello_cpu)
-        run: cargo rdme --check --workspace-project=vello_cpu
-
-      - name: Run cargo rdme (vello_common)
-        run: cargo rdme --check --workspace-project=vello_common
-    
-      - name: Run cargo rdme (vello_api)
-        run: cargo rdme --check --workspace-project=vello_api
-
-      - name: Run cargo rdme (vello_hybrid)
-        run: cargo rdme --check --workspace-project=vello_hybrid
 
   clippy-stable:
     name: cargo clippy
@@ -131,7 +109,6 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_STABLE_VER }}
-          targets: x86_64-unknown-none
           components: clippy
 
       - name: install cargo-hack
@@ -148,52 +125,11 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'merge_group' }}
 
-      - name: cargo clippy (no_std)
-        run: cargo hack clippy ${{ env.RUST_NO_STD_PKGS }} --locked --optional-deps --each-feature --ignore-unknown-features --features libm,u8_pipeline,f32_pipeline --exclude-features ${{ env.FEATURES_DEPENDING_ON_STD }} --target x86_64-unknown-none -- -D warnings
-
       - name: cargo clippy
-        run: cargo hack clippy --workspace --locked --optional-deps --each-feature --ignore-unknown-features --features std,u8_pipeline,f32_pipeline -- -D warnings
-
-      - name: cargo clippy (vello_cpu - u8 pipeline)
-        run: cargo clippy -p vello_cpu --locked --no-default-features --features std,text,png,u8_pipeline
-
-      - name: cargo clippy (vello_cpu - f32 pipeline)
-        run: cargo clippy -p vello_cpu --locked --no-default-features --features std,text,png,f32_pipeline
+        run: cargo clippy --workspace --locked --all-features -- -D warnings
 
       - name: cargo clippy (auxiliary)
-        run: cargo hack clippy --workspace --locked --optional-deps --each-feature --ignore-unknown-features --features std,u8_pipeline,f32_pipeline --tests --benches --examples -- -D warnings
-
-  clippy-stable-wasm:
-    name: cargo clippy (wasm32)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: install stable toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_STABLE_VER }}
-          targets: wasm32-unknown-unknown
-          components: clippy
-
-      - name: install cargo-hack
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-hack
-
-      - name: restore cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.event_name != 'merge_group' }}
-
-      - name: cargo clippy (no_std)
-        run: cargo hack clippy ${{ env.RUST_NO_STD_PKGS }} --locked --target wasm32-unknown-unknown --optional-deps --each-feature --ignore-unknown-features --features libm,u8_pipeline,f32_pipeline --exclude-features ${{ env.FEATURES_DEPENDING_ON_STD }} -- -D warnings
-
-      - name: cargo clippy
-        run: cargo hack clippy --workspace ${{ env.NO_WASM_PKGS }} --locked --target wasm32-unknown-unknown --optional-deps --each-feature --ignore-unknown-features --features std,u8_pipeline,f32_pipeline -- -D warnings
-
-      - name: cargo clippy (auxiliary)
-        run: cargo hack clippy --workspace ${{ env.NO_WASM_PKGS }} --locked --target wasm32-unknown-unknown --optional-deps --each-feature --ignore-unknown-features --features std,u8_pipeline,f32_pipeline --tests --benches --examples -- -D warnings
+        run: cargo clippy --workspace --locked --all-features --tests --benches --examples -- -D warnings
 
   prime-lfs-cache:
     name: Prime LFS Cache
@@ -308,72 +244,9 @@ jobs:
           path: |
             vello_tests/comparisons
             vello_tests/current
-            sparse_strips/vello_sparse_tests/diffs
 
       - name: cargo test --doc
         run: cargo test --doc --workspace --locked --all-features --no-fail-fast
-
-  test-stable-wasm:
-    name: cargo test (wasm32)
-    needs: prime-lfs-cache
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        # We intentionally do not use lfs: true here, instead using the caching method to save LFS bandwidth.
-
-      - name: Restore lfs cache
-        id: lfs-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: .git/lfs
-          # The files targeted with git lfs
-          key: vello-lfs-${{ needs.prime-lfs-cache.outputs.lfs-hash }}
-          enableCrossOsArchive: true
-  
-      - name: Checkout LFS files
-        # `git lfs checkout` requires that each individual glob is a separate command line argument.
-        # The string `''' '''` is how you write `' '` in GitHub's expression context (i.e. two quotes separated by a space)
-        # The quotes are to avoid the shell from evaluating the globs itself.
-        run: git lfs checkout '${{ join(fromJson(env.LFS_FILES), ''' ''') }}'
-        continue-on-error: true
-
-      - name: install stable toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_STABLE_VER }}
-          targets: wasm32-unknown-unknown
-
-      - name: restore cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.event_name != 'merge_group' }}
-
-      - name: cargo test compile
-        run: cargo test --workspace ${{ env.NO_WASM_PKGS }} --locked --target wasm32-unknown-unknown --all-features --no-run
-
-      - name: install wasm-pack
-        uses: taiki-e/install-action@v2
-        with:
-          tool: wasm-pack
-
-      - name: check vello_hybrid is wgpu webgl compatible
-        run: wasm-pack test --headless --chrome
-        working-directory: sparse_strips/vello_hybrid/examples/wgpu_webgl
-
-      - name: check vello_hybrid is native webgl compatible
-        run: wasm-pack test --headless --chrome
-        working-directory: sparse_strips/vello_hybrid/examples/native_webgl
-
-      - name: Run vello_sparse_tests on Chrome
-        # We need to run in release mode, because otherwise wasm_parser can't read the
-        # blob, see <https://github.com/linebender/vello/pull/1078#issuecomment-3029336905>
-        run: wasm-pack test --headless --chrome --features webgl --release
-        working-directory: sparse_strips/vello_sparse_tests
-
-      - name: Run vello_sparse_tests (+simd128) on Chrome
-        run: RUSTFLAGS=-Ctarget-feature=+simd128 wasm-pack test --headless --chrome --features webgl --release
-        working-directory: sparse_strips/vello_sparse_tests
-
 
   check-stable-android:
     name: cargo check (aarch64-android)
@@ -396,7 +269,7 @@ jobs:
         run: cargo install cargo-apk
 
       - name: cargo apk check (android)
-        run: cargo apk check -p with_winit --lib
+        run: cargo apk check -p simple --lib
         env:
           # This is a bit of a hack, but cargo apk doesn't seem to allow customising this
           RUSTFLAGS: '-D warnings'
@@ -414,12 +287,6 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_MIN_VER }}
-          targets: x86_64-unknown-none
-
-      - name: install cargo-hack
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-hack
 
       - name: install native dependencies
         if: matrix.os == 'ubuntu-latest'
@@ -430,36 +297,8 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'merge_group' }}
 
-      - name: cargo check (no_std)
-        run: cargo hack check ${{ env.RUST_NO_STD_PKGS }} --locked --optional-deps --each-feature --ignore-unknown-features --features libm,u8_pipeline,f32_pipeline --exclude-features ${{ env.FEATURES_DEPENDING_ON_STD }} --target x86_64-unknown-none
-
       - name: cargo check
-        run: cargo hack check ${{ env.RUST_MIN_VER_PKGS }} --locked --optional-deps --each-feature --ignore-unknown-features --features std,u8_pipeline,f32_pipeline
-
-  check-msrv-wasm:
-    name: cargo check (msrv) (wasm32)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: install msrv toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_MIN_VER }}
-          targets: wasm32-unknown-unknown
-
-      - name: install cargo-hack
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-hack
-
-      - name: restore cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.event_name != 'merge_group' }}
-
-      - name: cargo check
-        run: cargo hack check ${{ env.RUST_MIN_VER_PKGS }} ${{ env.NO_WASM_PKGS }} --locked --target wasm32-unknown-unknown --optional-deps --each-feature --ignore-unknown-features --features std,u8_pipeline,f32_pipeline
+        run: cargo check ${{ env.RUST_MIN_VER_PKGS }} --locked --all-features
 
   doc:
     name: cargo doc
