@@ -16,7 +16,9 @@ fn main() {
                 println!("cargo:rustc-cfg=skip_gpu_tests");
             }
             _ => {
-                println!("cargo:cargo:warning=EKRANO_CI_GPU_SUPPORT should be set to yes/y or no/n");
+                println!(
+                    "cargo:cargo:warning=EKRANO_CI_GPU_SUPPORT should be set to yes/y or no/n"
+                );
             }
         }
     }

@@ -11,11 +11,11 @@
 
 use std::cmp::Ordering;
 
-use rand::Rng;
-use rand::seq::IndexedRandom;
 use ekrano::Scene;
 use ekrano::kurbo::{Affine, BezPath, CubicBez, Line, ParamCurve, PathSeg, Point, QuadBez, Stroke};
 use ekrano::peniko::Color;
+use rand::Rng;
+use rand::seq::IndexedRandom;
 
 use crate::{SceneParams, TestScene};
 

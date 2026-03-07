@@ -3,13 +3,13 @@
 
 //! Tests to validate our snapshot testing ability
 
-use scenes::SimpleText;
 use ekrano::{
     Scene,
     kurbo::{Affine, Circle, Rect},
     peniko::{Brush, Fill, color::palette},
 };
 use ekrano_tests::{TestParams, smoke_snapshot_test_sync};
+use scenes::SimpleText;
 
 fn filled_square(use_cpu: bool) {
     let mut scene = Scene::new();

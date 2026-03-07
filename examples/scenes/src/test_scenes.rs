@@ -123,15 +123,15 @@ mod impls {
     use std::sync::Arc;
 
     use crate::SceneParams;
-    use kurbo::RoundedRect;
-    use rand::Rng;
-    use rand::{SeedableRng, rngs::StdRng};
     use ekrano::kurbo::{
         Affine, BezPath, Cap, Circle, Ellipse, Join, PathEl, Point, Rect, Shape, Stroke, Vec2,
     };
     use ekrano::peniko::color::{AlphaColor, Lch, palette};
     use ekrano::peniko::*;
     use ekrano::*;
+    use kurbo::RoundedRect;
+    use rand::Rng;
+    use rand::{SeedableRng, rngs::StdRng};
 
     const FLOWER_IMAGE: &[u8] = include_bytes!("../../assets/splash-flower.jpg");
 

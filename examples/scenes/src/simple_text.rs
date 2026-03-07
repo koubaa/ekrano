@@ -7,13 +7,13 @@
 
 use std::sync::Arc;
 
+use ekrano::kurbo::Affine;
+use ekrano::peniko::{Blob, Brush, BrushRef, Fill, FontData, StyleRef, color::palette};
+use ekrano::{Glyph, Scene};
 use skrifa::{
     MetadataProvider,
     raw::{FileRef, FontRef},
 };
-use ekrano::kurbo::Affine;
-use ekrano::peniko::{Blob, Brush, BrushRef, Fill, FontData, StyleRef, color::palette};
-use ekrano::{Glyph, Scene};
 
 // This is very much a hack to get things working.
 // On Windows, can set this to "c:\\Windows\\Fonts\\seguiemj.ttf" to get color emoji

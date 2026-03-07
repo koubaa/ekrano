@@ -12,13 +12,13 @@
     clippy::allow_attributes_without_reason
 )]
 
-use scenes::ImageCache;
 use ekrano::{
     AaConfig, Scene,
     kurbo::{Affine, Rect, Triangle},
     peniko::{Color, ColorStop, Extend, Gradient, ImageFormat, ImageQuality, Mix, color::palette},
 };
 use ekrano_tests::{TestParams, smoke_snapshot_test_sync, snapshot_test_sync};
+use scenes::ImageCache;
 
 /// A reproduction of <https://github.com/linebender/vello/issues/680>
 fn many_bins(use_cpu: bool) {
@@ -206,7 +206,11 @@ fn clip_blends() {
         &Rect::from_origin_size((0., 0.), (100., 100.)),
     );
     let layer_shape = Triangle::from_coords((50., 0.), (0., 100.), (100., 100.));
-    scene.push_clip_layer(ekrano::peniko::Fill::NonZero, Affine::IDENTITY, &layer_shape);
+    scene.push_clip_layer(
+        ekrano::peniko::Fill::NonZero,
+        Affine::IDENTITY,
+        &layer_shape,
+    );
     scene.push_layer(
         ekrano::peniko::Fill::NonZero,
         Mix::Multiply,

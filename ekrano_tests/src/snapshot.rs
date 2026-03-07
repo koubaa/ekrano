@@ -8,12 +8,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use image::{DynamicImage, ImageError};
-use nv_flip::FlipPool;
 use ekrano::{
     Scene,
     peniko::{ImageData, ImageFormat},
 };
+use image::{DynamicImage, ImageError};
+use nv_flip::FlipPool;
 
 use crate::{TestParams, env_var_relates_to, render_then_debug, write_png_to_file};
 use anyhow::{Result, anyhow, bail};

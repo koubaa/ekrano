@@ -33,7 +33,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow, bail};
-use scenes::{ExampleScene, ImageCache, SceneParams, SimpleText};
 use ekrano::kurbo::{Affine, Vec2};
 use ekrano::peniko::{Blob, Color, ImageFormat, color::palette};
 use ekrano::peniko::{ImageAlphaType, ImageData};
@@ -42,6 +41,7 @@ use ekrano::wgpu::{
     TextureDescriptor, TextureFormat, TextureUsages,
 };
 use ekrano::{AaConfig, RendererOptions, Scene, util::RenderContext, util::block_on_wgpu};
+use scenes::{ExampleScene, ImageCache, SceneParams, SimpleText};
 
 mod compare;
 mod snapshot;

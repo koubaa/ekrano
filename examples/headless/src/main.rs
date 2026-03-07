@@ -17,7 +17,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
-use scenes::{ImageCache, SceneParams, SceneSet, SimpleText};
 use ekrano::kurbo::{Affine, Vec2};
 use ekrano::peniko::color::palette;
 use ekrano::util::RenderContext;
@@ -26,6 +25,7 @@ use ekrano::wgpu::{
     TextureDescriptor, TextureFormat, TextureUsages,
 };
 use ekrano::{RendererOptions, Scene, util::block_on_wgpu};
+use scenes::{ImageCache, SceneParams, SceneSet, SimpleText};
 
 fn main() -> Result<()> {
     #[cfg(not(target_arch = "wasm32"))]

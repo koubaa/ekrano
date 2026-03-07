@@ -7,12 +7,12 @@ use std::{
 };
 
 use anyhow::{Result, anyhow, bail};
-use image::DynamicImage;
-use nv_flip::FlipPool;
 use ekrano::{
     Scene,
     peniko::{ImageData, ImageFormat},
 };
+use image::DynamicImage;
+use nv_flip::FlipPool;
 
 use crate::{TestParams, render_then_debug, write_png_to_file};
 

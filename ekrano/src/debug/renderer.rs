@@ -12,8 +12,8 @@ use crate::{
 
 use {
     bytemuck::{Pod, Zeroable, offset_of},
-    peniko::color::{OpaqueColor, Srgb, palette},
     ekrano_encoding::{BumpAllocators, LineSoup, PathBbox},
+    peniko::color::{OpaqueColor, Srgb, palette},
 };
 pub(crate) struct DebugRenderer {
     // `clear_tint` slightly darkens the output from the vello renderer to make the debug overlays

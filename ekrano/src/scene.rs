@@ -3,6 +3,11 @@
 
 use std::sync::Arc;
 
+#[cfg(feature = "bump_estimate")]
+use ekrano_encoding::BumpAllocatorMemory;
+use ekrano_encoding::{
+    DrawBeginClip, Encoding, Glyph, GlyphRun, NormalizedCoord, Patch, Transform,
+};
 use peniko::{
     BlendMode, Blob, Brush, BrushRef, Color, ColorStop, ColorStops, ColorStopsSource, Compose,
     Extend, Fill, FontData, Gradient, ImageBrush, ImageBrushRef, ImageData, StyleRef,
@@ -19,9 +24,6 @@ use skrifa::{
     prelude::Size,
     raw::{TableProvider, tables::cpal::Cpal},
 };
-#[cfg(feature = "bump_estimate")]
-use ekrano_encoding::BumpAllocatorMemory;
-use ekrano_encoding::{DrawBeginClip, Encoding, Glyph, GlyphRun, NormalizedCoord, Patch, Transform};
 
 // TODO - Document invariants and edge cases (#470)
 // - What happens when we pass a transform matrix with NaN values to the Scene?

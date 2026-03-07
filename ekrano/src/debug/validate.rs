@@ -3,8 +3,8 @@
 
 use {
     bytemuck::{Pod, Zeroable},
-    std::{collections::BTreeSet, fmt},
     ekrano_encoding::LineSoup,
+    std::{collections::BTreeSet, fmt},
 };
 
 #[derive(Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Pod, Zeroable)]

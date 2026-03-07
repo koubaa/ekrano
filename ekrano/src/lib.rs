@@ -142,8 +142,8 @@ use peniko::ImageData;
 #[cfg(feature = "wgpu")]
 pub use wgpu;
 
-pub use scene::{DrawGlyphs, Scene};
 pub use ekrano_encoding::{Glyph, NormalizedCoord};
+pub use scene::{DrawGlyphs, Scene};
 
 use low_level::ShaderId;
 #[cfg(feature = "wgpu")]

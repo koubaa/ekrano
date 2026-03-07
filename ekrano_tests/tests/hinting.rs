@@ -11,13 +11,13 @@
     clippy::allow_attributes_without_reason
 )]
 
-use scenes::SimpleText;
 use ekrano::{
     Scene,
     kurbo::Affine,
     peniko::{Brush, Fill, color::palette},
 };
 use ekrano_tests::{TestParams, snapshot_test_sync};
+use scenes::SimpleText;
 
 fn encode_hinted_text(text: &str, font_size: f32) -> Scene {
     let mut scene = Scene::new();

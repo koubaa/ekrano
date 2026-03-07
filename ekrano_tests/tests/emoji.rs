@@ -11,15 +11,15 @@
     clippy::allow_attributes_without_reason
 )]
 
-use scenes::SimpleText;
-#[cfg(target_os = "macos")]
-use std::sync::Arc;
 #[cfg(target_os = "macos")]
 use ekrano::peniko::color::palette;
 #[cfg(target_os = "macos")]
 use ekrano::peniko::{Blob, Brush, FontData};
 use ekrano::{Scene, kurbo::Affine, peniko::Fill};
 use ekrano_tests::{TestParams, snapshot_test_sync};
+use scenes::SimpleText;
+#[cfg(target_os = "macos")]
+use std::sync::Arc;
 
 fn encode_noto_colr(text: &str, font_size: f32) -> Scene {
     let mut scene = Scene::new();

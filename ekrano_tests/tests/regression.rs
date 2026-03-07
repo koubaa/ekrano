@@ -3,14 +3,14 @@
 
 //! Tests to ensure that certain issues which don't deserve a test scene don't regress
 
-use scenes::ImageCache;
-use scenes::SimpleText;
 use ekrano::{
     AaConfig, Scene,
     kurbo::{Affine, Rect, RoundedRect, Stroke},
     peniko::{Extend, ImageQuality, color::palette},
 };
 use ekrano_tests::{TestParams, smoke_snapshot_test_sync, snapshot_test_sync};
+use scenes::ImageCache;
+use scenes::SimpleText;
 
 /// Test created from <https://github.com/linebender/vello/issues/616>
 #[test]

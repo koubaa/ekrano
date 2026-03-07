@@ -4,12 +4,12 @@
 //! Simple example.
 
 use anyhow::Result;
-use std::sync::Arc;
 use ekrano::kurbo::{Affine, Circle, Ellipse, Line, RoundedRect, Stroke};
 use ekrano::peniko::Color;
 use ekrano::peniko::color::palette;
 use ekrano::util::{RenderContext, RenderSurface};
 use ekrano::{AaConfig, Renderer, RendererOptions, Scene};
+use std::sync::Arc;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::WindowEvent;
