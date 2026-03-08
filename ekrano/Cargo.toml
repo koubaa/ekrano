@@ -41,6 +41,9 @@ wgpu-profiler = ["dep:wgpu-profiler"]
 # In practise, this won't compile outside of the Vello repository.
 hot_reload = ["ekrano_shaders/compile"]
 
+# Goldy backend (Phase 3 migration). Use with: cargo build --no-default-features --features goldy
+goldy = ["dep:goldy", "dep:ekrano_shaders"]
+
 [lints]
 workspace = true
 
@@ -58,3 +61,4 @@ wgpu-profiler = { workspace = true, optional = true }
 thiserror = { workspace = true }
 # TODO: Add feature for built-in bitmap emoji support?
 png = { workspace = true }
+goldy = { path = "../../goldy", optional = true }

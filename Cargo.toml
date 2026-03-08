@@ -9,7 +9,6 @@ members = [
 
     "examples/headless",
     "examples/scenes",
-    "examples/simple",
 ]
 
 [workspace.package]
@@ -17,7 +16,7 @@ members = [
 #
 # NOTE: When bumping this, remember to also bump those packages'
 #       version in the dependencies section at the bottom of this file.
-#       Additionally, bump the ekrano dependency version in the 'simple' example.
+#
 version = "0.7.0"
 
 edition = "2024"
@@ -109,7 +108,6 @@ clap = "4.5.54"
 anyhow = "1.0.100"
 pollster = "0.4.0"
 wgpu-profiler = "0.25.0"
-winit = "0.30.12"
 scenes = { path = "examples/scenes" }
 svg = "0.18.0"
 criterion = { version = "0.5.1", default-features = false }

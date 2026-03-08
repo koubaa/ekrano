@@ -15,6 +15,12 @@ use crate::{
     wgpu_engine::WgpuEngine,
 };
 
+#[cfg(all(feature = "goldy", not(feature = "wgpu")))]
+use crate::{Error, recording::{BindType, ImageFormat}};
+
+#[cfg(feature = "goldy")]
+use crate::goldy_engine::GoldyEngine;
+
 // Shaders for the full pipeline
 pub struct FullShaders {
     pub pathtag_reduce: ShaderId,
@@ -270,5 +276,236 @@ pub(crate) fn full_shaders(
         fine_msaa8,
         fine_msaa16,
         pathtag_is_cpu: options.use_cpu,
+    })
+}
+
+#[cfg(feature = "goldy")]
+pub(crate) fn goldy_full_shaders(
+    device: &goldy::Device,
+    engine: &mut GoldyEngine,
+) -> Result<FullShaders, Error> {
+    use BindType::*;
+
+    let search_path = ekrano_shaders::slang::slang_search_path();
+    let search_path_str = search_path.to_string_lossy();
+    let search_paths = [search_path_str.as_ref()];
+
+    let pathtag_reduce = engine.add_compute_shader(
+        device,
+        "pathtag_reduce",
+        ekrano_shaders::slang::PATHTAG_REDUCE,
+        &[Uniform, BufReadOnly, Buffer],
+        &search_paths,
+    )?;
+    let pathtag_reduce2 = engine.add_compute_shader(
+        device,
+        "pathtag_reduce2",
+        ekrano_shaders::slang::PATHTAG_REDUCE2,
+        &[BufReadOnly, Buffer],
+        &search_paths,
+    )?;
+    let pathtag_scan1 = engine.add_compute_shader(
+        device,
+        "pathtag_scan1",
+        ekrano_shaders::slang::PATHTAG_SCAN1,
+        &[BufReadOnly, BufReadOnly, Buffer],
+        &search_paths,
+    )?;
+    let pathtag_scan = engine.add_compute_shader(
+        device,
+        "pathtag_scan_small",
+        ekrano_shaders::slang::PATHTAG_SCAN_SMALL,
+        &[Uniform, BufReadOnly, BufReadOnly, Buffer],
+        &search_paths,
+    )?;
+    let pathtag_scan_large = engine.add_compute_shader(
+        device,
+        "pathtag_scan_large",
+        ekrano_shaders::slang::PATHTAG_SCAN_SMALL,
+        &[Uniform, BufReadOnly, BufReadOnly, Buffer],
+        &search_paths,
+    )?;
+    let bbox_clear = engine.add_compute_shader(
+        device,
+        "bbox_clear",
+        ekrano_shaders::slang::BBOX_CLEAR,
+        &[Uniform, Buffer],
+        &search_paths,
+    )?;
+    let flatten = engine.add_compute_shader(
+        device,
+        "flatten",
+        ekrano_shaders::slang::FLATTEN,
+        &[Uniform, BufReadOnly, BufReadOnly, Buffer, Buffer, Buffer],
+        &search_paths,
+    )?;
+    let draw_reduce = engine.add_compute_shader(
+        device,
+        "draw_reduce",
+        ekrano_shaders::slang::DRAW_REDUCE,
+        &[Uniform, BufReadOnly, Buffer],
+        &search_paths,
+    )?;
+    let draw_leaf = engine.add_compute_shader(
+        device,
+        "draw_leaf",
+        ekrano_shaders::slang::DRAW_LEAF,
+        &[
+            Uniform,
+            BufReadOnly,
+            BufReadOnly,
+            BufReadOnly,
+            Buffer,
+            Buffer,
+            Buffer,
+        ],
+        &search_paths,
+    )?;
+    let clip_reduce = engine.add_compute_shader(
+        device,
+        "clip_reduce",
+        ekrano_shaders::slang::CLIP_REDUCE,
+        &[BufReadOnly, BufReadOnly, Buffer, Buffer],
+        &search_paths,
+    )?;
+    let clip_leaf = engine.add_compute_shader(
+        device,
+        "clip_leaf",
+        ekrano_shaders::slang::CLIP_LEAF,
+        &[
+            Uniform,
+            BufReadOnly,
+            BufReadOnly,
+            BufReadOnly,
+            BufReadOnly,
+            Buffer,
+            Buffer,
+        ],
+        &search_paths,
+    )?;
+    let binning = engine.add_compute_shader(
+        device,
+        "binning",
+        ekrano_shaders::slang::BINNING,
+        &[
+            Uniform,
+            BufReadOnly,
+            BufReadOnly,
+            BufReadOnly,
+            Buffer,
+            Buffer,
+            Buffer,
+            Buffer,
+        ],
+        &search_paths,
+    )?;
+    let tile_alloc = engine.add_compute_shader(
+        device,
+        "tile_alloc",
+        ekrano_shaders::slang::TILE_ALLOC,
+        &[Uniform, BufReadOnly, BufReadOnly, Buffer, Buffer, Buffer],
+        &search_paths,
+    )?;
+    let path_count_setup = engine.add_compute_shader(
+        device,
+        "path_count_setup",
+        ekrano_shaders::slang::PATH_COUNT_SETUP,
+        &[Buffer, Buffer],
+        &search_paths,
+    )?;
+    let path_count = engine.add_compute_shader(
+        device,
+        "path_count",
+        ekrano_shaders::slang::PATH_COUNT,
+        &[Uniform, Buffer, BufReadOnly, BufReadOnly, Buffer, Buffer],
+        &search_paths,
+    )?;
+    let backdrop = engine.add_compute_shader(
+        device,
+        "backdrop_dyn",
+        ekrano_shaders::slang::BACKDROP_DYN,
+        &[Uniform, Buffer, BufReadOnly, Buffer],
+        &search_paths,
+    )?;
+    let coarse = engine.add_compute_shader(
+        device,
+        "coarse",
+        ekrano_shaders::slang::COARSE,
+        &[
+            Uniform,
+            BufReadOnly,
+            BufReadOnly,
+            BufReadOnly,
+            BufReadOnly,
+            BufReadOnly,
+            Buffer,
+            Buffer,
+            Buffer,
+        ],
+        &search_paths,
+    )?;
+    let path_tiling_setup = engine.add_compute_shader(
+        device,
+        "path_tiling_setup",
+        ekrano_shaders::slang::PATH_TILING_SETUP,
+        &[Buffer, Buffer, Buffer],
+        &search_paths,
+    )?;
+    let path_tiling = engine.add_compute_shader(
+        device,
+        "path_tiling",
+        ekrano_shaders::slang::PATH_TILING,
+        &[
+            Buffer,
+            BufReadOnly,
+            BufReadOnly,
+            BufReadOnly,
+            BufReadOnly,
+            Buffer,
+        ],
+        &search_paths,
+    )?;
+    // Only fine_area for now (no MSAA support in Goldy path)
+    let fine_area = Some(engine.add_compute_shader(
+        device,
+        "fine_area",
+        ekrano_shaders::slang::FINE,
+        &[
+            Uniform,
+            BufReadOnly,
+            BufReadOnly,
+            BufReadOnly,
+            Buffer,
+            Image(ImageFormat::Rgba8),
+            ImageRead(ImageFormat::Rgba8),
+            ImageRead(ImageFormat::Rgba8),
+        ],
+        &search_paths,
+    )?);
+
+    Ok(FullShaders {
+        pathtag_reduce,
+        pathtag_reduce2,
+        pathtag_scan1,
+        pathtag_scan,
+        pathtag_scan_large,
+        bbox_clear,
+        flatten,
+        draw_reduce,
+        draw_leaf,
+        clip_reduce,
+        clip_leaf,
+        binning,
+        tile_alloc,
+        path_count_setup,
+        path_count,
+        backdrop,
+        coarse,
+        path_tiling_setup,
+        path_tiling,
+        fine_area,
+        fine_msaa8: None,
+        fine_msaa16: None,
+        pathtag_is_cpu: false,
     })
 }

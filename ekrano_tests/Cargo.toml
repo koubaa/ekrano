@@ -8,11 +8,17 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+default = ["wgpu"]
+wgpu = ["ekrano/wgpu", "ekrano/wgpu_default"]
+goldy = ["ekrano/goldy", "dep:goldy"]
+
 [lints]
 workspace = true
 
 [dependencies]
-ekrano = { workspace = true }
+ekrano = { path = "../ekrano", default-features = false }
+goldy = { path = "../../goldy", optional = true }
 anyhow = { workspace = true }
 
 pollster = { workspace = true }

@@ -49,6 +49,9 @@ pub mod compile;
 #[cfg(feature = "cpu")]
 pub mod cpu;
 
+/// Slang shader sources for Goldy backend (Phase 3 migration).
+pub mod slang;
+
 #[cfg(feature = "msl")]
 pub use types::msl;
 pub use types::{BindType, BindingInfo, WorkgroupBufferInfo};

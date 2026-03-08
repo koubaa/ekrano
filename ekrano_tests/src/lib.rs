@@ -36,12 +36,16 @@ use anyhow::{Result, anyhow, bail};
 use ekrano::kurbo::{Affine, Vec2};
 use ekrano::peniko::{Blob, Color, ImageFormat, color::palette};
 use ekrano::peniko::{ImageAlphaType, ImageData};
+use ekrano::{AaConfig, Scene};
+use scenes::{ExampleScene, ImageCache, SceneParams, SimpleText};
+
+#[cfg(feature = "wgpu")]
 use ekrano::wgpu::{
     self, BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Extent3d, TexelCopyBufferInfo,
     TextureDescriptor, TextureFormat, TextureUsages,
 };
-use ekrano::{AaConfig, RendererOptions, Scene, util::RenderContext, util::block_on_wgpu};
-use scenes::{ExampleScene, ImageCache, SceneParams, SimpleText};
+#[cfg(feature = "wgpu")]
+use ekrano::{RendererOptions, util::RenderContext, util::block_on_wgpu};
 
 mod compare;
 mod snapshot;
@@ -99,103 +103,140 @@ pub async fn render_then_debug(scene: &Scene, params: &TestParams) -> Result<Ima
     Ok(image)
 }
 
-pub async fn get_scene_image(
-    params: &TestParams,
-    scene: &Scene,
-) -> Result<ImageData, anyhow::Error> {
-    let mut context = RenderContext::new();
-    let device_id = context
-        .device(None)
-        .await
-        .ok_or_else(|| anyhow!("No compatible device found"))?;
-    let device_handle = &mut context.devices[device_id];
-    let device = &device_handle.device;
-    let queue = &device_handle.queue;
-    let mut renderer = ekrano::Renderer::new(
-        device,
-        RendererOptions {
-            use_cpu: params.use_cpu,
-            num_init_threads: NonZeroUsize::new(1),
-            antialiasing_support: std::iter::once(params.anti_aliasing).collect(),
-            pipeline_cache: None,
-        },
-    )
-    .or_else(|_| bail!("Got non-Send/Sync error from creating renderer"))?;
+#[cfg(feature = "goldy")]
+pub fn get_scene_image_goldy(params: &TestParams, scene: &Scene) -> Result<ImageData, anyhow::Error> {
+    use goldy::{Device, DeviceType, Instance};
+    use ekrano::{GoldyRenderer, RenderParams};
+
+    let instance = Instance::new()?;
+    let device = instance
+        .create_device(DeviceType::DiscreteGpu)
+        .or_else(|_| instance.create_device(DeviceType::IntegratedGpu))
+        .or_else(|_| instance.create_device(DeviceType::Other))
+        .map_err(|e| anyhow!("No Goldy device: {e}"))?;
+
+    let mut renderer = GoldyRenderer::new(&device)?;
     let width = params.width;
     let height = params.height;
-    let render_params = ekrano::RenderParams {
+    let render_params = RenderParams {
         base_color: params.base_color.unwrap_or(palette::css::BLACK),
         width,
         height,
         antialiasing_method: params.anti_aliasing,
     };
-    let size = Extent3d {
-        width,
-        height,
-        depth_or_array_layers: 1,
-    };
-    let target = device.create_texture(&TextureDescriptor {
-        label: Some("Target texture"),
-        size,
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: TextureFormat::Rgba8Unorm,
-        usage: TextureUsages::STORAGE_BINDING | TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let view = target.create_view(&wgpu::TextureViewDescriptor::default());
-    renderer
-        .render_to_texture(device, queue, scene, &view, &render_params)
-        .or_else(|_| bail!("Got non-Send/Sync error from rendering"))?;
-    let padded_byte_width = (width * 4).next_multiple_of(256);
-    let buffer_size = padded_byte_width as u64 * height as u64;
-    let buffer = device.create_buffer(&BufferDescriptor {
-        label: Some("val"),
-        size: buffer_size,
-        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
-        label: Some("Copy out buffer"),
-    });
-    encoder.copy_texture_to_buffer(
-        target.as_image_copy(),
-        TexelCopyBufferInfo {
-            buffer: &buffer,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(padded_byte_width),
-                rows_per_image: None,
-            },
-        },
-        size,
-    );
-    queue.submit([encoder.finish()]);
-    let buf_slice = buffer.slice(..);
-    let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
-    buf_slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
-    if let Some(recv_result) = block_on_wgpu(device, receiver.receive()) {
-        recv_result?;
-    } else {
-        bail!("channel was closed");
-    }
-    let data = buf_slice.get_mapped_range();
-    let mut result_unpadded = Vec::<u8>::with_capacity((width * height * 4).try_into()?);
-    for row in 0..height {
-        let start = (row * padded_byte_width).try_into()?;
-        result_unpadded.extend(&data[start..start + (width * 4) as usize]);
-    }
-    let data = Blob::new(Arc::new(result_unpadded));
-    let image = ImageData {
+
+    let pixels = renderer.render_to_buffer(&device, scene, &render_params)?;
+    let data = Blob::new(Arc::new(pixels));
+    Ok(ImageData {
         data,
         format: ImageFormat::Rgba8,
         width,
         height,
-        // TODO: Confirm
         alpha_type: ImageAlphaType::Alpha,
-    };
-    Ok(image)
+    })
+}
+
+pub async fn get_scene_image(
+    params: &TestParams,
+    scene: &Scene,
+) -> Result<ImageData, anyhow::Error> {
+    #[cfg(feature = "goldy")]
+    return Ok(get_scene_image_goldy(params, scene)?);
+
+    #[cfg(feature = "wgpu")]
+    {
+        let mut context = RenderContext::new();
+        let device_id = context
+            .device()
+            .await
+            .ok_or_else(|| anyhow!("No compatible device found"))?;
+        let device_handle = &mut context.devices[device_id];
+        let device = &device_handle.device;
+        let queue = &device_handle.queue;
+        let mut renderer = ekrano::Renderer::new(
+            device,
+            RendererOptions {
+                use_cpu: params.use_cpu,
+                num_init_threads: NonZeroUsize::new(1),
+                antialiasing_support: std::iter::once(params.anti_aliasing).collect(),
+                pipeline_cache: None,
+            },
+        )
+        .or_else(|_| bail!("Got non-Send/Sync error from creating renderer"))?;
+        let width = params.width;
+        let height = params.height;
+        let render_params = ekrano::RenderParams {
+            base_color: params.base_color.unwrap_or(palette::css::BLACK),
+            width,
+            height,
+            antialiasing_method: params.anti_aliasing,
+        };
+        let size = Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+        let target = device.create_texture(&TextureDescriptor {
+            label: Some("Target texture"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: TextureFormat::Rgba8Unorm,
+            usage: TextureUsages::STORAGE_BINDING | TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        renderer
+            .render_to_texture(device, queue, scene, &view, &render_params)
+            .or_else(|_| bail!("Got non-Send/Sync error from rendering"))?;
+        let padded_byte_width = (width * 4).next_multiple_of(256);
+        let buffer_size = padded_byte_width as u64 * height as u64;
+        let buffer = device.create_buffer(&BufferDescriptor {
+            label: Some("val"),
+            size: buffer_size,
+            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("Copy out buffer"),
+        });
+        encoder.copy_texture_to_buffer(
+            target.as_image_copy(),
+            TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_byte_width),
+                    rows_per_image: None,
+                },
+            },
+            size,
+        );
+        queue.submit([encoder.finish()]);
+        let buf_slice = buffer.slice(..);
+        let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
+        buf_slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
+        if let Some(recv_result) = block_on_wgpu(device, receiver.receive()) {
+            recv_result?;
+        } else {
+            bail!("channel was closed");
+        }
+        let data = buf_slice.get_mapped_range();
+        let mut result_unpadded = Vec::<u8>::with_capacity((width * height * 4).try_into()?);
+        for row in 0..height {
+            let start = (row * padded_byte_width).try_into()?;
+            result_unpadded.extend(&data[start..start + (width * 4) as usize]);
+        }
+        let data = Blob::new(Arc::new(result_unpadded));
+        Ok(ImageData {
+            data,
+            format: ImageFormat::Rgba8,
+            width,
+            height,
+            alpha_type: ImageAlphaType::Alpha,
+        })
+    }
 }
 
 pub fn write_png_to_file(

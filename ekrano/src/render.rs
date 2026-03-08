@@ -7,7 +7,7 @@ use crate::recording::{BufferProxy, ImageFormat, ImageProxy, Recording, Resource
 use crate::shaders::FullShaders;
 use crate::{AaConfig, RenderParams};
 
-#[cfg(feature = "wgpu")]
+#[cfg(any(feature = "wgpu", feature = "goldy"))]
 use crate::Scene;
 
 use ekrano_encoding::{Encoding, Resolver, WorkgroupSize, make_mask_lut, make_mask_lut_16};
@@ -73,7 +73,7 @@ impl CapturedBuffers {
     }
 }
 
-#[cfg(feature = "wgpu")]
+#[cfg(any(feature = "wgpu", feature = "goldy"))]
 pub(crate) fn render_full(
     scene: &Scene,
     resolver: &mut Resolver,
@@ -83,7 +83,7 @@ pub(crate) fn render_full(
     render_encoding_full(scene.encoding(), resolver, shaders, params)
 }
 
-#[cfg(feature = "wgpu")]
+#[cfg(any(feature = "wgpu", feature = "goldy"))]
 /// Create a single recording with both coarse and fine render stages.
 ///
 /// This function is not recommended when the scene can be complex, as it does not

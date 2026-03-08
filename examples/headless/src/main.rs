@@ -12,20 +12,26 @@
 )]
 
 use std::fs::File;
-use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use ekrano::kurbo::{Affine, Vec2};
 use ekrano::peniko::color::palette;
+use ekrano::Scene;
+use scenes::{ImageCache, SceneParams, SceneSet, SimpleText};
+
+#[cfg(feature = "wgpu")]
+use std::num::NonZeroUsize;
+#[cfg(feature = "wgpu")]
 use ekrano::util::RenderContext;
+#[cfg(feature = "wgpu")]
 use ekrano::wgpu::{
     self, BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Extent3d, TexelCopyBufferInfo,
     TextureDescriptor, TextureFormat, TextureUsages,
 };
-use ekrano::{RendererOptions, Scene, util::block_on_wgpu};
-use scenes::{ImageCache, SceneParams, SceneSet, SimpleText};
+#[cfg(feature = "wgpu")]
+use ekrano::{RendererOptions, util::block_on_wgpu};
 
 fn main() -> Result<()> {
     #[cfg(not(target_arch = "wasm32"))]
@@ -87,10 +93,21 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+#[allow(unused_mut)]
 async fn render(mut scenes: SceneSet, index: usize, args: &Args) -> Result<()> {
+    #[cfg(all(feature = "goldy", not(feature = "wgpu")))]
+    return render_goldy(scenes, index, args);
+
+    #[cfg(all(feature = "goldy", feature = "wgpu"))]
+    if args.goldy {
+        return render_goldy(scenes, index, args);
+    }
+
+    #[cfg(feature = "wgpu")]
+    {
     let mut context = RenderContext::new();
     let device_id = context
-        .device(None)
+        .device()
         .await
         .ok_or_else(|| anyhow!("No compatible device found"))?;
     let device_handle = &mut context.devices[device_id];
@@ -227,6 +244,86 @@ async fn render(mut scenes: SceneSet, index: usize, args: &Args) -> Result<()> {
     writer.finish()?;
     println!("Wrote result ({width}x{height}) to {out_path:?}");
     Ok(())
+    }
+}
+
+#[cfg(feature = "goldy")]
+fn render_goldy(mut scenes: SceneSet, index: usize, args: &Args) -> Result<()> {
+    use goldy::{DeviceType, Instance};
+    use ekrano::{GoldyRenderer, RenderParams};
+
+    let instance = Instance::new()?;
+    let device = instance
+        .create_device(DeviceType::DiscreteGpu)
+        .or_else(|_| instance.create_device(DeviceType::IntegratedGpu))
+        .or_else(|_| instance.create_device(DeviceType::Other))
+        .map_err(|e| anyhow!("No Goldy device: {e}"))?;
+
+    let mut renderer = GoldyRenderer::new(&device)?;
+    let mut fragment = Scene::new();
+    let example_scene = &mut scenes.scenes[index];
+    let mut text = SimpleText::new();
+    let mut images = ImageCache::new();
+    let mut scene_params = SceneParams {
+        time: args.time.unwrap_or(0.),
+        text: &mut text,
+        images: &mut images,
+        resolution: None,
+        base_color: None,
+        interactive: false,
+        complexity: 0,
+    };
+    example_scene
+        .function
+        .render(&mut fragment, &mut scene_params);
+    let mut transform = Affine::IDENTITY;
+    let (width, height) = if let Some(resolution) = scene_params.resolution {
+        let ratio = resolution.x / resolution.y;
+        let (new_width, new_height) = match (args.x_resolution, args.y_resolution) {
+            (None, None) => (resolution.x.ceil() as u32, resolution.y.ceil() as u32),
+            (None, Some(y)) => ((ratio * (y as f64)).ceil() as u32, y),
+            (Some(x), None) => (x, ((x as f64) / ratio).ceil() as u32),
+            (Some(x), Some(y)) => (x, y),
+        };
+        let factor = Vec2::new(new_width as f64, new_height as f64);
+        let scale_factor = (factor.x / resolution.x).min(factor.y / resolution.y);
+        transform *= Affine::scale(scale_factor);
+        (new_width, new_height)
+    } else {
+        match (args.x_resolution, args.y_resolution) {
+            (None, None) => (1000, 1000),
+            (None, Some(y)) => (y, y),
+            (Some(x), None) => (x, x),
+            (Some(x), Some(y)) => (x, y),
+        }
+    };
+    let render_params = RenderParams {
+        base_color: args
+            .args
+            .base_color
+            .or(scene_params.base_color)
+            .unwrap_or(palette::css::BLACK),
+        width,
+        height,
+        antialiasing_method: ekrano::AaConfig::Area,
+    };
+    let mut scene = Scene::new();
+    scene.append(&fragment, Some(transform));
+
+    let result_unpadded = renderer.render_to_buffer(&device, &scene, &render_params)?;
+    let out_path = args
+        .out_directory
+        .join(&example_scene.config.name)
+        .with_extension("png");
+    let mut file = File::create(&out_path)?;
+    let mut png_encoder = png::Encoder::new(&mut file, width, height);
+    png_encoder.set_color(png::ColorType::Rgba);
+    png_encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = png_encoder.write_header()?;
+    writer.write_image_data(&result_unpadded)?;
+    writer.finish()?;
+    println!("Wrote result ({width}x{height}) to {out_path:?}");
+    Ok(())
 }
 
 #[derive(Parser, Debug)]
@@ -250,8 +347,12 @@ struct Args {
     /// Display a list of all scene names
     print_scenes: bool,
     #[arg(long)]
-    /// Whether to use CPU shaders
+    /// Whether to use CPU shaders (wgpu only)
     use_cpu: bool,
+    #[cfg(feature = "goldy")]
+    #[arg(long, default_value_t = false)]
+    /// Use Goldy backend instead of wgpu
+    goldy: bool,
     #[command(flatten)]
     args: scenes::Arguments,
 }

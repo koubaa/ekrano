@@ -73,7 +73,7 @@
 //!    )
 //!    .expect("Failed to render to a texture");
 //! // Do things with surface texture, such as blitting it to the Surface using
-//! // wgpu::util::TextureBlitter.
+//! // a texture blitter if presenting to a window.
 //! ```
 //!
 //! See the [`examples/`](https://github.com/linebender/vello/tree/main/examples) folder to see how that code integrates with frameworks like winit.
@@ -117,6 +117,11 @@ pub mod util;
 #[cfg(feature = "wgpu")]
 mod wgpu_engine;
 
+#[cfg(feature = "goldy")]
+mod goldy_engine;
+#[cfg(feature = "goldy")]
+mod goldy_renderer;
+
 pub mod low_level {
     //! Utilities which can be used to create an alternative Vello renderer to [`Renderer`][crate::Renderer].
     //!
@@ -141,6 +146,9 @@ pub use peniko::kurbo;
 use peniko::ImageData;
 #[cfg(feature = "wgpu")]
 pub use wgpu;
+
+#[cfg(feature = "goldy")]
+pub use goldy_renderer::GoldyRenderer;
 
 pub use ekrano_encoding::{Glyph, NormalizedCoord};
 pub use scene::{DrawGlyphs, Scene};
@@ -305,6 +313,11 @@ pub enum Error {
     #[error("Failed to compile shaders:\n{0}")]
     #[doc(hidden)] // End-users of Vello should not have `hot_reload` enabled.
     ShaderCompilation(#[from] ekrano_shaders::compile::ErrorVec),
+
+    /// Goldy backend shader or GPU operation error.
+    #[cfg(feature = "goldy")]
+    #[error("Shader/GPU error: {0}")]
+    Shader(String),
 }
 
 #[cfg_attr(
@@ -463,7 +476,7 @@ impl Renderer {
     ///
     /// If you want to render Vello content to a surface (such as in a UI toolkit), you have two options:
     /// 1) Render to an intermediate texture, which is the same size as the surface.
-    ///    You would then use [`TextureBlitter`][wgpu::util::TextureBlitter] to blit the rendered result from
+    ///    You would then use a texture blitter to copy the rendered result from
     ///    that texture to the surface.
     ///    This pattern is supported by the [`util`] module.
     /// 2) Call `render_to_texture` directly on the [`SurfaceTexture`][wgpu::SurfaceTexture]'s texture, if

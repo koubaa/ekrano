@@ -1,0 +1,787 @@
+// Copyright 2022 the Vello Authors
+// Copyright 2026 the Ekrano Authors
+// SPDX-License-Identifier: Apache-2.0 OR MIT OR Unlicense
+//
+// Shared type definitions for Ekrano Slang shaders.
+// Ported from WGSL shared/ modules. Import with: import ekrano_shared;
+//
+// Must be kept in sync with ekrano_encoding config and types.
+
+module ekrano_shared;
+
+// === Config (from config.wgsl) ===
+// Sync with ConfigUniform in ekrano_encoding/src/config.rs
+public struct Config {
+    public uint width_in_tiles;
+
+    public uint height_in_tiles;
+
+    public uint target_width;
+
+    public uint target_height;
+
+    public uint base_color;
+
+    public uint n_drawobj;
+
+    public uint n_path;
+
+    public uint n_clip;
+
+    public uint bin_data_start;
+
+    public uint pathtag_base;
+
+    public uint pathdata_base;
+
+    public uint drawtag_base;
+
+    public uint drawdata_base;
+
+    public uint transform_base;
+
+    public uint style_base;
+
+    public uint lines_size;
+
+    public uint binning_size;
+
+    public uint tiles_size;
+
+    public uint seg_counts_size;
+
+    public uint segments_size;
+
+    public uint blend_size;
+
+    public uint ptcl_size;
+
+};
+
+// Tile geometry
+public static const uint TILE_WIDTH = 16;
+public static const uint TILE_HEIGHT = 16;
+public static const uint N_TILE_X = 16;
+public static const uint N_TILE_Y = 16;
+public static const uint N_TILE = N_TILE_X * N_TILE_Y;
+public static const float TILE_SCALE = 0.0625;
+public static const uint BLEND_STACK_SPLIT = 4;
+
+// Radial gradient kinds
+public static const uint RAD_GRAD_KIND_CIRCULAR = 1;
+public static const uint RAD_GRAD_KIND_STRIP = 2;
+public static const uint RAD_GRAD_KIND_FOCAL_ON_CIRCLE = 3;
+public static const uint RAD_GRAD_KIND_CONE = 4;
+public static const uint RAD_GRAD_SWAPPED = 1;
+
+// === Pathtag (from pathtag.wgsl) ===
+public struct TagMonoid {
+    public uint trans_ix;
+
+    public uint pathseg_ix;
+
+    public uint pathseg_offset;
+
+    public uint style_ix;
+
+    public uint path_ix;
+
+};
+
+public static const uint PATH_TAG_SEG_TYPE = 3;
+public static const uint PATH_TAG_LINETO = 1;
+public static const uint PATH_TAG_QUADTO = 2;
+public static const uint PATH_TAG_CUBICTO = 3;
+public static const uint PATH_TAG_F32 = 8;
+public static const uint PATH_TAG_TRANSFORM = 0x20;
+public static const uint PATH_TAG_PATH = 0x10;
+public static const uint PATH_TAG_SUBPATH_END = 4;
+public static const uint PATH_TAG_STYLE = 0x40;
+public static const uint STYLE_SIZE_IN_WORDS = 2;
+public static const uint STYLE_FLAGS_STYLE = 0x80000000;
+public static const uint STYLE_FLAGS_FILL = 0x40000000;
+public static const uint STYLE_MITER_LIMIT_MASK = 0xFFFF;
+public static const uint STYLE_FLAGS_START_CAP_MASK = 0x0C000000;
+public static const uint STYLE_FLAGS_END_CAP_MASK = 0x03000000;
+public static const uint STYLE_FLAGS_CAP_BUTT = 0;
+public static const uint STYLE_FLAGS_CAP_SQUARE = 0x01000000;
+public static const uint STYLE_FLAGS_CAP_ROUND = 0x02000000;
+public static const uint STYLE_FLAGS_JOIN_MASK = 0x30000000;
+public static const uint STYLE_FLAGS_JOIN_BEVEL = 0;
+public static const uint STYLE_FLAGS_JOIN_MITER = 0x10000000;
+public static const uint STYLE_FLAGS_JOIN_ROUND = 0x20000000;
+
+// === Drawtag (from drawtag.wgsl) ===
+public struct DrawMonoid {
+    public uint path_ix;
+
+    public uint clip_ix;
+
+    public uint scene_offset;
+
+    public uint info_offset;
+
+};
+
+public static const uint DRAWTAG_NOP = 0;
+public static const uint DRAWTAG_FILL_COLOR = 0x44;
+public static const uint DRAWTAG_FILL_LIN_GRADIENT = 0x114;
+public static const uint DRAWTAG_FILL_RAD_GRADIENT = 0x29c;
+public static const uint DRAWTAG_FILL_SWEEP_GRADIENT = 0x254;
+public static const uint DRAWTAG_FILL_IMAGE = 0x28C;
+public static const uint DRAWTAG_BLURRED_ROUNDED_RECT = 0x2d4;
+public static const uint DRAWTAG_BEGIN_CLIP = 0x49;
+public static const uint DRAWTAG_END_CLIP = 0x21;
+public static const uint DRAW_INFO_FLAGS_FILL_RULE_BIT = 1;
+
+// === Tile (from tile.wgsl) ===
+public struct Path {
+    public uint4 bbox;
+
+    public uint tiles;
+
+    public uint _pad0;
+    public uint _pad1;
+    public uint _pad2;
+};
+
+public struct Tile {
+    public int backdrop;
+
+    public uint segment_count_or_ix;
+
+};
+
+// Same layout as Tile, used with InterlockedAdd in path_count
+public struct AtomicTile {
+    public int backdrop;
+
+    public uint segment_count_or_ix;
+
+};
+
+// For flatten stage - path bbox with atomic fields for InterlockedMin/Max
+public struct AtomicPathBbox {
+    public int x0;
+
+    public int y0;
+
+    public int x1;
+
+    public int y1;
+
+    public uint draw_flags;
+
+    public uint trans_ix;
+
+};
+
+// === Segment (from segment.wgsl) ===
+public struct Segment {
+    public float2 point0;
+
+    public float2 point1;
+
+    public float y_edge;
+
+    public uint _pad;
+};
+
+public struct LineSoup {
+    public uint path_ix;
+
+    public uint _pad;
+
+    public float2 p0;
+
+    public float2 p1;
+
+};
+
+public struct SegmentCount {
+    public uint line_ix;
+
+    public uint counts;
+
+}
+
+// === Bbox (from bbox.wgsl) ===
+public struct PathBbox {
+    public int x0;
+
+    public int y0;
+
+    public int x1;
+
+    public int y1;
+
+    public uint draw_flags;
+
+    public uint trans_ix;
+
+};
+
+// === Clip (from clip.wgsl) ===
+public struct Bic {
+    public uint a;
+
+    public uint b;
+
+};
+
+public struct ClipInp {
+    public uint ix;
+
+    public int path_ix;
+
+};
+
+public struct ClipEl {
+    public uint parent_ix;
+
+    public uint _pad0;
+    public uint _pad1;
+    public uint _pad2;
+
+    public float4 bbox;
+
+};
+
+// bbox_intersect from bbox.wgsl
+public float4 bbox_intersect(float4 a, float4 b) {
+    return float4(max(a.xy, b.xy), min(a.zw, b.zw));
+}
+
+// bic_combine from clip.wgsl
+public Bic bic_combine(Bic x, Bic y) {
+    uint m = min(x.b, y.a);
+    Bic r;
+    r.a = x.a + y.a - m;
+    r.b = x.b + y.b - m;
+    return r;
+}
+
+// === Bump (from bump.wgsl) ===
+public static const uint STAGE_BINNING = 0x1;
+public static const uint STAGE_TILE_ALLOC = 0x2;
+public static const uint STAGE_FLATTEN = 0x4;
+public static const uint STAGE_PATH_COUNT = 0x8;
+public static const uint STAGE_COARSE = 0x10;
+
+// Layout must match config.rs BumpAllocators. Fields are written atomically by other stages.
+public struct BumpAllocators {
+    public uint failed;
+
+    public uint binning;
+
+    public uint ptcl;
+
+    public uint tile;
+
+    public uint seg_counts;
+
+    public uint segments;
+
+    public uint blend;
+
+    public uint lines;
+
+};
+
+public struct IndirectCount {
+    public uint count_x;
+
+    public uint count_y;
+
+    public uint count_z;
+
+};
+
+// === PTCL (from ptcl.wgsl) - command layout constants ===
+public static const uint PTCL_INITIAL_ALLOC = 64;
+public static const uint PTCL_INCREMENT = 256;
+public static const uint PTCL_HEADROOM = 2;
+public static const uint CMD_END = 0;
+public static const uint CMD_FILL = 1;
+public static const uint CMD_STROKE = 2;
+public static const uint CMD_SOLID = 3;
+public static const uint CMD_COLOR = 5;
+public static const uint CMD_LIN_GRAD = 6;
+public static const uint CMD_RAD_GRAD = 7;
+public static const uint CMD_SWEEP_GRAD = 8;
+public static const uint CMD_IMAGE = 9;
+public static const uint CMD_BEGIN_CLIP = 10;
+public static const uint CMD_END_CLIP = 11;
+public static const uint CMD_JUMP = 12;
+public static const uint CMD_BLUR_RECT = 13;
+
+public struct CmdFill {
+    public uint size_and_rule;
+
+    public uint seg_data;
+
+    public int backdrop;
+
+};
+
+public struct CmdStroke {
+    public uint tile;
+
+    public float half_width;
+
+};
+
+public struct CmdJump {
+    public uint new_ix;
+
+};
+
+public struct CmdColor {
+    public uint rgba_color;
+
+};
+
+public struct CmdEndClip {
+    public uint blend;
+
+    public float alpha;
+
+};
+
+// === Cubic (from cubic.wgsl) ===
+public struct Cubic {
+    public float2 p0;
+
+    public float2 p1;
+
+    public float2 p2;
+
+    public float2 p3;
+
+    public float2 stroke;
+
+    public uint path_ix;
+
+    public uint flags;
+
+};
+
+public static const uint CUBIC_IS_STROKE = 1;
+
+// === Transform (from transform.wgsl) ===
+public struct Transform {
+    public float4 matrx;
+
+    public float2 translate;
+
+};
+
+public float2 transform_apply(Transform transform, float2 p) {
+    return transform.matrx.xy * p.x + transform.matrx.zw * p.y + transform.translate;
+}
+
+public Transform transform_identity() {
+    Transform r;
+    r.matrx = float4(1.0, 0.0, 0.0, 1.0);
+    r.translate = float2(0.0, 0.0);
+    return r;
+}
+
+public Transform transform_inverse(Transform transform) {
+    float inv_det = 1.0 / (transform.matrx.x * transform.matrx.w - transform.matrx.y * transform.matrx.z);
+    float4 inv_mat = inv_det * float4(transform.matrx.w, -transform.matrx.y, -transform.matrx.z, transform.matrx.x);
+    float2 inv_tr = float2(inv_mat.x * -transform.translate.x + inv_mat.z * -transform.translate.y,
+                           inv_mat.y * -transform.translate.x + inv_mat.w * -transform.translate.y);
+    Transform r;
+    r.matrx = inv_mat;
+    r.translate = inv_tr;
+    return r;
+}
+
+public Transform transform_mul(Transform a, Transform b) {
+    Transform r;
+    r.matrx = float4(
+        a.matrx.x * b.matrx.x + a.matrx.z * b.matrx.y,
+        a.matrx.y * b.matrx.x + a.matrx.w * b.matrx.y,
+        a.matrx.x * b.matrx.z + a.matrx.z * b.matrx.w,
+        a.matrx.y * b.matrx.z + a.matrx.w * b.matrx.w
+    );
+    r.translate = a.matrx.xy * b.translate.x + a.matrx.zw * b.translate.y + a.translate;
+    return r;
+}
+
+public Transform from_poly2(float2 p0, float2 p1) {
+    Transform r;
+    r.matrx = float4(p1.y - p0.y, p0.x - p1.x, p1.x - p0.x, p1.y - p0.y);
+    r.translate = float2(p0.x, p0.y);
+    return r;
+}
+
+public Transform two_point_to_unit_line(float2 p0, float2 p1) {
+    Transform tmp1 = from_poly2(p0, p1);
+    Transform inv = transform_inverse(tmp1);
+    Transform tmp2 = from_poly2(float2(0.0, 0.0), float2(1.0, 0.0));
+    return transform_mul(tmp2, inv);
+}
+
+// === BinHeader (from binning.wgsl) ===
+public struct BinHeader {
+    public uint element_count;
+
+    public uint chunk_offset;
+
+};
+
+// === Pathtag helpers (from pathtag.wgsl) ===
+public TagMonoid tag_monoid_identity() {
+    TagMonoid c;
+    c.trans_ix = 0; c.pathseg_ix = 0; c.pathseg_offset = 0; c.style_ix = 0; c.path_ix = 0;
+    return c;
+}
+
+public TagMonoid combine_tag_monoid(TagMonoid a, TagMonoid b) {
+    TagMonoid c;
+    c.trans_ix = a.trans_ix + b.trans_ix;
+    c.pathseg_ix = a.pathseg_ix + b.pathseg_ix;
+    c.pathseg_offset = a.pathseg_offset + b.pathseg_offset;
+    c.style_ix = a.style_ix + b.style_ix;
+    c.path_ix = a.path_ix + b.path_ix;
+    return c;
+}
+
+public TagMonoid reduce_tag(uint tag_word) {
+    TagMonoid c;
+    uint point_count = tag_word & 0x3030303u;
+    c.pathseg_ix = countbits((point_count * 7u) & 0x4040404u);
+    c.trans_ix = countbits(tag_word & (PATH_TAG_TRANSFORM * 0x1010101u));
+    uint n_points = point_count + ((tag_word >> 2u) & 0x1010101u);
+    uint a = n_points + (n_points & (((tag_word >> 3u) & 0x1010101u) * 15u));
+    a += a >> 8u;
+    a += a >> 16u;
+    c.pathseg_offset = a & 0xffu;
+    c.path_ix = countbits(tag_word & (PATH_TAG_PATH * 0x1010101u));
+    c.style_ix = countbits(tag_word & (PATH_TAG_STYLE * 0x1010101u)) * STYLE_SIZE_IN_WORDS;
+    return c;
+}
+
+// === Drawtag helpers (from drawtag.wgsl) ===
+public DrawMonoid draw_monoid_identity() {
+    DrawMonoid c;
+    c.path_ix = 0; c.clip_ix = 0; c.scene_offset = 0; c.info_offset = 0;
+    return c;
+}
+
+public DrawMonoid combine_draw_monoid(DrawMonoid a, DrawMonoid b) {
+    DrawMonoid c;
+    c.path_ix = a.path_ix + b.path_ix;
+    c.clip_ix = a.clip_ix + b.clip_ix;
+    c.scene_offset = a.scene_offset + b.scene_offset;
+    c.info_offset = a.info_offset + b.info_offset;
+    return c;
+}
+
+public DrawMonoid map_draw_tag(uint tag_word) {
+    DrawMonoid c;
+    c.path_ix = (tag_word != DRAWTAG_NOP) ? 1u : 0u;
+    c.clip_ix = tag_word & 1u;
+    c.scene_offset = (tag_word >> 2u) & 0x07u;
+    c.info_offset = (tag_word >> 6u) & 0x0fu;
+    return c;
+}
+
+// Read draw tag from scene buffer (from util.wgsl). Pass scene and config.
+public uint read_draw_tag_from_scene(RWStructuredBuffer<uint> scene, Config config, uint ix) {
+    if (ix < config.n_drawobj) {
+        return scene[config.drawtag_base + ix];
+    }
+    return DRAWTAG_NOP;
+}
+
+
+// === Blend (from blend.wgsl) - mix and compose mode constants ===
+public static const uint MIX_NORMAL = 0;
+public static const uint MIX_MULTIPLY = 1;
+public static const uint MIX_SCREEN = 2;
+public static const uint MIX_OVERLAY = 3;
+public static const uint MIX_DARKEN = 4;
+public static const uint MIX_LIGHTEN = 5;
+public static const uint MIX_COLOR_DODGE = 6;
+public static const uint MIX_COLOR_BURN = 7;
+public static const uint MIX_HARD_LIGHT = 8;
+public static const uint MIX_SOFT_LIGHT = 9;
+public static const uint MIX_DIFFERENCE = 10;
+public static const uint MIX_EXCLUSION = 11;
+public static const uint MIX_HUE = 12;
+public static const uint MIX_SATURATION = 13;
+public static const uint MIX_COLOR = 14;
+public static const uint MIX_LUMINOSITY = 15;
+public static const uint MIX_CLIP = 128;
+
+public static const uint COMPOSE_CLEAR = 0;
+public static const uint COMPOSE_COPY = 1;
+public static const uint COMPOSE_DEST = 2;
+public static const uint COMPOSE_SRC_OVER = 3;
+public static const uint COMPOSE_DEST_OVER = 4;
+public static const uint COMPOSE_SRC_IN = 5;
+public static const uint COMPOSE_DEST_IN = 6;
+public static const uint COMPOSE_SRC_OUT = 7;
+public static const uint COMPOSE_DEST_OUT = 8;
+public static const uint COMPOSE_SRC_ATOP = 9;
+public static const uint COMPOSE_DEST_ATOP = 10;
+public static const uint COMPOSE_XOR = 11;
+public static const uint COMPOSE_PLUS = 12;
+public static const uint COMPOSE_PLUS_LIGHTER = 13;
+
+// unpack4x8unorm / pack4x8unorm (WGSL builtins)
+public float4 unpack4x8unorm(uint x) {
+    return float4(
+        float((x >> 0) & 0xFF) / 255.0,
+        float((x >> 8) & 0xFF) / 255.0,
+        float((x >> 16) & 0xFF) / 255.0,
+        float((x >> 24) & 0xFF) / 255.0
+    );
+}
+public uint pack4x8unorm(float4 v) {
+    return (uint(saturate(v.x) * 255.0) << 0) |
+           (uint(saturate(v.y) * 255.0) << 8) |
+           (uint(saturate(v.z) * 255.0) << 16) |
+           (uint(saturate(v.w) * 255.0) << 24);
+}
+
+// === PTCL structs (from ptcl.wgsl) ===
+public struct CmdBlurRect {
+    public uint rgba_color;
+
+    public float4 matrx;
+
+    public float2 xlat;
+
+    public float width;
+
+    public float height;
+
+    public float radius;
+
+    public float std_dev;
+
+};
+
+public struct CmdLinGrad {
+    public uint index;
+
+    public uint extend_mode;
+
+    public float line_x;
+
+    public float line_y;
+
+    public float line_c;
+
+};
+
+public struct CmdRadGrad {
+    public uint index;
+
+    public uint extend_mode;
+
+    public float4 matrx;
+
+    public float2 xlat;
+
+    public float focal_x;
+
+    public float radius;
+
+    public uint kind;
+
+    public uint flags;
+
+};
+
+public struct CmdSweepGrad {
+    public uint index;
+
+    public uint extend_mode;
+
+    public float4 matrx;
+
+    public float2 xlat;
+
+    public float t0;
+
+    public float t1;
+
+};
+
+public struct CmdImage {
+    public float4 matrx;
+
+    public float2 xlat;
+
+    public float2 atlas_offset;
+
+    public float2 extents;
+
+    public uint format;
+
+    public uint x_extend_mode;
+
+    public uint y_extend_mode;
+
+    public uint quality;
+
+    public float alpha;
+
+    public uint alpha_type;
+
+};
+
+// === Blend functions (from blend.wgsl) ===
+public float3 blend_screen(float3 cb, float3 cs) {
+    return cb + cs - (cb * cs);
+}
+public float blend_color_dodge(float cb, float cs) {
+    if (cb == 0.0) return 0.0;
+    if (cs == 1.0) return 1.0;
+    return min(1.0, cb / (1.0 - cs));
+}
+public float blend_color_burn(float cb, float cs) {
+    if (cb == 1.0) return 1.0;
+    if (cs == 0.0) return 0.0;
+    return 1.0 - min(1.0, (1.0 - cb) / cs);
+}
+public float3 blend_hard_light(float3 cb, float3 cs) {
+    return select(cs <= 0.5, cb * 2.0 * cs, blend_screen(cb, 2.0 * cs - 1.0));
+}
+public float3 blend_soft_light(float3 cb, float3 cs) {
+    float3 d = select(cb <= 0.25, ((16.0 * cb - 12.0) * cb + 4.0) * cb, sqrt(cb));
+    return select(cs <= 0.5, cb + (2.0 * cs - 1.0) * (d - cb), cb - (1.0 - 2.0 * cs) * cb * (1.0 - cb));
+}
+public float blend_sat(float3 c) {
+    return max(c.x, max(c.y, c.z)) - min(c.x, min(c.y, c.z));
+}
+public float blend_lum(float3 c) {
+    return dot(c, float3(0.3, 0.59, 0.11));
+}
+public float blend_svg_lum(float3 c) {
+    return dot(c, float3(0.2125, 0.7154, 0.0721));
+}
+public float3 blend_clip_color(float3 c) {
+    float l = blend_lum(c);
+    float n = min(c.x, min(c.y, c.z));
+    float x = max(c.x, max(c.y, c.z));
+    if (n < 0.0) c = l + (((c - l) * l) / (l - n));
+    if (x > 1.0) c = l + (((c - l) * (1.0 - l)) / (x - l));
+    return c;
+}
+public float3 blend_set_lum(float3 c, float l) {
+    return blend_clip_color(c + (l - blend_lum(c)));
+}
+public float3 blend_set_sat(float3 c, float s) {
+    float r = c.r, g = c.g, b = c.b;
+    if (r <= g) {
+        if (g <= b) { if (max(b,r)>min(b,r)) { g = ((g-min(b,r))*s)/(max(b,r)-min(b,r)); b = s; } else { g = b = 0; } r = 0; }
+        else if (r <= b) { if (max(g,r)>min(g,r)) { b = ((b-min(g,r))*s)/(max(g,r)-min(g,r)); g = s; } else { b = g = 0; } r = 0; }
+        else { if (max(g,b)>min(g,b)) { r = ((r-min(g,b))*s)/(max(g,b)-min(g,b)); g = s; } else { r = g = 0; } b = 0; }
+    } else if (r <= b) { if (max(g,r)>min(g,r)) { b = ((b-min(g,r))*s)/(max(g,r)-min(g,r)); r = s; } else { b = r = 0; } g = 0; }
+    else if (g <= b) { if (max(b,g)>min(b,g)) { r = ((r-min(b,g))*s)/(max(b,g)-min(b,g)); b = s; } else { r = b = 0; } g = 0; }
+    else { if (max(b,r)>min(b,r)) { g = ((g-min(b,r))*s)/(max(b,r)-min(b,r)); b = s; } else { g = b = 0; } r = 0; }
+    return float3(r, g, b);
+}
+public float3 blend_mix(float3 cb, float3 cs, uint mode) {
+    if (mode == MIX_MULTIPLY) return cb * cs;
+    if (mode == MIX_SCREEN) return blend_screen(cb, cs);
+    if (mode == MIX_OVERLAY) return blend_hard_light(cs, cb);
+    if (mode == MIX_DARKEN) return min(cb, cs);
+    if (mode == MIX_LIGHTEN) return max(cb, cs);
+    if (mode == MIX_COLOR_DODGE) return float3(blend_color_dodge(cb.x, cs.x), blend_color_dodge(cb.y, cs.y), blend_color_dodge(cb.z, cs.z));
+    if (mode == MIX_COLOR_BURN) return float3(blend_color_burn(cb.x, cs.x), blend_color_burn(cb.y, cs.y), blend_color_burn(cb.z, cs.z));
+    if (mode == MIX_HARD_LIGHT) return blend_hard_light(cb, cs);
+    if (mode == MIX_SOFT_LIGHT) return blend_soft_light(cb, cs);
+    if (mode == MIX_DIFFERENCE) return abs(cb - cs);
+    if (mode == MIX_EXCLUSION) return cb + cs - 2.0 * cb * cs;
+    if (mode == MIX_HUE) return blend_set_lum(blend_set_sat(cs, blend_sat(cb)), blend_lum(cb));
+    if (mode == MIX_SATURATION) return blend_set_lum(blend_set_sat(cb, blend_sat(cs)), blend_lum(cb));
+    if (mode == MIX_COLOR) return blend_set_lum(cs, blend_lum(cb));
+    if (mode == MIX_LUMINOSITY) return blend_set_lum(cb, blend_lum(cs));
+    return cs;
+}
+public float3 blend_unpremultiply(float4 color) {
+    float inv_alpha = 1.0 / max(color.a, 1e-15);
+    return color.rgb * inv_alpha;
+}
+public float4 blend_compose(float3 cb, float3 cs, float ab, float as_, uint compose_mode) {
+    float fa = 0.0, fb = 0.0;
+    if (compose_mode == COMPOSE_COPY) { fa = 1.0; fb = 0.0; }
+    else if (compose_mode == COMPOSE_DEST) { fa = 0.0; fb = 1.0; }
+    else if (compose_mode == COMPOSE_SRC_OVER) { fa = 1.0; fb = 1.0 - as_; }
+    else if (compose_mode == COMPOSE_DEST_OVER) { fa = 1.0 - ab; fb = 1.0; }
+    else if (compose_mode == COMPOSE_SRC_IN) { fa = ab; fb = 0.0; }
+    else if (compose_mode == COMPOSE_DEST_IN) { fa = 0.0; fb = as_; }
+    else if (compose_mode == COMPOSE_SRC_OUT) { fa = 1.0 - ab; fb = 0.0; }
+    else if (compose_mode == COMPOSE_DEST_OUT) { fa = 0.0; fb = 1.0 - as_; }
+    else if (compose_mode == COMPOSE_SRC_ATOP) { fa = ab; fb = 1.0 - as_; }
+    else if (compose_mode == COMPOSE_DEST_ATOP) { fa = 1.0 - ab; fb = as_; }
+    else if (compose_mode == COMPOSE_XOR) { fa = 1.0 - ab; fb = 1.0 - as_; }
+    else if (compose_mode == COMPOSE_PLUS) { fa = 1.0; fb = 1.0; }
+    else if (compose_mode == COMPOSE_PLUS_LIGHTER) {
+        return min(float4(1.0, 1.0, 1.0, 1.0), float4(as_ * cs + ab * cb, as_ + ab));
+    }
+    float as_fa = as_ * fa;
+    float ab_fb = ab * fb;
+    float3 co = as_fa * cs + ab_fb * cb;
+    return float4(co, min(as_fa + ab_fb, 1.0));
+}
+public float4 blend_mix_compose(float4 backdrop, float4 src, uint mode) {
+    uint BLEND_DEFAULT = (MIX_NORMAL << 8) | COMPOSE_SRC_OVER;
+    if ((mode & 0x7FFF) == BLEND_DEFAULT) return backdrop * (1.0 - src.a) + src;
+    float3 cs = blend_unpremultiply(src);
+    float3 cb = blend_unpremultiply(backdrop);
+    uint mix_mode = mode >> 8;
+    float3 mixed = blend_mix(cb, cs, mix_mode);
+    cs = lerp(cs, mixed, backdrop.a);
+    uint compose_mode = mode & 0xFF;
+    if (compose_mode == COMPOSE_SRC_OVER)
+        return float4(lerp(backdrop.rgb, cs, src.a), src.a + backdrop.a * (1.0 - src.a));
+    return blend_compose(cb, cs, backdrop.a, src.a, compose_mode);
+}
+public float4 premul_alpha(float4 rgba) {
+    return float4(rgba.rgb * rgba.a, rgba.a);
+}
+
+// === Fine shader helpers ===
+public static const uint LUMINANCE_MASK_LAYER = 0x10000;
+public static const uint IMAGE_QUALITY_LOW = 0;
+public static const uint IMAGE_QUALITY_MEDIUM = 1;
+public static const uint IMAGE_QUALITY_HIGH = 2;
+public static const uint PIXEL_FORMAT_RGBA = 0;
+public static const uint PIXEL_FORMAT_BGRA = 1;
+public static const uint ALPHA = 0;
+public static const uint PREMULTIPLIED_ALPHA = 1;
+public static const uint EXTEND_PAD = 0;
+public static const uint EXTEND_REPEAT = 1;
+public static const uint EXTEND_REFLECT = 2;
+
+public float3 unpremultiply(float4 color) { return blend_unpremultiply(color); }
+public float svg_lum(float3 c) { return blend_svg_lum(c); }
+
+public float4 maybe_premul_alpha(float4 pixel, uint alpha_type) {
+    return (alpha_type == PREMULTIPLIED_ALPHA) ? pixel : premul_alpha(pixel);
+}
+
+public float extend_mode_normalized(float t, uint mode) {
+    if (mode == EXTEND_PAD) return saturate(t);
+    if (mode == EXTEND_REPEAT) return frac(t);
+    return abs(t - 2.0 * round(0.5 * t));
+}
+public float extend_mode(float t, uint mode, float max_val) {
+    if (mode == EXTEND_PAD) return clamp(t, 0.0, max_val);
+    return extend_mode_normalized(t / max_val, mode) * max_val;
+}
+
+public float4 pixel_format(float4 pixel, uint format) {
+    return (format == PIXEL_FORMAT_BGRA) ? pixel.bgra : pixel;
+}
+
+public static const uint GRADIENT_WIDTH = 512;
+public static const uint PIXELS_PER_THREAD = 4;
