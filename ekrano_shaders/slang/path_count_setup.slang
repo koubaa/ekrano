@@ -9,7 +9,7 @@ import ekrano_shared;
 
 static const uint WG_SIZE = 256;
 
-// Slots: 0 = bump (BumpAllocators), 1 = indirect (IndirectCount)
+// Slots: 0 = bump (BumpAllocators), 1 = indirect (IndirectCount[N_INDIRECT_STAGES])
 
 [shader("compute")]
 [numthreads(1, 1, 1)]
@@ -18,11 +18,11 @@ void cs_main() {
     RWStructuredBuffer<IndirectCount> indirect = goldy_dyn_scattered<IndirectCount>(1);
 
     if (bump[0].failed != 0) {
-        indirect[0].count_x = 0;
+        indirect[INDIRECT_STAGE_PATH_COUNT].count_x = 0;
     } else {
         uint lines = bump[0].lines;
-        indirect[0].count_x = (lines + (WG_SIZE - 1)) / WG_SIZE;
+        indirect[INDIRECT_STAGE_PATH_COUNT].count_x = (lines + (WG_SIZE - 1)) / WG_SIZE;
     }
-    indirect[0].count_y = 1;
-    indirect[0].count_z = 1;
+    indirect[INDIRECT_STAGE_PATH_COUNT].count_y = 1;
+    indirect[INDIRECT_STAGE_PATH_COUNT].count_z = 1;
 }

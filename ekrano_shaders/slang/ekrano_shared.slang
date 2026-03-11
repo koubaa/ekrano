@@ -288,14 +288,43 @@ public struct BumpAllocators {
 
 };
 
+// Must match Rust IndirectCount (count_x, count_y, count_z, pad0) = 16 bytes stride
 public struct IndirectCount {
     public uint count_x;
-
     public uint count_y;
-
     public uint count_z;
-
+    public uint pad0;
 };
+
+// Stage indices for multi-entry indirect dispatch buffer (Phase 1).
+// Must match ekrano_encoding config.rs. Prefixed to avoid conflict with bump STAGE_* flags.
+public static const uint INDIRECT_STAGE_PATHTAG_REDUCE = 0;
+public static const uint INDIRECT_STAGE_PATHTAG_REDUCE2 = 1;
+public static const uint INDIRECT_STAGE_PATHTAG_SCAN1 = 2;
+public static const uint INDIRECT_STAGE_PATHTAG_SCAN = 3;
+public static const uint INDIRECT_STAGE_PATHTAG_SCAN_LARGE = 4;
+public static const uint INDIRECT_STAGE_BBOX_CLEAR = 5;
+public static const uint INDIRECT_STAGE_FLATTEN = 6;
+public static const uint INDIRECT_STAGE_DRAW_REDUCE = 7;
+public static const uint INDIRECT_STAGE_DRAW_LEAF = 8;
+public static const uint INDIRECT_STAGE_CLIP_REDUCE = 9;
+public static const uint INDIRECT_STAGE_CLIP_LEAF = 10;
+public static const uint INDIRECT_STAGE_BINNING = 11;
+public static const uint INDIRECT_STAGE_TILE_ALLOC = 12;
+public static const uint INDIRECT_STAGE_PATH_COUNT_SETUP = 13;
+public static const uint INDIRECT_STAGE_PATH_COUNT = 14;
+public static const uint INDIRECT_STAGE_BACKDROP = 15;
+public static const uint INDIRECT_STAGE_COARSE = 16;
+public static const uint INDIRECT_STAGE_PATH_TILING_SETUP = 17;
+public static const uint INDIRECT_STAGE_PATH_TILING = 18;
+public static const uint INDIRECT_STAGE_FINE = 19;
+
+public static const uint N_INDIRECT_STAGES = 20;
+
+// Layout must match ekrano_encoding WorkgroupCountsGpu.
+public struct WorkgroupCountsGpu {
+    public uint4 entries[N_INDIRECT_STAGES];
+}
 
 // === PTCL (from ptcl.wgsl) - command layout constants ===
 public static const uint PTCL_INITIAL_ALLOC = 64;

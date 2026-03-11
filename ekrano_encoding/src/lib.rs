@@ -50,7 +50,12 @@ pub use binning::BinHeader;
 pub use clip::{Clip, ClipBbox, ClipBic, ClipElement};
 pub use config::{
     BufferSize, BufferSizes, BumpAllocatorMemory, BumpAllocators, ConfigUniform, IndirectCount,
-    RenderConfig, WorkgroupCounts, WorkgroupSize,
+    N_INDIRECT_STAGES, RenderConfig, WorkgroupCounts, WorkgroupCountsGpu, WorkgroupSize,
+    STAGE_BACKDROP, STAGE_BBOX_CLEAR, STAGE_BINNING, STAGE_CLIP_LEAF, STAGE_CLIP_REDUCE,
+    STAGE_COARSE, STAGE_DRAW_LEAF, STAGE_DRAW_REDUCE, STAGE_FINE, STAGE_FLATTEN,
+    STAGE_PATHTAG_REDUCE, STAGE_PATHTAG_REDUCE2, STAGE_PATHTAG_SCAN, STAGE_PATHTAG_SCAN1,
+    STAGE_PATHTAG_SCAN_LARGE, STAGE_PATH_COUNT, STAGE_PATH_COUNT_SETUP, STAGE_PATH_TILING,
+    STAGE_PATH_TILING_SETUP, STAGE_TILE_ALLOC,
 };
 pub use draw::{
     DRAW_INFO_FLAGS_FILL_RULE_BIT, DrawBbox, DrawBeginClip, DrawBlurRoundedRect, DrawColor,

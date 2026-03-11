@@ -116,11 +116,9 @@ impl CpuBinding<'_> {
     pub fn as_typed_mut<T: Pod>(&self) -> TypedBufGuardMut<'_, T> {
         match self {
             CpuBinding::Buffer(_) => panic!("can't borrow external buffer mutably"),
-            CpuBinding::BufferRW(b) => {
-                TypedBufGuardMut::Interior(RefMut::map(b.borrow_mut(), |buf| {
-                    bytemuck::from_bytes_mut(buf)
-                }))
-            }
+            CpuBinding::BufferRW(b) => TypedBufGuardMut::Interior(RefMut::map(b.borrow_mut(), |buf| {
+                bytemuck::from_bytes_mut(buf)
+            })),
             _ => panic!("resource type mismatch"),
         }
     }

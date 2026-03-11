@@ -127,9 +127,11 @@ impl GoldyEngine {
         slang_source: &str,
         bindings: &[BindType],
         search_paths: &[&str],
+        defines: &[(&str, &str)],
     ) -> Result<ShaderId> {
-        let shader_module = ShaderModule::from_slang_with_paths(device, slang_source, search_paths)
-            .map_err(|e| Error::Shader(format!("{:#}", e)))?;
+        let shader_module =
+            ShaderModule::from_slang_with_paths_and_defines(device, slang_source, search_paths, defines)
+                .map_err(|e| Error::Shader(format!("{:#}", e)))?;
         let pipeline = ComputePipeline::new(device, &shader_module)
             .map_err(|e| Error::Shader(format!("{:#}", e)))?;
 
@@ -483,13 +485,8 @@ impl GoldyEngine {
             }
         }
 
-        for id in deferred_free_buffers {
-            self.bind_map.remove_buf(id);
-        }
-        for id in deferred_free_images {
-            self.bind_map.remove_image(id);
-        }
-
+        // Downloads must happen before frees, since a recording may download
+        // and then free the same buffer.
         for buf_proxy in pending_downloads {
             if let Some((buf, _)) = self.bind_map.get_buf(buf_proxy.id) {
                 let size = buf.size() as usize;
@@ -499,19 +496,32 @@ impl GoldyEngine {
                 self.downloads.insert(buf_proxy.id, output);
             }
         }
+
+        for id in deferred_free_buffers {
+            self.bind_map.remove_buf(id);
+        }
+        for id in deferred_free_images {
+            self.bind_map.remove_image(id);
+        }
         Ok(())
     }
 
     /// Get downloaded buffer data, if the recording contained a Download command for it.
-    #[allow(dead_code)]
     pub fn get_download(&self, buf: BufferProxy) -> Option<&[u8]> {
         self.downloads.get(&buf.id).map(|v| v.as_slice())
     }
 
     /// Free a downloaded buffer from the engine's storage.
-    #[allow(dead_code)]
     pub fn free_download(&mut self, buf: BufferProxy) {
         self.downloads.remove(&buf.id);
+    }
+
+    /// Clear all transient resources (buffers, images, downloads) between retry attempts.
+    /// Shaders and the pool are preserved.
+    pub fn clear_transients(&mut self) {
+        self.bind_map.buf_map.clear();
+        self.bind_map.image_map.clear();
+        self.downloads.clear();
     }
 }
 

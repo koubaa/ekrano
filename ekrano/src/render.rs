@@ -7,10 +7,21 @@ use crate::recording::{BufferProxy, ImageFormat, ImageProxy, Recording, Resource
 use crate::shaders::FullShaders;
 use crate::{AaConfig, RenderParams};
 
-#[cfg(any(feature = "wgpu", feature = "goldy"))]
+#[cfg(feature = "wgpu")]
 use crate::Scene;
 
-use ekrano_encoding::{Encoding, Resolver, WorkgroupSize, make_mask_lut, make_mask_lut_16};
+use std::mem::size_of;
+
+use ekrano_encoding::{
+    Encoding, IndirectCount, Resolver, WorkgroupCountsGpu, WorkgroupSize, make_mask_lut,
+    make_mask_lut_16,
+};
+use ekrano_encoding::{
+    STAGE_BACKDROP, STAGE_BBOX_CLEAR, STAGE_BINNING, STAGE_CLIP_LEAF, STAGE_CLIP_REDUCE,
+    STAGE_COARSE, STAGE_DRAW_LEAF, STAGE_DRAW_REDUCE, STAGE_FLATTEN,
+    STAGE_PATHTAG_REDUCE, STAGE_PATHTAG_REDUCE2, STAGE_PATHTAG_SCAN, STAGE_PATHTAG_SCAN1,
+    STAGE_PATHTAG_SCAN_LARGE, STAGE_PATH_COUNT, STAGE_PATH_TILING, STAGE_TILE_ALLOC,
+};
 
 /// State for a render in progress.
 pub struct Render {
@@ -73,7 +84,25 @@ impl CapturedBuffers {
     }
 }
 
-#[cfg(any(feature = "wgpu", feature = "goldy"))]
+fn dispatch_stage(
+    recording: &mut Recording,
+    use_indirect: bool,
+    indirect_buf: Option<BufferProxy>,
+    shader: crate::ShaderId,
+    stage: u32,
+    wg: WorkgroupSize,
+    stride: u64,
+    resources: impl IntoIterator<Item = impl Into<ResourceProxy>>,
+) {
+    let r: Vec<_> = resources.into_iter().map(|x| x.into()).collect();
+    if use_indirect {
+        recording.dispatch_indirect(shader, indirect_buf.unwrap(), stage as u64 * stride, r);
+    } else {
+        recording.dispatch(shader, wg, r);
+    }
+}
+
+#[cfg(feature = "wgpu")]
 pub(crate) fn render_full(
     scene: &Scene,
     resolver: &mut Resolver,
@@ -83,7 +112,7 @@ pub(crate) fn render_full(
     render_encoding_full(scene.encoding(), resolver, shaders, params)
 }
 
-#[cfg(any(feature = "wgpu", feature = "goldy"))]
+#[cfg(feature = "wgpu")]
 /// Create a single recording with both coarse and fine render stages.
 ///
 /// This function is not recommended when the scene can be complex, as it does not
@@ -122,6 +151,10 @@ impl Render {
     ///
     /// The `robust` parameter controls whether we're preparing for readback
     /// of the atomic bump buffer, for robust dynamic memory.
+    ///
+    /// If `config_override` is provided, its buffer sizes and GPU config are used
+    /// instead of the defaults. This supports retry with larger buffers after
+    /// bump overflow.
     pub fn render_encoding_coarse(
         &mut self,
         encoding: &Encoding,
@@ -129,6 +162,33 @@ impl Render {
         shaders: &FullShaders,
         params: &RenderParams,
         robust: bool,
+    ) -> Recording {
+        self.render_encoding_coarse_inner(encoding, resolver, shaders, params, robust, None)
+    }
+
+    /// Like [`render_encoding_coarse`] but with a custom config for retry.
+    pub fn render_encoding_coarse_with_config(
+        &mut self,
+        encoding: &Encoding,
+        resolver: &mut Resolver,
+        shaders: &FullShaders,
+        params: &RenderParams,
+        robust: bool,
+        config: &ekrano_encoding::RenderConfig,
+    ) -> Recording {
+        self.render_encoding_coarse_inner(
+            encoding, resolver, shaders, params, robust, Some(config),
+        )
+    }
+
+    fn render_encoding_coarse_inner(
+        &mut self,
+        encoding: &Encoding,
+        resolver: &mut Resolver,
+        shaders: &FullShaders,
+        params: &RenderParams,
+        robust: bool,
+        config_override: Option<&ekrano_encoding::RenderConfig>,
     ) -> Recording {
         use ekrano_encoding::RenderConfig;
         let mut recording = Recording::default();
@@ -154,8 +214,9 @@ impl Render {
         for image in images.images {
             recording.write_image(image_atlas, image.1, image.2, image.0.clone());
         }
-        let cpu_config =
+        let default_config =
             RenderConfig::new(&layout, params.width, params.height, &params.base_color);
+        let cpu_config = config_override.unwrap_or(&default_config);
         // HACK: The coarse workgroup counts is the number of active bins.
         if (cpu_config.workgroup_counts.coarse.0
             * cpu_config.workgroup_counts.coarse.1
@@ -183,6 +244,28 @@ impl Render {
         let config_buf = ResourceProxy::Buffer(
             recording.upload_uniform("vello.config", bytemuck::bytes_of(&cpu_config.gpu)),
         );
+        const INDIRECT_STRIDE: u64 = size_of::<IndirectCount>() as u64;
+
+        let use_indirect = shaders.pipeline_setup.is_some();
+        let indirect_buf = if use_indirect {
+            let wg_counts_gpu = WorkgroupCountsGpu::from(wg_counts);
+            let wg_counts_buf = ResourceProxy::Buffer(recording.upload(
+                "vello.wg_counts",
+                bytemuck::bytes_of(&wg_counts_gpu),
+            ));
+            let indirect_buf = BufferProxy::new(
+                buffer_sizes.indirect_count.size_in_bytes().into(),
+                "vello.indirect_dispatch",
+            );
+            recording.dispatch(
+                shaders.pipeline_setup.unwrap(),
+                (1, 1, 1),
+                [wg_counts_buf, indirect_buf.into()],
+            );
+            Some(indirect_buf)
+        } else {
+            None
+        };
         let info_bin_data_buf = ResourceProxy::new_buf(
             buffer_sizes.bin_data.size_in_bytes() as u64,
             "vello.info_bin_data_buf",
@@ -199,28 +282,80 @@ impl Render {
             buffer_sizes.path_reduced.size_in_bytes().into(),
             "vello.reduced_buf",
         );
+        let reduced2_buf = ResourceProxy::new_buf(
+            buffer_sizes.path_reduced2.size_in_bytes().into(),
+            "vello.reduced2_buf",
+        );
+        let reduced_scan_buf = ResourceProxy::new_buf(
+            buffer_sizes.path_reduced_scan.size_in_bytes().into(),
+            "vello.reduced_scan_buf",
+        );
+        let tagmonoid_buf = ResourceProxy::new_buf(
+            buffer_sizes.path_monoids.size_in_bytes().into(),
+            "vello.tagmonoid_buf",
+        );
+        let use_large_path_scan = wg_counts.use_large_path_scan && !shaders.pathtag_is_cpu;
+
         // TODO: really only need pathtag_wgs - 1
-        recording.dispatch(
+        dispatch_stage(
+            &mut recording,
+            use_indirect,
+            indirect_buf,
             shaders.pathtag_reduce,
+            STAGE_PATHTAG_REDUCE,
             wg_counts.path_reduce,
+            INDIRECT_STRIDE,
             [config_buf, scene_buf, reduced_buf],
         );
         let mut pathtag_parent = reduced_buf;
-        let mut large_pathtag_bufs = None;
-        let use_large_path_scan = wg_counts.use_large_path_scan && !shaders.pathtag_is_cpu;
-        if use_large_path_scan {
-            let reduced2_buf = ResourceProxy::new_buf(
-                buffer_sizes.path_reduced2.size_in_bytes().into(),
-                "vello.reduced2_buf",
+        if use_indirect {
+            dispatch_stage(
+                &mut recording,
+                use_indirect,
+                indirect_buf,
+                shaders.pathtag_reduce2,
+                STAGE_PATHTAG_REDUCE2,
+                wg_counts.path_reduce2,
+                INDIRECT_STRIDE,
+                [reduced_buf, reduced2_buf],
             );
+            dispatch_stage(
+                &mut recording,
+                use_indirect,
+                indirect_buf,
+                shaders.pathtag_scan1,
+                STAGE_PATHTAG_SCAN1,
+                wg_counts.path_scan1,
+                INDIRECT_STRIDE,
+                [reduced_buf, reduced2_buf, reduced_scan_buf],
+            );
+            // Small variant reads from reduced_buf; large variant from reduced_scan_buf.
+            // Only one has non-zero workgroups; the other is a no-op.
+            dispatch_stage(
+                &mut recording,
+                use_indirect,
+                indirect_buf,
+                shaders.pathtag_scan,
+                STAGE_PATHTAG_SCAN,
+                wg_counts.path_scan,
+                INDIRECT_STRIDE,
+                [config_buf, scene_buf, reduced_buf, tagmonoid_buf],
+            );
+            dispatch_stage(
+                &mut recording,
+                use_indirect,
+                indirect_buf,
+                shaders.pathtag_scan_large,
+                STAGE_PATHTAG_SCAN_LARGE,
+                wg_counts.path_scan,
+                INDIRECT_STRIDE,
+                [config_buf, scene_buf, reduced_scan_buf, tagmonoid_buf],
+            );
+        } else if use_large_path_scan {
             recording.dispatch(
                 shaders.pathtag_reduce2,
                 wg_counts.path_reduce2,
                 [reduced_buf, reduced2_buf],
-            );
-            let reduced_scan_buf = ResourceProxy::new_buf(
-                buffer_sizes.path_reduced_scan.size_in_bytes().into(),
-                "reduced_scan_buf",
             );
             recording.dispatch(
                 shaders.pathtag_scan1,
@@ -228,35 +363,34 @@ impl Render {
                 [reduced_buf, reduced2_buf, reduced_scan_buf],
             );
             pathtag_parent = reduced_scan_buf;
-            large_pathtag_bufs = Some((reduced2_buf, reduced_scan_buf));
-        }
-
-        let tagmonoid_buf = ResourceProxy::new_buf(
-            buffer_sizes.path_monoids.size_in_bytes().into(),
-            "vello.tagmonoid_buf",
-        );
-        let pathtag_scan = if use_large_path_scan {
-            shaders.pathtag_scan_large
+            recording.dispatch(
+                shaders.pathtag_scan_large,
+                wg_counts.path_scan,
+                [config_buf, scene_buf, pathtag_parent, tagmonoid_buf],
+            );
         } else {
-            shaders.pathtag_scan
-        };
-        recording.dispatch(
-            pathtag_scan,
-            wg_counts.path_scan,
-            [config_buf, scene_buf, pathtag_parent, tagmonoid_buf],
-        );
-        recording.free_resource(reduced_buf);
-        if let Some((reduced2, reduced_scan)) = large_pathtag_bufs {
-            recording.free_resource(reduced2);
-            recording.free_resource(reduced_scan);
+            recording.dispatch(
+                shaders.pathtag_scan,
+                wg_counts.path_scan,
+                [config_buf, scene_buf, pathtag_parent, tagmonoid_buf],
+            );
         }
+        recording.free_resource(reduced_buf);
+        recording.free_resource(reduced2_buf);
+        recording.free_resource(reduced_scan_buf);
+
         let path_bbox_buf = ResourceProxy::new_buf(
             buffer_sizes.path_bboxes.size_in_bytes().into(),
             "vello.path_bbox_buf",
         );
-        recording.dispatch(
+        dispatch_stage(
+            &mut recording,
+            use_indirect,
+            indirect_buf,
             shaders.bbox_clear,
+            STAGE_BBOX_CLEAR,
             wg_counts.bbox_clear,
+            INDIRECT_STRIDE,
             [config_buf, path_bbox_buf],
         );
         let bump_buf = BufferProxy::new(
@@ -267,9 +401,14 @@ impl Render {
         let bump_buf = ResourceProxy::Buffer(bump_buf);
         let lines_buf =
             ResourceProxy::new_buf(buffer_sizes.lines.size_in_bytes().into(), "vello.lines_buf");
-        recording.dispatch(
+        dispatch_stage(
+            &mut recording,
+            use_indirect,
+            indirect_buf,
             shaders.flatten,
+            STAGE_FLATTEN,
             wg_counts.flatten,
+            INDIRECT_STRIDE,
             [
                 config_buf,
                 scene_buf,
@@ -283,9 +422,14 @@ impl Render {
             buffer_sizes.draw_reduced.size_in_bytes().into(),
             "vello.draw_reduced_buf",
         );
-        recording.dispatch(
+        dispatch_stage(
+            &mut recording,
+            use_indirect,
+            indirect_buf,
             shaders.draw_reduce,
+            STAGE_DRAW_REDUCE,
             wg_counts.draw_reduce,
+            INDIRECT_STRIDE,
             [config_buf, scene_buf, draw_reduced_buf],
         );
         let draw_monoid_buf = ResourceProxy::new_buf(
@@ -296,9 +440,14 @@ impl Render {
             buffer_sizes.clip_inps.size_in_bytes().into(),
             "vello.clip_inp_buf",
         );
-        recording.dispatch(
+        dispatch_stage(
+            &mut recording,
+            use_indirect,
+            indirect_buf,
             shaders.draw_leaf,
+            STAGE_DRAW_LEAF,
             wg_counts.draw_leaf,
+            INDIRECT_STRIDE,
             [
                 config_buf,
                 scene_buf,
@@ -318,10 +467,15 @@ impl Render {
             buffer_sizes.clip_bics.size_in_bytes().into(),
             "vello.clip_bic_buf",
         );
-        if wg_counts.clip_reduce.0 > 0 {
-            recording.dispatch(
+        if use_indirect || wg_counts.clip_reduce.0 > 0 {
+            dispatch_stage(
+                &mut recording,
+                use_indirect,
+                indirect_buf,
                 shaders.clip_reduce,
+                STAGE_CLIP_REDUCE,
                 wg_counts.clip_reduce,
+                INDIRECT_STRIDE,
                 [clip_inp_buf, path_bbox_buf, clip_bic_buf, clip_el_buf],
             );
         }
@@ -329,10 +483,15 @@ impl Render {
             buffer_sizes.clip_bboxes.size_in_bytes().into(),
             "vello.clip_bbox_buf",
         );
-        if wg_counts.clip_leaf.0 > 0 {
-            recording.dispatch(
+        if use_indirect || wg_counts.clip_leaf.0 > 0 {
+            dispatch_stage(
+                &mut recording,
+                use_indirect,
+                indirect_buf,
                 shaders.clip_leaf,
+                STAGE_CLIP_LEAF,
                 wg_counts.clip_leaf,
+                INDIRECT_STRIDE,
                 [
                     config_buf,
                     clip_inp_buf,
@@ -355,9 +514,14 @@ impl Render {
             buffer_sizes.bin_headers.size_in_bytes().into(),
             "vello.bin_header_buf",
         );
-        recording.dispatch(
+        dispatch_stage(
+            &mut recording,
+            use_indirect,
+            indirect_buf,
             shaders.binning,
+            STAGE_BINNING,
             wg_counts.binning,
+            INDIRECT_STRIDE,
             [
                 config_buf,
                 draw_monoid_buf,
@@ -375,9 +539,14 @@ impl Render {
         // in storage rather than workgroup memory.
         let path_buf =
             ResourceProxy::new_buf(buffer_sizes.paths.size_in_bytes().into(), "vello.path_buf");
-        recording.dispatch(
+        dispatch_stage(
+            &mut recording,
+            use_indirect,
+            indirect_buf,
             shaders.tile_alloc,
+            STAGE_TILE_ALLOC,
             wg_counts.tile_alloc,
+            INDIRECT_STRIDE,
             [
                 config_buf,
                 scene_buf,
@@ -389,23 +558,33 @@ impl Render {
         );
         recording.free_resource(draw_bbox_buf);
         recording.free_resource(tagmonoid_buf);
-        let indirect_count_buf = BufferProxy::new(
-            buffer_sizes.indirect_count.size_in_bytes().into(),
-            "vello.indirect_count",
-        );
+
+        // Buffer for path_count/path_tiling: multi-entry when use_indirect (shared with other stages),
+        // otherwise dedicated buffer for just those two stages.
+        let path_indirect_buf = indirect_buf.unwrap_or_else(|| {
+            BufferProxy::new(
+                buffer_sizes.indirect_count.size_in_bytes().into(),
+                "vello.indirect_count",
+            )
+        });
         recording.dispatch(
             shaders.path_count_setup,
             wg_counts.path_count_setup,
-            [bump_buf, indirect_count_buf.into()],
+            [bump_buf, path_indirect_buf.into()],
         );
         let seg_counts_buf = ResourceProxy::new_buf(
             buffer_sizes.seg_counts.size_in_bytes().into(),
             "vello.seg_counts_buf",
         );
+        let path_count_offset = if use_indirect {
+            STAGE_PATH_COUNT as u64 * INDIRECT_STRIDE
+        } else {
+            0
+        };
         recording.dispatch_indirect(
             shaders.path_count,
-            indirect_count_buf,
-            0,
+            path_indirect_buf,
+            path_count_offset,
             [
                 config_buf,
                 bump_buf,
@@ -415,14 +594,24 @@ impl Render {
                 seg_counts_buf,
             ],
         );
-        recording.dispatch(
+        dispatch_stage(
+            &mut recording,
+            use_indirect,
+            indirect_buf,
             shaders.backdrop,
+            STAGE_BACKDROP,
             wg_counts.backdrop,
+            INDIRECT_STRIDE,
             [config_buf, bump_buf, path_buf, tile_buf],
         );
-        recording.dispatch(
+        dispatch_stage(
+            &mut recording,
+            use_indirect,
+            indirect_buf,
             shaders.coarse,
+            STAGE_COARSE,
             wg_counts.coarse,
+            INDIRECT_STRIDE,
             [
                 config_buf,
                 scene_buf,
@@ -438,12 +627,17 @@ impl Render {
         recording.dispatch(
             shaders.path_tiling_setup,
             wg_counts.path_tiling_setup,
-            [bump_buf, indirect_count_buf.into(), ptcl_buf],
+            [bump_buf, path_indirect_buf.into(), ptcl_buf],
         );
+        let path_tiling_offset = if use_indirect {
+            STAGE_PATH_TILING as u64 * INDIRECT_STRIDE
+        } else {
+            0
+        };
         recording.dispatch_indirect(
             shaders.path_tiling,
-            indirect_count_buf,
-            0,
+            path_indirect_buf,
+            path_tiling_offset,
             [
                 bump_buf,
                 seg_counts_buf,
@@ -453,7 +647,7 @@ impl Render {
                 segments_buf,
             ],
         );
-        recording.free_buffer(indirect_count_buf);
+        recording.free_buffer(path_indirect_buf);
         recording.free_resource(seg_counts_buf);
         recording.free_resource(scene_buf);
         recording.free_resource(draw_monoid_buf);

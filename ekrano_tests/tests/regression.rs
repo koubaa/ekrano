@@ -29,10 +29,7 @@ fn rounded_rectangle_watertight() {
 
 const DATA_IMAGE_PNG: &[u8] = include_bytes!("../snapshots/smoke/data_image_roundtrip.png");
 
-/// Test for <https://github.com/linebender/vello/issues/972>
-#[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
-fn test_data_image_roundtrip_extend_pad() {
+fn data_image_roundtrip(use_cpu: bool) {
     let mut scene = Scene::new();
     let mut images = ImageCache::new();
     let image = images
@@ -46,10 +43,24 @@ fn test_data_image_roundtrip_extend_pad() {
         image.image.width,
         image.image.height,
     );
+    params.use_cpu = use_cpu;
     params.anti_aliasing = AaConfig::Area;
     smoke_snapshot_test_sync(scene, &params)
         .unwrap()
         .assert_mean_less_than(0.001);
+}
+
+/// Test for <https://github.com/linebender/vello/issues/972>
+#[test]
+#[cfg_attr(skip_gpu_tests, ignore)]
+fn test_data_image_roundtrip_extend_pad() {
+    data_image_roundtrip(false);
+}
+
+#[test]
+#[cfg_attr(skip_gpu_tests, ignore)]
+fn test_data_image_roundtrip_extend_pad_cpu() {
+    data_image_roundtrip(true);
 }
 
 /// Test created from <https://github.com/linebender/vello/issues/662>

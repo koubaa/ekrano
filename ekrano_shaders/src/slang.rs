@@ -21,6 +21,7 @@ macro_rules! include_slang {
 
 include_slang!(EKRANO_SHARED, "ekrano_shared.slang");
 include_slang!(BBOX_CLEAR, "bbox_clear.slang");
+include_slang!(PIPELINE_SETUP, "pipeline_setup.slang");
 include_slang!(PATH_COUNT_SETUP, "path_count_setup.slang");
 include_slang!(PATH_TILING_SETUP, "path_tiling_setup.slang");
 include_slang!(PATHTAG_REDUCE, "pathtag_reduce.slang");

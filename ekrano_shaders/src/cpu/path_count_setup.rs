@@ -16,6 +16,6 @@ fn path_count_setup_main(bump: &BumpAllocators, indirect: &mut IndirectCount) {
 
 pub fn path_count_setup(_n_wg: u32, resources: &[CpuBinding<'_>]) {
     let bump = resources[0].as_typed();
-    let mut indirect = resources[1].as_typed_mut();
-    path_count_setup_main(&bump, &mut indirect);
+    let mut indirect_slice = resources[1].as_slice_mut::<IndirectCount>();
+    path_count_setup_main(&bump, &mut indirect_slice[0]);
 }

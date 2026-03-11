@@ -117,6 +117,39 @@ pub struct IndirectCount {
     pub pad0: u32,
 }
 
+/// Stage indices into the multi-entry indirect dispatch buffer.
+/// Must match the order used by pipeline_setup.slang.
+pub const STAGE_PATHTAG_REDUCE: u32 = 0;
+pub const STAGE_PATHTAG_REDUCE2: u32 = 1;
+pub const STAGE_PATHTAG_SCAN1: u32 = 2;
+pub const STAGE_PATHTAG_SCAN: u32 = 3;
+pub const STAGE_PATHTAG_SCAN_LARGE: u32 = 4;
+pub const STAGE_BBOX_CLEAR: u32 = 5;
+pub const STAGE_FLATTEN: u32 = 6;
+pub const STAGE_DRAW_REDUCE: u32 = 7;
+pub const STAGE_DRAW_LEAF: u32 = 8;
+pub const STAGE_CLIP_REDUCE: u32 = 9;
+pub const STAGE_CLIP_LEAF: u32 = 10;
+pub const STAGE_BINNING: u32 = 11;
+pub const STAGE_TILE_ALLOC: u32 = 12;
+pub const STAGE_PATH_COUNT_SETUP: u32 = 13;
+pub const STAGE_PATH_COUNT: u32 = 14;
+pub const STAGE_BACKDROP: u32 = 15;
+pub const STAGE_COARSE: u32 = 16;
+pub const STAGE_PATH_TILING_SETUP: u32 = 17;
+pub const STAGE_PATH_TILING: u32 = 18;
+pub const STAGE_FINE: u32 = 19;
+
+pub const N_INDIRECT_STAGES: u32 = 20;
+
+/// GPU-uploadable workgroup counts for Phase 1 indirect dispatch.
+/// Layout must match ekrano_shared.slang WorkgroupCountsGpu.
+#[derive(Clone, Copy, Debug, Default, Zeroable, Pod)]
+#[repr(C)]
+pub struct WorkgroupCountsGpu {
+    pub entries: [[u32; 4]; N_INDIRECT_STAGES as usize],
+}
+
 /// Uniform render configuration data used by all GPU stages.
 ///
 /// This data structure must be kept in sync with the definition in
@@ -192,6 +225,27 @@ impl RenderConfig {
             },
             workgroup_counts,
             buffer_sizes,
+        }
+    }
+
+    /// Create a new config with bump-allocated buffers resized to accommodate
+    /// actual GPU usage. The GPU config's `*_size` fields are updated to match.
+    pub fn with_bump_estimates(&self, bump: &BumpAllocators) -> Self {
+        let buffer_sizes = self.buffer_sizes.with_bump_estimates(bump);
+        let layout = &self.gpu.layout;
+        Self {
+            gpu: ConfigUniform {
+                lines_size: buffer_sizes.lines.len(),
+                binning_size: buffer_sizes.bin_data.len() - layout.bin_data_start,
+                tiles_size: buffer_sizes.tiles.len(),
+                seg_counts_size: buffer_sizes.seg_counts.len(),
+                segments_size: buffer_sizes.segments.len(),
+                blend_size: buffer_sizes.blend_spill.len(),
+                ptcl_size: buffer_sizes.ptcl.len(),
+                ..self.gpu
+            },
+            buffer_sizes,
+            workgroup_counts: self.workgroup_counts,
         }
     }
 }
@@ -270,6 +324,39 @@ impl WorkgroupCounts {
             path_tiling_setup: (1, 1, 1),
             fine: (width_in_tiles, height_in_tiles, 1),
         }
+    }
+}
+
+impl From<&WorkgroupCounts> for WorkgroupCountsGpu {
+    fn from(wc: &WorkgroupCounts) -> Self {
+        let to_u4 = |(x, y, z): WorkgroupSize| [x, y, z, 0];
+        let zero = [0u32; 4];
+        let mut entries = [[0u32; 4]; N_INDIRECT_STAGES as usize];
+        entries[STAGE_PATHTAG_REDUCE as usize] = to_u4(wc.path_reduce);
+        entries[STAGE_PATHTAG_REDUCE2 as usize] =
+            if wc.use_large_path_scan { to_u4(wc.path_reduce2) } else { zero };
+        entries[STAGE_PATHTAG_SCAN1 as usize] =
+            if wc.use_large_path_scan { to_u4(wc.path_scan1) } else { zero };
+        entries[STAGE_PATHTAG_SCAN as usize] =
+            if wc.use_large_path_scan { zero } else { to_u4(wc.path_scan) };
+        entries[STAGE_PATHTAG_SCAN_LARGE as usize] =
+            if wc.use_large_path_scan { to_u4(wc.path_scan) } else { zero };
+        entries[STAGE_BBOX_CLEAR as usize] = to_u4(wc.bbox_clear);
+        entries[STAGE_FLATTEN as usize] = to_u4(wc.flatten);
+        entries[STAGE_DRAW_REDUCE as usize] = to_u4(wc.draw_reduce);
+        entries[STAGE_DRAW_LEAF as usize] = to_u4(wc.draw_leaf);
+        entries[STAGE_CLIP_REDUCE as usize] = to_u4(wc.clip_reduce);
+        entries[STAGE_CLIP_LEAF as usize] = to_u4(wc.clip_leaf);
+        entries[STAGE_BINNING as usize] = to_u4(wc.binning);
+        entries[STAGE_TILE_ALLOC as usize] = to_u4(wc.tile_alloc);
+        entries[STAGE_PATH_COUNT_SETUP as usize] = to_u4(wc.path_count_setup);
+        entries[STAGE_PATH_COUNT as usize] = zero; // Written by path_count_setup
+        entries[STAGE_BACKDROP as usize] = to_u4(wc.backdrop);
+        entries[STAGE_COARSE as usize] = to_u4(wc.coarse);
+        entries[STAGE_PATH_TILING_SETUP as usize] = to_u4(wc.path_tiling_setup);
+        entries[STAGE_PATH_TILING as usize] = zero; // Written by path_tiling_setup
+        entries[STAGE_FINE as usize] = to_u4(wc.fine);
+        Self { entries }
     }
 }
 
@@ -386,7 +473,7 @@ impl BufferSizes {
         let clip_bboxes = BufferSize::new(n_clips);
         let draw_bboxes = BufferSize::new(n_paths);
         let bump_alloc = BufferSize::new(1);
-        let indirect_count = BufferSize::new(1);
+        let indirect_count = BufferSize::new(N_INDIRECT_STAGES);
         let bin_headers = BufferSize::new(binning_wgs * 256);
         let n_paths_aligned = align_up(n_paths, 256);
         let paths = BufferSize::new(n_paths_aligned);
@@ -427,6 +514,38 @@ impl BufferSizes {
             segments,
             blend_spill,
             ptcl,
+        }
+    }
+}
+
+impl BufferSizes {
+    /// Create new buffer sizes with bump-allocated buffers scaled up to accommodate
+    /// the actual usage reported by the GPU bump allocator.
+    ///
+    /// Each overflowed buffer is rounded up to the next power of two of the actual
+    /// usage. Non-bump buffers are unchanged.
+    pub fn with_bump_estimates(&self, bump: &BumpAllocators) -> Self {
+        fn grow(current: u32, needed: u32) -> u32 {
+            if needed > current {
+                needed.next_power_of_two()
+            } else {
+                current
+            }
+        }
+        // bin_data is shared: first `info.len()` elements are draw info (fixed),
+        // remaining are binning data (bump-allocated). Only the binning portion grows.
+        let bin_data_start = self.info.len();
+        let current_binning = self.bin_data.len() - bin_data_start;
+        let new_binning = grow(current_binning, bump.binning);
+        Self {
+            lines: BufferSize::new(grow(self.lines.len(), bump.lines)),
+            bin_data: BufferSize::new(bin_data_start + new_binning),
+            tiles: BufferSize::new(grow(self.tiles.len(), bump.tile)),
+            seg_counts: BufferSize::new(grow(self.seg_counts.len(), bump.seg_counts)),
+            segments: BufferSize::new(grow(self.segments.len(), bump.segments)),
+            blend_spill: BufferSize::new(grow(self.blend_spill.len(), bump.blend)),
+            ptcl: BufferSize::new(grow(self.ptcl.len(), bump.ptcl)),
+            ..*self
         }
     }
 }

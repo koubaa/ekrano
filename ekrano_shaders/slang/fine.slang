@@ -6,7 +6,7 @@
 // Variants: fine_area (default), fine_msaa8 (#define msaa, msaa8), fine_msaa16 (#define msaa, msaa16)
 //
 // Build: fine_area = no defines; fine_msaa8 = -Dmsaa -Dmsaa8; fine_msaa16 = -Dmsaa -Dmsaa16
-// MSAA variants require fill_path_ms port from fine.wgsl (TODO).
+// MSAA variants use fill_path_ms (ported from fine.wgsl).
 
 import goldy_exp;
 import ekrano_shared;
@@ -14,10 +14,479 @@ import ekrano_shared;
 // Slots: 0=config, 1=segments, 2=ptcl, 3=info, 4=blend_spill, 5=output, 6=gradients, 7=image_atlas
 // MSAA adds mask_lut at 8
 
-// When msaa is defined, bindings add mask_lut at slot 8. fill_path_ms is not yet ported;
-// we fall back to analytic fill_path (lower AA quality for MSAA config).
+// When msaa is defined, bindings add mask_lut at slot 8. fill_path_ms provides true MSAA.
 #ifdef msaa
-// TODO: port fill_path_ms and fill_path_ms_evenodd from fine.wgsl for true MSAA
+#ifdef msaa8
+static const uint MASK_WIDTH = 32;
+static const uint MASK_HEIGHT = 32;
+static const uint SH_SAMPLES_SIZE = 512;
+static const uint SAMPLE_WORDS_PER_PIXEL = 2;
+#endif
+#ifdef msaa16
+static const uint MASK_WIDTH = 64;
+static const uint MASK_HEIGHT = 64;
+static const uint SH_SAMPLES_SIZE = 1024;
+static const uint SAMPLE_WORDS_PER_PIXEL = 4;
+#endif
+static const uint WG_SIZE = 64;
+
+groupshared uint sh_count[64];
+groupshared uint sh_winding_y[4];
+groupshared uint sh_winding_y_prefix[4];
+groupshared uint sh_winding[64];
+groupshared uint sh_samples[1024]; // Max of msaa8 (512) and msaa16 (1024)
+
+uint span_ms(float a, float b) {
+    return uint(max(ceil(max(a, b)) - floor(min(a, b)), 1.0));
+}
+
+void fill_path_ms_impl(
+    CmdFill fill,
+    uint2 local_id,
+    RWStructuredBuffer<Segment> segments,
+    RWStructuredBuffer<uint> mask_lut,
+    out float area[4]
+) {
+    uint n_segs = fill.size_and_rule >> 1;
+    uint th_ix = local_id.y * (TILE_WIDTH / PIXELS_PER_THREAD) + local_id.x;
+    uint sample_count = PIXELS_PER_THREAD * SAMPLE_WORDS_PER_PIXEL;
+
+    uint _;
+    if (th_ix < 64) {
+        if (th_ix < 4)
+            InterlockedExchange(sh_winding_y[th_ix], 0x80808080, _);
+        InterlockedExchange(sh_winding[th_ix], 0x80808080, _);
+    }
+    for (uint i = 0; i < sample_count; i++)
+        InterlockedExchange(sh_samples[th_ix * sample_count + i], 0x80808080, _);
+
+    GroupMemoryBarrierWithGroupSync();
+
+    uint n_batch = (n_segs + (WG_SIZE - 1)) / WG_SIZE;
+    for (uint batch = 0; batch < n_batch; batch++) {
+        uint seg_ix = batch * WG_SIZE + th_ix;
+        uint seg_off = fill.seg_data + seg_ix;
+        uint count = 0;
+        uint slice_size = min(n_segs - batch * WG_SIZE, WG_SIZE);
+
+        if (th_ix < slice_size) {
+            Segment segment = segments[seg_off];
+            float2 xy0 = segment.point0;
+            float2 xy1 = segment.point1;
+            float y_edge_f = float(TILE_HEIGHT);
+            int delta = (xy1.x <= xy0.x) ? 1 : -1;
+            if (xy0.x == 0.0)
+                y_edge_f = xy0.y;
+            else if (xy1.x == 0.0)
+                y_edge_f = xy1.y;
+            if (!(xy0.y == xy1.y && xy0.y == floor(xy0.y)))
+                count = span_ms(xy0.x, xy1.x) + span_ms(xy0.y, xy1.y) - 1;
+            uint y_edge = uint(ceil(y_edge_f));
+            if (y_edge < TILE_HEIGHT)
+                InterlockedAdd(sh_winding_y[y_edge >> 2], uint(delta) << ((y_edge & 3) << 3));
+        }
+
+        sh_count[th_ix] = count;
+        uint lg_n = firstbithigh(slice_size * 2 - 1);
+        if (lg_n == 0xFFFFFFFF) lg_n = 0;
+        for (uint i = 0; i < lg_n; i++) {
+            GroupMemoryBarrierWithGroupSync();
+            if (th_ix >= (1 << i))
+                count += sh_count[th_ix - (1 << i)];
+            GroupMemoryBarrierWithGroupSync();
+            sh_count[th_ix] = count;
+        }
+        uint total = sh_count[slice_size - 1];
+
+        for (uint ii = th_ix; ii < total; ii += WG_SIZE) {
+            uint lo = 0, hi = slice_size;
+            uint goal = ii;
+            while (hi > lo + 1) {
+                uint mid = (lo + hi) >> 1;
+                if (goal >= sh_count[mid - 1])
+                    lo = mid;
+                else
+                    hi = mid;
+            }
+            uint el_ix = lo;
+            bool last_pixel = (ii + 1) == sh_count[el_ix];
+            uint sub_ix = ii - (el_ix > 0 ? sh_count[el_ix - 1] : 0);
+            uint s_off = fill.seg_data + batch * WG_SIZE + el_ix;
+            Segment seg = segments[s_off];
+            float2 xy0_in = seg.point0;
+            float2 xy1_in = seg.point1;
+            bool is_down = xy1_in.y >= xy0_in.y;
+            float2 xy0 = is_down ? xy0_in : xy1_in;
+            float2 xy1 = is_down ? xy1_in : xy0_in;
+
+            float dx = abs(xy1.x - xy0.x);
+            float dy = xy1.y - xy0.y;
+            float idxdy = 1.0 / (dx + dy);
+            float a = dx * idxdy;
+            bool is_positive_slope = xy1.x >= xy0.x;
+            float x_sign = is_positive_slope ? 1.0 : -1.0;
+            float xt0 = floor(xy0.x * x_sign);
+            float c = xy0.x * x_sign - xt0;
+            float y0i = floor(xy0.y);
+            float ytop = y0i + 1.0;
+            float b = min((dy * c + dx * (ytop - xy0.y)) * idxdy, ONE_MINUS_ULP);
+            uint count_x = span_ms(xy0.x, xy1.x) - 1;
+            uint cnt = count_x + span_ms(xy0.y, xy1.y);
+            float robust_err = floor(a * (float(cnt) - 1.0) + b) - float(count_x);
+            if (robust_err != 0.0)
+                a -= ROBUST_EPSILON * sign(robust_err);
+            int x0i = int(xt0 * x_sign + 0.5 * (x_sign - 1.0));
+
+            float zf = a * float(sub_ix) + b;
+            float z = floor(zf);
+            int x = int(x0i) + int(x_sign * z);
+            int y = int(y0i) + int(sub_ix) - int(z);
+            bool is_delta;
+            bool is_bump = false;
+            float zp = floor(a * float(sub_ix - 1) + b);
+            if (sub_ix == 0) {
+                is_delta = (y0i == xy0.y);
+                is_bump = (xy0.x == 0.0 && y0i != xy0.y);
+            } else {
+                is_delta = (z == zp);
+                is_bump = is_positive_slope && !is_delta;
+            }
+            uint pix_ix = uint(y) * TILE_WIDTH + uint(x);
+            if (uint(x) < TILE_WIDTH - 1 && uint(y) < TILE_HEIGHT) {
+                uint delta_pix = pix_ix + 1;
+                if (is_delta) {
+                    uint d = (is_down ? 1u : 0xFFFFFFFF) << ((delta_pix & 3) << 3);
+                    InterlockedAdd(sh_winding[delta_pix >> 2], d);
+                }
+            }
+
+            uint mask_block = (is_positive_slope ? 1u : 0u) * (MASK_WIDTH * MASK_HEIGHT / 2);
+            float half_height = float(MASK_HEIGHT) / 2.0;
+            float mask_row = floor(min(a * half_height, half_height - 1.0)) * float(MASK_WIDTH);
+            float mask_col = floor((zf - z) * float(MASK_WIDTH));
+            uint mask_ix = mask_block + uint(mask_row + mask_col);
+
+#ifdef msaa8
+            uint mask = mask_lut[mask_ix / 4] >> ((mask_ix % 4) * 8);
+            mask &= 0xFF;
+            if (sub_ix == 0 && !is_bump) {
+                uint mask_shift = uint(round(8.0 * (xy0.y - float(y))));
+                mask &= 0xFF << mask_shift;
+            }
+            if (last_pixel && xy1.x != 0.0) {
+                uint mask_shift = uint(round(8.0 * (xy1.y - float(y))));
+                mask &= ~(0xFF << mask_shift);
+            }
+            uint mask_a = mask ^ (mask << 7);
+            uint mask_b = mask_a ^ (mask_a << 14);
+            uint mask0_exp = mask_b & 0x1010101;
+            uint mask0_signed = is_down ? uint(-int(mask0_exp)) : mask0_exp;
+            uint mask1_exp = (mask_b >> 4) & 0x1010101;
+            uint mask1_signed = is_down ? uint(-int(mask1_exp)) : mask1_exp;
+            if (is_bump) {
+                uint bump_delta = is_down ? 0x1010101u : 0xFEFEFEFFu;
+                mask0_signed += bump_delta;
+                mask1_signed += bump_delta;
+            }
+            InterlockedAdd(sh_samples[pix_ix * 2], mask0_signed);
+            InterlockedAdd(sh_samples[pix_ix * 2 + 1], mask1_signed);
+#endif
+#ifdef msaa16
+            uint mask = mask_lut[mask_ix / 2] >> ((mask_ix % 2) * 16);
+            mask &= 0xFFFF;
+            if (sub_ix == 0 && !is_bump) {
+                uint mask_shift = uint(round(16.0 * (xy0.y - float(y))));
+                mask &= 0xFFFF << mask_shift;
+            }
+            if (last_pixel && xy1.x != 0.0) {
+                uint mask_shift = uint(round(16.0 * (xy1.y - float(y))));
+                mask &= ~(0xFFFF << mask_shift);
+            }
+            uint mask0 = mask & 0xFF;
+            uint mask0_a = mask0 ^ (mask0 << 7);
+            uint mask0_b = mask0_a ^ (mask0_a << 14);
+            uint mask0_exp = mask0_b & 0x1010101;
+            uint mask0_signed = is_down ? uint(-int(mask0_exp)) : mask0_exp;
+            uint mask1_exp = (mask0_b >> 4) & 0x1010101;
+            uint mask1_signed = is_down ? uint(-int(mask1_exp)) : mask1_exp;
+            uint mask1_8 = (mask >> 8) & 0xFF;
+            uint mask1_a = mask1_8 ^ (mask1_8 << 7);
+            uint mask1_b = mask1_a ^ (mask1_a << 14);
+            uint mask2_exp = mask1_b & 0x1010101;
+            uint mask2_signed = is_down ? uint(-int(mask2_exp)) : mask2_exp;
+            uint mask3_exp = (mask1_b >> 4) & 0x1010101;
+            uint mask3_signed = is_down ? uint(-int(mask3_exp)) : mask3_exp;
+            if (is_bump) {
+                uint bump_delta = is_down ? 0x1010101u : 0xFEFEFEFFu;
+                mask0_signed += bump_delta;
+                mask1_signed += bump_delta;
+                mask2_signed += bump_delta;
+                mask3_signed += bump_delta;
+            }
+            InterlockedAdd(sh_samples[pix_ix * 4], mask0_signed);
+            InterlockedAdd(sh_samples[pix_ix * 4 + 1], mask1_signed);
+            InterlockedAdd(sh_samples[pix_ix * 4 + 2], mask2_signed);
+            InterlockedAdd(sh_samples[pix_ix * 4 + 3], mask3_signed);
+#endif
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+
+    uint major = (th_ix * PIXELS_PER_THREAD) >> 2;
+    uint packed_w = sh_winding[major];
+    packed_w += (packed_w - 0x808080) << 8;
+    packed_w += (packed_w - 0x8080) << 16;
+    uint packed_y = sh_winding_y[local_id.y >> 2];
+    packed_y += (packed_y - 0x808080) << 8;
+    packed_y += (packed_y - 0x8080) << 16;
+    uint wind_y = (packed_y >> ((local_id.y & 3) << 3)) - 0x80;
+    if ((local_id.y & 3) == 3 && local_id.x == 0)
+        InterlockedExchange(sh_winding_y_prefix[local_id.y >> 2], wind_y, _);
+    uint prefix_x = ((packed_w >> 24) - 0x80) * 0x1010101;
+    InterlockedExchange(sh_winding[major], prefix_x, _);
+    GroupMemoryBarrierWithGroupSync();
+    for (uint i = (major & ~3u); i < major; i++)
+        packed_w += sh_winding[i];
+    for (uint i = 0; i < (local_id.y >> 2); i++)
+        wind_y += sh_winding_y_prefix[i];
+
+    for (uint i = 0; i < PIXELS_PER_THREAD; i++) {
+        uint pix_ix = th_ix * PIXELS_PER_THREAD + i;
+        uint minor = i;
+        uint expected_zero = (((packed_w >> (minor * 8)) + wind_y) & 0xFF) - uint(fill.backdrop);
+        if (expected_zero >= 256) {
+            area[i] = 1.0;
+        } else {
+#ifdef msaa8
+            uint samples0 = sh_samples[pix_ix * 2];
+            uint samples1 = sh_samples[pix_ix * 2 + 1];
+            uint xored0 = (expected_zero * 0x1010101) ^ samples0;
+            uint xored0_2 = xored0 | (xored0 * 2);
+            uint xored1 = (expected_zero * 0x1010101) ^ samples1;
+            uint xored1_2 = xored1 | (xored1 >> 1);
+            uint xored2 = (xored0_2 & 0xAAAAAAAA) | (xored1_2 & 0x55555555);
+            uint xored4 = xored2 | (xored2 * 4);
+            uint xored8 = xored4 | (xored4 * 16);
+            area[i] = float(countbits(xored8 & 0xC0C0C0C0)) * 0.125;
+#endif
+#ifdef msaa16
+            uint samples0 = sh_samples[pix_ix * 4];
+            uint samples1 = sh_samples[pix_ix * 4 + 1];
+            uint samples2 = sh_samples[pix_ix * 4 + 2];
+            uint samples3 = sh_samples[pix_ix * 4 + 3];
+            uint xored0 = (expected_zero * 0x1010101) ^ samples0;
+            uint xored0_2 = xored0 | (xored0 * 2);
+            uint xored1 = (expected_zero * 0x1010101) ^ samples1;
+            uint xored1_2 = xored1 | (xored1 >> 1);
+            uint xored01 = (xored0_2 & 0xAAAAAAAA) | (xored1_2 & 0x55555555);
+            uint xored01_4 = xored01 | (xored01 * 4);
+            uint xored2 = (expected_zero * 0x1010101) ^ samples2;
+            uint xored2_2 = xored2 | (xored2 * 2);
+            uint xored3 = (expected_zero * 0x1010101) ^ samples3;
+            uint xored3_2 = xored3 | (xored3 >> 1);
+            uint xored23 = (xored2_2 & 0xAAAAAAAA) | (xored3_2 & 0x55555555);
+            uint xored23_4 = xored23 | (xored23 >> 2);
+            uint xored4 = (xored01_4 & 0xCCCCCCCC) | (xored23_4 & 0x33333333);
+            uint xored8 = xored4 | (xored4 * 16);
+            area[i] = float(countbits(xored8 & 0xF0F0F0F0)) * 0.0625;
+#endif
+        }
+    }
+}
+
+void fill_path_ms_evenodd_impl(
+    CmdFill fill,
+    uint2 local_id,
+    RWStructuredBuffer<Segment> segments,
+    RWStructuredBuffer<uint> mask_lut,
+    out float area[4]
+) {
+    uint n_segs = fill.size_and_rule >> 1;
+    uint th_ix = local_id.y * (TILE_WIDTH / PIXELS_PER_THREAD) + local_id.x;
+    uint sample_count = PIXELS_PER_THREAD;
+
+    uint _;
+    if (th_ix < TILE_HEIGHT) {
+        if (th_ix == 0)
+            InterlockedExchange(sh_winding_y[th_ix], 0, _);
+        InterlockedExchange(sh_winding[th_ix], 0, _);
+    }
+    for (uint i = 0; i < sample_count; i++)
+        InterlockedExchange(sh_samples[th_ix * sample_count + i], 0, _);
+
+    GroupMemoryBarrierWithGroupSync();
+
+    uint n_batch = (n_segs + (WG_SIZE - 1)) / WG_SIZE;
+    for (uint batch = 0; batch < n_batch; batch++) {
+        uint seg_ix = batch * WG_SIZE + th_ix;
+        uint seg_off = fill.seg_data + seg_ix;
+        uint count = 0;
+        uint slice_size = min(n_segs - batch * WG_SIZE, WG_SIZE);
+
+        if (th_ix < slice_size) {
+            Segment segment = segments[seg_off];
+            float2 xy0 = segment.point0;
+            float2 xy1 = segment.point1;
+            float y_edge_f = float(TILE_HEIGHT);
+            if (xy0.x == 0.0)
+                y_edge_f = xy0.y;
+            else if (xy1.x == 0.0)
+                y_edge_f = xy1.y;
+            if (!(xy0.y == xy1.y && xy0.y == floor(xy0.y)))
+                count = span_ms(xy0.x, xy1.x) + span_ms(xy0.y, xy1.y) - 1;
+            uint y_edge = uint(ceil(y_edge_f));
+            if (y_edge < TILE_HEIGHT)
+                InterlockedXor(sh_winding_y[0], 1 << y_edge);
+        }
+
+        sh_count[th_ix] = count;
+        uint lg_n = firstbithigh(slice_size * 2 - 1);
+        if (lg_n == 0xFFFFFFFF) lg_n = 0;
+        for (uint i = 0; i < lg_n; i++) {
+            GroupMemoryBarrierWithGroupSync();
+            if (th_ix >= (1 << i))
+                count += sh_count[th_ix - (1 << i)];
+            GroupMemoryBarrierWithGroupSync();
+            sh_count[th_ix] = count;
+        }
+        uint total = sh_count[slice_size - 1];
+
+        for (uint ii = th_ix; ii < total; ii += WG_SIZE) {
+            uint lo = 0, hi = slice_size;
+            uint goal = ii;
+            while (hi > lo + 1) {
+                uint mid = (lo + hi) >> 1;
+                if (goal >= sh_count[mid - 1])
+                    lo = mid;
+                else
+                    hi = mid;
+            }
+            uint el_ix = lo;
+            bool last_pixel = (ii + 1) == sh_count[el_ix];
+            uint sub_ix = ii - (el_ix > 0 ? sh_count[el_ix - 1] : 0);
+            uint s_off = fill.seg_data + batch * WG_SIZE + el_ix;
+            Segment seg = segments[s_off];
+            float2 xy0_in = seg.point0;
+            float2 xy1_in = seg.point1;
+            bool is_down = xy1_in.y >= xy0_in.y;
+            float2 xy0 = is_down ? xy0_in : xy1_in;
+            float2 xy1 = is_down ? xy1_in : xy0_in;
+
+            float dx = abs(xy1.x - xy0.x);
+            float dy = xy1.y - xy0.y;
+            float idxdy = 1.0 / (dx + dy);
+            float a = dx * idxdy;
+            bool is_positive_slope = xy1.x >= xy0.x;
+            float x_sign = is_positive_slope ? 1.0 : -1.0;
+            float xt0 = floor(xy0.x * x_sign);
+            float c = xy0.x * x_sign - xt0;
+            float y0i = floor(xy0.y);
+            float ytop = y0i + 1.0;
+            float b = min((dy * c + dx * (ytop - xy0.y)) * idxdy, ONE_MINUS_ULP);
+            uint count_x = span_ms(xy0.x, xy1.x) - 1;
+            uint cnt = count_x + span_ms(xy0.y, xy1.y);
+            float robust_err = floor(a * (float(cnt) - 1.0) + b) - float(count_x);
+            if (robust_err != 0.0)
+                a -= ROBUST_EPSILON * sign(robust_err);
+            int x0i = int(xt0 * x_sign + 0.5 * (x_sign - 1.0));
+
+            float zf = a * float(sub_ix) + b;
+            float z = floor(zf);
+            int x = int(x0i) + int(x_sign * z);
+            int y = int(y0i) + int(sub_ix) - int(z);
+            bool is_delta;
+            bool is_bump = false;
+            float zp = floor(a * float(sub_ix - 1) + b);
+            if (sub_ix == 0) {
+                is_delta = (y0i == xy0.y);
+                is_bump = (xy0.x == 0.0);
+            } else {
+                is_delta = (z == zp);
+                is_bump = is_positive_slope && !is_delta;
+            }
+            if (uint(x) < TILE_WIDTH - 1 && uint(y) < TILE_HEIGHT && is_delta)
+                InterlockedXor(sh_winding[y], 2 << uint(x));
+
+            uint mask_block = (is_positive_slope ? 1u : 0u) * (MASK_WIDTH * MASK_HEIGHT / 2);
+            float half_height = float(MASK_HEIGHT) / 2.0;
+            float mask_row = floor(min(a * half_height, half_height - 1.0)) * float(MASK_WIDTH);
+            float mask_col = floor((zf - z) * float(MASK_WIDTH));
+            uint mask_ix = mask_block + uint(mask_row + mask_col);
+            uint pix_ix = uint(y) * TILE_WIDTH + uint(x);
+
+#ifdef msaa8
+            uint mask = mask_lut[mask_ix / 4] >> ((mask_ix % 4) * 8);
+            mask &= 0xFF;
+            if (sub_ix == 0 && !is_bump) {
+                uint mask_shift = uint(round(8.0 * (xy0.y - float(y))));
+                mask &= 0xFF << mask_shift;
+            }
+            if (last_pixel && xy1.x != 0.0) {
+                uint mask_shift = uint(round(8.0 * (xy1.y - float(y))));
+                mask &= ~(0xFF << mask_shift);
+            }
+            if (is_bump)
+                mask ^= 0xFF;
+            InterlockedXor(sh_samples[pix_ix], mask);
+#endif
+#ifdef msaa16
+            uint mask = mask_lut[mask_ix / 2] >> ((mask_ix % 2) * 16);
+            mask &= 0xFFFF;
+            if (sub_ix == 0 && !is_bump) {
+                uint mask_shift = uint(round(16.0 * (xy0.y - float(y))));
+                mask &= 0xFFFF << mask_shift;
+            }
+            if (last_pixel && xy1.x != 0.0) {
+                uint mask_shift = uint(round(16.0 * (xy1.y - float(y))));
+                mask &= ~(0xFFFF << mask_shift);
+            }
+            if (is_bump)
+                mask ^= 0xFFFF;
+            InterlockedXor(sh_samples[pix_ix], mask);
+#endif
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+
+    uint scan_x = sh_winding[local_id.y];
+    scan_x ^= scan_x << 1;
+    scan_x ^= scan_x << 2;
+    scan_x ^= scan_x << 4;
+    scan_x ^= scan_x << 8;
+    uint scan_y = sh_winding_y[0];
+    scan_y ^= scan_y << 1;
+    scan_y ^= scan_y << 2;
+    scan_y ^= scan_y << 4;
+    scan_y ^= scan_y << 8;
+    uint row_parity = (scan_y >> local_id.y) ^ uint(fill.backdrop);
+
+    for (uint i = 0; i < PIXELS_PER_THREAD; i++) {
+        uint pix_ix = th_ix * PIXELS_PER_THREAD + i;
+        uint samples = sh_samples[pix_ix];
+        uint pix_parity = row_parity ^ (scan_x >> (pix_ix % TILE_WIDTH));
+        uint pix_mask = uint(-int(pix_parity & 1));
+#ifdef msaa8
+        area[i] = float(countbits((samples ^ pix_mask) & 0xFF)) * 0.125;
+#endif
+#ifdef msaa16
+        area[i] = float(countbits((samples ^ pix_mask) & 0xFFFF)) * 0.0625;
+#endif
+    }
+}
+
+void fill_path_ms(
+    CmdFill fill,
+    uint2 local_id,
+    RWStructuredBuffer<Segment> segments,
+    RWStructuredBuffer<uint> mask_lut,
+    out float area[4]
+) {
+    if ((fill.size_and_rule & 1) != 0) {
+        fill_path_ms_evenodd_impl(fill, local_id, segments, mask_lut, area);
+        return;
+    }
+    fill_path_ms_impl(fill, local_id, segments, mask_lut, area);
+}
 #endif
 
 static const float ONE_MINUS_ULP = 0.99999994;
@@ -218,7 +687,11 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
 
         if (tag == CMD_FILL) {
             CmdFill fill = read_fill(ptcl, cmd_ix);
+#ifdef msaa
+            fill_path_ms(fill, local_id.xy, segments, mask_lut, area);
+#else
             fill_path(fill, local_xy, segments, area);
+#endif
             cmd_ix += 4;
         } else if (tag == CMD_SOLID) {
             for (uint i = 0; i < 4; i++) area[i] = 1.0;
@@ -384,24 +857,42 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
         } else if (tag == CMD_IMAGE) {
             CmdImage image = read_image_cmd(ptcl, info, cmd_ix);
             float2 atlas_max = image.atlas_offset + image.extents - 1.0;
-            for (uint i = 0; i < 4; i++) {
-                if (area[i] != 0.0) {
-                    float2 my_xy = float2(xy.x + float(i), xy.y);
-                    float2 atlas_uv = image.matrx.xy * my_xy.x + image.matrx.zw * my_xy.y + image.xlat;
-                    atlas_uv.x = extend_mode(atlas_uv.x, image.x_extend_mode, image.extents.x);
-                    atlas_uv.y = extend_mode(atlas_uv.y, image.y_extend_mode, image.extents.y);
-                    atlas_uv += image.atlas_offset - 0.5;
-                    float2 atlas_uv_clamped = clamp(atlas_uv, image.atlas_offset, atlas_max);
-                    int2 uv00 = int2(floor(atlas_uv_clamped));
-                    int2 uv11 = int2(ceil(atlas_uv_clamped));
-                    float2 uv_frac = frac(atlas_uv);
-                    float4 a = maybe_premul_alpha(image_atlas.Load(int3(uv00, 0)), image.alpha_type);
-                    float4 b = maybe_premul_alpha(image_atlas.Load(int3(uv00.x, uv11.y, 0)), image.alpha_type);
-                    float4 c = maybe_premul_alpha(image_atlas.Load(int3(uv11.x, uv00.y, 0)), image.alpha_type);
-                    float4 d = maybe_premul_alpha(image_atlas.Load(int3(uv11, 0)), image.alpha_type);
-                    float4 fg_rgba = lerp(lerp(a, b, uv_frac.y), lerp(c, d, uv_frac.y), uv_frac.x);
-                    float4 fg_i = pixel_format(fg_rgba * area[i] * image.alpha, image.format);
-                    rgba[i] = rgba[i] * (1.0 - fg_i.a) + fg_i;
+            if (image.quality == IMAGE_QUALITY_LOW) {
+                // Nearest neighbor (matches fine.wgsl IMAGE_QUALITY_LOW)
+                for (uint i = 0; i < 4; i++) {
+                    if (area[i] != 0.0) {
+                        float2 my_xy = float2(xy.x + float(i), xy.y);
+                        float2 atlas_uv = image.matrx.xy * my_xy.x + image.matrx.zw * my_xy.y + image.xlat;
+                        atlas_uv.x = extend_mode(atlas_uv.x, image.x_extend_mode, image.extents.x);
+                        atlas_uv.y = extend_mode(atlas_uv.y, image.y_extend_mode, image.extents.y);
+                        atlas_uv += image.atlas_offset;
+                        float2 atlas_uv_clamped = clamp(atlas_uv, image.atlas_offset, atlas_max);
+                        float4 fg_rgba = maybe_premul_alpha(image_atlas.Load(int3(int2(atlas_uv_clamped), 0)), image.alpha_type);
+                        float4 fg_i = pixel_format(fg_rgba * area[i] * image.alpha, image.format);
+                        rgba[i] = rgba[i] * (1.0 - fg_i.a) + fg_i;
+                    }
+                }
+            } else {
+                // Bilinear (matches fine.wgsl IMAGE_QUALITY_MEDIUM)
+                for (uint i = 0; i < 4; i++) {
+                    if (area[i] != 0.0) {
+                        float2 my_xy = float2(xy.x + float(i), xy.y);
+                        float2 atlas_uv = image.matrx.xy * my_xy.x + image.matrx.zw * my_xy.y + image.xlat;
+                        atlas_uv.x = extend_mode(atlas_uv.x, image.x_extend_mode, image.extents.x);
+                        atlas_uv.y = extend_mode(atlas_uv.y, image.y_extend_mode, image.extents.y);
+                        atlas_uv += image.atlas_offset - 0.5;
+                        float2 atlas_uv_clamped = clamp(atlas_uv, image.atlas_offset, atlas_max);
+                        int2 uv00 = int2(floor(atlas_uv_clamped));
+                        int2 uv11 = int2(ceil(atlas_uv_clamped));
+                        float2 uv_frac = frac(atlas_uv);
+                        float4 a = maybe_premul_alpha(image_atlas.Load(int3(uv00, 0)), image.alpha_type);
+                        float4 b = maybe_premul_alpha(image_atlas.Load(int3(uv00.x, uv11.y, 0)), image.alpha_type);
+                        float4 c = maybe_premul_alpha(image_atlas.Load(int3(uv11.x, uv00.y, 0)), image.alpha_type);
+                        float4 d = maybe_premul_alpha(image_atlas.Load(int3(uv11, 0)), image.alpha_type);
+                        float4 fg_rgba = lerp(lerp(a, b, uv_frac.y), lerp(c, d, uv_frac.y), uv_frac.x);
+                        float4 fg_i = pixel_format(fg_rgba * area[i] * image.alpha, image.format);
+                        rgba[i] = rgba[i] * (1.0 - fg_i.a) + fg_i;
+                    }
                 }
             }
             cmd_ix += 2;
