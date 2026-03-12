@@ -59,7 +59,7 @@ ekrano/                   # Git root (forked from Vello)
 - **Phase 2.5** (todo): Make `render_to_texture` the primary API; remove surface/swapchain path
 - **Phase 3a** (todo): Replace wgpu with Goldy (keep WGSL, compile via naga → SPIR-V → Goldy)
 - **Phase 3b** (todo): Port WGSL shaders to Slang
-- **Phase 3c** (todo): Exploit Goldy features (BDA, indirect dispatch, bounded memory)
+- **Phase 3c** (in progress): Exploit Goldy features. Phase 1 indirect dispatch done (all stages); BDA deferred; bump overflow handling done.
 
 ## Test Commands
 

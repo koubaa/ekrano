@@ -18,7 +18,7 @@ use ekrano_encoding::{
 };
 use ekrano_encoding::{
     STAGE_BACKDROP, STAGE_BBOX_CLEAR, STAGE_BINNING, STAGE_CLIP_LEAF, STAGE_CLIP_REDUCE,
-    STAGE_COARSE, STAGE_DRAW_LEAF, STAGE_DRAW_REDUCE, STAGE_FLATTEN,
+    STAGE_COARSE, STAGE_DRAW_LEAF, STAGE_DRAW_REDUCE, STAGE_FINE, STAGE_FLATTEN,
     STAGE_PATHTAG_REDUCE, STAGE_PATHTAG_REDUCE2, STAGE_PATHTAG_SCAN, STAGE_PATHTAG_SCAN1,
     STAGE_PATHTAG_SCAN_LARGE, STAGE_PATH_COUNT, STAGE_PATH_TILING, STAGE_TILE_ALLOC,
 };
@@ -45,6 +45,8 @@ impl Drop for Render {
 /// Resources produced by pipeline, needed for fine rasterization.
 struct FineResources {
     aa_config: AaConfig,
+    /// When Some (Goldy indirect path), fine stage uses dispatch_indirect.
+    indirect_buf: Option<BufferProxy>,
 
     config_buf: ResourceProxy,
     bump_buf: ResourceProxy,
@@ -560,10 +562,10 @@ impl Render {
         recording.free_resource(tagmonoid_buf);
 
         // Buffer for path_count/path_tiling: multi-entry when use_indirect (shared with other stages),
-        // otherwise dedicated buffer for just those two stages.
+        // otherwise dedicated buffer for just those two stages (single IndirectCount; both write to offset 0).
         let path_indirect_buf = indirect_buf.unwrap_or_else(|| {
             BufferProxy::new(
-                buffer_sizes.indirect_count.size_in_bytes().into(),
+                size_of::<IndirectCount>() as u64,
                 "vello.indirect_count",
             )
         });
@@ -647,7 +649,11 @@ impl Render {
                 segments_buf,
             ],
         );
-        recording.free_buffer(path_indirect_buf);
+        // When !use_indirect (wgpu), path_indirect_buf is dedicated and we free it here.
+        // When use_indirect (Goldy), keep it for the fine stage and pass via FineResources.
+        if !use_indirect {
+            recording.free_buffer(path_indirect_buf);
+        }
         recording.free_resource(seg_counts_buf);
         recording.free_resource(scene_buf);
         recording.free_resource(draw_monoid_buf);
@@ -661,6 +667,11 @@ impl Render {
         self.fine_wg_count = Some(wg_counts.fine);
         self.fine_resources = Some(FineResources {
             aa_config: params.antialiasing_method,
+            indirect_buf: if use_indirect {
+                Some(path_indirect_buf)
+            } else {
+                None
+            },
             config_buf,
             bump_buf,
             tile_buf,
@@ -706,25 +717,35 @@ impl Render {
     /// Run fine rasterization assuming the coarse phase succeeded.
     pub fn record_fine(&mut self, shaders: &FullShaders, recording: &mut Recording) {
         let fine_wg_count = self.fine_wg_count.take().unwrap();
-        let fine = self.fine_resources.take().unwrap();
+        let mut fine = self.fine_resources.take().unwrap();
+        const INDIRECT_STRIDE: u64 = size_of::<IndirectCount>() as u64;
+        let fine_offset = STAGE_FINE as u64 * INDIRECT_STRIDE;
+        let base_resources = [
+            fine.config_buf,
+            fine.segments_buf,
+            fine.ptcl_buf,
+            fine.info_bin_data_buf,
+            fine.blend_spill_buf,
+            ResourceProxy::Image(fine.out_image),
+            fine.gradient_image,
+            fine.image_atlas,
+        ];
         match fine.aa_config {
             AaConfig::Area => {
-                recording.dispatch(
-                    shaders
-                        .fine_area
-                        .expect("shaders not configured to support AA mode: area"),
-                    fine_wg_count,
-                    [
-                        fine.config_buf,
-                        fine.segments_buf,
-                        fine.ptcl_buf,
-                        fine.info_bin_data_buf,
-                        fine.blend_spill_buf,
-                        ResourceProxy::Image(fine.out_image),
-                        fine.gradient_image,
-                        fine.image_atlas,
-                    ],
-                );
+                let shader = shaders
+                    .fine_area
+                    .expect("shaders not configured to support AA mode: area");
+                if let Some(indirect_buf) = fine.indirect_buf.take() {
+                    recording.dispatch_indirect(
+                        shader,
+                        indirect_buf,
+                        fine_offset,
+                        base_resources.iter().cloned(),
+                    );
+                    recording.free_buffer(indirect_buf);
+                } else {
+                    recording.dispatch(shader, fine_wg_count, base_resources.iter().cloned());
+                }
             }
             _ => {
                 if self.mask_buf.is_none() {
@@ -745,21 +766,24 @@ impl Render {
                         .expect("shaders not configured to support AA mode: msaa8"),
                     _ => unreachable!(),
                 };
-                recording.dispatch(
-                    fine_shader,
-                    fine_wg_count,
-                    [
-                        fine.config_buf,
-                        fine.segments_buf,
-                        fine.ptcl_buf,
-                        fine.info_bin_data_buf,
-                        fine.blend_spill_buf,
-                        ResourceProxy::Image(fine.out_image),
-                        fine.gradient_image,
-                        fine.image_atlas,
-                        self.mask_buf.unwrap(),
-                    ],
-                );
+                let mut msaa_resources: Vec<ResourceProxy> =
+                    base_resources.iter().cloned().collect();
+                msaa_resources.push(self.mask_buf.unwrap());
+                if let Some(indirect_buf) = fine.indirect_buf.take() {
+                    recording.dispatch_indirect(
+                        fine_shader,
+                        indirect_buf,
+                        fine_offset,
+                        msaa_resources.iter().cloned(),
+                    );
+                    recording.free_buffer(indirect_buf);
+                } else {
+                    recording.dispatch(
+                        fine_shader,
+                        fine_wg_count,
+                        msaa_resources.iter().cloned(),
+                    );
+                }
             }
         }
         recording.free_resource(fine.config_buf);
