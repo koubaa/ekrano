@@ -41,6 +41,8 @@ fn snapshot_dir(directory: SnapshotDirectory) -> PathBuf {
 /// The result of a scene render, and the difference between that and a stored snapshot.
 pub struct Snapshot<'a> {
     pub statistics: Option<FlipPool>,
+    /// FLIP error map, kept so we can export a diff visualization on failure.
+    error_map: Option<nv_flip::FlipImageFloat>,
     pub reference_path: PathBuf,
     pub update_path: PathBuf,
     pub raw_rendered: ImageData,
@@ -64,7 +66,7 @@ impl Snapshot<'_> {
             value < 0.1,
             "Mean should be less than 0.1 in almost all cases for a successful test"
         );
-        if let Some(stats) = &self.statistics {
+        if let Some(ref mut stats) = self.statistics {
             let mean = stats.mean();
             if mean > value {
                 self.handle_failure(format_args!(
@@ -114,6 +116,23 @@ impl Snapshot<'_> {
                 None,
                 false,
             )?;
+            // Export FLIP error map as a perceptual diff image (magma LUT: dark=identical, bright=diff)
+            if let Some(em) = self.error_map.take() {
+                let diff_path = self
+                    .update_path
+                    .parent()
+                    .map(|p| p.join(format!("{}_diff.png", self.params.name)))
+                    .unwrap_or_else(|| self.update_path.with_file_name(format!("{}_diff.png", self.params.name)));
+                let visualized = em.apply_color_lut(&nv_flip::magma_lut());
+                if let Some(rgb) = image::RgbImage::from_raw(
+                    visualized.width(),
+                    visualized.height(),
+                    visualized.to_vec(),
+                ) {
+                    let _ = rgb.save(&diff_path);
+                    eprintln!("Wrote perceptual diff to {:?}", diff_path);
+                }
+            }
             eprintln!(
                 "Wrote result for failing test {} to {:?}\n\
                 Use `EKRANO_TEST_UPDATE=all` to update",
@@ -244,6 +263,7 @@ pub fn snapshot_test_image(
                 }
                 return Ok(Snapshot {
                     statistics: None,
+                    error_map: None,
                     reference_path,
                     update_path,
                     raw_rendered,
@@ -273,6 +293,7 @@ pub fn snapshot_test_image(
             if env_var_relates_to("EKRANO_SKIP_LFS_SNAPSHOTS", &params.name, params.use_cpu) {
                 return Ok(Snapshot {
                     statistics: None,
+                    error_map: None,
                     reference_path,
                     update_path,
                     raw_rendered,
@@ -295,6 +316,7 @@ pub fn snapshot_test_image(
     {
         let mut snapshot = Snapshot {
             statistics: None,
+            error_map: None,
             reference_path,
             update_path,
             raw_rendered,
@@ -337,6 +359,7 @@ pub fn snapshot_test_image(
 
     Ok(Snapshot {
         statistics: Some(pool),
+        error_map: Some(error_map),
         reference_path,
         update_path,
         raw_rendered,

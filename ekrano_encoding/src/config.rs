@@ -8,6 +8,7 @@ use super::{
     PathBbox, PathMonoid, PathSegment, Tile,
 };
 use bytemuck::{Pod, Zeroable};
+use size_of;
 
 const TILE_WIDTH: u32 = 16;
 const TILE_HEIGHT: u32 = 16;
@@ -304,6 +305,7 @@ impl WorkgroupCounts {
         let path_wgs = n_paths.div_ceil(PATH_BBOX_WG);
         let width_in_bins = width_in_tiles.div_ceil(16);
         let height_in_bins = height_in_tiles.div_ceil(16);
+        // coarse is capped to 256 in coarse.slang when bin_headers has only 256 slots (vello #680)
         Self {
             use_large_path_scan,
             path_reduce: (path_tag_wgs, 1, 1),
@@ -519,6 +521,35 @@ impl BufferSizes {
 }
 
 impl BufferSizes {
+    /// Pairs of (element_count, element_stride) for all buffers that go into the
+    /// storage pool. Excludes bump_alloc and indirect_count (exempt from pooling).
+    /// Used with `BufferPool::padded_size()` to compute total pool size.
+    pub fn pool_allocs(&self) -> Vec<(usize, usize)> {
+        vec![
+            (self.path_reduced.len() as usize, size_of::<PathMonoid>()),
+            (self.path_reduced2.len() as usize, size_of::<PathMonoid>()),
+            (self.path_reduced_scan.len() as usize, size_of::<PathMonoid>()),
+            (self.path_monoids.len() as usize, size_of::<PathMonoid>()),
+            (self.path_bboxes.len() as usize, size_of::<PathBbox>()),
+            (self.draw_reduced.len() as usize, size_of::<DrawMonoid>()),
+            (self.draw_monoids.len() as usize, size_of::<DrawMonoid>()),
+            (self.bin_data.len() as usize, size_of::<u32>()),
+            (self.clip_inps.len() as usize, size_of::<Clip>()),
+            (self.clip_els.len() as usize, size_of::<ClipElement>()),
+            (self.clip_bics.len() as usize, size_of::<ClipBic>()),
+            (self.clip_bboxes.len() as usize, size_of::<ClipBbox>()),
+            (self.draw_bboxes.len() as usize, size_of::<DrawBbox>()),
+            (self.bin_headers.len() as usize, size_of::<BinHeader>()),
+            (self.paths.len() as usize, size_of::<Path>()),
+            (self.tiles.len() as usize, size_of::<Tile>()),
+            (self.segments.len() as usize, size_of::<PathSegment>()),
+            (self.ptcl.len() as usize, size_of::<u32>()),
+            (self.lines.len() as usize, size_of::<LineSoup>()),
+            (self.seg_counts.len() as usize, size_of::<SegmentCount>()),
+            (self.blend_spill.len() as usize, size_of::<u32>()),
+        ]
+    }
+
     /// Create new buffer sizes with bump-allocated buffers scaled up to accommodate
     /// the actual usage reported by the GPU bump allocator.
     ///

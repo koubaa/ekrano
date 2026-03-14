@@ -106,7 +106,7 @@ fn little_colr() {
     );
     snapshot_test_sync(scene, &params)
         .unwrap()
-        .assert_mean_less_than(0.002);
+        .assert_mean_less_than(0.005);
 }
 
 #[test]

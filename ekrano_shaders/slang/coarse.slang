@@ -145,6 +145,9 @@ void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
 
     uint width_in_bins = (config.width_in_tiles + N_TILE_X - 1) / N_TILE_X;
     uint bin_ix = width_in_bins * wg_id.y + wg_id.x;
+    // Skip when bin_ix exceeds bin_headers capacity (binning_wgs * 256). See vello #680.
+    if (bin_ix >= 256)
+        return;
     uint n_partitions = (config.n_drawobj + N_TILE - 1) / N_TILE;
 
     uint bin_tile_x = N_TILE_X * wg_id.x;

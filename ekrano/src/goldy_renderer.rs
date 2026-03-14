@@ -6,7 +6,7 @@
 //!
 //! Use this when building with `--no-default-features --features goldy`.
 
-use goldy::{Device, Texture};
+use goldy::{BufferPool, Device, Texture};
 use goldy::types::{SpatialAccess, TextureFlags, TextureFormat};
 
 use crate::{
@@ -56,25 +56,32 @@ impl GoldyRenderer {
         let mut retry_config: Option<ekrano_encoding::RenderConfig> = None;
 
         for attempt in 0..=MAX_BUMP_RETRIES {
+            let config = retry_config.take().unwrap_or_else(|| {
+                let mut packed = vec![];
+                let (layout, _, _) = self.resolver.resolve(encoding, &mut packed);
+                ekrano_encoding::RenderConfig::new(
+                    &layout,
+                    params.width,
+                    params.height,
+                    &params.base_color,
+                )
+            });
+            let base = BufferPool::padded_size(&config.buffer_sizes.pool_allocs());
+            // Safety margin: runtime allocation order may differ from pool_allocs order,
+            // causing extra alignment padding. Add 256K to absorb ordering variance.
+            let pool_size = base.saturating_add(262144);
+            self.engine.prepare_storage_pool(device, pool_size)?;
+
             let mut render = Render::new();
-            let coarse_recording = if let Some(ref cfg) = retry_config {
+            let coarse_recording =
                 render.render_encoding_coarse_with_config(
                     encoding,
                     &mut self.resolver,
                     &self.shaders,
                     params,
                     true,
-                    cfg,
-                )
-            } else {
-                render.render_encoding_coarse(
-                    encoding,
-                    &mut self.resolver,
-                    &self.shaders,
-                    params,
-                    true,
-                )
-            };
+                    &config,
+                );
             let bump_buf = render.bump_buf();
 
             self.engine
@@ -104,25 +111,12 @@ impl GoldyRenderer {
             }
 
             // Build a new config with grown buffer sizes for retry.
-            // On first retry, base off the default config that render_encoding_coarse
-            // would have created internally.
-            let base = retry_config.take().unwrap_or_else(|| {
-                let mut packed = vec![];
-                let (layout, _, _) = self.resolver.resolve(encoding, &mut packed);
-                ekrano_encoding::RenderConfig::new(
-                    &layout,
-                    params.width,
-                    params.height,
-                    &params.base_color,
-                )
-            });
-            let new_config = base.with_bump_estimates(&bump);
+            retry_config = Some(config.with_bump_estimates(&bump));
             log::info!(
                 "Bump overflow on attempt {} (failed: 0x{:x}), retrying with larger buffers",
                 attempt + 1,
                 bump.failed,
             );
-            retry_config = Some(new_config);
             self.engine.clear_transients();
         }
         unreachable!()

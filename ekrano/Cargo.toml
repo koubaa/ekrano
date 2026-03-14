@@ -16,7 +16,7 @@ default-target = "x86_64-unknown-linux-gnu"
 targets = []
 
 [features]
-default = ["wgpu", "wgpu_default"]
+default = ["goldy"]
 # Enables GPU memory usage estimation. This performs additional computations
 # in order to estimate the minimum required allocations for buffers backing
 # bump-allocated GPU memory.

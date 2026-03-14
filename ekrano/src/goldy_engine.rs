@@ -20,7 +20,8 @@ pub const MAX_BINDLESS_SLOTS: usize = 16;
 use std::collections::HashMap;
 
 use goldy::{
-    Buffer, ComputeEncoder, ComputePipeline, DataAccess, Device, ShaderModule, Texture,
+    Buffer, BufferPool, BufferView, ComputeEncoder, ComputePipeline, DataAccess, Device,
+    ShaderModule, Texture,
 };
 use goldy::types::{SpatialAccess, TextureFlags, TextureFormat};
 
@@ -30,6 +31,46 @@ use crate::{
     recording::BindType,
 };
 
+/// Either an owned buffer (exempt from pooling) or a view from the storage pool.
+///
+/// Exempt buffers (bump, indirect) need read_to_cpu, dispatch_indirect, or clear;
+/// pooled buffers only need bindless_index for compute shader binding.
+enum GpuBuffer {
+    Owned(Buffer),
+    Pooled(BufferView),
+}
+
+impl GpuBuffer {
+    fn bindless_index(&self) -> Option<u32> {
+        match self {
+            GpuBuffer::Owned(b) => b.bindless_index(),
+            GpuBuffer::Pooled(v) => v.bindless_index(),
+        }
+    }
+
+    fn bindless_srv_index(&self) -> Option<u32> {
+        match self {
+            GpuBuffer::Owned(b) => b.bindless_srv_index(),
+            GpuBuffer::Pooled(v) => v.bindless_srv_index(),
+        }
+    }
+
+    fn size(&self) -> u64 {
+        match self {
+            GpuBuffer::Owned(b) => b.size(),
+            GpuBuffer::Pooled(v) => v.size(),
+        }
+    }
+
+    /// For dispatch_indirect; only Owned buffers are used as indirect sources.
+    fn as_owned(&self) -> Option<&Buffer> {
+        match self {
+            GpuBuffer::Owned(b) => Some(b),
+            GpuBuffer::Pooled(_) => None,
+        }
+    }
+}
+
 /// Goldy-based recording executor.
 #[derive(Default)]
 pub struct GoldyEngine {
@@ -38,6 +79,8 @@ pub struct GoldyEngine {
     bind_map: BindMap,
     /// Buffers that were downloaded (Command::Download); keyed by ResourceId.
     downloads: HashMap<ResourceId, Vec<u8>>,
+    /// Single large buffer pool for storage buffers (Phase 3c). None until prepare_storage_pool.
+    storage_pool: Option<BufferPool>,
 }
 
 struct GoldyShader {
@@ -47,8 +90,12 @@ struct GoldyShader {
 
 #[derive(Default)]
 struct BindMap {
-    buf_map: HashMap<ResourceId, (Buffer, &'static str)>,
+    buf_map: HashMap<ResourceId, (GpuBuffer, &'static str)>,
     image_map: HashMap<ResourceId, (Texture, &'static str)>,
+}
+
+fn is_pool_exempt(name: &str) -> bool {
+    matches!(name, "vello.bump_buf" | "vello.indirect_dispatch")
 }
 
 #[derive(Hash, PartialEq, Eq)]
@@ -82,15 +129,27 @@ impl GoldyEngine {
             match res {
                 ResourceProxy::Buffer(proxy) | ResourceProxy::BufferRange { proxy, .. } => {
                     if self.bind_map.get_buf(proxy.id).is_none() {
-                        let buf = self.pool.get_buf(
-                            device,
-                            proxy.size,
-                            proxy.name,
-                            DataAccess::Scattered,
-                        )?;
-                        buf.clear(device, 0, proxy.size)
-                            .map_err(|e| Error::Shader(e.to_string()))?;
-                        self.bind_map.insert_buf(proxy.id, buf, proxy.name);
+                        let gpu_buf = if !is_pool_exempt(proxy.name)
+                            && self.storage_pool.is_some()
+                        {
+                            let pool = self.storage_pool.as_mut().unwrap();
+                            let stride = element_stride_for_buffer(proxy.name);
+                            let view = pool
+                                .alloc_bytes(proxy.size, stride)
+                                .map_err(|e| Error::Shader(e.to_string()))?;
+                            GpuBuffer::Pooled(view)
+                        } else {
+                            let buf = self.pool.get_buf(
+                                device,
+                                proxy.size,
+                                proxy.name,
+                                DataAccess::Scattered,
+                            )?;
+                            buf.clear(device, 0, proxy.size)
+                                .map_err(|e| Error::Shader(e.to_string()))?;
+                            GpuBuffer::Owned(buf)
+                        };
+                        self.bind_map.insert_buf(proxy.id, gpu_buf, proxy.name);
                     }
                 }
                 ResourceProxy::Image(proxy) => {
@@ -175,7 +234,7 @@ impl GoldyEngine {
                         DataAccess::Scattered,
                     )?;
                     buf.write(0, bytes).map_err(|e| Error::Shader(e.to_string()))?;
-                    self.bind_map.insert_buf(buf_proxy.id, buf, buf_proxy.name);
+                    self.bind_map.insert_buf(buf_proxy.id, GpuBuffer::Owned(buf), buf_proxy.name);
                 }
                 Command::UploadUniform(buf_proxy, bytes) => {
                     let buf = self.pool.get_buf(
@@ -185,7 +244,7 @@ impl GoldyEngine {
                         DataAccess::Broadcast,
                     )?;
                     buf.write(0, bytes).map_err(|e| Error::Shader(e.to_string()))?;
-                    self.bind_map.insert_buf(buf_proxy.id, buf, buf_proxy.name);
+                    self.bind_map.insert_buf(buf_proxy.id, GpuBuffer::Owned(buf), buf_proxy.name);
                 }
                 Command::UploadImage(image_proxy, bytes) => {
                     let format = image_format_to_goldy(image_proxy.format);
@@ -236,10 +295,21 @@ impl GoldyEngine {
                     pending_downloads.push(*buf_proxy);
                 }
                 Command::Clear(buf_proxy, offset, size) => {
-                    if let Some((buf, _)) = self.bind_map.get_buf(buf_proxy.id) {
-                        let clear_size = size.unwrap_or(buf.size() - offset);
-                        buf.clear(device, *offset, clear_size)
-                            .map_err(|e| Error::Shader(e.to_string()))?;
+                    if let Some((gpu_buf, _)) = self.bind_map.get_buf(buf_proxy.id) {
+                        let clear_size = size.unwrap_or(gpu_buf.size() - offset);
+                        match gpu_buf {
+                            GpuBuffer::Owned(buf) => {
+                                buf.clear(device, *offset, clear_size)
+                                    .map_err(|e| Error::Shader(e.to_string()))?;
+                            }
+                            GpuBuffer::Pooled(view) => {
+                                if let Some(ref pool) = self.storage_pool {
+                                    pool.backing_buffer()
+                                        .clear(device, view.offset() + offset, clear_size)
+                                        .map_err(|e| Error::Shader(e.to_string()))?;
+                                }
+                            }
+                        }
                     } else {
                         // Lazy allocation: buffer not yet materialized (cf. wgpu pending_clears).
                         let buf = self.pool.get_buf(
@@ -251,7 +321,7 @@ impl GoldyEngine {
                         let clear_size = size.unwrap_or(buf.size() - offset);
                         buf.clear(device, *offset, clear_size)
                             .map_err(|e| Error::Shader(e.to_string()))?;
-                        self.bind_map.insert_buf(buf_proxy.id, buf, buf_proxy.name);
+                        self.bind_map.insert_buf(buf_proxy.id, GpuBuffer::Owned(buf), buf_proxy.name);
                     }
                 }
                 Command::FreeBuffer(buf_proxy) => {
@@ -296,13 +366,15 @@ impl GoldyEngine {
                     self.ensure_resources_materialized(device, bindings, &bind_types)?;
                     let indices =
                         collect_bindless_indices(bindings, &bind_types, &self.bind_map)?;
-                    if let Some((indirect_buf, _)) = self.bind_map.get_buf(buf_proxy.id) {
-                        let mut pass = encoder.begin_compute_pass();
-                        pass.set_pipeline(&self.shaders[shader_id.0].pipeline);
-                        if !indices.is_empty() {
-                            pass.set_push_constants_raw(&indices);
+                    if let Some((gpu_buf, _)) = self.bind_map.get_buf(buf_proxy.id) {
+                        if let Some(buf) = gpu_buf.as_owned() {
+                            let mut pass = encoder.begin_compute_pass();
+                            pass.set_pipeline(&self.shaders[shader_id.0].pipeline);
+                            if !indices.is_empty() {
+                                pass.set_push_constants_raw(&indices);
+                            }
+                            pass.dispatch_indirect(buf, *offset);
                         }
-                        pass.dispatch_indirect(indirect_buf, *offset);
                     }
                 }
                 #[cfg(feature = "debug_layers")]
@@ -314,7 +386,11 @@ impl GoldyEngine {
 
         // Diagnostic readback (enabled by EKRANO_DIAG=1)
         if std::env::var("EKRANO_DIAG").is_ok() {
-            for (_id, (buf, name)) in &self.bind_map.buf_map {
+            for (_id, (gpu_buf, name)) in &self.bind_map.buf_map {
+                let buf = match gpu_buf {
+                    GpuBuffer::Owned(b) => b,
+                    GpuBuffer::Pooled(_) => continue,
+                };
                 if *name == "vello.tile_buf" {
                     let sz = buf.size() as usize;
                     let mut data = vec![0u8; sz];
@@ -488,12 +564,14 @@ impl GoldyEngine {
         // Downloads must happen before frees, since a recording may download
         // and then free the same buffer.
         for buf_proxy in pending_downloads {
-            if let Some((buf, _)) = self.bind_map.get_buf(buf_proxy.id) {
-                let size = buf.size() as usize;
-                let mut output = vec![0u8; size];
-                buf.read_to_cpu(device, &mut output)
-                    .map_err(|e| Error::Shader(e.to_string()))?;
-                self.downloads.insert(buf_proxy.id, output);
+            if let Some((gpu_buf, _)) = self.bind_map.get_buf(buf_proxy.id) {
+                if let GpuBuffer::Owned(buf) = gpu_buf {
+                    let size = buf.size() as usize;
+                    let mut output = vec![0u8; size];
+                    buf.read_to_cpu(device, &mut output)
+                        .map_err(|e| Error::Shader(e.to_string()))?;
+                    self.downloads.insert(buf_proxy.id, output);
+                }
             }
         }
 
@@ -516,12 +594,38 @@ impl GoldyEngine {
         self.downloads.remove(&buf.id);
     }
 
+    /// Prepare the storage pool for a recording. Creates or resets the pool with the given size.
+    /// Call before run_recording when the pipeline will use pooled buffers.
+    pub fn prepare_storage_pool(&mut self, device: &Device, pool_size: u64) -> Result<()> {
+        let need_new = match &self.storage_pool {
+            Some(pool) => pool.capacity() < pool_size,
+            None => true,
+        };
+        if need_new {
+            let pool = BufferPool::new(device, pool_size)
+                .map_err(|e| Error::Shader(e.to_string()))?;
+            pool.backing_buffer()
+                .clear(device, 0, pool_size)
+                .map_err(|e| Error::Shader(e.to_string()))?;
+            self.storage_pool = Some(pool);
+        } else {
+            let pool = self.storage_pool.as_mut().unwrap();
+            pool.reset();
+            pool.backing_buffer()
+                .clear(device, 0, pool.capacity())
+                .map_err(|e| Error::Shader(e.to_string()))?;
+        }
+        log::debug!("Storage pool ready: {} bytes", pool_size);
+        Ok(())
+    }
+
     /// Clear all transient resources (buffers, images, downloads) between retry attempts.
-    /// Shaders and the pool are preserved.
+    /// Drops the storage pool so the next prepare_storage_pool allocates fresh.
     pub fn clear_transients(&mut self) {
         self.bind_map.buf_map.clear();
         self.bind_map.image_map.clear();
         self.downloads.clear();
+        self.storage_pool = None;
     }
 }
 
@@ -530,11 +634,11 @@ fn image_format_to_goldy(_format: crate::recording::ImageFormat) -> TextureForma
 }
 
 impl BindMap {
-    fn insert_buf(&mut self, id: ResourceId, buf: Buffer, name: &'static str) {
-        self.buf_map.insert(id, (buf, name));
+    fn insert_buf(&mut self, id: ResourceId, gpu_buf: GpuBuffer, name: &'static str) {
+        self.buf_map.insert(id, (gpu_buf, name));
     }
 
-    fn get_buf(&self, id: ResourceId) -> Option<&(Buffer, &'static str)> {
+    fn get_buf(&self, id: ResourceId) -> Option<&(GpuBuffer, &'static str)> {
         self.buf_map.get(&id)
     }
 

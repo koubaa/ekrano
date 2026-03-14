@@ -9,7 +9,7 @@ repository.workspace = true
 publish = false
 
 [features]
-default = ["wgpu"]
+default = ["goldy"]
 wgpu = ["ekrano/wgpu", "ekrano/wgpu_default"]
 goldy = ["ekrano/goldy", "dep:goldy"]
 
