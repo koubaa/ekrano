@@ -192,7 +192,7 @@ pub async fn snapshot_test(
     params: &TestParams,
     directory: SnapshotDirectory,
 ) -> Result<Snapshot<'_>> {
-    let raw_rendered = render_then_debug(&scene, params).await?;
+    let raw_rendered = render_then_debug(&scene, params)?;
     snapshot_test_image(raw_rendered, params, directory)
 }
 

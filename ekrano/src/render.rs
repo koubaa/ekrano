@@ -7,9 +7,6 @@ use crate::recording::{BufferProxy, ImageFormat, ImageProxy, Recording, Resource
 use crate::shaders::FullShaders;
 use crate::{AaConfig, RenderParams};
 
-#[cfg(feature = "wgpu")]
-use crate::Scene;
-
 use std::mem::size_of;
 
 use ekrano_encoding::{
@@ -102,34 +99,6 @@ fn dispatch_stage(
     } else {
         recording.dispatch(shader, wg, r);
     }
-}
-
-#[cfg(feature = "wgpu")]
-pub(crate) fn render_full(
-    scene: &Scene,
-    resolver: &mut Resolver,
-    shaders: &FullShaders,
-    params: &RenderParams,
-) -> (Recording, ResourceProxy) {
-    render_encoding_full(scene.encoding(), resolver, shaders, params)
-}
-
-#[cfg(feature = "wgpu")]
-/// Create a single recording with both coarse and fine render stages.
-///
-/// This function is not recommended when the scene can be complex, as it does not
-/// implement robust dynamic memory.
-pub(crate) fn render_encoding_full(
-    encoding: &Encoding,
-    resolver: &mut Resolver,
-    shaders: &FullShaders,
-    params: &RenderParams,
-) -> (Recording, ResourceProxy) {
-    let mut render = Render::new();
-    let mut recording = render.render_encoding_coarse(encoding, resolver, shaders, params, false);
-    let out_image = render.out_image();
-    render.record_fine(shaders, &mut recording);
-    (recording, out_image.into())
 }
 
 impl Default for Render {

@@ -241,7 +241,7 @@ impl BufferProxy {
 }
 
 impl ImageFormat {
-    #[cfg(feature = "wgpu")]
+    #[cfg(any())] // was: feature = "wgpu" - wgpu backend removed
     pub fn to_wgpu(self) -> wgpu::TextureFormat {
         match self {
             Self::Rgba8 => wgpu::TextureFormat::Rgba8Unorm,
@@ -249,7 +249,7 @@ impl ImageFormat {
         }
     }
 
-    #[cfg(feature = "wgpu")]
+    #[cfg(any())] // was: feature = "wgpu" - wgpu backend removed
     pub fn from_wgpu(format: wgpu::TextureFormat) -> Option<Self> {
         match format {
             wgpu::TextureFormat::Rgba8Unorm => Some(Self::Rgba8),

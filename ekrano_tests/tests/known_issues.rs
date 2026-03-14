@@ -70,12 +70,8 @@ fn many_bins_gpu() {
     many_bins(false);
 }
 
-#[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
-#[should_panic]
-fn many_bins_cpu() {
-    many_bins(true);
-}
+// many_bins_cpu removed: it tested wgpu CPU-path panic (vello#680). The wgpu backend was
+// removed; goldy is GPU-only and get_scene_image ignores use_cpu.
 
 /// Test for <https://github.com/linebender/vello/issues/1061>
 #[test]

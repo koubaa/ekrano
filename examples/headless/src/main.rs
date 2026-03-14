@@ -21,18 +21,6 @@ use ekrano::peniko::color::palette;
 use ekrano::Scene;
 use scenes::{ImageCache, SceneParams, SceneSet, SimpleText};
 
-#[cfg(feature = "wgpu")]
-use std::num::NonZeroUsize;
-#[cfg(feature = "wgpu")]
-use ekrano::util::RenderContext;
-#[cfg(feature = "wgpu")]
-use ekrano::wgpu::{
-    self, BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Extent3d, TexelCopyBufferInfo,
-    TextureDescriptor, TextureFormat, TextureUsages,
-};
-#[cfg(feature = "wgpu")]
-use ekrano::{RendererOptions, util::block_on_wgpu};
-
 fn main() -> Result<()> {
     #[cfg(not(target_arch = "wasm32"))]
     env_logger::init();
@@ -88,167 +76,12 @@ fn main() -> Result<()> {
             }
             return Ok(());
         }
-        pollster::block_on(render(scenes, scene_idx, &args))?;
+        render(scenes, scene_idx, &args)?;
     }
     Ok(())
 }
 
-#[allow(unused_mut)]
-async fn render(mut scenes: SceneSet, index: usize, args: &Args) -> Result<()> {
-    #[cfg(all(feature = "goldy", not(feature = "wgpu")))]
-    return render_goldy(scenes, index, args);
-
-    #[cfg(all(feature = "goldy", feature = "wgpu"))]
-    if args.goldy {
-        return render_goldy(scenes, index, args);
-    }
-
-    #[cfg(feature = "wgpu")]
-    {
-    let mut context = RenderContext::new();
-    let device_id = context
-        .device()
-        .await
-        .ok_or_else(|| anyhow!("No compatible device found"))?;
-    let device_handle = &mut context.devices[device_id];
-    let device = &device_handle.device;
-    let queue = &device_handle.queue;
-    let mut renderer = ekrano::Renderer::new(
-        device,
-        RendererOptions {
-            use_cpu: args.use_cpu,
-            num_init_threads: NonZeroUsize::new(1),
-            antialiasing_support: ekrano::AaSupport::area_only(),
-            ..Default::default()
-        },
-    )
-    .or_else(|_| bail!("Got non-Send/Sync error from creating renderer"))?;
-    let mut fragment = Scene::new();
-    let example_scene = &mut scenes.scenes[index];
-    let mut text = SimpleText::new();
-    let mut images = ImageCache::new();
-    let mut scene_params = SceneParams {
-        time: args.time.unwrap_or(0.),
-        text: &mut text,
-        images: &mut images,
-        resolution: None,
-        base_color: None,
-        interactive: false,
-        complexity: 0,
-    };
-    example_scene
-        .function
-        .render(&mut fragment, &mut scene_params);
-    let mut transform = Affine::IDENTITY;
-    let (width, height) = if let Some(resolution) = scene_params.resolution {
-        let ratio = resolution.x / resolution.y;
-        let (new_width, new_height) = match (args.x_resolution, args.y_resolution) {
-            (None, None) => (resolution.x.ceil() as u32, resolution.y.ceil() as u32),
-            (None, Some(y)) => ((ratio * (y as f64)).ceil() as u32, y),
-            (Some(x), None) => (x, ((x as f64) / ratio).ceil() as u32),
-            (Some(x), Some(y)) => (x, y),
-        };
-        let factor = Vec2::new(new_width as f64, new_height as f64);
-        let scale_factor = (factor.x / resolution.x).min(factor.y / resolution.y);
-        transform *= Affine::scale(scale_factor);
-        (new_width, new_height)
-    } else {
-        match (args.x_resolution, args.y_resolution) {
-            (None, None) => (1000, 1000),
-            (None, Some(y)) => (y, y),
-            (Some(x), None) => (x, x),
-            (Some(x), Some(y)) => (x, y),
-        }
-    };
-    let render_params = ekrano::RenderParams {
-        base_color: args
-            .args
-            .base_color
-            .or(scene_params.base_color)
-            .unwrap_or(palette::css::BLACK),
-        width,
-        height,
-        antialiasing_method: ekrano::AaConfig::Area,
-    };
-    let mut scene = Scene::new();
-    scene.append(&fragment, Some(transform));
-    let size = Extent3d {
-        width,
-        height,
-        depth_or_array_layers: 1,
-    };
-    let target = device.create_texture(&TextureDescriptor {
-        label: Some("Target texture"),
-        size,
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: TextureFormat::Rgba8Unorm,
-        usage: TextureUsages::STORAGE_BINDING | TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let view = target.create_view(&wgpu::TextureViewDescriptor::default());
-    renderer
-        .render_to_texture(device, queue, &scene, &view, &render_params)
-        .or_else(|_| bail!("Got non-Send/Sync error from rendering"))?;
-    let padded_byte_width = (width * 4).next_multiple_of(256);
-    let buffer_size = padded_byte_width as u64 * height as u64;
-    let buffer = device.create_buffer(&BufferDescriptor {
-        label: Some("val"),
-        size: buffer_size,
-        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
-        label: Some("Copy out buffer"),
-    });
-    encoder.copy_texture_to_buffer(
-        target.as_image_copy(),
-        TexelCopyBufferInfo {
-            buffer: &buffer,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(padded_byte_width),
-                rows_per_image: None,
-            },
-        },
-        size,
-    );
-    queue.submit([encoder.finish()]);
-    let buf_slice = buffer.slice(..);
-
-    let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
-    buf_slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
-    if let Some(recv_result) = block_on_wgpu(device, receiver.receive()) {
-        recv_result?;
-    } else {
-        bail!("channel was closed");
-    }
-
-    let data = buf_slice.get_mapped_range();
-    let mut result_unpadded = Vec::<u8>::with_capacity((width * height * 4).try_into()?);
-    for row in 0..height {
-        let start = (row * padded_byte_width).try_into()?;
-        result_unpadded.extend(&data[start..start + (width * 4) as usize]);
-    }
-    let out_path = args
-        .out_directory
-        .join(&example_scene.config.name)
-        .with_extension("png");
-    let mut file = File::create(&out_path)?;
-    let mut png_encoder = png::Encoder::new(&mut file, width, height);
-    png_encoder.set_color(png::ColorType::Rgba);
-    png_encoder.set_depth(png::BitDepth::Eight);
-    let mut writer = png_encoder.write_header()?;
-    writer.write_image_data(&result_unpadded)?;
-    writer.finish()?;
-    println!("Wrote result ({width}x{height}) to {out_path:?}");
-    Ok(())
-    }
-}
-
-#[cfg(feature = "goldy")]
-fn render_goldy(mut scenes: SceneSet, index: usize, args: &Args) -> Result<()> {
+fn render(mut scenes: SceneSet, index: usize, args: &Args) -> Result<()> {
     use goldy::{DeviceType, Instance};
     use ekrano::{GoldyRenderer, RenderParams};
 
@@ -346,13 +179,6 @@ struct Args {
     #[arg(long, short, global(false))]
     /// Display a list of all scene names
     print_scenes: bool,
-    #[arg(long)]
-    /// Whether to use CPU shaders (wgpu only)
-    use_cpu: bool,
-    #[cfg(feature = "goldy")]
-    #[arg(long, default_value_t = false)]
-    /// Use Goldy backend instead of wgpu
-    goldy: bool,
     #[command(flatten)]
     args: scenes::Arguments,
 }

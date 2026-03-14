@@ -16,49 +16,32 @@ default-target = "x86_64-unknown-linux-gnu"
 targets = []
 
 [features]
-default = ["goldy"]
+default = []
 # Enables GPU memory usage estimation. This performs additional computations
 # in order to estimate the minimum required allocations for buffers backing
 # bump-allocated GPU memory.
 # TODO: Turn this into a runtime option used at resolve time and remove the feature.
 bump_estimate = ["ekrano_encoding/bump_estimate"]
-wgpu = ["dep:wgpu", "dep:ekrano_shaders", "dep:futures-intrusive"]
-# Enable wgpu with its default features. If you need to customise the set of enabled wgpu features,
-# please disable this crate's default features, enable its "wgpu" feature, then depend on wgpu directly
-# with the features which you need enabled.
-wgpu_default = ["wgpu", "wgpu/default"]
 
 # Development only features
 
 # Enables debug features when using the "async" pipeline.
-# This is only intended for development of Vello itself.
 debug_layers = []
-# Enables an embedded wgpu-profiler profiler.
-# This is only intended for development of Vello itself.
-wgpu-profiler = ["dep:wgpu-profiler"]
-# Enables hot reloading of Vello shaders.
-# This is only intended for development of Vello itself.
-# In practise, this won't compile outside of the Vello repository.
+# Enables hot reloading of shaders.
 hot_reload = ["ekrano_shaders/compile"]
-
-# Goldy backend (Phase 3 migration). Use with: cargo build --no-default-features --features goldy
-goldy = ["dep:goldy", "dep:ekrano_shaders"]
 
 [lints]
 workspace = true
 
 [dependencies]
 ekrano_encoding = { workspace = true }
-ekrano_shaders = { workspace = true, optional = true }
+ekrano_shaders = { workspace = true }
 bytemuck = { workspace = true }
 skrifa = { workspace = true, features = ["std"] }
 peniko = { workspace = true, default-features = true }
-wgpu = { workspace = true, default-features = false, optional = true }
 log = { workspace = true }
 static_assertions = { workspace = true }
-futures-intrusive = { workspace = true, optional = true }
-wgpu-profiler = { workspace = true, optional = true }
 thiserror = { workspace = true }
 # TODO: Add feature for built-in bitmap emoji support?
 png = { workspace = true }
-goldy = { path = "../../goldy", optional = true }
+goldy = { path = "../../goldy" }
