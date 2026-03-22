@@ -407,23 +407,11 @@ impl Scene {
         let encoded_stroke = self.encoding.encode_stroke_style(style);
         debug_assert!(encoded_stroke, "Stroke width is non-zero");
 
-        // We currently don't support dashing on the GPU. If the style has a dash pattern, then
-        // we convert it into stroked paths on the CPU and encode those as individual draw
-        // objects.
-        //
-        // Note both branches return a boolean indicating whether a non-zero number of segments
-        // were encoded.
-        if style.dash_pattern.is_empty() {
-            #[cfg(feature = "bump_estimate")]
-            self.estimator
-                .count_path(shape.path_elements(SHAPE_TOLERANCE), &t, Some(style));
-            self.encoding.encode_shape(shape, false)
-        } else {
-            // TODO: We currently collect the output of the dash iterator because
-            // `encode_path_elements` wants to consume the iterator. We want to avoid calling
-            // `dash` twice when `bump_estimate` is enabled because it internally allocates.
-            // Bump estimation will move to resolve time rather than scene construction time,
-            // so we can revert this back to not collecting when that happens.
+        // 2-element dash patterns are handled on the GPU (encoded in the Style).
+        // Longer patterns still fall back to CPU dashing.
+        let use_cpu_dash = !style.dash_pattern.is_empty() && style.dash_pattern.len() != 2;
+
+        if use_cpu_dash {
             let dashed = peniko::kurbo::dash(
                 shape.path_elements(SHAPE_TOLERANCE),
                 style.dash_offset,
@@ -435,6 +423,11 @@ impl Scene {
                 .count_path(dashed.iter().copied(), &t, Some(style));
             self.encoding
                 .encode_path_elements(dashed.into_iter(), false)
+        } else {
+            #[cfg(feature = "bump_estimate")]
+            self.estimator
+                .count_path(shape.path_elements(SHAPE_TOLERANCE), &t, Some(style));
+            self.encoding.encode_shape(shape, false)
         }
     }
 

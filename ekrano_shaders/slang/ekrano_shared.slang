@@ -3,13 +3,13 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT OR Unlicense
 //
 // Shared type definitions for Ekrano Slang shaders.
-// Ported from WGSL shared/ modules. Import with: import ekrano_shared;
+// Import with: import ekrano_shared;
 //
 // Must be kept in sync with ekrano_encoding config and types.
 
 module ekrano_shared;
 
-// === Config (from config.wgsl) ===
+// === Config ===
 // Sync with ConfigUniform in ekrano_encoding/src/config.rs
 public struct Config {
     public uint width_in_tiles;
@@ -56,6 +56,10 @@ public struct Config {
 
     public uint ptcl_size;
 
+    public uint tile_y_offset;
+
+    public uint flatten_thread_base;
+
 };
 
 // Tile geometry
@@ -74,7 +78,7 @@ public static const uint RAD_GRAD_KIND_FOCAL_ON_CIRCLE = 3;
 public static const uint RAD_GRAD_KIND_CONE = 4;
 public static const uint RAD_GRAD_SWAPPED = 1;
 
-// === Pathtag (from pathtag.wgsl) ===
+// === Pathtag ===
 public struct TagMonoid {
     public uint trans_ix;
 
@@ -97,7 +101,7 @@ public static const uint PATH_TAG_TRANSFORM = 0x20;
 public static const uint PATH_TAG_PATH = 0x10;
 public static const uint PATH_TAG_SUBPATH_END = 4;
 public static const uint PATH_TAG_STYLE = 0x40;
-public static const uint STYLE_SIZE_IN_WORDS = 2;
+public static const uint STYLE_SIZE_IN_WORDS = 4;
 public static const uint STYLE_FLAGS_STYLE = 0x80000000;
 public static const uint STYLE_FLAGS_FILL = 0x40000000;
 public static const uint STYLE_MITER_LIMIT_MASK = 0xFFFF;
@@ -110,8 +114,9 @@ public static const uint STYLE_FLAGS_JOIN_MASK = 0x30000000;
 public static const uint STYLE_FLAGS_JOIN_BEVEL = 0;
 public static const uint STYLE_FLAGS_JOIN_MITER = 0x10000000;
 public static const uint STYLE_FLAGS_JOIN_ROUND = 0x20000000;
+public static const uint STYLE_FLAGS_DASHED = 0x00800000;
 
-// === Drawtag (from drawtag.wgsl) ===
+// === Drawtag ===
 public struct DrawMonoid {
     public uint path_ix;
 
@@ -134,7 +139,7 @@ public static const uint DRAWTAG_BEGIN_CLIP = 0x49;
 public static const uint DRAWTAG_END_CLIP = 0x21;
 public static const uint DRAW_INFO_FLAGS_FILL_RULE_BIT = 1;
 
-// === Tile (from tile.wgsl) ===
+// === Tile ===
 public struct Path {
     public uint4 bbox;
 
@@ -176,7 +181,7 @@ public struct AtomicPathBbox {
 
 };
 
-// === Segment (from segment.wgsl) ===
+// === Segment ===
 public struct Segment {
     public float2 point0;
 
@@ -205,7 +210,7 @@ public struct SegmentCount {
 
 }
 
-// === Bbox (from bbox.wgsl) ===
+// === Bbox ===
 public struct PathBbox {
     public int x0;
 
@@ -221,7 +226,7 @@ public struct PathBbox {
 
 };
 
-// === Clip (from clip.wgsl) ===
+// === Clip ===
 public struct Bic {
     public uint a;
 
@@ -247,12 +252,12 @@ public struct ClipEl {
 
 };
 
-// bbox_intersect from bbox.wgsl
+// bbox_intersect from original Vello bbox shader
 public float4 bbox_intersect(float4 a, float4 b) {
     return float4(max(a.xy, b.xy), min(a.zw, b.zw));
 }
 
-// bic_combine from clip.wgsl
+// bic_combine from original Vello clip shader
 public Bic bic_combine(Bic x, Bic y) {
     uint m = min(x.b, y.a);
     Bic r;
@@ -261,7 +266,7 @@ public Bic bic_combine(Bic x, Bic y) {
     return r;
 }
 
-// === Bump (from bump.wgsl) ===
+// === Bump ===
 public static const uint STAGE_BINNING = 0x1;
 public static const uint STAGE_TILE_ALLOC = 0x2;
 public static const uint STAGE_FLATTEN = 0x4;
@@ -326,7 +331,7 @@ public struct WorkgroupCountsGpu {
     public uint4 entries[N_INDIRECT_STAGES];
 }
 
-// === PTCL (from ptcl.wgsl) - command layout constants ===
+// === PTCL - command layout constants ===
 public static const uint PTCL_INITIAL_ALLOC = 64;
 public static const uint PTCL_INCREMENT = 256;
 public static const uint PTCL_HEADROOM = 2;
@@ -377,7 +382,7 @@ public struct CmdEndClip {
 
 };
 
-// === Cubic (from cubic.wgsl) ===
+// === Cubic ===
 public struct Cubic {
     public float2 p0;
 
@@ -397,7 +402,7 @@ public struct Cubic {
 
 public static const uint CUBIC_IS_STROKE = 1;
 
-// === Transform (from transform.wgsl) ===
+// === Transform ===
 public struct Transform {
     public float4 matrx;
 
@@ -453,7 +458,7 @@ public Transform two_point_to_unit_line(float2 p0, float2 p1) {
     return transform_mul(tmp2, inv);
 }
 
-// === BinHeader (from binning.wgsl) ===
+// === BinHeader ===
 public struct BinHeader {
     public uint element_count;
 
@@ -461,7 +466,7 @@ public struct BinHeader {
 
 };
 
-// === Pathtag helpers (from pathtag.wgsl) ===
+// === Pathtag helpers ===
 public TagMonoid tag_monoid_identity() {
     TagMonoid c;
     c.trans_ix = 0; c.pathseg_ix = 0; c.pathseg_offset = 0; c.style_ix = 0; c.path_ix = 0;
@@ -493,7 +498,7 @@ public TagMonoid reduce_tag(uint tag_word) {
     return c;
 }
 
-// === Drawtag helpers (from drawtag.wgsl) ===
+// === Drawtag helpers ===
 public DrawMonoid draw_monoid_identity() {
     DrawMonoid c;
     c.path_ix = 0; c.clip_ix = 0; c.scene_offset = 0; c.info_offset = 0;
@@ -518,7 +523,7 @@ public DrawMonoid map_draw_tag(uint tag_word) {
     return c;
 }
 
-// Read draw tag from scene buffer (from util.wgsl). Pass scene and config.
+// Read draw tag from scene buffer. Pass scene and config.
 public uint read_draw_tag_from_scene(RWStructuredBuffer<uint> scene, Config config, uint ix) {
     if (ix < config.n_drawobj) {
         return scene[config.drawtag_base + ix];
@@ -527,7 +532,7 @@ public uint read_draw_tag_from_scene(RWStructuredBuffer<uint> scene, Config conf
 }
 
 
-// === Blend (from blend.wgsl) - mix and compose mode constants ===
+// === Blend - mix and compose mode constants ===
 public static const uint MIX_NORMAL = 0;
 public static const uint MIX_MULTIPLY = 1;
 public static const uint MIX_SCREEN = 2;
@@ -561,7 +566,7 @@ public static const uint COMPOSE_XOR = 11;
 public static const uint COMPOSE_PLUS = 12;
 public static const uint COMPOSE_PLUS_LIGHTER = 13;
 
-// unpack4x8unorm / pack4x8unorm (WGSL builtins)
+// unpack4x8unorm / pack4x8unorm (portable helpers)
 public float4 unpack4x8unorm(uint x) {
     return float4(
         float((x >> 0) & 0xFF) / 255.0,
@@ -577,7 +582,7 @@ public uint pack4x8unorm(float4 v) {
            (uint(saturate(v.w) * 255.0) << 24);
 }
 
-// === PTCL structs (from ptcl.wgsl) ===
+// === PTCL structs ===
 public struct CmdBlurRect {
     public uint rgba_color;
 
@@ -665,7 +670,7 @@ public struct CmdImage {
 
 };
 
-// === Blend functions (from blend.wgsl) ===
+// === Blend functions ===
 public float3 blend_screen(float3 cb, float3 cs) {
     return cb + cs - (cb * cs);
 }

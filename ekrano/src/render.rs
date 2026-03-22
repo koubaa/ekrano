@@ -3,7 +3,7 @@
 
 //! Take an encoded scene and create a graph to render it
 
-use crate::recording::{BufferProxy, ImageFormat, ImageProxy, Recording, ResourceProxy};
+use crate::recording::{BufferProxy, Command, ImageFormat, ImageProxy, Recording, ResourceProxy};
 use crate::shaders::FullShaders;
 use crate::{AaConfig, RenderParams};
 
@@ -15,7 +15,7 @@ use ekrano_encoding::{
 };
 use ekrano_encoding::{
     STAGE_BACKDROP, STAGE_BBOX_CLEAR, STAGE_BINNING, STAGE_CLIP_LEAF, STAGE_CLIP_REDUCE,
-    STAGE_COARSE, STAGE_DRAW_LEAF, STAGE_DRAW_REDUCE, STAGE_FINE, STAGE_FLATTEN,
+     STAGE_COARSE, STAGE_DRAW_LEAF, STAGE_DRAW_REDUCE, STAGE_FLATTEN,
     STAGE_PATHTAG_REDUCE, STAGE_PATHTAG_REDUCE2, STAGE_PATHTAG_SCAN, STAGE_PATHTAG_SCAN1,
     STAGE_PATHTAG_SCAN_LARGE, STAGE_PATH_COUNT, STAGE_PATH_TILING, STAGE_TILE_ALLOC,
 };
@@ -42,8 +42,10 @@ impl Drop for Render {
 /// Resources produced by pipeline, needed for fine rasterization.
 struct FineResources {
     aa_config: AaConfig,
-    /// When Some (Goldy indirect path), fine stage uses dispatch_indirect.
+    /// When Some (Goldy indirect path), fine stage uses `dispatch_indirect`.
     indirect_buf: Option<BufferProxy>,
+    /// Raw config bytes for creating per-row config buffers (fine row splitting).
+    gpu_config: ekrano_encoding::ConfigUniform,
 
     config_buf: ResourceProxy,
     bump_buf: ResourceProxy,
@@ -82,6 +84,12 @@ impl CapturedBuffers {
         recording.free_buffer(self.lines);
     }
 }
+
+/// Max flatten workgroups per queue submit. Large single dispatches can exceed the
+/// Windows ~2s GPU timeout (TDR) on stressed dashed paths.
+const MAX_FLATTEN_WG_PER_SUBMIT: u32 = 8;
+/// Must match `FLATTEN_WG` in ekrano_encoding (threads per flatten workgroup).
+const FLATTEN_THREADS_PER_GROUP: u32 = 256;
 
 fn dispatch_stage(
     recording: &mut Recording,
@@ -212,9 +220,9 @@ impl Render {
             packed.resize(size_of::<u32>(), u8::MAX);
         }
         let scene_buf = ResourceProxy::Buffer(recording.upload("vello.scene", packed));
-        let config_buf = ResourceProxy::Buffer(
-            recording.upload_uniform("vello.config", bytemuck::bytes_of(&cpu_config.gpu)),
-        );
+        let config_buf_proxy =
+            recording.upload_uniform("vello.config", bytemuck::bytes_of(&cpu_config.gpu));
+        let config_buf = ResourceProxy::Buffer(config_buf_proxy);
         const INDIRECT_STRIDE: u64 = size_of::<IndirectCount>() as u64;
 
         let use_indirect = shaders.pipeline_setup.is_some();
@@ -372,23 +380,44 @@ impl Render {
         let bump_buf = ResourceProxy::Buffer(bump_buf);
         let lines_buf =
             ResourceProxy::new_buf(buffer_sizes.lines.size_in_bytes().into(), "vello.lines_buf");
-        dispatch_stage(
-            &mut recording,
-            use_indirect,
-            indirect_buf,
-            shaders.flatten,
-            STAGE_FLATTEN,
-            wg_counts.flatten,
-            INDIRECT_STRIDE,
-            [
-                config_buf,
-                scene_buf,
-                tagmonoid_buf,
-                path_bbox_buf,
-                bump_buf,
-                lines_buf,
-            ],
-        );
+        let flatten_bindings = [
+            config_buf,
+            scene_buf,
+            tagmonoid_buf,
+            path_bbox_buf,
+            bump_buf,
+            lines_buf,
+        ];
+        let flat_wg_x = wg_counts.flatten.0;
+        if flat_wg_x > MAX_FLATTEN_WG_PER_SUBMIT {
+            let mut gpu_cfg = cpu_config.gpu;
+            let mut base_wg = 0u32;
+            while base_wg < flat_wg_x {
+                let chunk = (flat_wg_x - base_wg).min(MAX_FLATTEN_WG_PER_SUBMIT);
+                gpu_cfg.flatten_thread_base = base_wg * FLATTEN_THREADS_PER_GROUP;
+                recording.push(Command::UploadUniform(
+                    config_buf_proxy,
+                    bytemuck::bytes_of(&gpu_cfg).to_vec(),
+                ));
+                recording.dispatch(shaders.flatten, (chunk, 1, 1), flatten_bindings);
+                base_wg += chunk;
+            }
+            recording.push(Command::UploadUniform(
+                config_buf_proxy,
+                bytemuck::bytes_of(&cpu_config.gpu).to_vec(),
+            ));
+        } else {
+            dispatch_stage(
+                &mut recording,
+                use_indirect,
+                indirect_buf,
+                shaders.flatten,
+                STAGE_FLATTEN,
+                wg_counts.flatten,
+                INDIRECT_STRIDE,
+                flatten_bindings,
+            );
+        }
         let draw_reduced_buf = ResourceProxy::new_buf(
             buffer_sizes.draw_reduced.size_in_bytes().into(),
             "vello.draw_reduced_buf",
@@ -641,6 +670,7 @@ impl Render {
             } else {
                 None
             },
+            gpu_config: cpu_config.gpu,
             config_buf,
             bump_buf,
             tile_buf,
@@ -684,11 +714,21 @@ impl Render {
     }
 
     /// Run fine rasterization assuming the coarse phase succeeded.
+    ///
+    /// When `height_in_tiles > 1`, splits the fine dispatch into per-row
+    /// dispatches to avoid GPU TDR on large workloads. Each row gets a
+    /// separate config buffer with `tile_y_offset` set, so the fine shader
+    /// knows which tile row to process.
     pub fn record_fine(&mut self, shaders: &FullShaders, recording: &mut Recording) {
         let fine_wg_count = self.fine_wg_count.take().unwrap();
         let mut fine = self.fine_resources.take().unwrap();
-        const INDIRECT_STRIDE: u64 = size_of::<IndirectCount>() as u64;
-        let fine_offset = STAGE_FINE as u64 * INDIRECT_STRIDE;
+        let width_in_tiles = fine_wg_count.0;
+        let height_in_tiles = fine_wg_count.1;
+
+        if let Some(indirect_buf) = fine.indirect_buf.take() {
+            recording.free_buffer(indirect_buf);
+        }
+
         let base_resources = [
             fine.config_buf,
             fine.segments_buf,
@@ -699,24 +739,21 @@ impl Render {
             fine.gradient_image,
             fine.image_atlas,
         ];
-        match fine.aa_config {
-            AaConfig::Area => {
-                let shader = shaders
-                    .fine_area
-                    .expect("shaders not configured to support AA mode: area");
-                if let Some(indirect_buf) = fine.indirect_buf.take() {
-                    recording.dispatch_indirect(
-                        shader,
-                        indirect_buf,
-                        fine_offset,
-                        base_resources.iter().cloned(),
-                    );
-                    recording.free_buffer(indirect_buf);
-                } else {
-                    recording.dispatch(shader, fine_wg_count, base_resources.iter().cloned());
-                }
-            }
-            _ => {
+
+        let shader = match fine.aa_config {
+            AaConfig::Area => shaders
+                .fine_area
+                .expect("shaders not configured to support AA mode: area"),
+            AaConfig::Msaa16 => shaders
+                .fine_msaa16
+                .expect("shaders not configured to support AA mode: msaa16"),
+            AaConfig::Msaa8 => shaders
+                .fine_msaa8
+                .expect("shaders not configured to support AA mode: msaa8"),
+        };
+
+        let msaa_mask_buf = match fine.aa_config {
+            AaConfig::Msaa16 | AaConfig::Msaa8 => {
                 if self.mask_buf.is_none() {
                     let mask_lut = match fine.aa_config {
                         AaConfig::Msaa16 => make_mask_lut_16(),
@@ -726,35 +763,21 @@ impl Render {
                     let buf = recording.upload("vello.mask_lut", mask_lut);
                     self.mask_buf = Some(buf.into());
                 }
-                let fine_shader = match fine.aa_config {
-                    AaConfig::Msaa16 => shaders
-                        .fine_msaa16
-                        .expect("shaders not configured to support AA mode: msaa16"),
-                    AaConfig::Msaa8 => shaders
-                        .fine_msaa8
-                        .expect("shaders not configured to support AA mode: msaa8"),
-                    _ => unreachable!(),
-                };
-                let mut msaa_resources: Vec<ResourceProxy> =
-                    base_resources.iter().cloned().collect();
-                msaa_resources.push(self.mask_buf.unwrap());
-                if let Some(indirect_buf) = fine.indirect_buf.take() {
-                    recording.dispatch_indirect(
-                        fine_shader,
-                        indirect_buf,
-                        fine_offset,
-                        msaa_resources.iter().cloned(),
-                    );
-                    recording.free_buffer(indirect_buf);
-                } else {
-                    recording.dispatch(
-                        fine_shader,
-                        fine_wg_count,
-                        msaa_resources.iter().cloned(),
-                    );
-                }
+                self.mask_buf
             }
+            _ => None,
+        };
+
+        let mut fine_resources: Vec<ResourceProxy> = base_resources.to_vec();
+        if let Some(mask) = msaa_mask_buf {
+            fine_resources.push(mask);
         }
+        recording.dispatch(
+            shader,
+            (width_in_tiles, height_in_tiles, 1),
+            fine_resources.iter().cloned(),
+        );
+
         recording.free_resource(fine.config_buf);
         recording.free_resource(fine.tile_buf);
         recording.free_resource(fine.segments_buf);
@@ -763,7 +786,6 @@ impl Render {
         recording.free_resource(fine.image_atlas);
         recording.free_resource(fine.info_bin_data_buf);
         recording.free_resource(fine.blend_spill_buf);
-        // TODO: make mask buf persistent
         if let Some(mask_buf) = self.mask_buf.take() {
             recording.free_resource(mask_buf);
         }

@@ -234,7 +234,7 @@ impl BumpEstimator {
 
 fn estimate_arc_lines(scaled_stroke_width: f64) -> (u32, f64) {
     // These constants need to be kept consistent with the definitions in `flatten_arc` in
-    // flatten.wgsl.
+    // flatten.slang.
     // TODO: It would be better if these definitions were shared/configurable. For example an
     // option is for all tolerances to be parameters to the estimator as well as the GPU pipelines
     // (the latter could be in the form of a config uniform) which would help to keep them in

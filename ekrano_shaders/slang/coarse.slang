@@ -282,7 +282,20 @@ void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
             int backdrop_val = even_odd ? (abs(tile.backdrop) & 1) : tile.backdrop;
             bool backdrop_clear = (backdrop_val == 0);
             bool include_tile = (n_segs != 0) || (backdrop_clear == is_clip) || is_blend;
-            if (include_tile) {
+            if ((bin_tile_x + x) < config.width_in_tiles &&
+                (bin_tile_y + y) < config.height_in_tiles)
+            {
+                if (include_tile) {
+                    InterlockedAdd(bump[0].blend, 1);
+                }
+                if (n_segs != 0) {
+                    InterlockedAdd(bump[0].binning, 1);
+                }
+            }
+            if (include_tile &&
+                (bin_tile_x + x) < config.width_in_tiles &&
+                (bin_tile_y + y) < config.height_in_tiles)
+            {
                 uint el_slice = el_ix / 32;
                 uint el_mask = 1 << (el_ix & 31);
                 InterlockedOr(sh_bitmaps[el_slice][y * N_TILE_X + x], el_mask);

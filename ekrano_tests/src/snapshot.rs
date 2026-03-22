@@ -68,6 +68,7 @@ impl Snapshot<'_> {
         );
         if let Some(ref mut stats) = self.statistics {
             let mean = stats.mean();
+            eprintln!("[SNAP] {} mean={mean}", self.params.name);
             if mean > value {
                 self.handle_failure(format_args!(
                     "Expected mean to be less than {value}, got {mean}"

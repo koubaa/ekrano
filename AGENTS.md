@@ -39,7 +39,7 @@ When you **create a new file**, use only the Ekrano header:
 ekrano/                   # Git root (forked from Vello)
 ├── ekrano/               # Main crate (renderer, Scene, Renderer API)
 ├── ekrano_encoding/      # Scene encoding into GPU-friendly streams
-├── ekrano_shaders/       # 33 WGSL compute shaders + pipeline metadata
+├── ekrano_shaders/       # Slang compute shaders + optional CPU fallbacks
 ├── ekrano_tests/         # Snapshot / regression test suite
 ├── xtask/                # Snapshot diff tooling (kompari)
 ├── examples/
@@ -57,8 +57,7 @@ ekrano/                   # Git root (forked from Vello)
 - **Phase 2** (complete): Strip to full-GPU pipeline; remove hybrid backend, mobile, WASM
 - **Phase 2.4** (complete): Rebrand vello → ekrano
 - **Phase 2.5** (todo): Make `render_to_texture` the primary API; remove surface/swapchain path
-- **Phase 3a** (todo): Replace wgpu with Goldy (keep WGSL, compile via naga → SPIR-V → Goldy)
-- **Phase 3b** (todo): Port WGSL shaders to Slang
+- **Phase 3a** (complete): Goldy backend with Slang shaders (Vulkan / DX12)
 - **Phase 3c** (in progress): Exploit Goldy features. Phase 1 indirect dispatch done (all stages); BDA deferred; bump overflow handling done.
 
 ## Test Commands

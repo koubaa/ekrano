@@ -2,7 +2,7 @@
 // Copyright 2026 the Ekrano Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT OR Unlicense
 //
-// Flatten curves to lines. Ported from flatten.wgsl.
+// Flatten curves to lines. Ported from original Vello flatten shader.
 // Uses goldy_dyn_byte_address for path_bboxes (InterlockedMin/Max require RWByteAddressBuffer).
 
 import goldy_exp;
@@ -83,6 +83,7 @@ static const float QUAD_U2 = QUAD_W2 * QUAD_W2 - QUAD_C2 / QUAD_A2;
 static const float FRAC_PI_4 = 0.7853981633974483;
 static const float CBRT_9_8 = 1.040041911525952;
 static const uint PATH_BBOX_STRIDE = 6;  // x0,y0,x1,y1,draw_flags,trans_ix per path
+static const uint FLATTEN_ARC_MAX_LINES = 512;
 
 // Context passed to helpers (buffers + pathdata_base)
 struct FlattenCtx {
@@ -415,7 +416,13 @@ CubicPoints read_path_segment(FlattenCtx ctx, PathTagData tag, bool is_stroke) {
     return r;
 }
 
+bool line_coords_finite(float2 p0, float2 p1) {
+    return !(isnan(p0.x) || isnan(p0.y) || isnan(p1.x) || isnan(p1.y));
+}
+
 void write_line(FlattenCtx ctx, uint line_ix, uint path_ix, float2 p0, float2 p1, inout float4 bbox) {
+    if (!line_coords_finite(p0, p1))
+        return;
     bbox = float4(min(bbox.xy, min(p0, p1)), max(bbox.zw, max(p0, p1)));
     if (line_ix < ctx.config.lines_size) {
         LineSoup ls;
@@ -434,6 +441,8 @@ void write_line_with_transform(FlattenCtx ctx, uint line_ix, uint path_ix, float
 }
 
 uint output_line(FlattenCtx ctx, uint path_ix, float2 p0, float2 p1, inout float4 bbox) {
+    if (!line_coords_finite(p0, p1))
+        return 0;
     uint line_ix = 0;
     InterlockedAdd(ctx.bump[0].lines, 1, line_ix);
     write_line(ctx, line_ix, path_ix, p0, p1, bbox);
@@ -441,16 +450,29 @@ uint output_line(FlattenCtx ctx, uint path_ix, float2 p0, float2 p1, inout float
 }
 
 void output_line_with_transform(FlattenCtx ctx, uint path_ix, float2 p0, float2 p1, Transform transform, inout float4 bbox) {
+    float2 tp0 = transform_apply(transform, p0);
+    float2 tp1 = transform_apply(transform, p1);
+    // TEMP: count NaN lines in the tile field of bump allocator
+    if (!line_coords_finite(tp0, tp1)) {
+        InterlockedAdd(ctx.bump[0].tile, 1);
+        return;
+    }
     uint line_ix = 0;
     InterlockedAdd(ctx.bump[0].lines, 1, line_ix);
-    write_line_with_transform(ctx, line_ix, path_ix, p0, p1, transform, bbox);
+    write_line(ctx, line_ix, path_ix, tp0, tp1, bbox);
 }
 
 void output_two_lines_with_transform(FlattenCtx ctx, uint path_ix, float2 p00, float2 p01, float2 p10, float2 p11, Transform transform, inout float4 bbox) {
+    float2 t00 = transform_apply(transform, p00);
+    float2 t01 = transform_apply(transform, p01);
+    float2 t10 = transform_apply(transform, p10);
+    float2 t11 = transform_apply(transform, p11);
+    if (!line_coords_finite(t00, t01) || !line_coords_finite(t10, t11))
+        return;
     uint line_ix = 0;
     InterlockedAdd(ctx.bump[0].lines, 2, line_ix);
-    write_line_with_transform(ctx, line_ix, path_ix, p00, p01, transform, bbox);
-    write_line_with_transform(ctx, line_ix + 1, path_ix, p10, p11, transform, bbox);
+    write_line(ctx, line_ix, path_ix, t00, t01, bbox);
+    write_line(ctx, line_ix + 1, path_ix, t10, t11, bbox);
 }
 
 NeighboringSegment read_neighboring_segment(FlattenCtx ctx, uint ix) {
@@ -529,6 +551,23 @@ void flatten_euler(FlattenCtx ctx, CubicPoints cubic, uint path_ix, Transform lo
             float k0 = es.params.k0 - 0.5 * es.params.k1;
             float k1 = es.params.k1;
             float normalized_offset = offset / cubic_params.chord_len;
+            // When the chord is negligible relative to the offset, the ESPC math
+            // produces NaN. Emit a single straight-line segment instead.
+            if (abs(normalized_offset) > 1e3) {
+                float2 lp1 = (t1 == 1.0) ? t_end : es_seg_eval_with_offset(es, 1.0, 0.0);
+                float2 l0 = (offset >= 0.0) ? lp0 : lp1;
+                float2 l1 = (offset >= 0.0) ? lp1 : lp0;
+                output_line_with_transform(ctx, path_ix, l0, l1, transform, bbox);
+                lp0 = lp1;
+                last_p = this_pq1.point;
+                last_q = this_pq1.deriv;
+                last_t = t1;
+                t0_u += 1;
+                uint shift = firstbitlow(t0_u);
+                t0_u >>= shift;
+                dt *= float(1u << shift);
+                continue;
+            }
             float dist_scaled = normalized_offset * es.params.ch;
             float scale_multiplier = sqrt(0.125 * scale * cubic_params.chord_len / (es.params.ch * tol));
             float a = 0.0, b = 0.0, integral = 0.0, int0 = 0.0, n_frac = 0.0;
@@ -596,20 +635,25 @@ void flatten_arc(FlattenCtx ctx, uint path_ix, float2 begin, float2 end, float2 
     float radius = max(tol, length(p0 - transform_apply(transform, center)));
     float theta = max(MIN_THETA, 2.0 * acos(1.0 - tol / radius));
     uint n_lines = max(1u, uint(ceil(angle / theta)));
+    n_lines = min(n_lines, FLATTEN_ARC_MAX_LINES);
 
     float c = cos(theta);
     float s = sin(theta);
     float2 r_next;
-    r_next.x = r.x * c - r.y * s;
-    r_next.y = r.x * s + r.y * c;
+    r_next.x = r.x * c + r.y * s;
+    r_next.y = r.y * c - r.x * s;
+
+    float2 p_last = transform_apply(transform, end);
+    if (!line_coords_finite(p0, p_last))
+        return;
 
     uint line_ix = 0;
     InterlockedAdd(ctx.bump[0].lines, n_lines, line_ix);
 
     for (uint i = 0; i < n_lines - 1; i++) {
         r = r_next;
-        r_next.x = r.x * c - r.y * s;
-        r_next.y = r.x * s + r.y * c;
+        r_next.x = r.x * c + r.y * s;
+        r_next.y = r.y * c - r.x * s;
         float2 p1 = transform_apply(transform, center + r);
         write_line(ctx, line_ix + i, path_ix, p0, p1, bbox);
         p0 = p1;
@@ -626,18 +670,26 @@ void draw_cap(FlattenCtx ctx, uint path_ix, uint cap_style, float2 point, float2
     float2 start = cap0;
     float2 end = cap1;
     bool is_square = (cap_style == STYLE_FLAGS_CAP_SQUARE);
-    uint line_ix = 0;
-    InterlockedAdd(ctx.bump[0].lines, is_square ? 3u : 1u, line_ix);
     if (is_square) {
         float2 v = offset_tangent;
         float2 p0 = start + v;
         float2 p1 = end + v;
-        write_line_with_transform(ctx, line_ix + 1, path_ix, start, p0, transform, bbox);
-        write_line_with_transform(ctx, line_ix + 2, path_ix, p1, end, transform, bbox);
-        start = p0;
-        end = p1;
+        float2 ts0 = transform_apply(transform, start);
+        float2 ts1 = transform_apply(transform, p0);
+        float2 te0 = transform_apply(transform, p1);
+        float2 te1 = transform_apply(transform, end);
+        float2 tm0 = transform_apply(transform, p0);
+        float2 tm1 = transform_apply(transform, p1);
+        if (!line_coords_finite(ts0, ts1) || !line_coords_finite(te0, te1) || !line_coords_finite(tm0, tm1))
+            return;
+        uint line_ix = 0;
+        InterlockedAdd(ctx.bump[0].lines, 3u, line_ix);
+        write_line(ctx, line_ix + 1, path_ix, ts0, ts1, bbox);
+        write_line(ctx, line_ix + 2, path_ix, te0, te1, bbox);
+        write_line(ctx, line_ix, path_ix, tm0, tm1, bbox);
+        return;
     }
-    write_line_with_transform(ctx, line_ix, path_ix, start, end, transform, bbox);
+    output_line_with_transform(ctx, path_ix, start, end, transform, bbox);
 }
 
 void draw_join(FlattenCtx ctx, uint path_ix, uint style_flags, float2 p0, float2 tan_prev, float2 tan_next, float2 n_prev, float2 n_next, Transform transform, inout float4 bbox) {
@@ -654,7 +706,7 @@ void draw_join(FlattenCtx ctx, uint path_ix, uint style_flags, float2 p0, float2
     } else if (join_bits == STYLE_FLAGS_JOIN_MITER) {
         float hypot_len = length(float2(cr, d));
         float miter_limit = f16tof32(style_flags & STYLE_MITER_LIMIT_MASK);
-        uint line_ix;
+        bool did_miter_inner = false;
         if (2.0 * hypot_len < (hypot_len + d) * miter_limit * miter_limit && abs(cr) > TANGENT_THRESH * TANGENT_THRESH) {
             bool is_backside = cr > 0.0;
             float2 fp_last = is_backside ? back1 : front0;
@@ -663,20 +715,41 @@ void draw_join(FlattenCtx ctx, uint path_ix, uint style_flags, float2 p0, float2
             float2 v = fp_this - fp_last;
             float h = (tan_prev.x * v.y - tan_prev.y * v.x) / cr;
             float2 miter_pt = fp_this - tan_next * h;
-            uint tmp = 0;
-            InterlockedAdd(ctx.bump[0].lines, 3, tmp);
-            line_ix = tmp;
-            write_line_with_transform(ctx, line_ix, path_ix, p, miter_pt, transform, bbox);
-            if (is_backside) back0 = miter_pt;
-            else front0 = miter_pt;
-            line_ix += 1;
-        } else {
-            uint tmp = 0;
-            InterlockedAdd(ctx.bump[0].lines, 2, tmp);
-            line_ix = tmp;
+            float2 f0 = front0;
+            float2 f1 = front1;
+            float2 b0 = back0;
+            float2 b1 = back1;
+            if (is_backside)
+                b0 = miter_pt;
+            else
+                f0 = miter_pt;
+            float2 tp0 = transform_apply(transform, p);
+            float2 tp1 = transform_apply(transform, miter_pt);
+            float2 tf0 = transform_apply(transform, f0);
+            float2 tf1 = transform_apply(transform, f1);
+            float2 tb0 = transform_apply(transform, b0);
+            float2 tb1 = transform_apply(transform, b1);
+            if (line_coords_finite(tp0, tp1) && line_coords_finite(tf0, tf1) && line_coords_finite(tb0, tb1)) {
+                uint tmp = 0;
+                InterlockedAdd(ctx.bump[0].lines, 3, tmp);
+                write_line(ctx, tmp, path_ix, tp0, tp1, bbox);
+                write_line(ctx, tmp + 1, path_ix, tf0, tf1, bbox);
+                write_line(ctx, tmp + 2, path_ix, tb0, tb1, bbox);
+                did_miter_inner = true;
+            }
         }
-        write_line_with_transform(ctx, line_ix, path_ix, front0, front1, transform, bbox);
-        write_line_with_transform(ctx, line_ix + 1, path_ix, back0, back1, transform, bbox);
+        if (!did_miter_inner) {
+            float2 tf0 = transform_apply(transform, front0);
+            float2 tf1 = transform_apply(transform, front1);
+            float2 tb0 = transform_apply(transform, back0);
+            float2 tb1 = transform_apply(transform, back1);
+            if (!line_coords_finite(tf0, tf1) || !line_coords_finite(tb0, tb1))
+                return;
+            uint line_ix = 0;
+            InterlockedAdd(ctx.bump[0].lines, 2, line_ix);
+            write_line(ctx, line_ix, path_ix, tf0, tf1, bbox);
+            write_line(ctx, line_ix + 1, path_ix, tb0, tb1, bbox);
+        }
     } else if (join_bits == STYLE_FLAGS_JOIN_ROUND) {
         float2 arc0, arc1, other0, other1;
         if (cr > 0.0) {
@@ -686,6 +759,118 @@ void draw_join(FlattenCtx ctx, uint path_ix, uint style_flags, float2 p0, float2
         }
         flatten_arc(ctx, path_ix, arc0, arc1, p0, abs(atan2(cr, d)), transform, bbox);
         output_line_with_transform(ctx, path_ix, other0, other1, transform, bbox);
+    }
+}
+
+// ---- GPU-side dashing helpers ----
+
+// Compute cumulative arc length from the start of the current subpath to
+// the beginning of segment at index `ix`. Uses a backward walk to find the
+// subpath start, then a forward walk to sum chord lengths.
+float compute_subpath_arc(FlattenCtx ctx, uint ix, uint my_path_ix) {
+    // Walk backward to find subpath start. Stop at:
+    //  - PATH_TAG_PATH markers (draw object boundary)
+    //  - Tags with SUBPATH_END set (end of previous subpath)
+    uint start_ix = ix;
+    const uint MAX_WALK = 512;
+    for (uint i = 1; i <= MAX_WALK && ix >= i; i++) {
+        uint prev_ix = ix - i;
+        uint tw = ctx.scene[ctx.config.pathtag_base + (prev_ix >> 2)];
+        uint sh = (prev_ix & 3) * 8;
+        uint tb = (tw >> sh) & 0xFF;
+        if ((tb & PATH_TAG_PATH) != 0) break;
+        if ((tb & PATH_TAG_SUBPATH_END) != 0) break;
+        start_ix = prev_ix;
+    }
+
+    // Forward walk: accumulate chord lengths of real (non-cap) segments before ix.
+    float arc = 0.0;
+    for (uint j = start_ix; j < ix; j++) {
+        PathTagData ptag = compute_tag_monoid(ctx, j);
+        uint seg = ptag.tag_byte & PATH_TAG_SEG_TYPE;
+        if (seg == 0) continue;
+        if ((ptag.tag_byte & PATH_TAG_SUBPATH_END) != 0) continue;
+        CubicPoints p = read_path_segment(ctx, ptag, true);
+        arc += distance(p.p0, p.p3);
+    }
+    return arc;
+}
+
+// Emit a single stroke dash sub-segment using the same flatten_euler path
+// as normal strokes, ensuring identical rendering across backends.
+void emit_dash_stroke(
+    FlattenCtx ctx,
+    uint path_ix,
+    uint style_flags,
+    float2 sp0,
+    float2 sp3,
+    float offset,
+    Transform transform,
+    inout float4 bbox
+) {
+    float2 tangent = sp3 - sp0;
+    float tang_len = length(tangent);
+    if (tang_len < 1e-12) return;
+    float2 tn = tangent / tang_len;
+    float2 offset_tangent = offset * tn;
+    float2 n = offset_tangent.yx * float2(-1.0, 1.0);
+
+    uint start_cap = (style_flags & STYLE_FLAGS_START_CAP_MASK) >> 2;
+    uint end_cap = (style_flags & STYLE_FLAGS_END_CAP_MASK);
+    draw_cap(ctx, path_ix, start_cap, sp0, sp0 - n, sp0 + n, -offset_tangent, transform, bbox);
+    draw_cap(ctx, path_ix, end_cap, sp3, sp3 + n, sp3 - n, offset_tangent, transform, bbox);
+
+    output_line_with_transform(ctx, path_ix, sp0 + n, sp3 + n, transform, bbox);
+    output_line_with_transform(ctx, path_ix, sp3 - n, sp0 - n, transform, bbox);
+}
+
+// Process one segment of a dashed stroke: find visible intervals and emit them.
+void process_dashed_segment(
+    FlattenCtx ctx,
+    uint path_ix,
+    uint style_flags,
+    CubicPoints pts,
+    float offset,
+    Transform transform,
+    float cum_arc,
+    float dash_offset_val,
+    float dash_on,
+    float dash_off,
+    inout float4 bbox
+) {
+    float period = dash_on + dash_off;
+    if (period < 1e-9) return;
+    float seg_len = distance(pts.p0, pts.p3);
+    if (seg_len < 1e-12) return;
+
+    float seg_start = cum_arc;
+    float seg_end = seg_start + seg_len;
+    float pos = seg_start;
+
+    const uint MAX_INTERVALS = 32;
+    float snap_eps = period * 1e-5;
+    for (uint di = 0; di < MAX_INTERVALS && pos < seg_end - 1e-6; di++) {
+        float adjusted = pos + dash_offset_val;
+        float in_period = fmod(adjusted, period);
+        if (in_period < 0.0) in_period += period;
+        if (in_period < snap_eps || period - in_period < snap_eps) in_period = 0.0;
+        if (abs(in_period - dash_on) < snap_eps) in_period = dash_on;
+        bool visible = in_period < dash_on;
+        float to_next = visible ? (dash_on - in_period) : (period - in_period);
+        to_next = max(to_next, 1e-6);
+        float interval_end = min(pos + to_next, seg_end);
+
+        if (visible) {
+            float t0 = (pos - seg_start) / seg_len;
+            float t1 = (interval_end - seg_start) / seg_len;
+            t0 = clamp(t0, 0.0, 1.0);
+            t1 = clamp(t1, 0.0, 1.0);
+            float2 sp0 = lerp(pts.p0, pts.p3, t0);
+            float2 sp3 = lerp(pts.p0, pts.p3, t1);
+            emit_dash_stroke(ctx, path_ix, style_flags, sp0, sp3, offset, transform, bbox);
+        }
+
+        pos = interval_end;
     }
 }
 
@@ -708,7 +893,7 @@ void cs_main(uint3 global_id : SV_DispatchThreadID) {
     ctx.lines = lines;
     ctx.pathdata_base = config.pathdata_base;
 
-    uint ix = global_id.x;
+    uint ix = global_id.x + config.flatten_thread_base;
     float4 bbox = float4(1e31, 1e31, -1e31, -1e31);
 
     PathTagData tag = compute_tag_monoid(ctx, ix);
@@ -735,13 +920,30 @@ void cs_main(uint3 global_id : SV_DispatchThreadID) {
             float offset = 0.5 * linewidth;
             bool is_open = (tag.tag_byte & PATH_TAG_SEG_TYPE) != PATH_TAG_LINETO;
             bool is_stroke_cap_marker = (tag.tag_byte & PATH_TAG_SUBPATH_END) != 0;
+            bool is_dashed = (style_flags & STYLE_FLAGS_DASHED) != 0;
 
-            if (is_stroke_cap_marker) {
+            if (is_dashed && !is_stroke_cap_marker) {
+                float dash_offset_val = asfloat(scene[config.style_base + style_ix + 2]);
+                uint packed_dash = scene[config.style_base + style_ix + 3];
+                float dash_on = f16tof32(packed_dash & 0xFFFF);
+                float dash_off = f16tof32(packed_dash >> 16);
+
+                float cum_arc = compute_subpath_arc(ctx, ix, path_ix);
+                process_dashed_segment(
+                    ctx, path_ix, style_flags, pts, offset, transform,
+                    cum_arc, dash_offset_val, dash_on, dash_off, bbox
+                );
+            } else if (is_stroke_cap_marker) {
                 if (is_open) {
-                    float2 tangent = pts.p3 - pts.p0;
-                    float2 offset_tangent = offset * normalize(tangent);
-                    float2 n = offset_tangent.yx * float2(-1.0, 1.0);
-                    draw_cap(ctx, path_ix, (style_flags & STYLE_FLAGS_START_CAP_MASK) >> 2, pts.p0, pts.p0 - n, pts.p0 + n, -offset_tangent, transform, bbox);
+                    if (is_dashed) {
+                        // Dashed strokes: each dash already has its own caps
+                        // from emit_dash_stroke, so no subpath-level cap needed.
+                    } else {
+                        float2 tangent = pts.p3 - pts.p0;
+                        float2 offset_tangent = offset * normalize(tangent);
+                        float2 n = offset_tangent.yx * float2(-1.0, 1.0);
+                        draw_cap(ctx, path_ix, (style_flags & STYLE_FLAGS_START_CAP_MASK) >> 2, pts.p0, pts.p0 - n, pts.p0 + n, -offset_tangent, transform, bbox);
+                    }
                 }
             } else {
                 NeighboringSegment neighbor = read_neighboring_segment(ctx, ix + 1);

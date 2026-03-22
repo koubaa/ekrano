@@ -7,8 +7,8 @@ use super::{
     BinHeader, Clip, ClipBbox, ClipBic, ClipElement, DrawBbox, DrawMonoid, Layout, LineSoup, Path,
     PathBbox, PathMonoid, PathSegment, Tile,
 };
+use std::mem::size_of;
 use bytemuck::{Pod, Zeroable};
-use size_of;
 
 const TILE_WIDTH: u32 = 16;
 const TILE_HEIGHT: u32 = 16;
@@ -21,7 +21,7 @@ const CLIP_REDUCE_WG: u32 = 256;
 
 /// Counters for tracking dynamic allocation on the GPU.
 ///
-/// This must be kept in sync with the struct in `shader/shared/bump.wgsl`
+/// This must be kept in sync with the struct in `ekrano_shaders/slang/ekrano_shared.slang` (BumpAllocators).
 #[derive(Clone, Copy, Debug, Default, Zeroable, Pod)]
 #[repr(C)]
 pub struct BumpAllocators {
@@ -119,7 +119,7 @@ pub struct IndirectCount {
 }
 
 /// Stage indices into the multi-entry indirect dispatch buffer.
-/// Must match the order used by pipeline_setup.slang.
+/// Must match the order used by `pipeline_setup.slang`.
 pub const STAGE_PATHTAG_REDUCE: u32 = 0;
 pub const STAGE_PATHTAG_REDUCE2: u32 = 1;
 pub const STAGE_PATHTAG_SCAN1: u32 = 2;
@@ -144,7 +144,7 @@ pub const STAGE_FINE: u32 = 19;
 pub const N_INDIRECT_STAGES: u32 = 20;
 
 /// GPU-uploadable workgroup counts for Phase 1 indirect dispatch.
-/// Layout must match ekrano_shared.slang WorkgroupCountsGpu.
+/// Layout must match `ekrano_shared.slang` `WorkgroupCountsGpu`.
 #[derive(Clone, Copy, Debug, Default, Zeroable, Pod)]
 #[repr(C)]
 pub struct WorkgroupCountsGpu {
@@ -154,7 +154,7 @@ pub struct WorkgroupCountsGpu {
 /// Uniform render configuration data used by all GPU stages.
 ///
 /// This data structure must be kept in sync with the definition in
-/// `shaders/shared/config.wgsl`.
+/// `ekrano_shaders/slang/ekrano_shared.slang` (Config).
 #[derive(Clone, Copy, Debug, Default, Zeroable, Pod)]
 #[repr(C)]
 pub struct ConfigUniform {
@@ -185,6 +185,11 @@ pub struct ConfigUniform {
     pub blend_size: u32,
     /// Size of per-tile command list buffer allocation (in `u32`s).
     pub ptcl_size: u32,
+    /// Y-offset for fine pass row splitting (0 = full dispatch).
+    pub tile_y_offset: u32,
+    /// Global thread index offset for chunked flatten dispatches (0 = default).
+    /// Must be a multiple of the flatten workgroup size (256).
+    pub flatten_thread_base: u32,
 }
 
 /// CPU side setup and configuration.
@@ -222,6 +227,8 @@ impl RenderConfig {
                 segments_size: buffer_sizes.segments.len(),
                 blend_size: buffer_sizes.blend_spill.len(),
                 ptcl_size: buffer_sizes.ptcl.len(),
+                tile_y_offset: 0,
+                flatten_thread_base: 0,
                 layout: *layout,
             },
             workgroup_counts,
@@ -332,8 +339,8 @@ impl WorkgroupCounts {
 impl From<&WorkgroupCounts> for WorkgroupCountsGpu {
     fn from(wc: &WorkgroupCounts) -> Self {
         let to_u4 = |(x, y, z): WorkgroupSize| [x, y, z, 0];
-        let zero = [0u32; 4];
-        let mut entries = [[0u32; 4]; N_INDIRECT_STAGES as usize];
+        let zero = [0_u32; 4];
+        let mut entries = [[0_u32; 4]; N_INDIRECT_STAGES as usize];
         entries[STAGE_PATHTAG_REDUCE as usize] = to_u4(wc.path_reduce);
         entries[STAGE_PATHTAG_REDUCE2 as usize] =
             if wc.use_large_path_scan { to_u4(wc.path_reduce2) } else { zero };
@@ -521,8 +528,8 @@ impl BufferSizes {
 }
 
 impl BufferSizes {
-    /// Pairs of (element_count, element_stride) for all buffers that go into the
-    /// storage pool. Excludes bump_alloc and indirect_count (exempt from pooling).
+    /// Pairs of (`element_count`, `element_stride`) for all buffers that go into the
+    /// storage pool. Excludes `bump_alloc` and `indirect_count` (exempt from pooling).
     /// Used with `BufferPool::padded_size()` to compute total pool size.
     pub fn pool_allocs(&self) -> Vec<(usize, usize)> {
         vec![
@@ -568,12 +575,16 @@ impl BufferSizes {
         let bin_data_start = self.info.len();
         let current_binning = self.bin_data.len() - bin_data_start;
         let new_binning = grow(current_binning, bump.binning);
+        // segments_needed: the coarse pass only allocates segments when it runs
+        // (after flatten/path_count succeed). If it didn't run, bump.segments is 0.
+        // Use seg_counts as a lower bound since each seg_count produces one segment.
+        let segments_needed = bump.segments.max(bump.seg_counts);
         Self {
             lines: BufferSize::new(grow(self.lines.len(), bump.lines)),
             bin_data: BufferSize::new(bin_data_start + new_binning),
             tiles: BufferSize::new(grow(self.tiles.len(), bump.tile)),
             seg_counts: BufferSize::new(grow(self.seg_counts.len(), bump.seg_counts)),
-            segments: BufferSize::new(grow(self.segments.len(), bump.segments)),
+            segments: BufferSize::new(grow(self.segments.len(), segments_needed)),
             blend_spill: BufferSize::new(grow(self.blend_spill.len(), bump.blend)),
             ptcl: BufferSize::new(grow(self.ptcl.len(), bump.ptcl)),
             ..*self

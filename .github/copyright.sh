@@ -13,7 +13,7 @@
 #   // Copyright YYYY the Ekrano Authors  (both lines, for modified files)
 
 # Check all the standard Rust source files
-output=$(rg "^// Copyright (19|20)[\d]{2} (.+ and )?the (Vello|Ekrano) Authors( and .+)?$\n^// SPDX-License-Identifier: Apache-2\.0 OR MIT$\n\n" --files-without-match --multiline -g "*.rs" -g "!ekrano_shaders/{shader,src/cpu}" .)
+output=$(rg "^// Copyright (19|20)[\d]{2} (.+ and )?the (Vello|Ekrano) Authors( and .+)?$\n^// SPDX-License-Identifier: Apache-2\.0 OR MIT$\n\n" --files-without-match --multiline -g "*.rs" -g "!ekrano_shaders/src/cpu" .)
 
 if [ -n "$output" ]; then
 	echo -e "The following files lack the correct copyright header:\n"
@@ -28,8 +28,8 @@ if [ -n "$output" ]; then
 	exit 1
 fi
 
-# Check all the shaders, both WGSL and CPU shaders in Rust, as they also have Unlicense
-output=$(rg "^// Copyright (19|20)[\d]{2} (.+ and )?the (Vello|Ekrano) Authors( and .+)?$\n^// SPDX-License-Identifier: Apache-2\.0 OR MIT OR Unlicense$\n\n" --files-without-match --multiline -g "ekrano_shaders/{shader,src/cpu}/**/*.{rs,wgsl}" .)
+# Check Slang sources and CPU shader Rust (Unlicense)
+output=$(rg "^// Copyright (19|20)[\d]{2} (.+ and )?the (Vello|Ekrano) Authors( and .+)?$\n^// SPDX-License-Identifier: Apache-2\.0 OR MIT OR Unlicense$\n\n" --files-without-match --multiline -g "ekrano_shaders/{slang,src/cpu}/**/*.{rs,slang}" .)
 
 if [ -n "$output" ]; then
         echo -e "The following shader files lack the correct copyright header:\n"

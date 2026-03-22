@@ -8,29 +8,30 @@ use peniko::kurbo::{Cap, Join, Shape, Stroke};
 use super::Monoid;
 
 /// Data structure encoding stroke or fill style.
+///
+/// Layout (4 × u32 = 16 bytes):
+/// - Word 0: flags + miter limit (see below)
+/// - Word 1: stroke line width (f32)
+/// - Word 2: dash offset (f32, 0.0 if not dashed)
+/// - Word 3: packed dash pattern — dash_on (f16, bits 0-15) | dash_off (f16, bits 16-31)
+///
+/// Flags layout in word 0 (upper 16 bits):
+/// ```text
+/// |style|fill|join|start cap|end cap|dashed|reserved|
+///   31    30   29-28  27-26   25-24    23     22-16
+/// ```
+/// Lower 16 bits: miter limit as binary16.
 #[derive(Clone, Copy, Debug, Zeroable, Pod, Default, PartialEq)]
 #[repr(C)]
 pub struct Style {
-    /// Encodes the stroke and fill style parameters. This field is split into two 16-bit
-    /// parts:
-    ///
-    /// - `flags: u16` - encodes fill vs stroke, even-odd vs non-zero fill
-    ///   mode for fills and cap and join style for strokes. See the
-    ///   `FLAGS_*` constants below for more information.
-    ///
-    ///   ```text
-    ///   flags: |style|fill|join|start cap|end cap|reserved|
-    ///    bits:  0     1    2-3  4-5       6-7     8-15
-    ///   ```
-    ///
-    /// - `miter_limit: u16` - The miter limit for a stroke, encoded in
-    ///   binary16 (half) floating point representation. This field is
-    ///   only meaningful for the `Join::Miter` join style. It's ignored
-    ///   for other stroke styles and fills.
     pub flags_and_miter_limit: u32,
-
     /// Encodes the stroke width. This field is ignored for fills.
     pub line_width: f32,
+    /// Dash offset in user-space units. 0.0 when not dashed.
+    pub dash_offset: f32,
+    /// Packed dash pattern: lower 16 bits = dash_on (f16), upper 16 bits = dash_off (f16).
+    /// Zero when not dashed.
+    pub dash_pattern: u32,
 }
 
 impl Style {
@@ -66,6 +67,10 @@ impl Style {
 
     pub const FLAGS_START_CAP_MASK: u32 = 0x0C00_0000;
     pub const FLAGS_END_CAP_MASK: u32 = 0x0300_0000;
+
+    /// Set when the stroke has a dash pattern (GPU-side dashing).
+    pub const FLAGS_DASHED_BIT: u32 = 0x0080_0000;
+
     pub const MITER_LIMIT_MASK: u32 = 0xFFFF;
 
     pub fn from_fill(fill: Fill) -> Self {
@@ -76,12 +81,15 @@ impl Style {
         Self {
             flags_and_miter_limit: fill_bit,
             line_width: 0.,
+            dash_offset: 0.,
+            dash_pattern: 0,
         }
     }
 
     /// Creates a style from a stroke.
     ///
     /// As it isn't meaningful to encode a zero width stroke, returns None if the width is zero.
+    /// When the stroke has a 2-element dash pattern, it is encoded for GPU-side dashing.
     pub fn from_stroke(stroke: &Stroke) -> Option<Self> {
         if stroke.width == 0.0 {
             return None;
@@ -103,10 +111,26 @@ impl Style {
             Cap::Round => Self::FLAGS_END_CAP_BITS_ROUND,
         };
         let miter_limit = crate::math::f32_to_f16(stroke.miter_limit as f32) as u32;
+
+        let (dashed, dash_offset, dash_packed) = if stroke.dash_pattern.len() == 2 {
+            let on = crate::math::f32_to_f16(stroke.dash_pattern[0] as f32) as u32;
+            let off = crate::math::f32_to_f16(stroke.dash_pattern[1] as f32) as u32;
+            (Self::FLAGS_DASHED_BIT, stroke.dash_offset as f32, on | (off << 16))
+        } else {
+            (0, 0.0, 0)
+        };
+
         Some(Self {
-            flags_and_miter_limit: style | join | start_cap | end_cap | miter_limit,
+            flags_and_miter_limit: style | join | start_cap | end_cap | miter_limit | dashed,
             line_width: stroke.width as f32,
+            dash_offset,
+            dash_pattern: dash_packed,
         })
+    }
+
+    /// Returns true if this style has a GPU-side dash pattern.
+    pub fn is_dashed(&self) -> bool {
+        (self.flags_and_miter_limit & Self::FLAGS_DASHED_BIT) != 0
     }
 
     #[cfg(test)]
@@ -206,7 +230,7 @@ pub struct SegmentCount {
     // This could more accurately be modeled as:
     //     segment_within_line: u16,
     //     segment_within_slice: u16,
-    // However, here we mirror the way it's written in WGSL
+    // However, here we mirror the way it's written in the GPU path tag logic
     pub counts: u32,
 }
 

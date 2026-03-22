@@ -14,11 +14,9 @@
 
 </div>
 
-This is a utility library to help integrate the [Vello] shader modules into any renderer project.
-It provides the necessary metadata to construct the individual compute pipelines on any GPU API while leaving the responsibility of all API interactions (such as resource management and command encoding) up to the client.
+This crate ships **Slang** compute sources for the Ekrano/Goldy renderer (`slang/`), plus optional **CPU** fallbacks that mirror the GPU stages (`src/cpu/`).
 
-The shaders can be pre-compiled to any target shading language at build time based on feature flags.
-Currently only WGSL and Metal Shading Language are supported.
+GPU pipelines compile Slang at runtime; there is no WGSL or naga build step in this crate.
 
 Significant changes are documented in [the changelog].
 
@@ -59,7 +57,7 @@ Licensed under either of
 
 at your option.
 
-In addition, all files in the [`shader`](https://github.com/linebender/vello/tree/main/vello_shaders/shader) and [`src/cpu`](https://github.com/linebender/vello/tree/main/vello_shaders/src/cpu) directories and subdirectories thereof are alternatively licensed under the Unlicense ([shader/UNLICENSE](https://github.com/linebender/vello/tree/main/vello_shaders/shader/UNLICENSE) or <http://unlicense.org/>).
+In addition, all files in the [`slang`](slang) and [`src/cpu`](src/cpu) directories and subdirectories thereof are alternatively licensed under the Unlicense (<http://unlicense.org/>), matching upstream Vello’s shader licensing intent.
 For clarity, these files are also licensed under either of the above licenses.
 The intent is for this research to be used in as broad a context as possible.
 

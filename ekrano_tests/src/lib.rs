@@ -95,7 +95,7 @@ pub fn render_then_debug(scene: &Scene, params: &TestParams) -> Result<ImageData
 }
 
 pub fn get_scene_image(params: &TestParams, scene: &Scene) -> Result<ImageData, anyhow::Error> {
-    use goldy::{Device, DeviceType, Instance};
+    use goldy::{DeviceType, Instance};
     use ekrano::{GoldyRenderer, RenderParams};
 
     let instance = Instance::new()?;

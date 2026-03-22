@@ -233,12 +233,6 @@ impl FromIterator<AaConfig> for AaSupport {
 #[derive(Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    /// Failed to compile the shaders.
-    #[cfg(feature = "hot_reload")]
-    #[error("Failed to compile shaders:\n{0}")]
-    #[doc(hidden)] // End-users should not have `hot_reload` enabled.
-    ShaderCompilation(#[from] ekrano_shaders::compile::ErrorVec),
-
     /// Goldy backend shader or GPU operation error.
     #[error("Shader/GPU error: {0}")]
     Shader(String),

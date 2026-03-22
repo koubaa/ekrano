@@ -2,11 +2,11 @@
 // Copyright 2026 the Ekrano Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT OR Unlicense
 //
-// Fine rasterizer. Ported from fine.wgsl.
+// Fine rasterizer. Ported from original Vello fine shader.
 // Variants: fine_area (default), fine_msaa8 (#define msaa, msaa8), fine_msaa16 (#define msaa, msaa16)
 //
 // Build: fine_area = no defines; fine_msaa8 = -Dmsaa -Dmsaa8; fine_msaa16 = -Dmsaa -Dmsaa16
-// MSAA variants use fill_path_ms (ported from fine.wgsl).
+// MSAA variants use fill_path_ms (ported from original Vello fine shader).
 
 import goldy_exp;
 import ekrano_shared;
@@ -498,7 +498,7 @@ uint span_fine(float a, float b) {
 
 // Analytic area anti-aliasing (fine_area, no MSAA)
 void fill_path(CmdFill fill, float2 xy, RWStructuredBuffer<Segment> segments, out float area[4]) {
-    uint n_segs = fill.size_and_rule >> 1;
+    uint n_segs = min(fill.size_and_rule >> 1, 65536u);
     bool even_odd = (fill.size_and_rule & 1) != 0;
     float backdrop_f = float(fill.backdrop);
     area[0] = area[1] = area[2] = area[3] = backdrop_f;
@@ -663,11 +663,9 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
     RWStructuredBuffer<uint> mask_lut = goldy_dyn_buf_ro<uint>(8);
 #endif
 
-    if (ptcl[0] == 0xFFFFFFFFu)
-        return;
-
-    uint tile_ix = wg_id.y * config.width_in_tiles + wg_id.x;
-    float2 xy = float2(float(global_id.x * PIXELS_PER_THREAD), float(global_id.y));
+    uint actual_y = wg_id.y + config.tile_y_offset;
+    uint tile_ix = actual_y * config.width_in_tiles + wg_id.x;
+    float2 xy = float2(float(global_id.x * PIXELS_PER_THREAD), float(local_id.y + actual_y * TILE_HEIGHT));
     float2 local_xy = float2(float(local_id.x * PIXELS_PER_THREAD), float(local_id.y));
 
     float4 base_color = unpack4x8unorm(config.base_color);
@@ -858,7 +856,7 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
             CmdImage image = read_image_cmd(ptcl, info, cmd_ix);
             float2 atlas_max = image.atlas_offset + image.extents - 1.0;
             if (image.quality == IMAGE_QUALITY_LOW) {
-                // Nearest neighbor (matches fine.wgsl IMAGE_QUALITY_LOW)
+                // Nearest neighbor (matches original Vello fine shader IMAGE_QUALITY_LOW)
                 for (uint i = 0; i < 4; i++) {
                     if (area[i] != 0.0) {
                         float2 my_xy = float2(xy.x + float(i), xy.y);
@@ -873,7 +871,7 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
                     }
                 }
             } else {
-                // Bilinear (matches fine.wgsl IMAGE_QUALITY_MEDIUM)
+                // Bilinear (matches original Vello fine shader IMAGE_QUALITY_MEDIUM)
                 for (uint i = 0; i < 4; i++) {
                     if (area[i] != 0.0) {
                         float2 my_xy = float2(xy.x + float(i), xy.y);
@@ -896,6 +894,9 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
                 }
             }
             cmd_ix += 2;
+        } else {
+            // Unknown tag: skip one word to avoid infinite loop
+            cmd_ix += 1;
         }
     }
 

@@ -23,13 +23,12 @@ void cs_main(uint3 global_id : SV_DispatchThreadID) {
     RWStructuredBuffer<BumpAllocators> bump = goldy_dyn_scattered<BumpAllocators>(1);
     RWStructuredBuffer<LineSoup> lines = goldy_dyn_buf_ro<LineSoup>(2);
     RWStructuredBuffer<Path> paths = goldy_dyn_buf_ro<Path>(3);
-    // Use byte-address access for tile atomics: DX12 structured buffer descriptors
-    // with stride=4 cause InterlockedAdd on struct fields to use the wrong byte offset.
-    // Tile layout: {int backdrop (offset 0), uint segment_count_or_ix (offset 4)}, stride=8.
-    RWByteAddressBuffer tile = goldy_dyn_byte_address(4);
+    RWStructuredBuffer<Tile> tile = goldy_dyn_scattered<Tile>(4);
     RWStructuredBuffer<SegmentCount> seg_counts = goldy_dyn_scattered<SegmentCount>(5);
 
     uint n_lines = bump[0].lines;
+
+    // No line-level diagnostics
 
     if (global_id.x >= n_lines)
         return;
@@ -129,7 +128,7 @@ void cs_main(uint3 global_id : SV_DispatchThreadID) {
     ymax = min(ymax, bbox.w);
     for (int y = ymin; y < ymax; y++) {
         int base = int(path.tiles) + (y - bbox.y) * stride;
-        tile.InterlockedAdd(uint(base) * 8 + 0, delta);
+        InterlockedAdd(tile[base].backdrop, delta);
     }
 
     float last_z = floor(a * (float(imin) - 1.0) + b);
@@ -145,9 +144,10 @@ void cs_main(uint3 global_id : SV_DispatchThreadID) {
         bool top_edge = (subix == 0) ? (y0 == s0.y) : (last_z == z);
         if (top_edge && x + 1 < bbox.z) {
             int x_bump = max(x + 1, bbox.x);
-            tile.InterlockedAdd(uint(base + x_bump) * 8 + 0, delta);
+            InterlockedAdd(tile[base + x_bump].backdrop, delta);
         }
-        uint seg_within_slice; tile.InterlockedAdd(uint(base + x) * 8 + 4, 1, seg_within_slice);
+        uint seg_within_slice; InterlockedAdd(tile[base + x].segment_count_or_ix, 1, seg_within_slice);
+        // (no inner-loop diagnostic)
         uint counts = (seg_within_slice << 16) | subix;
         uint seg_ix = seg_base + i - imin;
         if (seg_ix < config.seg_counts_size) {

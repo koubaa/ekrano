@@ -84,11 +84,24 @@ impl GoldyRenderer {
                 );
             let bump_buf = render.bump_buf();
 
-            self.engine
-                .run_recording(device, &coarse_recording, None, "coarse")?;
+            let (coarse_future, coarse_completion) =
+                self.engine.submit_recording(device, &coarse_recording, None, "coarse")?;
+
+            let out_image = render.out_image();
+            let mut fine_recording = Recording::default();
+            render.record_fine(&self.shaders, &mut fine_recording);
+
+            if !coarse_future.wait_timeout(2000).map_err(|e| Error::Shader(e.to_string()))? {
+                log::warn!("Coarse pass exceeded 2s timeout (TDR risk); waiting anyway");
+                coarse_future.wait().map_err(|e| Error::Shader(e.to_string()))?;
+            }
+            self.engine.complete_recording(device, coarse_completion)?;
 
             let bump = self.read_bump(&bump_buf)?;
             self.engine.free_download(bump_buf);
+
+            eprintln!("[BUMP] lines={}, seg_counts={}, segments={}, tile={}, failed=0x{:x}",
+                bump.lines, bump.seg_counts, bump.segments, bump.tile, bump.failed);
 
             if bump.failed == 0 || attempt == MAX_BUMP_RETRIES {
                 if bump.failed != 0 {
@@ -99,9 +112,6 @@ impl GoldyRenderer {
                         bump.failed,
                     );
                 }
-                let out_image = render.out_image();
-                let mut fine_recording = Recording::default();
-                render.record_fine(&self.shaders, &mut fine_recording);
                 return self.engine.run_recording(
                     device,
                     &fine_recording,
@@ -143,7 +153,11 @@ impl GoldyRenderer {
 
         self.render_to_texture(device, scene, &texture, params)?;
 
-        let mut output = vec![0u8; texture.byte_size()];
+        // Free pool and transient buffer memory before readback so the staging
+        // buffer allocation doesn't fail on memory-constrained workloads.
+        self.engine.release_pool();
+
+        let mut output = vec![0_u8; texture.byte_size()];
         texture
             .read_to_cpu(&mut output)
             .map_err(|e| Error::Shader(e.to_string()))?;

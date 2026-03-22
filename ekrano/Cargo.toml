@@ -27,8 +27,8 @@ bump_estimate = ["ekrano_encoding/bump_estimate"]
 
 # Enables debug features when using the "async" pipeline.
 debug_layers = []
-# Enables hot reloading of shaders.
-hot_reload = ["ekrano_shaders/compile"]
+# Reserved for future Slang hot-reload support (no effect today).
+hot_reload = []
 
 [lints]
 workspace = true

@@ -67,7 +67,7 @@ impl GlyphCache {
             Style::Fill(fill) => super::path::Style::from_fill(*fill),
             Style::Stroke(stroke) => super::path::Style::from_stroke(stroke)?,
         };
-        let style_bits: [u32; 2] = bytemuck::cast(style_bits);
+        let style_bits: [u32; 4] = bytemuck::cast(style_bits);
         Some(GlyphCacheSession {
             free_list: &mut self.free_list,
             map,
@@ -141,7 +141,7 @@ pub(crate) struct GlyphCacheSession<'a> {
     size: Size,
     size_bits: u32,
     style: &'a Style,
-    style_bits: [u32; 2],
+    style_bits: [u32; 4],
     outlines: OutlineGlyphCollection<'a>,
     hinter: Option<&'a HintingInstance>,
     serial: u64,
@@ -215,7 +215,7 @@ struct GlyphKey {
     font_index: u32,
     glyph_id: u32,
     font_size_bits: u32,
-    style_bits: [u32; 2],
+    style_bits: [u32; 4],
     hint: bool,
 }
 

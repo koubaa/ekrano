@@ -15,7 +15,7 @@ struct ClipStackElement {
 const BIG_BBOX: [f32; 4] = [-1e9, -1e9, 1e9, 1e9];
 
 // Note: this implementation doesn't rigorously follow the
-// WGSL original. In particular, it just computes the clips
+// GPU coarse path. In particular, it just computes the clips
 // sequentially rather than using the partition reductions.
 fn clip_leaf_main(
     config: &ConfigUniform,

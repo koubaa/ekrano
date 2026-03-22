@@ -282,7 +282,7 @@ Licensed under either of
 
 at your option.
 
-In addition, all files in the [`vello_shaders/shader`](https://github.com/linebender/vello/tree/main/vello_shaders/shader) and [`vello_shaders/src/cpu`](https://github.com/linebender/vello/tree/main/vello_shaders/src/cpu) directories and subdirectories thereof are alternatively licensed under the Unlicense ([vello_shaders/shader/UNLICENSE](https://github.com/linebender/vello/tree/main/vello_shaders/shader/UNLICENSE) or <http://unlicense.org/>).
+In addition, all files in [`ekrano_shaders/slang`](ekrano_shaders/slang) and [`ekrano_shaders/src/cpu`](ekrano_shaders/src/cpu) are alternatively licensed under the Unlicense (<http://unlicense.org/>), following upstream Vello’s shader licensing intent.
 For clarity, these files are also licensed under either of the above licenses.
 The intent is for this research to be used in as broad a context as possible.
 

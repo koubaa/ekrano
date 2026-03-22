@@ -1,24 +1,4 @@
 {
-  "wgsl-analyzer.customImports": {
-    "bbox": "${workspaceFolder}/vello_shaders/shader/shared/bbox.wgsl",
-    "blend": "${workspaceFolder}/vello_shaders/shader/shared/blend.wgsl",
-    "bump": "${workspaceFolder}/vello_shaders/shader/shared/bump.wgsl",
-    "clip": "${workspaceFolder}/vello_shaders/shader/shared/clip.wgsl",
-    "config": "${workspaceFolder}/vello_shaders/shader/shared/config.wgsl",
-    "cubic": "${workspaceFolder}/vello_shaders/shader/shared/cubic.wgsl",
-    "drawtag": "${workspaceFolder}/vello_shaders/shader/shared/drawtag.wgsl",
-    "pathtag": "${workspaceFolder}/vello_shaders/shader/shared/pathtag.wgsl",
-    "ptcl": "${workspaceFolder}/vello_shaders/shader/shared/ptcl.wgsl",
-    "segment": "${workspaceFolder}/vello_shaders/shader/shared/segment.wgsl",
-    "tile": "${workspaceFolder}/vello_shaders/shader/shared/tile.wgsl",
-    "transform": "${workspaceFolder}/vello_shaders/shader/shared/transform.wgsl",
-    "util": "${workspaceFolder}/vello_shaders/shader/shared/util.wgsl"
-  },
-  "wgsl-analyzer.diagnostics.nagaVersion": "main",
-  "wgsl-analyzer.preprocessor.shaderDefs": [
-    "msaa16",
-    "msaa"
-  ],
   "[json]": {
     // Show a colour preview in the diff reports.
     // The diff reports (and the trace.json dump from wgpu-profiler) are the only instances of

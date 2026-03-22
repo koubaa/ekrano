@@ -18,7 +18,7 @@ const N_TILE_X: usize = 16;
 const N_TILE_Y: usize = 16;
 const N_TILE: usize = N_TILE_X * N_TILE_Y;
 
-// If changing also change in config.wgsl
+// If changing also change in `slang/ekrano_shared.slang` (Config).
 const BLEND_STACK_SPLIT: u32 = 4;
 
 // Pixels per tile
@@ -28,7 +28,7 @@ const TILE_HEIGHT: u32 = 16;
 const PTCL_INCREMENT: u32 = 256;
 const PTCL_HEADROOM: u32 = 2;
 
-// Modeled in the WGSL as private-scoped variables
+// Modeled in GPU shaders as private-scoped variables
 struct TileState {
     cmd_offset: u32,
     cmd_limit: u32,
@@ -234,7 +234,7 @@ fn coarse_main(
             }
         }
         // compacted now has the list of draw objects for each tile.
-        // While the WGSL source does at most 256 draw objects at a time,
+        // While the GPU coarse shader does at most 256 draw objects at a time,
         // this version does all the draw objects in a tile.
         for tile_ix in 0..N_TILE {
             let tile_x = (tile_ix % N_TILE_X) as u32;
