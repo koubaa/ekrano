@@ -19,7 +19,7 @@ groupshared int sh_backdrop[64];
 [numthreads(64, 1, 1)]
 void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
     Config config = goldy_dyn_broadcast<Config>(0);
-    RWStructuredBuffer<Tile> tiles = goldy_dyn_scattered<Tile>(1);
+    StorageBuffer<Tile> tiles = goldy_dyn_scattered<Tile>(1);
 
     uint width_in_tiles = config.width_in_tiles;
     uint ix = wg_id.x * width_in_tiles + local_id.x;

@@ -20,9 +20,9 @@ groupshared uint sh_offset[256];
 [numthreads(256, 1, 1)]
 void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID) {
     Config config = goldy_dyn_broadcast<Config>(0);
-    RWStructuredBuffer<BumpAllocators> bump = goldy_dyn_scattered<BumpAllocators>(1);
-    RWStructuredBuffer<Path> paths = goldy_dyn_buf_ro<Path>(2);
-    RWStructuredBuffer<Tile> tiles = goldy_dyn_scattered<Tile>(3);
+    StorageBuffer<BumpAllocators> bump = goldy_dyn_scattered<BumpAllocators>(1);
+    StorageBuffer<Path> paths = goldy_dyn_buf_ro<Path>(2);
+    StorageBuffer<Tile> tiles = goldy_dyn_scattered<Tile>(3);
 
     if (local_id.x == 0) {
         sh_row_count[0] = bump[0].failed;

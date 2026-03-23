@@ -43,8 +43,8 @@ uint span_ms(float a, float b) {
 void fill_path_ms_impl(
     CmdFill fill,
     uint2 local_id,
-    RWStructuredBuffer<Segment> segments,
-    RWStructuredBuffer<uint> mask_lut,
+    StorageBuffer<Segment> segments,
+    StorageBuffer<uint> mask_lut,
     out float area[4]
 ) {
     uint n_segs = fill.size_and_rule >> 1;
@@ -297,8 +297,8 @@ void fill_path_ms_impl(
 void fill_path_ms_evenodd_impl(
     CmdFill fill,
     uint2 local_id,
-    RWStructuredBuffer<Segment> segments,
-    RWStructuredBuffer<uint> mask_lut,
+    StorageBuffer<Segment> segments,
+    StorageBuffer<uint> mask_lut,
     out float area[4]
 ) {
     uint n_segs = fill.size_and_rule >> 1;
@@ -477,8 +477,8 @@ void fill_path_ms_evenodd_impl(
 void fill_path_ms(
     CmdFill fill,
     uint2 local_id,
-    RWStructuredBuffer<Segment> segments,
-    RWStructuredBuffer<uint> mask_lut,
+    StorageBuffer<Segment> segments,
+    StorageBuffer<uint> mask_lut,
     out float area[4]
 ) {
     if ((fill.size_and_rule & 1) != 0) {
@@ -497,7 +497,7 @@ uint span_fine(float a, float b) {
 }
 
 // Analytic area anti-aliasing (fine_area, no MSAA)
-void fill_path(CmdFill fill, float2 xy, RWStructuredBuffer<Segment> segments, out float area[4]) {
+void fill_path(CmdFill fill, float2 xy, StorageBuffer<Segment> segments, out float area[4]) {
     uint n_segs = min(fill.size_and_rule >> 1, 65536u);
     bool even_odd = (fill.size_and_rule & 1) != 0;
     float backdrop_f = float(fill.backdrop);
@@ -543,7 +543,7 @@ void fill_path(CmdFill fill, float2 xy, RWStructuredBuffer<Segment> segments, ou
     }
 }
 
-CmdFill read_fill(RWStructuredBuffer<uint> ptcl, uint cmd_ix) {
+CmdFill read_fill(StorageBuffer<uint> ptcl, uint cmd_ix) {
     CmdFill f;
     f.size_and_rule = ptcl[cmd_ix + 1];
     f.seg_data = ptcl[cmd_ix + 2];
@@ -551,13 +551,13 @@ CmdFill read_fill(RWStructuredBuffer<uint> ptcl, uint cmd_ix) {
     return f;
 }
 
-CmdColor read_color(RWStructuredBuffer<uint> ptcl, uint cmd_ix) {
+CmdColor read_color(StorageBuffer<uint> ptcl, uint cmd_ix) {
     CmdColor c;
     c.rgba_color = ptcl[cmd_ix + 1];
     return c;
 }
 
-CmdBlurRect read_blur_rect(RWStructuredBuffer<uint> ptcl, RWStructuredBuffer<uint> info, uint cmd_ix) {
+CmdBlurRect read_blur_rect(StorageBuffer<uint> ptcl, StorageBuffer<uint> info, uint cmd_ix) {
     uint info_offset = ptcl[cmd_ix + 1];
     CmdBlurRect r;
     r.rgba_color = ptcl[cmd_ix + 2];
@@ -570,7 +570,7 @@ CmdBlurRect read_blur_rect(RWStructuredBuffer<uint> ptcl, RWStructuredBuffer<uin
     return r;
 }
 
-CmdLinGrad read_lin_grad(RWStructuredBuffer<uint> ptcl, RWStructuredBuffer<uint> info, uint cmd_ix) {
+CmdLinGrad read_lin_grad(StorageBuffer<uint> ptcl, StorageBuffer<uint> info, uint cmd_ix) {
     uint index_mode = ptcl[cmd_ix + 1];
     uint info_offset = ptcl[cmd_ix + 2];
     CmdLinGrad g;
@@ -582,7 +582,7 @@ CmdLinGrad read_lin_grad(RWStructuredBuffer<uint> ptcl, RWStructuredBuffer<uint>
     return g;
 }
 
-CmdRadGrad read_rad_grad(RWStructuredBuffer<uint> ptcl, RWStructuredBuffer<uint> info, uint cmd_ix) {
+CmdRadGrad read_rad_grad(StorageBuffer<uint> ptcl, StorageBuffer<uint> info, uint cmd_ix) {
     uint index_mode = ptcl[cmd_ix + 1];
     uint info_offset = ptcl[cmd_ix + 2];
     CmdRadGrad g;
@@ -598,7 +598,7 @@ CmdRadGrad read_rad_grad(RWStructuredBuffer<uint> ptcl, RWStructuredBuffer<uint>
     return g;
 }
 
-CmdSweepGrad read_sweep_grad(RWStructuredBuffer<uint> ptcl, RWStructuredBuffer<uint> info, uint cmd_ix) {
+CmdSweepGrad read_sweep_grad(StorageBuffer<uint> ptcl, StorageBuffer<uint> info, uint cmd_ix) {
     uint index_mode = ptcl[cmd_ix + 1];
     uint info_offset = ptcl[cmd_ix + 2];
     CmdSweepGrad g;
@@ -611,7 +611,7 @@ CmdSweepGrad read_sweep_grad(RWStructuredBuffer<uint> ptcl, RWStructuredBuffer<u
     return g;
 }
 
-CmdImage read_image_cmd(RWStructuredBuffer<uint> ptcl, RWStructuredBuffer<uint> info, uint cmd_ix) {
+CmdImage read_image_cmd(StorageBuffer<uint> ptcl, StorageBuffer<uint> info, uint cmd_ix) {
     uint info_offset = ptcl[cmd_ix + 1];
     CmdImage img;
     img.matrx = float4(asfloat(info[info_offset]), asfloat(info[info_offset+1]), asfloat(info[info_offset+2]), asfloat(info[info_offset+3]));
@@ -630,7 +630,7 @@ CmdImage read_image_cmd(RWStructuredBuffer<uint> ptcl, RWStructuredBuffer<uint> 
     return img;
 }
 
-CmdEndClip read_end_clip(RWStructuredBuffer<uint> ptcl, uint cmd_ix) {
+CmdEndClip read_end_clip(StorageBuffer<uint> ptcl, uint cmd_ix) {
     CmdEndClip e;
     e.blend = ptcl[cmd_ix + 1];
     e.alpha = asfloat(ptcl[cmd_ix + 2]);
@@ -652,15 +652,15 @@ float hypot_fine(float a, float b) {
 [numthreads(4, 16, 1)]
 void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
     Config config = goldy_dyn_broadcast<Config>(0);
-    RWStructuredBuffer<Segment> segments = goldy_dyn_buf_ro<Segment>(1);
-    RWStructuredBuffer<uint> ptcl = goldy_dyn_buf_ro<uint>(2);
-    RWStructuredBuffer<uint> info = goldy_dyn_buf_ro<uint>(3);
-    RWStructuredBuffer<uint> blend_spill = goldy_dyn_scattered<uint>(4);
+    StorageBuffer<Segment> segments = goldy_dyn_buf_ro<Segment>(1);
+    StorageBuffer<uint> ptcl = goldy_dyn_buf_ro<uint>(2);
+    StorageBuffer<uint> info = goldy_dyn_buf_ro<uint>(3);
+    StorageBuffer<uint> blend_spill = goldy_dyn_scattered<uint>(4);
     RWTexture2D<float4> output = goldy_dyn_direct_spatial<float4>(5);
     Texture2D<float4> gradients = goldy_dyn_interpolated<float4>(6);
     Texture2D<float4> image_atlas = goldy_dyn_interpolated<float4>(7);
 #ifdef msaa
-    RWStructuredBuffer<uint> mask_lut = goldy_dyn_buf_ro<uint>(8);
+    StorageBuffer<uint> mask_lut = goldy_dyn_buf_ro<uint>(8);
 #endif
 
     uint actual_y = wg_id.y + config.tile_y_offset;

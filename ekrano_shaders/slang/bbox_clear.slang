@@ -13,7 +13,7 @@ import ekrano_shared;
 [numthreads(256, 1, 1)]
 void cs_main(uint3 global_id : SV_DispatchThreadID) {
     Config config = goldy_dyn_broadcast<Config>(0);
-    RWStructuredBuffer<PathBbox> path_bboxes = goldy_dyn_scattered<PathBbox>(1);
+    StorageBuffer<PathBbox> path_bboxes = goldy_dyn_scattered<PathBbox>(1);
 
     uint ix = global_id.x;
     if (ix < config.n_path) {

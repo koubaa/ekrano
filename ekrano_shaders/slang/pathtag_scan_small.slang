@@ -18,9 +18,9 @@ groupshared TagMonoid sh_monoid[256];
 [numthreads(256, 1, 1)]
 void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
     Config config = goldy_dyn_broadcast<Config>(0);
-    RWStructuredBuffer<uint> scene = goldy_dyn_buf_ro<uint>(1);
-    RWStructuredBuffer<TagMonoid> reduced = goldy_dyn_buf_ro<TagMonoid>(2);
-    RWStructuredBuffer<TagMonoid> tag_monoids = goldy_dyn_scattered<TagMonoid>(3);
+    StorageBuffer<uint> scene = goldy_dyn_buf_ro<uint>(1);
+    StorageBuffer<TagMonoid> reduced = goldy_dyn_buf_ro<TagMonoid>(2);
+    StorageBuffer<TagMonoid> tag_monoids = goldy_dyn_scattered<TagMonoid>(3);
 
     // Small variant: prefix over reduced (one level)
     TagMonoid agg = tag_monoid_identity();

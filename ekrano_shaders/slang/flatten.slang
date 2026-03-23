@@ -88,11 +88,11 @@ static const uint FLATTEN_ARC_MAX_LINES = 512;
 // Context passed to helpers (buffers + pathdata_base)
 struct FlattenCtx {
     Config config;
-    RWStructuredBuffer<uint> scene;
-    RWStructuredBuffer<TagMonoid> tag_monoids;
-    RWByteAddressBuffer path_bboxes;
-    RWStructuredBuffer<BumpAllocators> bump;
-    RWStructuredBuffer<LineSoup> lines;
+    StorageBuffer<uint> scene;
+    StorageBuffer<TagMonoid> tag_monoids;
+    ByteAddressView path_bboxes;
+    StorageBuffer<BumpAllocators> bump;
+    StorageBuffer<LineSoup> lines;
     uint pathdata_base;
 };
 
@@ -338,7 +338,7 @@ int round_up(float x) { return int(ceil(x)); }
 // RWByteAddressBuffer.InterlockedMin/Max use UNSIGNED comparison in HLSL/DXIL.
 // Path bboxes need SIGNED comparison (sentinel x1/y1 = INT_MIN = 0x80000000, which
 // is large unsigned). These helpers use CAS loops with signed comparison.
-void signed_atomic_min(RWByteAddressBuffer buf, uint addr, int new_val) {
+void signed_atomic_min(inout ByteAddressView buf, uint addr, int new_val) {
     uint orig;
     buf.InterlockedCompareExchange(addr, 0, 0, orig);
     while (new_val < int(orig)) {
@@ -348,7 +348,7 @@ void signed_atomic_min(RWByteAddressBuffer buf, uint addr, int new_val) {
     }
 }
 
-void signed_atomic_max(RWByteAddressBuffer buf, uint addr, int new_val) {
+void signed_atomic_max(inout ByteAddressView buf, uint addr, int new_val) {
     uint orig;
     buf.InterlockedCompareExchange(addr, 0, 0, orig);
     while (new_val > int(orig)) {
@@ -878,11 +878,11 @@ void process_dashed_segment(
 [numthreads(256, 1, 1)]
 void cs_main(uint3 global_id : SV_DispatchThreadID) {
     Config config = goldy_dyn_broadcast<Config>(0);
-    RWStructuredBuffer<uint> scene = goldy_dyn_buf_ro<uint>(1);
-    RWStructuredBuffer<TagMonoid> tag_monoids = goldy_dyn_buf_ro<TagMonoid>(2);
-    RWByteAddressBuffer path_bboxes = goldy_dyn_byte_address(3);
-    RWStructuredBuffer<BumpAllocators> bump = goldy_dyn_scattered<BumpAllocators>(4);
-    RWStructuredBuffer<LineSoup> lines = goldy_dyn_scattered<LineSoup>(5);
+    StorageBuffer<uint> scene = goldy_dyn_buf_ro<uint>(1);
+    StorageBuffer<TagMonoid> tag_monoids = goldy_dyn_buf_ro<TagMonoid>(2);
+    ByteAddressView path_bboxes = goldy_dyn_byte_address(3);
+    StorageBuffer<BumpAllocators> bump = goldy_dyn_scattered<BumpAllocators>(4);
+    StorageBuffer<LineSoup> lines = goldy_dyn_scattered<LineSoup>(5);
 
     FlattenCtx ctx;
     ctx.config = config;

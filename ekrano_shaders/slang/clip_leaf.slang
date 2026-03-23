@@ -52,12 +52,12 @@ int search_link(inout Bic bic, uint ix_in) {
 [numthreads(256, 1, 1)]
 void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
     Config config = goldy_dyn_broadcast<Config>(0);
-    RWStructuredBuffer<ClipInp> clip_inp = goldy_dyn_buf_ro<ClipInp>(1);
-    RWStructuredBuffer<PathBbox> path_bboxes = goldy_dyn_buf_ro<PathBbox>(2);
-    RWStructuredBuffer<Bic> reduced = goldy_dyn_buf_ro<Bic>(3);
-    RWStructuredBuffer<ClipEl> clip_els = goldy_dyn_buf_ro<ClipEl>(4);
-    RWStructuredBuffer<DrawMonoid> draw_monoids = goldy_dyn_scattered<DrawMonoid>(5);
-    RWStructuredBuffer<float4> clip_bboxes = goldy_dyn_scattered<float4>(6);
+    StorageBuffer<ClipInp> clip_inp = goldy_dyn_buf_ro<ClipInp>(1);
+    StorageBuffer<PathBbox> path_bboxes = goldy_dyn_buf_ro<PathBbox>(2);
+    StorageBuffer<Bic> reduced = goldy_dyn_buf_ro<Bic>(3);
+    StorageBuffer<ClipEl> clip_els = goldy_dyn_buf_ro<ClipEl>(4);
+    StorageBuffer<DrawMonoid> draw_monoids = goldy_dyn_scattered<DrawMonoid>(5);
+    StorageBuffer<float4> clip_bboxes = goldy_dyn_scattered<float4>(6);
 
     int load_path_ix = (global_id.x < config.n_clip) ? clip_inp[global_id.x].path_ix : -2147483648;
 

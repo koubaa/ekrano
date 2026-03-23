@@ -523,13 +523,8 @@ public DrawMonoid map_draw_tag(uint tag_word) {
     return c;
 }
 
-// Read draw tag from scene buffer. Pass scene and config.
-public uint read_draw_tag_from_scene(RWStructuredBuffer<uint> scene, Config config, uint ix) {
-    if (ix < config.n_drawobj) {
-        return scene[config.drawtag_base + ix];
-    }
-    return DRAWTAG_NOP;
-}
+// read_draw_tag_from_scene was moved to individual shaders (draw_leaf, draw_reduce)
+// to avoid requiring goldy_exp import or interface constraints in this shared module.
 
 
 // === Blend - mix and compose mode constants ===

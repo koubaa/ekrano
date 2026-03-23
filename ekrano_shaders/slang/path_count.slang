@@ -20,11 +20,11 @@ uint span(float a, float b) {
 [numthreads(256, 1, 1)]
 void cs_main(uint3 global_id : SV_DispatchThreadID) {
     Config config = goldy_dyn_broadcast<Config>(0);
-    RWStructuredBuffer<BumpAllocators> bump = goldy_dyn_scattered<BumpAllocators>(1);
-    RWStructuredBuffer<LineSoup> lines = goldy_dyn_buf_ro<LineSoup>(2);
-    RWStructuredBuffer<Path> paths = goldy_dyn_buf_ro<Path>(3);
-    RWStructuredBuffer<Tile> tile = goldy_dyn_scattered<Tile>(4);
-    RWStructuredBuffer<SegmentCount> seg_counts = goldy_dyn_scattered<SegmentCount>(5);
+    StorageBuffer<BumpAllocators> bump = goldy_dyn_scattered<BumpAllocators>(1);
+    StorageBuffer<LineSoup> lines = goldy_dyn_buf_ro<LineSoup>(2);
+    StorageBuffer<Path> paths = goldy_dyn_buf_ro<Path>(3);
+    StorageBuffer<Tile> tile = goldy_dyn_scattered<Tile>(4);
+    StorageBuffer<SegmentCount> seg_counts = goldy_dyn_scattered<SegmentCount>(5);
 
     uint n_lines = bump[0].lines;
 

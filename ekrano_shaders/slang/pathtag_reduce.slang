@@ -18,8 +18,8 @@ groupshared TagMonoid sh_scratch[WG_SIZE];
 [numthreads(256, 1, 1)]
 void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID) {
     Config config = goldy_dyn_broadcast<Config>(0);
-    RWStructuredBuffer<uint> scene = goldy_dyn_buf_ro<uint>(1);
-    RWStructuredBuffer<TagMonoid> reduced = goldy_dyn_scattered<TagMonoid>(2);
+    StorageBuffer<uint> scene = goldy_dyn_buf_ro<uint>(1);
+    StorageBuffer<TagMonoid> reduced = goldy_dyn_scattered<TagMonoid>(2);
 
     uint ix = global_id.x;
     uint tag_word = scene[config.pathtag_base + ix];

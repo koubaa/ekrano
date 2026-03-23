@@ -12,7 +12,7 @@ static const uint LG_WG_SIZE = 8;
 
 groupshared DrawMonoid sh_scratch[256];
 
-Transform read_transform(RWStructuredBuffer<uint> scene, uint transform_base, uint ix) {
+Transform read_transform(StorageBuffer<uint> scene, uint transform_base, uint ix) {
     uint base = transform_base + ix * 6;
     float c0 = asfloat(scene[base]);
     float c1 = asfloat(scene[base + 1]);
@@ -32,12 +32,12 @@ Transform read_transform(RWStructuredBuffer<uint> scene, uint transform_base, ui
 [numthreads(256, 1, 1)]
 void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
     Config config = goldy_dyn_broadcast<Config>(0);
-    RWStructuredBuffer<uint> scene = goldy_dyn_buf_ro<uint>(1);
-    RWStructuredBuffer<DrawMonoid> reduced = goldy_dyn_buf_ro<DrawMonoid>(2);
-    RWStructuredBuffer<PathBbox> path_bbox = goldy_dyn_buf_ro<PathBbox>(3);
-    RWStructuredBuffer<DrawMonoid> draw_monoid = goldy_dyn_scattered<DrawMonoid>(4);
-    RWStructuredBuffer<uint> info = goldy_dyn_scattered<uint>(5);
-    RWStructuredBuffer<ClipInp> clip_inp = goldy_dyn_scattered<ClipInp>(6);
+    StorageBuffer<uint> scene = goldy_dyn_buf_ro<uint>(1);
+    StorageBuffer<DrawMonoid> reduced = goldy_dyn_buf_ro<DrawMonoid>(2);
+    StorageBuffer<PathBbox> path_bbox = goldy_dyn_buf_ro<PathBbox>(3);
+    StorageBuffer<DrawMonoid> draw_monoid = goldy_dyn_scattered<DrawMonoid>(4);
+    StorageBuffer<uint> info = goldy_dyn_scattered<uint>(5);
+    StorageBuffer<ClipInp> clip_inp = goldy_dyn_scattered<ClipInp>(6);
 
     DrawMonoid agg = draw_monoid_identity();
     if (local_id.x < wg_id.x) {
@@ -66,7 +66,7 @@ void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
 
     while (block_start != blocks_end) {
         uint ix = block_start + local_id.x;
-        uint tag_word = read_draw_tag_from_scene(scene, config, ix);
+        uint tag_word = (ix < config.n_drawobj) ? scene[config.drawtag_base + ix] : DRAWTAG_NOP;
         agg = map_draw_tag(tag_word);
         GroupMemoryBarrierWithGroupSync();
         sh_scratch[local_id.x] = agg;
