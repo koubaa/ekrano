@@ -17,9 +17,9 @@ groupshared TagMonoid sh_monoid[256];
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
-    RWStructuredBuffer<TagMonoid> reduced = goldy_dyn_buf_ro<TagMonoid>(0);
-    RWStructuredBuffer<TagMonoid> reduced2 = goldy_dyn_buf_ro<TagMonoid>(1);
-    RWStructuredBuffer<TagMonoid> tag_monoids = goldy_dyn_scattered<TagMonoid>(2);
+    StorageBuffer<TagMonoid> reduced = goldy_dyn_buf_ro<TagMonoid>(0);
+    StorageBuffer<TagMonoid> reduced2 = goldy_dyn_buf_ro<TagMonoid>(1);
+    StorageBuffer<TagMonoid> tag_monoids = goldy_dyn_scattered<TagMonoid>(2);
 
     TagMonoid agg = tag_monoid_identity();
     if (local_id.x < wg_id.x) {

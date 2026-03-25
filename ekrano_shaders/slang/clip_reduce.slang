@@ -17,10 +17,10 @@ groupshared uint sh_path_ix[256];
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
-    RWStructuredBuffer<ClipInp> clip_inp = goldy_dyn_buf_ro<ClipInp>(0);
-    RWStructuredBuffer<PathBbox> path_bboxes = goldy_dyn_buf_ro<PathBbox>(1);
-    RWStructuredBuffer<Bic> reduced = goldy_dyn_scattered<Bic>(2);
-    RWStructuredBuffer<ClipEl> clip_out = goldy_dyn_scattered<ClipEl>(3);
+    StorageBuffer<ClipInp> clip_inp = goldy_dyn_buf_ro<ClipInp>(0);
+    StorageBuffer<PathBbox> path_bboxes = goldy_dyn_buf_ro<PathBbox>(1);
+    StorageBuffer<Bic> reduced = goldy_dyn_scattered<Bic>(2);
+    StorageBuffer<ClipEl> clip_out = goldy_dyn_scattered<ClipEl>(3);
 
     int inp = clip_inp[global_id.x].path_ix;
     bool is_push = inp >= 0;

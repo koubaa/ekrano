@@ -21,11 +21,11 @@ groupshared uint sh_previous_failed;
 [numthreads(256, 1, 1)]
 void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID) {
     Config config = goldy_dyn_broadcast<Config>(0);
-    RWStructuredBuffer<uint> scene = goldy_dyn_buf_ro<uint>(1);
-    RWStructuredBuffer<float4> draw_bboxes = goldy_dyn_buf_ro<float4>(2);
-    RWStructuredBuffer<BumpAllocators> bump = goldy_dyn_scattered<BumpAllocators>(3);
-    RWStructuredBuffer<Path> paths = goldy_dyn_scattered<Path>(4);
-    RWStructuredBuffer<Tile> tiles = goldy_dyn_scattered<Tile>(5);
+    StorageBuffer<uint> scene = goldy_dyn_buf_ro<uint>(1);
+    StorageBuffer<float4> draw_bboxes = goldy_dyn_buf_ro<float4>(2);
+    StorageBuffer<BumpAllocators> bump = goldy_dyn_scattered<BumpAllocators>(3);
+    StorageBuffer<Path> paths = goldy_dyn_scattered<Path>(4);
+    StorageBuffer<Tile> tiles = goldy_dyn_scattered<Tile>(5);
 
     if (local_id.x == 0) {
         uint failed_val = bump[0].failed & (STAGE_BINNING | STAGE_FLATTEN);

@@ -15,8 +15,8 @@ groupshared DrawMonoid sh_scratch[256];
 [numthreads(256, 1, 1)]
 void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
     Config config = goldy_dyn_broadcast<Config>(0);
-    RWStructuredBuffer<uint> scene = goldy_dyn_scattered<uint>(1);
-    RWStructuredBuffer<DrawMonoid> reduced = goldy_dyn_scattered<DrawMonoid>(2);
+    StorageBuffer<uint> scene = goldy_dyn_scattered<uint>(1);
+    StorageBuffer<DrawMonoid> reduced = goldy_dyn_scattered<DrawMonoid>(2);
 
     uint num_blocks_total = (config.n_drawobj + (WG_SIZE - 1)) / WG_SIZE;
     uint n_blocks_base = num_blocks_total / WG_SIZE;
@@ -27,7 +27,7 @@ void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
 
     DrawMonoid agg = draw_monoid_identity();
     for (uint i = 0; i < n_blocks; i++) {
-        uint tag_word = read_draw_tag_from_scene(scene, config, block_index);
+        uint tag_word = (block_index < config.n_drawobj) ? scene[config.drawtag_base + block_index] : DRAWTAG_NOP;
         agg = combine_draw_monoid(agg, map_draw_tag(tag_word));
         block_index += WG_SIZE;
     }

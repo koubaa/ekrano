@@ -14,9 +14,9 @@ static const uint WG_SIZE = 256;
 [shader("compute")]
 [numthreads(1, 1, 1)]
 void cs_main() {
-    RWStructuredBuffer<BumpAllocators> bump = goldy_dyn_scattered<BumpAllocators>(0);
-    RWStructuredBuffer<IndirectCount> indirect = goldy_dyn_scattered<IndirectCount>(1);
-    RWStructuredBuffer<uint> ptcl = goldy_dyn_scattered<uint>(2);
+    StorageBuffer<BumpAllocators> bump = goldy_dyn_scattered<BumpAllocators>(0);
+    StorageBuffer<IndirectCount> indirect = goldy_dyn_scattered<IndirectCount>(1);
+    StorageBuffer<uint> ptcl = goldy_dyn_scattered<uint>(2);
 
     if (bump[0].failed != 0) {
         indirect[INDIRECT_STAGE_PATH_TILING].count_x = 0;

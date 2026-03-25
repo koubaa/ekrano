@@ -24,7 +24,7 @@ groupshared uint sh_tile_count[256];
 groupshared uint sh_tile_base[256];
 
 void alloc_cmd(inout uint cmd_offset, inout uint cmd_limit,
-    RWStructuredBuffer<uint> ptcl, RWStructuredBuffer<BumpAllocators> bump,
+    StorageBuffer<uint> ptcl, StorageBuffer<BumpAllocators> bump,
     Config config, uint size) {
     if (cmd_offset + size >= cmd_limit) {
         uint ptcl_dyn_start = config.width_in_tiles * config.height_in_tiles * PTCL_INITIAL_ALLOC;
@@ -42,8 +42,8 @@ void alloc_cmd(inout uint cmd_offset, inout uint cmd_limit,
 
 void write_path(Tile tile, uint tile_ix, uint draw_flags,
     inout uint cmd_offset, inout uint cmd_limit,
-    RWStructuredBuffer<uint> ptcl, RWStructuredBuffer<BumpAllocators> bump,
-    RWStructuredBuffer<Tile> tiles, Config config) {
+    StorageBuffer<uint> ptcl, StorageBuffer<BumpAllocators> bump,
+    StorageBuffer<Tile> tiles, Config config) {
     uint n_segs = tile.segment_count_or_ix;
     if (n_segs != 0) {
         uint seg_ix; InterlockedAdd(bump[0].segments, n_segs, seg_ix);
@@ -63,7 +63,7 @@ void write_path(Tile tile, uint tile_ix, uint draw_flags,
 }
 
 void write_color(uint rgba_color, inout uint cmd_offset, inout uint cmd_limit,
-    RWStructuredBuffer<uint> ptcl, RWStructuredBuffer<BumpAllocators> bump, Config config) {
+    StorageBuffer<uint> ptcl, StorageBuffer<BumpAllocators> bump, Config config) {
     alloc_cmd(cmd_offset, cmd_limit, ptcl, bump, config, 2);
     ptcl[cmd_offset] = CMD_COLOR;
     ptcl[cmd_offset + 1] = rgba_color;
@@ -72,7 +72,7 @@ void write_color(uint rgba_color, inout uint cmd_offset, inout uint cmd_limit,
 
 void write_grad(uint ty, uint index, uint info_offset,
     inout uint cmd_offset, inout uint cmd_limit,
-    RWStructuredBuffer<uint> ptcl, RWStructuredBuffer<BumpAllocators> bump, Config config) {
+    StorageBuffer<uint> ptcl, StorageBuffer<BumpAllocators> bump, Config config) {
     alloc_cmd(cmd_offset, cmd_limit, ptcl, bump, config, 3);
     ptcl[cmd_offset] = ty;
     ptcl[cmd_offset + 1] = index;
@@ -81,7 +81,7 @@ void write_grad(uint ty, uint index, uint info_offset,
 }
 
 void write_image(uint info_offset, inout uint cmd_offset, inout uint cmd_limit,
-    RWStructuredBuffer<uint> ptcl, RWStructuredBuffer<BumpAllocators> bump, Config config) {
+    StorageBuffer<uint> ptcl, StorageBuffer<BumpAllocators> bump, Config config) {
     alloc_cmd(cmd_offset, cmd_limit, ptcl, bump, config, 2);
     ptcl[cmd_offset] = CMD_IMAGE;
     ptcl[cmd_offset + 1] = info_offset;
@@ -89,14 +89,14 @@ void write_image(uint info_offset, inout uint cmd_offset, inout uint cmd_limit,
 }
 
 void write_begin_clip(inout uint cmd_offset, inout uint cmd_limit,
-    RWStructuredBuffer<uint> ptcl, RWStructuredBuffer<BumpAllocators> bump, Config config) {
+    StorageBuffer<uint> ptcl, StorageBuffer<BumpAllocators> bump, Config config) {
     alloc_cmd(cmd_offset, cmd_limit, ptcl, bump, config, 1);
     ptcl[cmd_offset] = CMD_BEGIN_CLIP;
     cmd_offset += 1;
 }
 
 void write_end_clip(CmdEndClip end_clip, inout uint cmd_offset, inout uint cmd_limit,
-    RWStructuredBuffer<uint> ptcl, RWStructuredBuffer<BumpAllocators> bump, Config config) {
+    StorageBuffer<uint> ptcl, StorageBuffer<BumpAllocators> bump, Config config) {
     alloc_cmd(cmd_offset, cmd_limit, ptcl, bump, config, 3);
     ptcl[cmd_offset] = CMD_END_CLIP;
     ptcl[cmd_offset + 1] = end_clip.blend;
@@ -106,7 +106,7 @@ void write_end_clip(CmdEndClip end_clip, inout uint cmd_offset, inout uint cmd_l
 
 void write_blurred_rounded_rect(uint rgba_color, uint info_offset,
     inout uint cmd_offset, inout uint cmd_limit,
-    RWStructuredBuffer<uint> ptcl, RWStructuredBuffer<BumpAllocators> bump, Config config) {
+    StorageBuffer<uint> ptcl, StorageBuffer<BumpAllocators> bump, Config config) {
     alloc_cmd(cmd_offset, cmd_limit, ptcl, bump, config, 3);
     ptcl[cmd_offset] = CMD_BLUR_RECT;
     ptcl[cmd_offset + 1] = info_offset;
@@ -120,14 +120,14 @@ void write_blurred_rounded_rect(uint rgba_color, uint info_offset,
 [numthreads(256, 1, 1)]
 void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
     Config config = goldy_dyn_broadcast<Config>(0);
-    RWStructuredBuffer<uint> scene = goldy_dyn_buf_ro<uint>(1);
-    RWStructuredBuffer<DrawMonoid> draw_monoids = goldy_dyn_buf_ro<DrawMonoid>(2);
-    RWStructuredBuffer<BinHeader> bin_headers = goldy_dyn_buf_ro<BinHeader>(3);
-    RWStructuredBuffer<uint> info_bin_data = goldy_dyn_buf_ro<uint>(4);
-    RWStructuredBuffer<Path> paths = goldy_dyn_buf_ro<Path>(5);
-    RWStructuredBuffer<Tile> tiles = goldy_dyn_scattered<Tile>(6);
-    RWStructuredBuffer<BumpAllocators> bump = goldy_dyn_scattered<BumpAllocators>(7);
-    RWStructuredBuffer<uint> ptcl = goldy_dyn_scattered<uint>(8);
+    StorageBuffer<uint> scene = goldy_dyn_buf_ro<uint>(1);
+    StorageBuffer<DrawMonoid> draw_monoids = goldy_dyn_buf_ro<DrawMonoid>(2);
+    StorageBuffer<BinHeader> bin_headers = goldy_dyn_buf_ro<BinHeader>(3);
+    StorageBuffer<uint> info_bin_data = goldy_dyn_buf_ro<uint>(4);
+    StorageBuffer<Path> paths = goldy_dyn_buf_ro<Path>(5);
+    StorageBuffer<Tile> tiles = goldy_dyn_scattered<Tile>(6);
+    StorageBuffer<BumpAllocators> bump = goldy_dyn_scattered<BumpAllocators>(7);
+    StorageBuffer<uint> ptcl = goldy_dyn_scattered<uint>(8);
 
     if (local_id.x == 0) {
         uint failed = bump[0].failed & (STAGE_BINNING | STAGE_TILE_ALLOC | STAGE_FLATTEN);
