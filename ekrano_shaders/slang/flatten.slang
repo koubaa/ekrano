@@ -318,51 +318,14 @@ float2 read_i16_point(FlattenCtx ctx, uint ix) {
     return float2(x, y);
 }
 
-Transform read_transform(FlattenCtx ctx, uint transform_base, uint ix) {
-    uint base = transform_base + ix * 6;
-    float c0 = asfloat(ctx.scene[base]);
-    float c1 = asfloat(ctx.scene[base + 1]);
-    float c2 = asfloat(ctx.scene[base + 2]);
-    float c3 = asfloat(ctx.scene[base + 3]);
-    float c4 = asfloat(ctx.scene[base + 4]);
-    float c5 = asfloat(ctx.scene[base + 5]);
-    Transform r;
-    r.matrx = float4(c0, c1, c2, c3);
-    r.translate = float2(c4, c5);
-    return r;
-}
-
 int round_down(float x) { return int(floor(x)); }
 int round_up(float x) { return int(ceil(x)); }
-
-// RWByteAddressBuffer.InterlockedMin/Max use UNSIGNED comparison in HLSL/DXIL.
-// Path bboxes need SIGNED comparison (sentinel x1/y1 = INT_MIN = 0x80000000, which
-// is large unsigned). These helpers use CAS loops with signed comparison.
-void signed_atomic_min(inout ByteAddressView buf, uint addr, int new_val) {
-    uint orig;
-    buf.InterlockedCompareExchange(addr, 0, 0, orig);
-    while (new_val < int(orig)) {
-        uint expected = orig;
-        buf.InterlockedCompareExchange(addr, expected, uint(new_val), orig);
-        if (orig == expected) break;
-    }
-}
-
-void signed_atomic_max(inout ByteAddressView buf, uint addr, int new_val) {
-    uint orig;
-    buf.InterlockedCompareExchange(addr, 0, 0, orig);
-    while (new_val > int(orig)) {
-        uint expected = orig;
-        buf.InterlockedCompareExchange(addr, expected, uint(new_val), orig);
-        if (orig == expected) break;
-    }
-}
 
 PathTagData compute_tag_monoid(FlattenCtx ctx, uint ix) {
     uint tag_word = ctx.scene[ctx.config.pathtag_base + (ix >> 2)];
     uint shift = (ix & 3) * 8;
     TagMonoid tm = reduce_tag(tag_word & ((1u << shift) - 1u));
-    tm = combine_tag_monoid(ctx.tag_monoids[ix >> 2], tm);
+    tm = ctx.tag_monoids[ix >> 2] + tm;
     uint tag_byte = (tag_word >> shift) & 0xff;
     tm.trans_ix -= 1;
     tm.style_ix -= STYLE_SIZE_IN_WORDS;
@@ -435,8 +398,8 @@ void write_line(FlattenCtx ctx, uint line_ix, uint path_ix, float2 p0, float2 p1
 }
 
 void write_line_with_transform(FlattenCtx ctx, uint line_ix, uint path_ix, float2 p0, float2 p1, Transform t, inout float4 bbox) {
-    float2 tp0 = transform_apply(t, p0);
-    float2 tp1 = transform_apply(t, p1);
+    float2 tp0 = t * p0;
+    float2 tp1 = t * p1;
     write_line(ctx, line_ix, path_ix, tp0, tp1, bbox);
 }
 
@@ -450,8 +413,8 @@ uint output_line(FlattenCtx ctx, uint path_ix, float2 p0, float2 p1, inout float
 }
 
 void output_line_with_transform(FlattenCtx ctx, uint path_ix, float2 p0, float2 p1, Transform transform, inout float4 bbox) {
-    float2 tp0 = transform_apply(transform, p0);
-    float2 tp1 = transform_apply(transform, p1);
+    float2 tp0 = transform * p0;
+    float2 tp1 = transform * p1;
     // TEMP: count NaN lines in the tile field of bump allocator
     if (!line_coords_finite(tp0, tp1)) {
         InterlockedAdd(ctx.bump[0].tile, 1);
@@ -463,10 +426,10 @@ void output_line_with_transform(FlattenCtx ctx, uint path_ix, float2 p0, float2 
 }
 
 void output_two_lines_with_transform(FlattenCtx ctx, uint path_ix, float2 p00, float2 p01, float2 p10, float2 p11, Transform transform, inout float4 bbox) {
-    float2 t00 = transform_apply(transform, p00);
-    float2 t01 = transform_apply(transform, p01);
-    float2 t10 = transform_apply(transform, p10);
-    float2 t11 = transform_apply(transform, p11);
+    float2 t00 = transform * p00;
+    float2 t01 = transform * p01;
+    float2 t10 = transform * p10;
+    float2 t11 = transform * p11;
     if (!line_coords_finite(t00, t01) || !line_coords_finite(t10, t11))
         return;
     uint line_ix = 0;
@@ -498,10 +461,10 @@ void flatten_euler(FlattenCtx ctx, CubicPoints cubic, uint path_ix, Transform lo
     float2 t_end = end_p;
 
     if (offset == 0.0) {
-        p0 = transform_apply(local_to_device, cubic.p0);
-        p1 = transform_apply(local_to_device, cubic.p1);
-        p2 = transform_apply(local_to_device, cubic.p2);
-        p3 = transform_apply(local_to_device, cubic.p3);
+        p0 = local_to_device * cubic.p0;
+        p1 = local_to_device * cubic.p1;
+        p2 = local_to_device * cubic.p2;
+        p3 = local_to_device * cubic.p3;
         scale = 1.0;
         transform = transform_identity();
         t_start = p0;
@@ -628,11 +591,11 @@ void flatten_euler(FlattenCtx ctx, CubicPoints cubic, uint path_ix, Transform lo
 }
 
 void flatten_arc(FlattenCtx ctx, uint path_ix, float2 begin, float2 end, float2 center, float angle, Transform transform, inout float4 bbox) {
-    float2 p0 = transform_apply(transform, begin);
+    float2 p0 = transform * begin;
     float2 r = begin - center;
     float MIN_THETA = 0.0001;
     float tol = 0.25;
-    float radius = max(tol, length(p0 - transform_apply(transform, center)));
+    float radius = max(tol, length(p0 - transform * center));
     float theta = max(MIN_THETA, 2.0 * acos(1.0 - tol / radius));
     uint n_lines = max(1u, uint(ceil(angle / theta)));
     n_lines = min(n_lines, FLATTEN_ARC_MAX_LINES);
@@ -643,7 +606,7 @@ void flatten_arc(FlattenCtx ctx, uint path_ix, float2 begin, float2 end, float2 
     r_next.x = r.x * c + r.y * s;
     r_next.y = r.y * c - r.x * s;
 
-    float2 p_last = transform_apply(transform, end);
+    float2 p_last = transform * end;
     if (!line_coords_finite(p0, p_last))
         return;
 
@@ -654,11 +617,11 @@ void flatten_arc(FlattenCtx ctx, uint path_ix, float2 begin, float2 end, float2 
         r = r_next;
         r_next.x = r.x * c + r.y * s;
         r_next.y = r.y * c - r.x * s;
-        float2 p1 = transform_apply(transform, center + r);
+        float2 p1 = transform * (center + r);
         write_line(ctx, line_ix + i, path_ix, p0, p1, bbox);
         p0 = p1;
     }
-    float2 p1 = transform_apply(transform, end);
+    float2 p1 = transform * end;
     write_line(ctx, line_ix + n_lines - 1, path_ix, p0, p1, bbox);
 }
 
@@ -674,12 +637,12 @@ void draw_cap(FlattenCtx ctx, uint path_ix, uint cap_style, float2 point, float2
         float2 v = offset_tangent;
         float2 p0 = start + v;
         float2 p1 = end + v;
-        float2 ts0 = transform_apply(transform, start);
-        float2 ts1 = transform_apply(transform, p0);
-        float2 te0 = transform_apply(transform, p1);
-        float2 te1 = transform_apply(transform, end);
-        float2 tm0 = transform_apply(transform, p0);
-        float2 tm1 = transform_apply(transform, p1);
+        float2 ts0 = transform * start;
+        float2 ts1 = transform * p0;
+        float2 te0 = transform * p1;
+        float2 te1 = transform * end;
+        float2 tm0 = transform * p0;
+        float2 tm1 = transform * p1;
         if (!line_coords_finite(ts0, ts1) || !line_coords_finite(te0, te1) || !line_coords_finite(tm0, tm1))
             return;
         uint line_ix = 0;
@@ -723,12 +686,12 @@ void draw_join(FlattenCtx ctx, uint path_ix, uint style_flags, float2 p0, float2
                 b0 = miter_pt;
             else
                 f0 = miter_pt;
-            float2 tp0 = transform_apply(transform, p);
-            float2 tp1 = transform_apply(transform, miter_pt);
-            float2 tf0 = transform_apply(transform, f0);
-            float2 tf1 = transform_apply(transform, f1);
-            float2 tb0 = transform_apply(transform, b0);
-            float2 tb1 = transform_apply(transform, b1);
+            float2 tp0 = transform * p;
+            float2 tp1 = transform * miter_pt;
+            float2 tf0 = transform * f0;
+            float2 tf1 = transform * f1;
+            float2 tb0 = transform * b0;
+            float2 tb1 = transform * b1;
             if (line_coords_finite(tp0, tp1) && line_coords_finite(tf0, tf1) && line_coords_finite(tb0, tb1)) {
                 uint tmp = 0;
                 InterlockedAdd(ctx.bump[0].lines, 3, tmp);
@@ -739,10 +702,10 @@ void draw_join(FlattenCtx ctx, uint path_ix, uint style_flags, float2 p0, float2
             }
         }
         if (!did_miter_inner) {
-            float2 tf0 = transform_apply(transform, front0);
-            float2 tf1 = transform_apply(transform, front1);
-            float2 tb0 = transform_apply(transform, back0);
-            float2 tb1 = transform_apply(transform, back1);
+            float2 tf0 = transform * front0;
+            float2 tf1 = transform * front1;
+            float2 tb0 = transform * back0;
+            float2 tb1 = transform * back1;
             if (!line_coords_finite(tf0, tf1) || !line_coords_finite(tb0, tb1))
                 return;
             uint line_ix = 0;
@@ -894,7 +857,7 @@ void cs_main(uint3 global_id : SV_DispatchThreadID) {
     ctx.pathdata_base = config.pathdata_base;
 
     uint ix = global_id.x + config.flatten_thread_base;
-    float4 bbox = float4(1e31, 1e31, -1e31, -1e31);
+    float4 bbox = Bbox2D.empty().v;
 
     PathTagData tag = compute_tag_monoid(ctx, ix);
     uint path_ix = tag.monoid.path_ix;
@@ -912,7 +875,7 @@ void cs_main(uint3 global_id : SV_DispatchThreadID) {
     uint seg_type = tag.tag_byte & PATH_TAG_SEG_TYPE;
     if (seg_type != 0) {
         bool is_stroke = (style_flags & STYLE_FLAGS_STYLE) != 0;
-        Transform transform = read_transform(ctx, config.transform_base, trans_ix);
+        Transform transform = read_transform(ctx.scene, config.transform_base, trans_ix);
         CubicPoints pts = read_path_segment(ctx, tag, is_stroke);
 
         if (is_stroke) {

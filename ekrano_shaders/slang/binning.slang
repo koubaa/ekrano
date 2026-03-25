@@ -53,7 +53,7 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
     int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
     if (element_ix < config.n_drawobj) {
         DrawMonoid draw_monoid = draw_monoids[element_ix];
-        float4 clip_bbox = float4(-1e9, -1e9, 1e9, 1e9);
+        float4 clip_bbox = Bbox2D.infinite().v;
         if (draw_monoid.clip_ix > 0) {
             uint clip_idx = min(draw_monoid.clip_ix - 1, config.n_clip - 1);
             clip_bbox = clip_bbox_buf[clip_idx];

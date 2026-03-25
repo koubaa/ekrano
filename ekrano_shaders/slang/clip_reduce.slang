@@ -28,16 +28,7 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
     bic.a = is_push ? 0 : 1;
     bic.b = is_push ? 1 : 0;
 
-    for (uint i = 0; i < LG_WG_SIZE; i++) {
-        sh_bic[local_id.x] = bic;
-        GroupMemoryBarrierWithGroupSync();
-        if (local_id.x + (1 << i) < WG_SIZE) {
-            Bic other = sh_bic[local_id.x + (1 << i)];
-            bic = bic_combine(bic, other);
-        }
-        GroupMemoryBarrierWithGroupSync();
-        sh_bic[local_id.x] = bic;
-    }
+    bic = workgroup_reduce(bic, local_id.x, sh_bic);
     if (local_id.x == 0) {
         reduced[wg_id.x] = bic;
     }

@@ -12,20 +12,6 @@ static const uint LG_WG_SIZE = 8;
 
 groupshared DrawMonoid sh_scratch[256];
 
-Transform read_transform(StorageBuffer<uint> scene, uint transform_base, uint ix) {
-    uint base = transform_base + ix * 6;
-    float c0 = asfloat(scene[base]);
-    float c1 = asfloat(scene[base + 1]);
-    float c2 = asfloat(scene[base + 2]);
-    float c3 = asfloat(scene[base + 3]);
-    float c4 = asfloat(scene[base + 4]);
-    float c5 = asfloat(scene[base + 5]);
-    Transform r;
-    r.matrx = float4(c0, c1, c2, c3);
-    r.translate = float2(c4, c5);
-    return r;
-}
-
 // Slots: 0=config, 1=scene, 2=reduced, 3=path_bbox, 4=draw_monoid, 5=info, 6=clip_inp
 
 [shader("compute")]
@@ -39,20 +25,11 @@ void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
     StorageBuffer<uint> info = goldy_dyn_scattered<uint>(5);
     StorageBuffer<ClipInp> clip_inp = goldy_dyn_scattered<ClipInp>(6);
 
-    DrawMonoid agg = draw_monoid_identity();
+    DrawMonoid agg = DrawMonoid.identity();
     if (local_id.x < wg_id.x) {
         agg = reduced[local_id.x];
     }
-    sh_scratch[local_id.x] = agg;
-    for (uint i = 0; i < LG_WG_SIZE; i++) {
-        GroupMemoryBarrierWithGroupSync();
-        if (local_id.x + (1 << i) < WG_SIZE) {
-            DrawMonoid other = sh_scratch[local_id.x + (1 << i)];
-            agg = combine_draw_monoid(agg, other);
-        }
-        GroupMemoryBarrierWithGroupSync();
-        sh_scratch[local_id.x] = agg;
-    }
+    agg = workgroup_reduce(agg, local_id.x, sh_scratch);
     GroupMemoryBarrierWithGroupSync();
     DrawMonoid prefix = sh_scratch[0];
 
@@ -66,15 +43,15 @@ void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
 
     while (block_start != blocks_end) {
         uint ix = block_start + local_id.x;
-        uint tag_word = (ix < config.n_drawobj) ? scene[config.drawtag_base + ix] : DRAWTAG_NOP;
-        agg = map_draw_tag(tag_word);
+        uint tag_word = read_draw_tag_from_scene(scene, config, ix);
+        agg = DrawTagScanner.map(tag_word);
         GroupMemoryBarrierWithGroupSync();
         sh_scratch[local_id.x] = agg;
         for (uint i = 0; i < LG_WG_SIZE; i++) {
             GroupMemoryBarrierWithGroupSync();
-            if (local_id.x >= (1 << i)) {
-                DrawMonoid other = sh_scratch[local_id.x - (1 << i)];
-                agg = combine_draw_monoid(agg, other);
+            if (local_id.x >= (1u << i)) {
+                DrawMonoid other = sh_scratch[local_id.x - (1u << i)];
+                agg = other.combine(agg);
             }
             GroupMemoryBarrierWithGroupSync();
             sh_scratch[local_id.x] = agg;
@@ -82,7 +59,7 @@ void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
         DrawMonoid m = prefix;
         GroupMemoryBarrierWithGroupSync();
         if (local_id.x > 0) {
-            m = combine_draw_monoid(m, sh_scratch[local_id.x - 1]);
+            m = m + sh_scratch[local_id.x - 1];
         }
         if (ix < config.n_drawobj) {
             draw_monoid[ix] = m;
@@ -112,8 +89,8 @@ void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
                 info[di] = draw_flags;
                 float2 p0 = float2(asfloat(scene[dd + 1]), asfloat(scene[dd + 2]));
                 float2 p1 = float2(asfloat(scene[dd + 3]), asfloat(scene[dd + 4]));
-                p0 = transform_apply(transform, p0);
-                p1 = transform_apply(transform, p1);
+                p0 = transform * p0;
+                p1 = transform * p1;
                 float2 dxy = p1 - p0;
                 float scale = 1.0 / dot(dxy, dxy);
                 float2 line_xy = dxy * scale;
@@ -140,7 +117,7 @@ void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
                 if (abs(r0 - r1) <= GRADIENT_EPSILON) {
                     kind = RAD_GRAD_KIND_STRIP;
                     float scaled = r0 / length(p1 - p0);
-                    xform = transform_mul(two_point_to_unit_line(p0, p1), user_to_gradient);
+                    xform = two_point_to_unit_line(p0, p1) * user_to_gradient;
                     radius = scaled * scaled;
                 } else {
                     kind = RAD_GRAD_KIND_CONE;
@@ -160,7 +137,7 @@ void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
                     focal_x = r0 / (r0 - r1);
                     float2 cf = (1.0 - focal_x) * p0 + focal_x * p1;
                     radius = r1 / length(p1 - cf);
-                    Transform user_to_unit_line = transform_mul(two_point_to_unit_line(cf, p1), user_to_gradient);
+                    Transform user_to_unit_line = two_point_to_unit_line(cf, p1) * user_to_gradient;
                     Transform user_to_scaled = user_to_unit_line;
                     if (abs(radius - 1.0) <= GRADIENT_EPSILON) {
                         kind = RAD_GRAD_KIND_FOCAL_ON_CIRCLE;
@@ -168,7 +145,7 @@ void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
                         Transform scale_t;
                         scale_t.matrx = float4(scale, 0, 0, scale);
                         scale_t.translate = float2(0, 0);
-                        user_to_scaled = transform_mul(scale_t, user_to_unit_line);
+                        user_to_scaled = scale_t * user_to_unit_line;
                     } else {
                         float a_val = radius * radius - 1.0;
                         float scale_ratio = abs(1.0 - focal_x) / a_val;
@@ -177,7 +154,7 @@ void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
                         Transform scale_t;
                         scale_t.matrx = float4(scale_x, 0, 0, scale_y);
                         scale_t.translate = float2(0, 0);
-                        user_to_scaled = transform_mul(scale_t, user_to_unit_line);
+                        user_to_scaled = scale_t * user_to_unit_line;
                     }
                     xform = user_to_scaled;
                 }
@@ -196,7 +173,7 @@ void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
                 Transform ident;
                 ident.matrx = float4(1, 0, 0, 1);
                 ident.translate = p0;
-                Transform xform = transform_mul(transform, ident);
+                Transform xform = transform * ident;
                 Transform inv = transform_inverse(xform);
                 info[di + 1] = asuint(inv.matrx.x);
                 info[di + 2] = asuint(inv.matrx.y);
@@ -242,6 +219,6 @@ void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
         }
 
         block_start += WG_SIZE;
-        prefix = combine_draw_monoid(prefix, sh_scratch[WG_SIZE - 1]);
+        prefix = prefix + sh_scratch[WG_SIZE - 1];
     }
 }

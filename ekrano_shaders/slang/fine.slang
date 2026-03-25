@@ -36,10 +36,6 @@ groupshared uint sh_winding_y_prefix[4];
 groupshared uint sh_winding[64];
 groupshared uint sh_samples[1024]; // Max of msaa8 (512) and msaa16 (1024)
 
-uint span_ms(float a, float b) {
-    return uint(max(ceil(max(a, b)) - floor(min(a, b)), 1.0));
-}
-
 void fill_path_ms_impl(
     CmdFill fill,
     uint2 local_id,
@@ -80,7 +76,7 @@ void fill_path_ms_impl(
             else if (xy1.x == 0.0)
                 y_edge_f = xy1.y;
             if (!(xy0.y == xy1.y && xy0.y == floor(xy0.y)))
-                count = span_ms(xy0.x, xy1.x) + span_ms(xy0.y, xy1.y) - 1;
+                count = span(xy0.x, xy1.x) + span(xy0.y, xy1.y) - 1;
             uint y_edge = uint(ceil(y_edge_f));
             if (y_edge < TILE_HEIGHT)
                 InterlockedAdd(sh_winding_y[y_edge >> 2], uint(delta) << ((y_edge & 3) << 3));
@@ -119,37 +115,21 @@ void fill_path_ms_impl(
             float2 xy0 = is_down ? xy0_in : xy1_in;
             float2 xy1 = is_down ? xy1_in : xy0_in;
 
-            float dx = abs(xy1.x - xy0.x);
-            float dy = xy1.y - xy0.y;
-            float idxdy = 1.0 / (dx + dy);
-            float a = dx * idxdy;
-            bool is_positive_slope = xy1.x >= xy0.x;
-            float x_sign = is_positive_slope ? 1.0 : -1.0;
-            float xt0 = floor(xy0.x * x_sign);
-            float c = xy0.x * x_sign - xt0;
-            float y0i = floor(xy0.y);
-            float ytop = y0i + 1.0;
-            float b = min((dy * c + dx * (ytop - xy0.y)) * idxdy, ONE_MINUS_ULP);
-            uint count_x = span_ms(xy0.x, xy1.x) - 1;
-            uint cnt = count_x + span_ms(xy0.y, xy1.y);
-            float robust_err = floor(a * (float(cnt) - 1.0) + b) - float(count_x);
-            if (robust_err != 0.0)
-                a -= ROBUST_EPSILON * sign(robust_err);
-            int x0i = int(xt0 * x_sign + 0.5 * (x_sign - 1.0));
+            TileDDA dda = TileDDA.from_segment(xy0, xy1);
 
-            float zf = a * float(sub_ix) + b;
+            float zf = dda.a * float(sub_ix) + dda.b;
             float z = floor(zf);
-            int x = int(x0i) + int(x_sign * z);
-            int y = int(y0i) + int(sub_ix) - int(z);
+            int x = int(dda.x0 + dda.x_sign * z);
+            int y = int(dda.y0) + int(sub_ix) - int(z);
             bool is_delta;
             bool is_bump = false;
-            float zp = floor(a * float(sub_ix - 1) + b);
+            float zp = floor(dda.a * float(sub_ix - 1) + dda.b);
             if (sub_ix == 0) {
-                is_delta = (y0i == xy0.y);
-                is_bump = (xy0.x == 0.0 && y0i != xy0.y);
+                is_delta = (dda.y0 == xy0.y);
+                is_bump = (xy0.x == 0.0 && dda.y0 != xy0.y);
             } else {
                 is_delta = (z == zp);
-                is_bump = is_positive_slope && !is_delta;
+                is_bump = (dda.x_sign > 0.0) && !is_delta;
             }
             uint pix_ix = uint(y) * TILE_WIDTH + uint(x);
             if (uint(x) < TILE_WIDTH - 1 && uint(y) < TILE_HEIGHT) {
@@ -160,9 +140,9 @@ void fill_path_ms_impl(
                 }
             }
 
-            uint mask_block = (is_positive_slope ? 1u : 0u) * (MASK_WIDTH * MASK_HEIGHT / 2);
+            uint mask_block = (dda.x_sign > 0.0 ? 1u : 0u) * (MASK_WIDTH * MASK_HEIGHT / 2);
             float half_height = float(MASK_HEIGHT) / 2.0;
-            float mask_row = floor(min(a * half_height, half_height - 1.0)) * float(MASK_WIDTH);
+            float mask_row = floor(min(dda.a * half_height, half_height - 1.0)) * float(MASK_WIDTH);
             float mask_col = floor((zf - z) * float(MASK_WIDTH));
             uint mask_ix = mask_block + uint(mask_row + mask_col);
 
@@ -333,7 +313,7 @@ void fill_path_ms_evenodd_impl(
             else if (xy1.x == 0.0)
                 y_edge_f = xy1.y;
             if (!(xy0.y == xy1.y && xy0.y == floor(xy0.y)))
-                count = span_ms(xy0.x, xy1.x) + span_ms(xy0.y, xy1.y) - 1;
+                count = span(xy0.x, xy1.x) + span(xy0.y, xy1.y) - 1;
             uint y_edge = uint(ceil(y_edge_f));
             if (y_edge < TILE_HEIGHT)
                 InterlockedXor(sh_winding_y[0], 1 << y_edge);
@@ -372,44 +352,28 @@ void fill_path_ms_evenodd_impl(
             float2 xy0 = is_down ? xy0_in : xy1_in;
             float2 xy1 = is_down ? xy1_in : xy0_in;
 
-            float dx = abs(xy1.x - xy0.x);
-            float dy = xy1.y - xy0.y;
-            float idxdy = 1.0 / (dx + dy);
-            float a = dx * idxdy;
-            bool is_positive_slope = xy1.x >= xy0.x;
-            float x_sign = is_positive_slope ? 1.0 : -1.0;
-            float xt0 = floor(xy0.x * x_sign);
-            float c = xy0.x * x_sign - xt0;
-            float y0i = floor(xy0.y);
-            float ytop = y0i + 1.0;
-            float b = min((dy * c + dx * (ytop - xy0.y)) * idxdy, ONE_MINUS_ULP);
-            uint count_x = span_ms(xy0.x, xy1.x) - 1;
-            uint cnt = count_x + span_ms(xy0.y, xy1.y);
-            float robust_err = floor(a * (float(cnt) - 1.0) + b) - float(count_x);
-            if (robust_err != 0.0)
-                a -= ROBUST_EPSILON * sign(robust_err);
-            int x0i = int(xt0 * x_sign + 0.5 * (x_sign - 1.0));
+            TileDDA dda = TileDDA.from_segment(xy0, xy1);
 
-            float zf = a * float(sub_ix) + b;
+            float zf = dda.a * float(sub_ix) + dda.b;
             float z = floor(zf);
-            int x = int(x0i) + int(x_sign * z);
-            int y = int(y0i) + int(sub_ix) - int(z);
+            int x = int(dda.x0 + dda.x_sign * z);
+            int y = int(dda.y0) + int(sub_ix) - int(z);
             bool is_delta;
             bool is_bump = false;
-            float zp = floor(a * float(sub_ix - 1) + b);
+            float zp = floor(dda.a * float(sub_ix - 1) + dda.b);
             if (sub_ix == 0) {
-                is_delta = (y0i == xy0.y);
+                is_delta = (dda.y0 == xy0.y);
                 is_bump = (xy0.x == 0.0);
             } else {
                 is_delta = (z == zp);
-                is_bump = is_positive_slope && !is_delta;
+                is_bump = (dda.x_sign > 0.0) && !is_delta;
             }
             if (uint(x) < TILE_WIDTH - 1 && uint(y) < TILE_HEIGHT && is_delta)
                 InterlockedXor(sh_winding[y], 2 << uint(x));
 
-            uint mask_block = (is_positive_slope ? 1u : 0u) * (MASK_WIDTH * MASK_HEIGHT / 2);
+            uint mask_block = (dda.x_sign > 0.0 ? 1u : 0u) * (MASK_WIDTH * MASK_HEIGHT / 2);
             float half_height = float(MASK_HEIGHT) / 2.0;
-            float mask_row = floor(min(a * half_height, half_height - 1.0)) * float(MASK_WIDTH);
+            float mask_row = floor(min(dda.a * half_height, half_height - 1.0)) * float(MASK_WIDTH);
             float mask_col = floor((zf - z) * float(MASK_WIDTH));
             uint mask_ix = mask_block + uint(mask_row + mask_col);
             uint pix_ix = uint(y) * TILE_WIDTH + uint(x);
@@ -489,13 +453,6 @@ void fill_path_ms(
 }
 #endif
 
-static const float ONE_MINUS_ULP = 0.99999994;
-static const float ROBUST_EPSILON = 2e-7;
-
-uint span_fine(float a, float b) {
-    return uint(max(ceil(max(a, b)) - floor(min(a, b)), 1.0));
-}
-
 // Analytic area anti-aliasing (fine_area, no MSAA)
 void fill_path(CmdFill fill, float2 xy, StorageBuffer<Segment> segments, out float area[4]) {
     uint n_segs = min(fill.size_and_rule >> 1, 65536u);
@@ -561,8 +518,8 @@ CmdBlurRect read_blur_rect(StorageBuffer<uint> ptcl, StorageBuffer<uint> info, u
     uint info_offset = ptcl[cmd_ix + 1];
     CmdBlurRect r;
     r.rgba_color = ptcl[cmd_ix + 2];
-    r.matrx = float4(asfloat(info[info_offset]), asfloat(info[info_offset+1]), asfloat(info[info_offset+2]), asfloat(info[info_offset+3]));
-    r.xlat = float2(asfloat(info[info_offset+4]), asfloat(info[info_offset+5]));
+    r.xform.matrx = float4(asfloat(info[info_offset]), asfloat(info[info_offset+1]), asfloat(info[info_offset+2]), asfloat(info[info_offset+3]));
+    r.xform.translate = float2(asfloat(info[info_offset+4]), asfloat(info[info_offset+5]));
     r.width = asfloat(info[info_offset+6]);
     r.height = asfloat(info[info_offset+7]);
     r.radius = asfloat(info[info_offset+8]);
@@ -588,8 +545,8 @@ CmdRadGrad read_rad_grad(StorageBuffer<uint> ptcl, StorageBuffer<uint> info, uin
     CmdRadGrad g;
     g.index = index_mode >> 2;
     g.extend_mode = index_mode & 0x3;
-    g.matrx = float4(asfloat(info[info_offset]), asfloat(info[info_offset+1]), asfloat(info[info_offset+2]), asfloat(info[info_offset+3]));
-    g.xlat = float2(asfloat(info[info_offset+4]), asfloat(info[info_offset+5]));
+    g.xform.matrx = float4(asfloat(info[info_offset]), asfloat(info[info_offset+1]), asfloat(info[info_offset+2]), asfloat(info[info_offset+3]));
+    g.xform.translate = float2(asfloat(info[info_offset+4]), asfloat(info[info_offset+5]));
     g.focal_x = asfloat(info[info_offset+6]);
     g.radius = asfloat(info[info_offset+7]);
     uint flags_kind = info[info_offset+8];
@@ -604,8 +561,8 @@ CmdSweepGrad read_sweep_grad(StorageBuffer<uint> ptcl, StorageBuffer<uint> info,
     CmdSweepGrad g;
     g.index = index_mode >> 2;
     g.extend_mode = index_mode & 0x3;
-    g.matrx = float4(asfloat(info[info_offset]), asfloat(info[info_offset+1]), asfloat(info[info_offset+2]), asfloat(info[info_offset+3]));
-    g.xlat = float2(asfloat(info[info_offset+4]), asfloat(info[info_offset+5]));
+    g.xform.matrx = float4(asfloat(info[info_offset]), asfloat(info[info_offset+1]), asfloat(info[info_offset+2]), asfloat(info[info_offset+3]));
+    g.xform.translate = float2(asfloat(info[info_offset+4]), asfloat(info[info_offset+5]));
     g.t0 = asfloat(info[info_offset+6]);
     g.t1 = asfloat(info[info_offset+7]);
     return g;
@@ -614,8 +571,8 @@ CmdSweepGrad read_sweep_grad(StorageBuffer<uint> ptcl, StorageBuffer<uint> info,
 CmdImage read_image_cmd(StorageBuffer<uint> ptcl, StorageBuffer<uint> info, uint cmd_ix) {
     uint info_offset = ptcl[cmd_ix + 1];
     CmdImage img;
-    img.matrx = float4(asfloat(info[info_offset]), asfloat(info[info_offset+1]), asfloat(info[info_offset+2]), asfloat(info[info_offset+3]));
-    img.xlat = float2(asfloat(info[info_offset+4]), asfloat(info[info_offset+5]));
+    img.xform.matrx = float4(asfloat(info[info_offset]), asfloat(info[info_offset+1]), asfloat(info[info_offset+2]), asfloat(info[info_offset+3]));
+    img.xform.translate = float2(asfloat(info[info_offset+4]), asfloat(info[info_offset+5]));
     uint xy = info[info_offset+6];
     uint width_height = info[info_offset+7];
     uint sample_alpha = info[info_offset+8];
@@ -635,13 +592,6 @@ CmdEndClip read_end_clip(StorageBuffer<uint> ptcl, uint cmd_ix) {
     e.blend = ptcl[cmd_ix + 1];
     e.alpha = asfloat(ptcl[cmd_ix + 2]);
     return e;
-}
-
-float erf7(float x) {
-    float y = clamp(x * 1.1283791671, -100.0, 100.0);
-    float yy = y * y;
-    float z = y + (0.24295 + (0.03395 + 0.0104 * yy) * yy) * (y * yy);
-    return z / sqrt(1.0 + z * z);
 }
 
 float hypot_fine(float a, float b) {
@@ -697,10 +647,7 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
         } else if (tag == CMD_COLOR) {
             CmdColor color = read_color(ptcl, cmd_ix);
             float4 fg = unpack4x8unorm(color.rgba_color);
-            for (uint i = 0; i < 4; i++) {
-                float4 fg_i = fg * area[i];
-                rgba[i] = rgba[i] * (1.0 - fg_i.a) + fg_i;
-            }
+            composite_strip(rgba, fg, area);
             cmd_ix += 2;
         } else if (tag == CMD_BEGIN_CLIP) {
             if (clip_depth < BLEND_STACK_SPLIT) {
@@ -762,7 +709,7 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
 
             for (uint i = 0; i < 4; i++) {
                 float2 my_xy = float2(xy.x + float(i), xy.y);
-                float2 local_xy_blur = blur.matrx.xy * my_xy.x + blur.matrx.zw * my_xy.y + blur.xlat;
+                float2 local_xy_blur = blur.xform * my_xy;
                 float x = local_xy_blur.x, y = local_xy_blur.y;
                 float y0 = abs(y) - (height * 0.5 - r1);
                 float y1 = max(y0, 0.0);
@@ -774,7 +721,7 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
                 float alpha = scale * (erf7(inv_std_dev * (min_edge + d)) - erf7(inv_std_dev * d));
                 float4 fg_rgba = blur_rgba * alpha;
                 float4 fg_i = fg_rgba * area[i];
-                rgba[i] = rgba[i] * (1.0 - fg_i.a) + fg_i;
+                rgba[i] = premul_over(rgba[i], fg_i);
             }
             cmd_ix += 3;
         } else if (tag == CMD_LIN_GRAD) {
@@ -786,7 +733,7 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
                 int2 grad_coord = int2(round(t * float(GRADIENT_WIDTH - 1)), int(lin.index));
                 float4 fg_rgba = gradients.Load(int3(grad_coord, 0));
                 float4 fg_i = fg_rgba * area[i];
-                rgba[i] = rgba[i] * (1.0 - fg_i.a) + fg_i;
+                rgba[i] = premul_over(rgba[i], fg_i);
             }
             cmd_ix += 3;
         } else if (tag == CMD_RAD_GRAD) {
@@ -800,7 +747,7 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
             float t_sign = sign(1.0 - rad.focal_x);
             for (uint i = 0; i < 4; i++) {
                 float2 my_xy = float2(xy.x + float(i), xy.y);
-                float2 local_xy_rad = rad.matrx.xy * my_xy.x + rad.matrx.zw * my_xy.y + rad.xlat;
+                float2 local_xy_rad = rad.xform * my_xy;
                 float x = local_xy_rad.x, y = local_xy_rad.y;
                 float xx = x * x, yy = y * y;
                 float t = 0.0;
@@ -825,7 +772,7 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
                     int2 grad_coord = int2(round(t * float(GRADIENT_WIDTH - 1)), int(rad.index));
                     float4 fg_rgba = gradients.Load(int3(grad_coord, 0));
                     float4 fg_i = fg_rgba * area[i];
-                    rgba[i] = rgba[i] * (1.0 - fg_i.a) + fg_i;
+                    rgba[i] = premul_over(rgba[i], fg_i);
                 }
             }
             cmd_ix += 3;
@@ -834,7 +781,7 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
             float scale = 1.0 / (sweep.t1 - sweep.t0);
             for (uint i = 0; i < 4; i++) {
                 float2 my_xy = float2(xy.x + float(i), xy.y);
-                float2 local_xy_sw = sweep.matrx.xy * my_xy.x + sweep.matrx.zw * my_xy.y + sweep.xlat;
+                float2 local_xy_sw = sweep.xform * my_xy;
                 float x = local_xy_sw.x, y = local_xy_sw.y;
                 float xabs = abs(x), yabs = abs(y);
                 float slope = min(xabs, yabs) / max(xabs, yabs);
@@ -849,7 +796,7 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
                 int2 grad_coord = int2(round(t * float(GRADIENT_WIDTH - 1)), int(sweep.index));
                 float4 fg_rgba = gradients.Load(int3(grad_coord, 0));
                 float4 fg_i = fg_rgba * area[i];
-                rgba[i] = rgba[i] * (1.0 - fg_i.a) + fg_i;
+                rgba[i] = premul_over(rgba[i], fg_i);
             }
             cmd_ix += 3;
         } else if (tag == CMD_IMAGE) {
@@ -860,14 +807,14 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
                 for (uint i = 0; i < 4; i++) {
                     if (area[i] != 0.0) {
                         float2 my_xy = float2(xy.x + float(i), xy.y);
-                        float2 atlas_uv = image.matrx.xy * my_xy.x + image.matrx.zw * my_xy.y + image.xlat;
+                        float2 atlas_uv = image.xform * my_xy;
                         atlas_uv.x = extend_mode(atlas_uv.x, image.x_extend_mode, image.extents.x);
                         atlas_uv.y = extend_mode(atlas_uv.y, image.y_extend_mode, image.extents.y);
                         atlas_uv += image.atlas_offset;
                         float2 atlas_uv_clamped = clamp(atlas_uv, image.atlas_offset, atlas_max);
                         float4 fg_rgba = maybe_premul_alpha(image_atlas.Load(int3(int2(atlas_uv_clamped), 0)), image.alpha_type);
                         float4 fg_i = pixel_format(fg_rgba * area[i] * image.alpha, image.format);
-                        rgba[i] = rgba[i] * (1.0 - fg_i.a) + fg_i;
+                        rgba[i] = premul_over(rgba[i], fg_i);
                     }
                 }
             } else {
@@ -875,7 +822,7 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
                 for (uint i = 0; i < 4; i++) {
                     if (area[i] != 0.0) {
                         float2 my_xy = float2(xy.x + float(i), xy.y);
-                        float2 atlas_uv = image.matrx.xy * my_xy.x + image.matrx.zw * my_xy.y + image.xlat;
+                        float2 atlas_uv = image.xform * my_xy;
                         atlas_uv.x = extend_mode(atlas_uv.x, image.x_extend_mode, image.extents.x);
                         atlas_uv.y = extend_mode(atlas_uv.y, image.y_extend_mode, image.extents.y);
                         atlas_uv += image.atlas_offset - 0.5;
@@ -889,7 +836,7 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
                         float4 d = maybe_premul_alpha(image_atlas.Load(int3(uv11, 0)), image.alpha_type);
                         float4 fg_rgba = lerp(lerp(a, b, uv_frac.y), lerp(c, d, uv_frac.y), uv_frac.x);
                         float4 fg_i = pixel_format(fg_rgba * area[i] * image.alpha, image.format);
-                        rgba[i] = rgba[i] * (1.0 - fg_i.a) + fg_i;
+                        rgba[i] = premul_over(rgba[i], fg_i);
                     }
                 }
             }

@@ -21,16 +21,7 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
 
     uint ix = global_id.x;
     TagMonoid agg = reduced_in[ix];
-    sh_scratch[local_id.x] = agg;
-    for (uint i = 0; i < LG_WG_SIZE; i++) {
-        GroupMemoryBarrierWithGroupSync();
-        if (local_id.x + (1 << i) < WG_SIZE) {
-            TagMonoid other = sh_scratch[local_id.x + (1 << i)];
-            agg = combine_tag_monoid(agg, other);
-        }
-        GroupMemoryBarrierWithGroupSync();
-        sh_scratch[local_id.x] = agg;
-    }
+    agg = workgroup_reduce(agg, local_id.x, sh_scratch);
     if (local_id.x == 0) {
         reduced[ix >> LG_WG_SIZE] = agg;
     }

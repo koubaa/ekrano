@@ -186,12 +186,15 @@ void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
                     count = bh.element_count;
                     sh_part_offsets[local_id.x] = bh.chunk_offset;
                 }
+                sh_part_count[local_id.x] = count;
                 for (uint i = 0; i < LG_WG_SIZE; i++) {
+                    GroupMemoryBarrierWithGroupSync();
+                    if (local_id.x >= (1u << i)) {
+                        uint other = sh_part_count[local_id.x - (1u << i)];
+                        count = other + count;
+                    }
+                    GroupMemoryBarrierWithGroupSync();
                     sh_part_count[local_id.x] = count;
-                    GroupMemoryBarrierWithGroupSync();
-                    if (local_id.x >= (1 << i))
-                        count += sh_part_count[local_id.x - (1 << i)];
-                    GroupMemoryBarrierWithGroupSync();
                 }
                 sh_part_count[local_id.x] = part_start_ix + count;
                 ready_ix = sh_part_count[WG_SIZE - 1];
@@ -199,12 +202,7 @@ void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
             }
             uint ix = rd_ix + local_id.x;
             if (ix >= wr_ix && ix < ready_ix) {
-                uint part_ix = 0;
-                for (uint i = 0; i < LG_WG_SIZE; i++) {
-                    uint probe = part_ix + ((N_TILE / 2) >> i);
-                    if (ix >= sh_part_count[probe - 1])
-                        part_ix = probe;
-                }
+                uint part_ix = workgroup_upper_bound<LG_WG_SIZE>(ix, sh_part_count);
                 ix -= (part_ix > 0) ? sh_part_count[part_ix - 1] : part_start_ix;
                 uint offset = config.bin_data_start + sh_part_offsets[part_ix];
                 sh_drawobj_ix[local_id.x] = info_bin_data[offset + ix];
@@ -241,10 +239,12 @@ void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
         }
 
         sh_tile_count[local_id.x] = tile_count;
-        for (uint i = 0; i < LG_N_TILE; i++) {
+        for (uint i = 0; i < LG_WG_SIZE; i++) {
             GroupMemoryBarrierWithGroupSync();
-            if (local_id.x >= (1 << i))
-                tile_count += sh_tile_count[local_id.x - (1 << i)];
+            if (local_id.x >= (1u << i)) {
+                uint other = sh_tile_count[local_id.x - (1u << i)];
+                tile_count = other + tile_count;
+            }
             GroupMemoryBarrierWithGroupSync();
             sh_tile_count[local_id.x] = tile_count;
         }
@@ -252,12 +252,7 @@ void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
         uint total_tile_count = sh_tile_count[N_TILE - 1];
 
         for (uint ix = local_id.x; ix < total_tile_count; ix += N_TILE) {
-            uint el_ix = 0;
-            for (uint i = 0; i < LG_N_TILE; i++) {
-                uint probe = el_ix + ((N_TILE / 2) >> i);
-                if (ix >= sh_tile_count[probe - 1])
-                    el_ix = probe;
-            }
+            uint el_ix = workgroup_upper_bound<LG_N_TILE>(ix, sh_tile_count);
             drawobj_ix = sh_drawobj_ix[el_ix];
             tag = scene[config.drawtag_base + drawobj_ix];
             uint seq_ix = ix - ((el_ix > 0) ? sh_tile_count[el_ix - 1] : 0);

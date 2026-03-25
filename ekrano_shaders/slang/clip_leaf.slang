@@ -10,8 +10,8 @@ static const uint LG_WG_SIZE = 8;
 
 groupshared Bic sh_bic[510];
 groupshared uint sh_stack[256];
-groupshared float4 sh_stack_bbox[256];
-groupshared float4 sh_bbox[256];
+groupshared Bbox2D sh_stack_bbox[256];
+groupshared Bbox2D sh_bbox[256];
 groupshared int sh_link[256];
 
 int search_link(inout Bic bic, uint ix_in) {
@@ -20,7 +20,7 @@ int search_link(inout Bic bic, uint ix_in) {
     while (j < LG_WG_SIZE) {
         uint base = 2 * WG_SIZE - (2 << (LG_WG_SIZE - j));
         if (((ix >> j) & 1) != 0) {
-            Bic test = bic_combine(sh_bic[base + (ix >> j) - 1], bic);
+            Bic test = sh_bic[base + (ix >> j) - 1].combine(bic);
             if (test.b > 0)
                 break;
             bic = test;
@@ -32,7 +32,7 @@ int search_link(inout Bic bic, uint ix_in) {
         while (j > 0) {
             j--;
             uint base = 2 * WG_SIZE - (2 << (LG_WG_SIZE - j));
-            Bic test = bic_combine(sh_bic[base + (ix >> j) - 1], bic);
+            Bic test = sh_bic[base + (ix >> j) - 1].combine(bic);
             if (test.b == 0) {
                 bic = test;
                 ix -= 1 << j;
@@ -72,7 +72,7 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
         GroupMemoryBarrierWithGroupSync();
         if (local_id.x + (1 << i) < WG_SIZE) {
             Bic other = sh_bic[local_id.x + (1 << i)];
-            bic = bic_combine(bic, other);
+            bic = bic.combine(other);
         }
         GroupMemoryBarrierWithGroupSync();
         sh_bic[local_id.x] = bic;
@@ -88,21 +88,22 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
             ix = probe;
     }
     uint b = sh_bic[ix].b;
-    float4 bbox = float4(-1e9, -1e9, 1e9, 1e9);
+    Bbox2D bbox = Bbox2D.infinite();
     if (sp < b) {
         ClipEl el = clip_els[ix * WG_SIZE + b - sp - 1];
         sh_stack[local_id.x] = el.parent_ix;
-        bbox = el.bbox;
-    }
-    for (uint i = 0; i < LG_WG_SIZE; i++) {
-        sh_stack_bbox[local_id.x] = bbox;
-        GroupMemoryBarrierWithGroupSync();
-        if (local_id.x >= (1 << i)) {
-            bbox = bbox_intersect(sh_stack_bbox[local_id.x - (1 << i)], bbox);
-        }
-        GroupMemoryBarrierWithGroupSync();
+        bbox = Bbox2D.from_float4(el.bbox);
     }
     sh_stack_bbox[local_id.x] = bbox;
+    for (uint i = 0; i < LG_WG_SIZE; i++) {
+        GroupMemoryBarrierWithGroupSync();
+        if (local_id.x >= (1u << i)) {
+            Bbox2D other = sh_stack_bbox[local_id.x - (1u << i)];
+            bbox = other.combine(bbox);
+        }
+        GroupMemoryBarrierWithGroupSync();
+        sh_stack_bbox[local_id.x] = bbox;
+    }
 
     int inp = load_path_ix;
     bool is_push = inp >= 0;
@@ -111,9 +112,9 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
     sh_bic[local_id.x] = bic;
     if (is_push) {
         PathBbox path_bbox = path_bboxes[inp];
-        bbox = float4(float(path_bbox.x0), float(path_bbox.y0), float(path_bbox.x1), float(path_bbox.y1));
+        bbox = Bbox2D.from_float4(float4(float(path_bbox.x0), float(path_bbox.y0), float(path_bbox.x1), float(path_bbox.y1)));
     } else {
-        bbox = float4(-1e9, -1e9, 1e9, 1e9);
+        bbox = Bbox2D.infinite();
     }
     uint inbase = 0;
     for (uint i = 0; i < LG_WG_SIZE - 1; i++) {
@@ -121,7 +122,7 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
         GroupMemoryBarrierWithGroupSync();
         if (local_id.x < (1 << (LG_WG_SIZE - 1 - i))) {
             uint in_off = inbase + local_id.x * 2;
-            sh_bic[outbase + local_id.x] = bic_combine(sh_bic[in_off], sh_bic[in_off + 1]);
+            sh_bic[outbase + local_id.x] = sh_bic[in_off].combine(sh_bic[in_off + 1]);
         }
         inbase = outbase;
     }
@@ -149,13 +150,13 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
         sh_bbox[local_id.x] = bbox;
         GroupMemoryBarrierWithGroupSync();
         if (link >= 0) {
-            bbox = bbox_intersect(sh_bbox[link], bbox);
+            bbox = sh_bbox[link].intersect(bbox);
             link = sh_link[link];
         }
         GroupMemoryBarrierWithGroupSync();
     }
     if (link + int(stack_size) >= 0) {
-        bbox = bbox_intersect(sh_stack_bbox[int(WG_SIZE) + link], bbox);
+        bbox = sh_stack_bbox[int(WG_SIZE) + link].intersect(bbox);
     }
     sh_bbox[local_id.x] = bbox;
     GroupMemoryBarrierWithGroupSync();
@@ -173,10 +174,10 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
         } else if (grandparent + int(stack_size) >= 0) {
             bbox = sh_stack_bbox[int(WG_SIZE) + grandparent];
         } else {
-            bbox = float4(-1e9, -1e9, 1e9, 1e9);
+            bbox = Bbox2D.infinite();
         }
     }
     if (global_id.x < config.n_clip) {
-        clip_bboxes[global_id.x] = bbox;
+        clip_bboxes[global_id.x] = bbox.v;
     }
 }

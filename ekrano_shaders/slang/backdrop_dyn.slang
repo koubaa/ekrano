@@ -43,11 +43,11 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
         sh_row_width[local_id.x] = 0;
     }
     sh_row_count[local_id.x] = row_count;
-
     for (uint i = 0; i < LG_WG_SIZE; i++) {
         GroupMemoryBarrierWithGroupSync();
-        if (local_id.x >= (1 << i)) {
-            row_count += sh_row_count[local_id.x - (1 << i)];
+        if (local_id.x >= (1u << i)) {
+            uint other = sh_row_count[local_id.x - (1u << i)];
+            row_count = other + row_count;
         }
         GroupMemoryBarrierWithGroupSync();
         sh_row_count[local_id.x] = row_count;
@@ -56,12 +56,7 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
 
     uint total_rows = sh_row_count[WG_SIZE - 1];
     for (uint row = local_id.x; row < total_rows; row += WG_SIZE) {
-        uint el_ix = 0;
-        for (uint i = 0; i < LG_WG_SIZE; i++) {
-            uint probe = el_ix + ((WG_SIZE / 2) >> i);
-            if (row >= sh_row_count[probe - 1])
-                el_ix = probe;
-        }
+        uint el_ix = workgroup_upper_bound<LG_WG_SIZE>(row, sh_row_count);
         uint width = sh_row_width[el_ix];
         if (width > 0) {
             uint seq_ix = row - (el_ix > 0 ? sh_row_count[el_ix - 1] : 0);

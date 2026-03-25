@@ -56,17 +56,17 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
     uint ux1 = uint(clamp(x1, 0, int(config.width_in_tiles)));
     uint uy1 = uint(clamp(y1, 0, int(config.height_in_tiles)));
     uint tile_count = (ux1 - ux0) * (uy1 - uy0);
-    uint total_tile_count = tile_count;
     sh_tile_count[local_id.x] = tile_count;
-
     for (uint i = 0; i < LG_WG_SIZE; i++) {
         GroupMemoryBarrierWithGroupSync();
-        if (local_id.x >= (1 << i)) {
-            total_tile_count += sh_tile_count[local_id.x - (1 << i)];
+        if (local_id.x >= (1u << i)) {
+            uint other = sh_tile_count[local_id.x - (1u << i)];
+            tile_count = other + tile_count;
         }
         GroupMemoryBarrierWithGroupSync();
-        sh_tile_count[local_id.x] = total_tile_count;
+        sh_tile_count[local_id.x] = tile_count;
     }
+    uint total_tile_count = tile_count;
     if (local_id.x == WG_SIZE - 1) {
         uint count = sh_tile_count[WG_SIZE - 1];
         uint offset; InterlockedAdd(bump[0].tile, count, offset);

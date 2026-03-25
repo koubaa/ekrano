@@ -7,13 +7,6 @@
 import goldy_exp;
 import ekrano_shared;
 
-static const float ONE_MINUS_ULP = 0.99999994;
-static const float ROBUST_EPSILON = 2e-7;
-
-uint span(float a, float b) {
-    return uint(max(ceil(max(a, b)) - floor(min(a, b)), 1.0));
-}
-
 // Slots: 0=config, 1=bump, 2=lines, 3=paths, 4=tile, 5=seg_counts
 
 [shader("compute")]
@@ -39,8 +32,6 @@ void cs_main(uint3 global_id : SV_DispatchThreadID) {
     float2 xy1 = is_down ? line.p1 : line.p0;
     float2 s0 = xy0 * TILE_SCALE;
     float2 s1 = xy1 * TILE_SCALE;
-    uint count_x = span(s0.x, s1.x) - 1;
-    uint count = count_x + span(s0.y, s1.y);
     uint line_ix = global_id.x;
 
     float dx = abs(s1.x - s0.x);
@@ -50,19 +41,15 @@ void cs_main(uint3 global_id : SV_DispatchThreadID) {
     if (dy == 0.0 && floor(s0.y) == s0.y)
         return;
 
-    float idxdy = 1.0 / (dx + dy);
-    float a = dx * idxdy;
-    bool is_positive_slope = s1.x >= s0.x;
-    float x_sign = is_positive_slope ? 1.0 : -1.0;
-    float xt0 = floor(s0.x * x_sign);
-    float c = s0.x * x_sign - xt0;
-    float y0 = floor(s0.y);
-    float ytop = (s0.y == s1.y) ? ceil(s0.y) : (y0 + 1.0);
-    float b = min((dy * c + dx * (ytop - s0.y)) * idxdy, ONE_MINUS_ULP);
-    float robust_err = floor(a * (float(count) - 1.0) + b) - float(count_x);
-    if (robust_err != 0.0)
-        a -= ROBUST_EPSILON * sign(robust_err);
-    float x0 = xt0 * x_sign + (is_positive_slope ? 0.0 : -1.0);
+    TileDDA dda = TileDDA.from_segment(s0, s1);
+    uint count_x = dda.count_x;
+    uint count = dda.count;
+    float a = dda.a;
+    float b = dda.b;
+    float y0 = dda.y0;
+    float x0 = dda.x0;
+    float x_sign = dda.x_sign;
+    bool is_positive_slope = dda.x_sign > 0.0;
 
     Path path = paths[line.path_ix];
     int4 bbox = int4(asint(path.bbox.x), asint(path.bbox.y), asint(path.bbox.z), asint(path.bbox.w));
