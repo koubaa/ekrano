@@ -29,7 +29,7 @@ if [ -n "$output" ]; then
 fi
 
 # Check Slang sources and CPU shader Rust (Unlicense)
-output=$(rg "^// Copyright (19|20)[\d]{2} (.+ and )?the (Vello|Ekrano) Authors( and .+)?$\n^// SPDX-License-Identifier: Apache-2\.0 OR MIT OR Unlicense$\n\n" --files-without-match --multiline -g "ekrano_shaders/{slang,src/cpu}/**/*.{rs,slang}" .)
+output=$(rg "^// Copyright (19|20)[\d]{2} (.+ and )?the (Vello|Ekrano) Authors( and .+)?$\n^// SPDX-License-Identifier: Apache-2\.0 OR MIT OR Unlicense$\n" --files-without-match --multiline -g "ekrano_shaders/{slang,src/cpu}/**/*.{rs,slang}" .)
 
 if [ -n "$output" ]; then
         echo -e "The following shader files lack the correct copyright header:\n"
