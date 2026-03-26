@@ -24,10 +24,8 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
     sh_scratch[local_id.x] = agg;
     for (uint i = 0; i < LG_WG_SIZE; i++) {
         GroupMemoryBarrierWithGroupSync();
-        if (local_id.x + (1 << i) < WG_SIZE) {
-            TagMonoid other = sh_scratch[local_id.x + (1 << i)];
-            agg = combine_tag_monoid(agg, other);
-        }
+        if (local_id.x + (1u << i) < WG_SIZE)
+            agg = agg.combine(sh_scratch[local_id.x + (1u << i)]);
         GroupMemoryBarrierWithGroupSync();
         sh_scratch[local_id.x] = agg;
     }

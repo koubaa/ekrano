@@ -25,20 +25,17 @@ void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
     uint n_blocks = n_blocks_base + (wg_id.x < remainder ? 1u : 0u);
     uint block_index = first_block * WG_SIZE + local_id.x;
 
-    DrawMonoid agg = draw_monoid_identity();
+    DrawMonoid agg = DrawMonoid.identity();
     for (uint i = 0; i < n_blocks; i++) {
-        uint tag_word = (block_index < config.n_drawobj) ? scene[config.drawtag_base + block_index] : DRAWTAG_NOP;
-        agg = combine_draw_monoid(agg, map_draw_tag(tag_word));
+        uint tag_word = read_draw_tag_from_scene(scene, config, block_index);
+        agg = agg + DrawTagScanner.map(tag_word);
         block_index += WG_SIZE;
     }
     sh_scratch[local_id.x] = agg;
-
     for (uint i = 0; i < LG_WG_SIZE; i++) {
         GroupMemoryBarrierWithGroupSync();
-        if (local_id.x + (1 << i) < WG_SIZE) {
-            DrawMonoid other = sh_scratch[local_id.x + (1 << i)];
-            agg = combine_draw_monoid(agg, other);
-        }
+        if (local_id.x + (1u << i) < WG_SIZE)
+            agg = agg.combine(sh_scratch[local_id.x + (1u << i)]);
         GroupMemoryBarrierWithGroupSync();
         sh_scratch[local_id.x] = agg;
     }

@@ -9,6 +9,8 @@
 
 module ekrano_shared;
 
+import goldy_exp;
+
 // === Config ===
 // Sync with ConfigUniform in ekrano_encoding/src/config.rs
 public struct Config {
@@ -70,6 +72,64 @@ public static const uint N_TILE_Y = 16;
 public static const uint N_TILE = N_TILE_X * N_TILE_Y;
 public static const float TILE_SCALE = 0.0625;
 public static const uint BLEND_STACK_SPLIT = 4;
+
+public static const float ONE_MINUS_ULP = 0.99999994;
+public static const float ROBUST_EPSILON = 2e-7;
+
+public uint span(float a, float b) {
+    return uint(max(ceil(max(a, b)) - floor(min(a, b)), 1.0));
+}
+
+public struct TileDDA {
+    public float a;
+    public float b;
+    public float x_sign;
+    public float x0;
+    public float y0;
+    public uint count_x;
+    public uint count;
+
+    public static TileDDA from_segment(float2 s0, float2 s1) {
+        TileDDA d;
+        float dx = abs(s1.x - s0.x);
+        float dy = s1.y - s0.y;
+        float idxdy = 1.0 / (dx + dy);
+        d.a = dx * idxdy;
+        bool pos = s1.x >= s0.x;
+        d.x_sign = pos ? 1.0 : -1.0;
+        float xt0 = floor(s0.x * d.x_sign);
+        float c = s0.x * d.x_sign - xt0;
+        d.y0 = floor(s0.y);
+        float ytop = (s0.y == s1.y) ? ceil(s0.y) : (d.y0 + 1.0);
+        d.b = min((dy * c + dx * (ytop - s0.y)) * idxdy, ONE_MINUS_ULP);
+        d.count_x = span(s0.x, s1.x) - 1;
+        d.count = d.count_x + span(s0.y, s1.y);
+        float err = floor(d.a * (float(d.count) - 1.0) + d.b) - float(d.count_x);
+        if (err != 0.0) d.a -= ROBUST_EPSILON * sign(err);
+        d.x0 = xt0 * d.x_sign + (pos ? 0.0 : -1.0);
+        return d;
+    }
+
+    public int2 step(uint sub_ix) {
+        float z = floor(a * float(sub_ix) + b);
+        return int2(int(x0 + x_sign * z), int(y0 + float(sub_ix) - z));
+    }
+}
+
+public struct Bbox2D {
+    public float4 v;
+    public static Bbox2D empty() { Bbox2D b; b.v = float4(1e31, 1e31, -1e31, -1e31); return b; }
+    public static Bbox2D infinite() { Bbox2D b; b.v = float4(-1e9, -1e9, 1e9, 1e9); return b; }
+    public static Bbox2D from_float4(float4 f) { Bbox2D b; b.v = f; return b; }
+    public Bbox2D intersect(Bbox2D other) { Bbox2D b; b.v = float4(max(this.v.xy, other.v.xy), min(this.v.zw, other.v.zw)); return b; }
+    public Bbox2D union_with(Bbox2D other) { Bbox2D b; b.v = float4(min(this.v.xy, other.v.xy), max(this.v.zw, other.v.zw)); return b; }
+    public Bbox2D grow(float2 p) { Bbox2D b; b.v = float4(min(this.v.xy, p), max(this.v.zw, p)); return b; }
+}
+
+extension Bbox2D : IMonoid {
+    static Bbox2D identity() { return Bbox2D.infinite(); }
+    Bbox2D combine(Bbox2D other) { return this.intersect(other); }
+}
 
 // Radial gradient kinds
 public static const uint RAD_GRAD_KIND_CIRCULAR = 1;
@@ -266,6 +326,11 @@ public Bic bic_combine(Bic x, Bic y) {
     return r;
 }
 
+extension Bic : IMonoid {
+    static Bic identity() { Bic b; b.a = 0; b.b = 0; return b; }
+    Bic combine(Bic other) { return bic_combine(this, other); }
+}
+
 // === Bump ===
 public static const uint STAGE_BINNING = 0x1;
 public static const uint STAGE_TILE_ALLOC = 0x2;
@@ -410,6 +475,12 @@ public struct Transform {
 
 };
 
+public Transform operator*(Transform a, Transform b) { return transform_mul(a, b); }
+
+public float2 operator*(Transform t, float2 p) {
+    return t.matrx.xy * p.x + t.matrx.zw * p.y + t.translate;
+}
+
 public float2 transform_apply(Transform transform, float2 p) {
     return transform.matrx.xy * p.x + transform.matrx.zw * p.y + transform.translate;
 }
@@ -473,7 +544,7 @@ public TagMonoid tag_monoid_identity() {
     return c;
 }
 
-public TagMonoid combine_tag_monoid(TagMonoid a, TagMonoid b) {
+public TagMonoid operator+(TagMonoid a, TagMonoid b) {
     TagMonoid c;
     c.trans_ix = a.trans_ix + b.trans_ix;
     c.pathseg_ix = a.pathseg_ix + b.pathseg_ix;
@@ -481,6 +552,13 @@ public TagMonoid combine_tag_monoid(TagMonoid a, TagMonoid b) {
     c.style_ix = a.style_ix + b.style_ix;
     c.path_ix = a.path_ix + b.path_ix;
     return c;
+}
+
+public TagMonoid combine_tag_monoid(TagMonoid a, TagMonoid b) { return a + b; }
+
+extension TagMonoid : IMonoid {
+    static TagMonoid identity() { return tag_monoid_identity(); }
+    TagMonoid combine(TagMonoid other) { return this + other; }
 }
 
 public TagMonoid reduce_tag(uint tag_word) {
@@ -498,6 +576,10 @@ public TagMonoid reduce_tag(uint tag_word) {
     return c;
 }
 
+public struct PathTagScanner : IScannable<TagMonoid> {
+    static TagMonoid map(uint raw_input) { return reduce_tag(raw_input); }
+}
+
 // === Drawtag helpers ===
 public DrawMonoid draw_monoid_identity() {
     DrawMonoid c;
@@ -505,13 +587,20 @@ public DrawMonoid draw_monoid_identity() {
     return c;
 }
 
-public DrawMonoid combine_draw_monoid(DrawMonoid a, DrawMonoid b) {
+public DrawMonoid operator+(DrawMonoid a, DrawMonoid b) {
     DrawMonoid c;
     c.path_ix = a.path_ix + b.path_ix;
     c.clip_ix = a.clip_ix + b.clip_ix;
     c.scene_offset = a.scene_offset + b.scene_offset;
     c.info_offset = a.info_offset + b.info_offset;
     return c;
+}
+
+public DrawMonoid combine_draw_monoid(DrawMonoid a, DrawMonoid b) { return a + b; }
+
+extension DrawMonoid : IMonoid {
+    static DrawMonoid identity() { return draw_monoid_identity(); }
+    DrawMonoid combine(DrawMonoid other) { return this + other; }
 }
 
 public DrawMonoid map_draw_tag(uint tag_word) {
@@ -523,9 +612,17 @@ public DrawMonoid map_draw_tag(uint tag_word) {
     return c;
 }
 
-// read_draw_tag_from_scene was moved to individual shaders (draw_leaf, draw_reduce)
-// to avoid requiring goldy_exp import or interface constraints in this shared module.
+public struct DrawTagScanner : IScannable<DrawMonoid> {
+    static DrawMonoid map(uint raw_input) { return map_draw_tag(raw_input); }
+}
 
+// StorageBuffer (not RWStructuredBuffer) for Metal read-only scene access.
+public uint read_draw_tag_from_scene(StorageBuffer<uint> scene, Config config, uint ix) {
+    if (ix < config.n_drawobj) {
+        return scene[config.drawtag_base + ix];
+    }
+    return DRAWTAG_NOP;
+}
 
 // === Blend - mix and compose mode constants ===
 public static const uint MIX_NORMAL = 0;
@@ -581,9 +678,7 @@ public uint pack4x8unorm(float4 v) {
 public struct CmdBlurRect {
     public uint rgba_color;
 
-    public float4 matrx;
-
-    public float2 xlat;
+    public Transform xform;
 
     public float width;
 
@@ -613,9 +708,7 @@ public struct CmdRadGrad {
 
     public uint extend_mode;
 
-    public float4 matrx;
-
-    public float2 xlat;
+    public Transform xform;
 
     public float focal_x;
 
@@ -632,9 +725,7 @@ public struct CmdSweepGrad {
 
     public uint extend_mode;
 
-    public float4 matrx;
-
-    public float2 xlat;
+    public Transform xform;
 
     public float t0;
 
@@ -643,9 +734,7 @@ public struct CmdSweepGrad {
 };
 
 public struct CmdImage {
-    public float4 matrx;
-
-    public float2 xlat;
+    public Transform xform;
 
     public float2 atlas_offset;
 
@@ -814,3 +903,55 @@ public float4 pixel_format(float4 pixel, uint format) {
 
 public static const uint GRADIENT_WIDTH = 512;
 public static const uint PIXELS_PER_THREAD = 4;
+
+public float4 premul_over(float4 bg, float4 fg) {
+    return bg * (1.0 - fg.a) + fg;
+}
+
+public void composite_strip(inout float4 rgba[PIXELS_PER_THREAD], float4 fg, float area[PIXELS_PER_THREAD]) {
+    for (uint i = 0; i < PIXELS_PER_THREAD; i++) {
+        float4 fg_i = fg * area[i];
+        rgba[i] = premul_over(rgba[i], fg_i);
+    }
+}
+
+public float erf7(float x) {
+    float y = clamp(x * 1.1283791671, -100.0, 100.0);
+    float yy = y * y;
+    float z = y + (0.24295 + (0.03395 + 0.0104 * yy) * yy) * (y * yy);
+    return z / sqrt(1.0 + z * z);
+}
+
+public void signed_atomic_min(RWByteAddressBuffer buf, uint addr, int new_val) {
+    uint orig;
+    buf.InterlockedCompareExchange(addr, 0, 0, orig);
+    while (new_val < int(orig)) {
+        uint expected = orig;
+        buf.InterlockedCompareExchange(addr, expected, uint(new_val), orig);
+        if (orig == expected) break;
+    }
+}
+
+public void signed_atomic_max(RWByteAddressBuffer buf, uint addr, int new_val) {
+    uint orig;
+    buf.InterlockedCompareExchange(addr, 0, 0, orig);
+    while (new_val > int(orig)) {
+        uint expected = orig;
+        buf.InterlockedCompareExchange(addr, expected, uint(new_val), orig);
+        if (orig == expected) break;
+    }
+}
+
+public Transform read_transform(RWStructuredBuffer<uint> scene, uint transform_base, uint ix) {
+    uint base = transform_base + ix * 6;
+    float c0 = asfloat(scene[base]);
+    float c1 = asfloat(scene[base + 1]);
+    float c2 = asfloat(scene[base + 2]);
+    float c3 = asfloat(scene[base + 3]);
+    float c4 = asfloat(scene[base + 4]);
+    float c5 = asfloat(scene[base + 5]);
+    Transform r;
+    r.matrx = float4(c0, c1, c2, c3);
+    r.translate = float2(c4, c5);
+    return r;
+}

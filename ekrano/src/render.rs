@@ -44,9 +44,6 @@ struct FineResources {
     aa_config: AaConfig,
     /// When Some (Goldy indirect path), fine stage uses `dispatch_indirect`.
     indirect_buf: Option<BufferProxy>,
-    /// Raw config bytes for creating per-row config buffers (fine row splitting).
-    gpu_config: ekrano_encoding::ConfigUniform,
-
     config_buf: ResourceProxy,
     bump_buf: ResourceProxy,
     tile_buf: ResourceProxy,
@@ -670,7 +667,6 @@ impl Render {
             } else {
                 None
             },
-            gpu_config: cpu_config.gpu,
             config_buf,
             bump_buf,
             tile_buf,

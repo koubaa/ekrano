@@ -22,7 +22,6 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
     StorageBuffer<TagMonoid> reduced = goldy_dyn_buf_ro<TagMonoid>(2);
     StorageBuffer<TagMonoid> tag_monoids = goldy_dyn_scattered<TagMonoid>(3);
 
-    // Small variant: prefix over reduced (one level)
     TagMonoid agg = tag_monoid_identity();
     if (local_id.x < wg_id.x) {
         agg = reduced[local_id.x];
@@ -30,10 +29,8 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
     sh_parent[local_id.x] = agg;
     for (uint i = 0; i < LG_WG_SIZE; i++) {
         GroupMemoryBarrierWithGroupSync();
-        if (local_id.x + (1 << i) < WG_SIZE) {
-            TagMonoid other = sh_parent[local_id.x + (1 << i)];
-            agg = combine_tag_monoid(agg, other);
-        }
+        if (local_id.x + (1u << i) < WG_SIZE)
+            agg = agg.combine(sh_parent[local_id.x + (1u << i)]);
         GroupMemoryBarrierWithGroupSync();
         sh_parent[local_id.x] = agg;
     }
@@ -44,9 +41,9 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
     sh_monoid[local_id.x] = agg_part;
     for (uint i = 0; i < LG_WG_SIZE; i++) {
         GroupMemoryBarrierWithGroupSync();
-        if (local_id.x >= (1 << i)) {
-            TagMonoid other = sh_monoid[local_id.x - (1 << i)];
-            agg_part = combine_tag_monoid(other, agg_part);
+        if (local_id.x >= (1u << i)) {
+            TagMonoid other = sh_monoid[local_id.x - (1u << i)];
+            agg_part = other.combine(agg_part);
         }
         GroupMemoryBarrierWithGroupSync();
         sh_monoid[local_id.x] = agg_part;
@@ -55,7 +52,7 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
 
     TagMonoid tm = sh_parent[0];
     if (local_id.x > 0) {
-        tm = combine_tag_monoid(tm, sh_monoid[local_id.x - 1]);
+        tm = tm + sh_monoid[local_id.x - 1];
     }
     tag_monoids[ix] = tm;
 }
