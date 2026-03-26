@@ -29,7 +29,14 @@ void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
     if (local_id.x < wg_id.x) {
         agg = reduced[local_id.x];
     }
-    agg = workgroup_reduce(agg, local_id.x, sh_scratch);
+    sh_scratch[local_id.x] = agg;
+    for (uint i = 0; i < LG_WG_SIZE; i++) {
+        GroupMemoryBarrierWithGroupSync();
+        if (local_id.x + (1u << i) < WG_SIZE)
+            agg = agg.combine(sh_scratch[local_id.x + (1u << i)]);
+        GroupMemoryBarrierWithGroupSync();
+        sh_scratch[local_id.x] = agg;
+    }
     GroupMemoryBarrierWithGroupSync();
     DrawMonoid prefix = sh_scratch[0];
 

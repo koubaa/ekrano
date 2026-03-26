@@ -25,7 +25,14 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
     if (local_id.x < wg_id.x) {
         agg = reduced2[local_id.x];
     }
-    agg = workgroup_reduce(agg, local_id.x, sh_parent);
+    sh_parent[local_id.x] = agg;
+    for (uint i = 0; i < LG_WG_SIZE; i++) {
+        GroupMemoryBarrierWithGroupSync();
+        if (local_id.x + (1u << i) < WG_SIZE)
+            agg = agg.combine(sh_parent[local_id.x + (1u << i)]);
+        GroupMemoryBarrierWithGroupSync();
+        sh_parent[local_id.x] = agg;
+    }
 
     uint ix = global_id.x;
     agg = reduced[ix];
