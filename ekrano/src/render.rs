@@ -142,7 +142,7 @@ impl Render {
         self.render_encoding_coarse_inner(encoding, resolver, shaders, params, robust, None)
     }
 
-    /// Like [`render_encoding_coarse`] but with a custom config for retry.
+    /// Like [`Self::render_encoding_coarse`] but with a custom config for retry.
     pub fn render_encoding_coarse_with_config(
         &mut self,
         encoding: &Encoding,

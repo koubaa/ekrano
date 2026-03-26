@@ -72,6 +72,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Clone goldy
+        run: git clone --depth 1 --branch ${{ env.GOLDY_BRANCH }} ${{ env.GOLDY_REPO }} ../goldy
+
       - name: install stable toolchain
         uses: dtolnay/rust-toolchain@master
         with:

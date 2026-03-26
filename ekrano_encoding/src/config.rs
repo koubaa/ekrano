@@ -21,7 +21,7 @@ const CLIP_REDUCE_WG: u32 = 256;
 
 /// Counters for tracking dynamic allocation on the GPU.
 ///
-/// This must be kept in sync with the struct in `ekrano_shaders/slang/ekrano_shared.slang` (BumpAllocators).
+/// This must be kept in sync with the struct in `ekrano_shaders/slang/ekrano_shared.slang` (`BumpAllocators`).
 #[derive(Clone, Copy, Debug, Default, Zeroable, Pod)]
 #[repr(C)]
 pub struct BumpAllocators {
