@@ -16,9 +16,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
+use ekrano::Scene;
 use ekrano::kurbo::{Affine, Vec2};
 use ekrano::peniko::color::palette;
-use ekrano::Scene;
 use scenes::{ImageCache, SceneParams, SceneSet, SimpleText};
 
 fn main() -> Result<()> {
@@ -82,8 +82,8 @@ fn main() -> Result<()> {
 }
 
 fn render(mut scenes: SceneSet, index: usize, args: &Args) -> Result<()> {
-    use goldy::{DeviceType, Instance};
     use ekrano::{GoldyRenderer, RenderParams};
+    use goldy::{DeviceType, Instance};
 
     let instance = Instance::new()?;
     let device = instance

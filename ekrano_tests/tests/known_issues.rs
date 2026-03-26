@@ -60,7 +60,10 @@ fn many_bins(use_cpu: bool) {
     // due to bin_headers OOB when coarse exceeds 256; coarse shader guards bin_ix >= 256.
     // Goldy typically renders 230-251 bins; require at least 230 for the test to pass.
     const MIN_RED_COUNT: u32 = 230 * 256 * 256;
-    assert!(red_count >= MIN_RED_COUNT, "expected at least {MIN_RED_COUNT} red pixels, got {red_count}");
+    assert!(
+        red_count >= MIN_RED_COUNT,
+        "expected at least {MIN_RED_COUNT} red pixels, got {red_count}"
+    );
     assert!(black_count > 0);
 }
 

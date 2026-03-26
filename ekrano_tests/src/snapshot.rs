@@ -123,7 +123,10 @@ impl Snapshot<'_> {
                     .update_path
                     .parent()
                     .map(|p| p.join(format!("{}_diff.png", self.params.name)))
-                    .unwrap_or_else(|| self.update_path.with_file_name(format!("{}_diff.png", self.params.name)));
+                    .unwrap_or_else(|| {
+                        self.update_path
+                            .with_file_name(format!("{}_diff.png", self.params.name))
+                    });
                 let visualized = em.apply_color_lut(&nv_flip::magma_lut());
                 if let Some(rgb) = image::RgbImage::from_raw(
                     visualized.width(),

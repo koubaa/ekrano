@@ -19,11 +19,11 @@ pub const MAX_BINDLESS_SLOTS: usize = 16;
 
 use std::collections::HashMap;
 
-use goldy::{
-    Buffer, BufferPool, BufferView, ComputeEncoder, ComputePipeline, DataAccess, Device,
-    GpuFuture, ShaderModule, Texture,
-};
 use goldy::types::{SpatialAccess, TextureFlags, TextureFormat};
+use goldy::{
+    Buffer, BufferPool, BufferView, ComputeEncoder, ComputePipeline, DataAccess, Device, GpuFuture,
+    ShaderModule, Texture,
+};
 
 use crate::{
     Error, Result,
@@ -32,7 +32,12 @@ use crate::{
 };
 
 /// Return type for `process_recording_commands`: encoder plus pending downloads and deferred frees.
-type ProcessRecordingResult = (ComputeEncoder, Vec<BufferProxy>, Vec<ResourceId>, Vec<ResourceId>);
+type ProcessRecordingResult = (
+    ComputeEncoder,
+    Vec<BufferProxy>,
+    Vec<ResourceId>,
+    Vec<ResourceId>,
+);
 
 /// Deferred work after a non-blocking submit: downloads and resource frees.
 /// Call [`GoldyE ngine::complete_recording`] after waiting on the future.
@@ -152,9 +157,8 @@ impl GoldyEngine {
                 ResourceProxy::Buffer(proxy) | ResourceProxy::BufferRange { proxy, .. } => {
                     if self.bind_map.get_buf(proxy.id).is_none() {
                         let gpu_buf = if !is_pool_exempt(proxy.name)
-                            && self.storage_pool.is_some()
+                            && let Some(pool) = self.storage_pool.as_mut()
                         {
-                            let pool = self.storage_pool.as_mut().unwrap();
                             let stride = element_stride_for_buffer(proxy.name);
                             let view = pool
                                 .alloc_bytes(proxy.size, stride)
@@ -210,9 +214,13 @@ impl GoldyEngine {
         search_paths: &[&str],
         defines: &[(&str, &str)],
     ) -> Result<ShaderId> {
-        let shader_module =
-            ShaderModule::from_slang_with_paths_and_defines(device, slang_source, search_paths, defines)
-                .map_err(|e| Error::Shader(format!("{:#}", e)))?;
+        let shader_module = ShaderModule::from_slang_with_paths_and_defines(
+            device,
+            slang_source,
+            search_paths,
+            defines,
+        )
+        .map_err(|e| Error::Shader(format!("{:#}", e)))?;
         let pipeline = ComputePipeline::new(device, &shader_module)
             .map_err(|e| Error::Shader(format!("{:#}", e)))?;
 
@@ -228,6 +236,11 @@ impl GoldyEngine {
     ///
     /// `output` maps the recording's output image proxy to the actual texture to render into.
     /// The caller gets both from `render::render_full()` which returns `(Recording, target)`.
+    #[allow(
+        clippy::modulo_one,
+        clippy::manual_is_multiple_of,
+        reason = "DISPATCHES_PER_SUBMIT is intentionally 1 (flush every dispatch for TDR safety)"
+    )]
     pub fn run_recording(
         &mut self,
         device: &Device,
@@ -256,8 +269,10 @@ impl GoldyEngine {
                         buf_proxy.name,
                         DataAccess::Scattered,
                     )?;
-                    buf.write(0, bytes).map_err(|e| Error::Shader(e.to_string()))?;
-                    self.bind_map.insert_buf(buf_proxy.id, GpuBuffer::Owned(buf), buf_proxy.name);
+                    buf.write(0, bytes)
+                        .map_err(|e| Error::Shader(e.to_string()))?;
+                    self.bind_map
+                        .insert_buf(buf_proxy.id, GpuBuffer::Owned(buf), buf_proxy.name);
                 }
                 Command::UploadUniform(buf_proxy, bytes) => {
                     let buf = self.pool.get_buf(
@@ -266,8 +281,10 @@ impl GoldyEngine {
                         buf_proxy.name,
                         DataAccess::Broadcast,
                     )?;
-                    buf.write(0, bytes).map_err(|e| Error::Shader(e.to_string()))?;
-                    self.bind_map.insert_buf(buf_proxy.id, GpuBuffer::Owned(buf), buf_proxy.name);
+                    buf.write(0, bytes)
+                        .map_err(|e| Error::Shader(e.to_string()))?;
+                    self.bind_map
+                        .insert_buf(buf_proxy.id, GpuBuffer::Owned(buf), buf_proxy.name);
                 }
                 Command::UploadImage(image_proxy, bytes) => {
                     let format = image_format_to_goldy(image_proxy.format);
@@ -301,7 +318,10 @@ impl GoldyEngine {
                             .insert_image(image_proxy.id, tex, "write_image_target");
                     }
                     if let Some((tex, _)) = self.bind_map.get_image(image_proxy.id) {
-                        if image_data.data.is_empty() && image_data.width != 0 && image_data.height != 0 {
+                        if image_data.data.is_empty()
+                            && image_data.width != 0
+                            && image_data.height != 0
+                        {
                             panic!(
                                 "Tried to draw an invalid empty image (id: {}). \
                                 Maybe it was registered to a different renderer, or \
@@ -344,7 +364,11 @@ impl GoldyEngine {
                         let clear_size = size.unwrap_or(buf.size() - offset);
                         buf.clear(device, *offset, clear_size)
                             .map_err(|e| Error::Shader(e.to_string()))?;
-                        self.bind_map.insert_buf(buf_proxy.id, GpuBuffer::Owned(buf), buf_proxy.name);
+                        self.bind_map.insert_buf(
+                            buf_proxy.id,
+                            GpuBuffer::Owned(buf),
+                            buf_proxy.name,
+                        );
                     }
                 }
                 Command::FreeBuffer(buf_proxy) => {
@@ -359,8 +383,7 @@ impl GoldyEngine {
                     }
                     let bind_types: Vec<_> = self.shaders[shader_id.0].bindings.clone();
                     self.ensure_resources_materialized(device, bindings, &bind_types)?;
-                    let indices =
-                        collect_bindless_indices(bindings, &bind_types, &self.bind_map)?;
+                    let indices = collect_bindless_indices(bindings, &bind_types, &self.bind_map)?;
 
                     // Split execution: fine reads ptcl written by coarse. Run coarse+path_tiling first, sync, then fine.
                     let is_fine = output_proxy_id.is_some_and(|oid| {
@@ -397,8 +420,7 @@ impl GoldyEngine {
                     )?;
                     let bind_types: Vec<_> = self.shaders[shader_id.0].bindings.clone();
                     self.ensure_resources_materialized(device, bindings, &bind_types)?;
-                    let indices =
-                        collect_bindless_indices(bindings, &bind_types, &self.bind_map)?;
+                    let indices = collect_bindless_indices(bindings, &bind_types, &self.bind_map)?;
                     if let Some((gpu_buf, _)) = self.bind_map.get_buf(buf_proxy.id)
                         && let Some(buf) = gpu_buf.as_owned()
                     {
@@ -472,7 +494,9 @@ impl GoldyEngine {
         }
         let (encoder, pending_downloads, deferred_free_buffers, deferred_free_images) =
             self.process_recording_commands(device, recording, output)?;
-        let future = encoder.submit(device).map_err(|e| Error::Shader(e.to_string()))?;
+        let future = encoder
+            .submit(device)
+            .map_err(|e| Error::Shader(e.to_string()))?;
         Ok((
             future,
             RecordingCompletion {
@@ -514,6 +538,11 @@ impl GoldyEngine {
     const DISPATCHES_PER_SUBMIT: usize = 1;
 
     /// Process recording commands and build the encoder. Shared by `run_recording` and `submit_recording`.
+    #[allow(
+        clippy::modulo_one,
+        clippy::manual_is_multiple_of,
+        reason = "DISPATCHES_PER_SUBMIT is intentionally 1 (flush every dispatch for TDR safety)"
+    )]
     fn process_recording_commands(
         &mut self,
         device: &Device,
@@ -541,8 +570,10 @@ impl GoldyEngine {
                         buf_proxy.name,
                         DataAccess::Scattered,
                     )?;
-                    buf.write(0, bytes).map_err(|e| Error::Shader(e.to_string()))?;
-                    self.bind_map.insert_buf(buf_proxy.id, GpuBuffer::Owned(buf), buf_proxy.name);
+                    buf.write(0, bytes)
+                        .map_err(|e| Error::Shader(e.to_string()))?;
+                    self.bind_map
+                        .insert_buf(buf_proxy.id, GpuBuffer::Owned(buf), buf_proxy.name);
                 }
                 Command::UploadUniform(buf_proxy, bytes) => {
                     let buf = self.pool.get_buf(
@@ -551,8 +582,10 @@ impl GoldyEngine {
                         buf_proxy.name,
                         DataAccess::Broadcast,
                     )?;
-                    buf.write(0, bytes).map_err(|e| Error::Shader(e.to_string()))?;
-                    self.bind_map.insert_buf(buf_proxy.id, GpuBuffer::Owned(buf), buf_proxy.name);
+                    buf.write(0, bytes)
+                        .map_err(|e| Error::Shader(e.to_string()))?;
+                    self.bind_map
+                        .insert_buf(buf_proxy.id, GpuBuffer::Owned(buf), buf_proxy.name);
                 }
                 Command::UploadImage(image_proxy, bytes) => {
                     let format = image_format_to_goldy(image_proxy.format);
@@ -585,7 +618,10 @@ impl GoldyEngine {
                             .insert_image(image_proxy.id, tex, "write_image_target");
                     }
                     if let Some((tex, _)) = self.bind_map.get_image(image_proxy.id) {
-                        if image_data.data.is_empty() && image_data.width != 0 && image_data.height != 0 {
+                        if image_data.data.is_empty()
+                            && image_data.width != 0
+                            && image_data.height != 0
+                        {
                             panic!(
                                 "Tried to draw an invalid empty image (id: {}). \
                                 Maybe it was registered to a different renderer, or \
@@ -627,7 +663,11 @@ impl GoldyEngine {
                         let clear_size = size.unwrap_or(buf.size() - offset);
                         buf.clear(device, *offset, clear_size)
                             .map_err(|e| Error::Shader(e.to_string()))?;
-                        self.bind_map.insert_buf(buf_proxy.id, GpuBuffer::Owned(buf), buf_proxy.name);
+                        self.bind_map.insert_buf(
+                            buf_proxy.id,
+                            GpuBuffer::Owned(buf),
+                            buf_proxy.name,
+                        );
                     }
                 }
                 Command::FreeBuffer(buf_proxy) => {
@@ -642,8 +682,7 @@ impl GoldyEngine {
                     }
                     let bind_types: Vec<_> = self.shaders[shader_id.0].bindings.clone();
                     self.ensure_resources_materialized(device, bindings, &bind_types)?;
-                    let indices =
-                        collect_bindless_indices(bindings, &bind_types, &self.bind_map)?;
+                    let indices = collect_bindless_indices(bindings, &bind_types, &self.bind_map)?;
 
                     let is_fine = output_proxy_id.is_some_and(|oid| {
                         bindings.len() == 8
@@ -679,8 +718,7 @@ impl GoldyEngine {
                     )?;
                     let bind_types: Vec<_> = self.shaders[shader_id.0].bindings.clone();
                     self.ensure_resources_materialized(device, bindings, &bind_types)?;
-                    let indices =
-                        collect_bindless_indices(bindings, &bind_types, &self.bind_map)?;
+                    let indices = collect_bindless_indices(bindings, &bind_types, &self.bind_map)?;
                     if let Some((gpu_buf, _)) = self.bind_map.get_buf(buf_proxy.id)
                         && let Some(buf) = gpu_buf.as_owned()
                     {
@@ -705,7 +743,12 @@ impl GoldyEngine {
             }
         }
 
-        Ok((encoder, pending_downloads, deferred_free_buffers, deferred_free_images))
+        Ok((
+            encoder,
+            pending_downloads,
+            deferred_free_buffers,
+            deferred_free_images,
+        ))
     }
 
     /// Get downloaded buffer data, if the recording contained a Download command for it.
@@ -726,8 +769,8 @@ impl GoldyEngine {
             None => true,
         };
         if need_new {
-            let pool = BufferPool::new(device, pool_size)
-                .map_err(|e| Error::Shader(e.to_string()))?;
+            let pool =
+                BufferPool::new(device, pool_size).map_err(|e| Error::Shader(e.to_string()))?;
             pool.backing_buffer()
                 .clear(device, 0, pool_size)
                 .map_err(|e| Error::Shader(e.to_string()))?;
@@ -758,7 +801,6 @@ impl GoldyEngine {
         self.downloads.clear();
         self.storage_pool = None;
     }
-
 }
 
 fn image_format_to_goldy(_format: crate::recording::ImageFormat) -> TextureFormat {

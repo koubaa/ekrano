@@ -13,7 +13,7 @@ use super::Monoid;
 /// - Word 0: flags + miter limit (see below)
 /// - Word 1: stroke line width (f32)
 /// - Word 2: dash offset (f32, 0.0 if not dashed)
-/// - Word 3: packed dash pattern — dash_on (f16, bits 0-15) | dash_off (f16, bits 16-31)
+/// - Word 3: packed dash pattern — `dash_on` (f16, bits 0-15) | `dash_off` (f16, bits 16-31)
 ///
 /// Flags layout in word 0 (upper 16 bits):
 /// ```text
@@ -29,7 +29,7 @@ pub struct Style {
     pub line_width: f32,
     /// Dash offset in user-space units. 0.0 when not dashed.
     pub dash_offset: f32,
-    /// Packed dash pattern: lower 16 bits = dash_on (f16), upper 16 bits = dash_off (f16).
+    /// Packed dash pattern: lower 16 bits = `dash_on` (f16), upper 16 bits = `dash_off` (f16).
     /// Zero when not dashed.
     pub dash_pattern: u32,
 }
@@ -115,7 +115,11 @@ impl Style {
         let (dashed, dash_offset, dash_packed) = if stroke.dash_pattern.len() == 2 {
             let on = crate::math::f32_to_f16(stroke.dash_pattern[0] as f32) as u32;
             let off = crate::math::f32_to_f16(stroke.dash_pattern[1] as f32) as u32;
-            (Self::FLAGS_DASHED_BIT, stroke.dash_offset as f32, on | (off << 16))
+            (
+                Self::FLAGS_DASHED_BIT,
+                stroke.dash_offset as f32,
+                on | (off << 16),
+            )
         } else {
             (0, 0.0, 0)
         };

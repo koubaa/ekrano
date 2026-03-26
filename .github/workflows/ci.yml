@@ -14,6 +14,9 @@ env:
   RUST_MIN_VER_PKGS: "-p ekrano -p ekrano_encoding -p ekrano_shaders"
   # The files stored in LFS the tests need to access, in JSON format
   LFS_FILES: '["ekrano_tests/snapshots/*.png"]'
+  # Goldy is an external path dependency (sibling repo). CI clones it at this branch.
+  GOLDY_BRANCH: "main"
+  GOLDY_REPO: "https://github.com/koubaa/goldy.git"
 
 
 # Rationale
@@ -69,6 +72,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Clone goldy
+        run: git clone --depth 1 --branch ${{ env.GOLDY_BRANCH }} ${{ env.GOLDY_REPO }} ../goldy
+
       - name: install stable toolchain
         uses: dtolnay/rust-toolchain@master
         with:
@@ -76,7 +82,9 @@ jobs:
           components: rustfmt
 
       - name: cargo fmt
-        run: cargo fmt --all --check
+        # Use explicit package list instead of --all, which would also check
+        # local path dependencies (goldy) outside this workspace.
+        run: cargo fmt -p ekrano -p ekrano_encoding -p ekrano_shaders -p ekrano_tests -p xtask -p headless -p scenes --check
 
       - name: Install Taplo
         uses: uncenter/setup-taplo@09968a8ae38d66ddd3d23802c44bf6122d7aa991 # v1
@@ -103,16 +111,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Clone goldy
+        run: git clone --depth 1 --branch ${{ env.GOLDY_BRANCH }} ${{ env.GOLDY_REPO }} ../goldy
+
       - name: install stable toolchain
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_STABLE_VER }}
           components: clippy
-
-      - name: install cargo-hack
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-hack
 
       - name: restore cache
         uses: Swatinem/rust-cache@v2
@@ -174,6 +180,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         # We intentionally do not use lfs: true here, instead using the caching method to save LFS bandwidth.
+
+      - name: Clone goldy
+        run: git clone --depth 1 --branch ${{ env.GOLDY_BRANCH }} ${{ env.GOLDY_REPO }} ../goldy
 
       - name: Restore lfs cache
         id: lfs-cache
@@ -247,6 +256,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Clone goldy
+        run: git clone --depth 1 --branch ${{ env.GOLDY_BRANCH }} ${{ env.GOLDY_REPO }} ../goldy
+
       - name: install msrv toolchain
         uses: dtolnay/rust-toolchain@master
         with:
@@ -267,6 +279,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Clone goldy
+        run: git clone --depth 1 --branch ${{ env.GOLDY_BRANCH }} ${{ env.GOLDY_REPO }} ../goldy
 
       - name: install nightly toolchain
         uses: dtolnay/rust-toolchain@nightly

@@ -15,9 +15,9 @@ use ekrano_encoding::{
 };
 use ekrano_encoding::{
     STAGE_BACKDROP, STAGE_BBOX_CLEAR, STAGE_BINNING, STAGE_CLIP_LEAF, STAGE_CLIP_REDUCE,
-     STAGE_COARSE, STAGE_DRAW_LEAF, STAGE_DRAW_REDUCE, STAGE_FLATTEN,
-    STAGE_PATHTAG_REDUCE, STAGE_PATHTAG_REDUCE2, STAGE_PATHTAG_SCAN, STAGE_PATHTAG_SCAN1,
-    STAGE_PATHTAG_SCAN_LARGE, STAGE_PATH_COUNT, STAGE_PATH_TILING, STAGE_TILE_ALLOC,
+    STAGE_COARSE, STAGE_DRAW_LEAF, STAGE_DRAW_REDUCE, STAGE_FLATTEN, STAGE_PATH_COUNT,
+    STAGE_PATH_TILING, STAGE_PATHTAG_REDUCE, STAGE_PATHTAG_REDUCE2, STAGE_PATHTAG_SCAN,
+    STAGE_PATHTAG_SCAN_LARGE, STAGE_PATHTAG_SCAN1, STAGE_TILE_ALLOC,
 };
 
 /// State for a render in progress.
@@ -85,7 +85,7 @@ impl CapturedBuffers {
 /// Max flatten workgroups per queue submit. Large single dispatches can exceed the
 /// Windows ~2s GPU timeout (TDR) on stressed dashed paths.
 const MAX_FLATTEN_WG_PER_SUBMIT: u32 = 8;
-/// Must match `FLATTEN_WG` in ekrano_encoding (threads per flatten workgroup).
+/// Must match `FLATTEN_WG` in `ekrano_encoding` (threads per flatten workgroup).
 const FLATTEN_THREADS_PER_GROUP: u32 = 256;
 
 fn dispatch_stage(
@@ -142,7 +142,7 @@ impl Render {
         self.render_encoding_coarse_inner(encoding, resolver, shaders, params, robust, None)
     }
 
-    /// Like [`render_encoding_coarse`] but with a custom config for retry.
+    /// Like [`Self::render_encoding_coarse`] but with a custom config for retry.
     pub fn render_encoding_coarse_with_config(
         &mut self,
         encoding: &Encoding,
@@ -152,9 +152,7 @@ impl Render {
         robust: bool,
         config: &ekrano_encoding::RenderConfig,
     ) -> Recording {
-        self.render_encoding_coarse_inner(
-            encoding, resolver, shaders, params, robust, Some(config),
-        )
+        self.render_encoding_coarse_inner(encoding, resolver, shaders, params, robust, Some(config))
     }
 
     fn render_encoding_coarse_inner(
@@ -225,10 +223,9 @@ impl Render {
         let use_indirect = shaders.pipeline_setup.is_some();
         let indirect_buf = if use_indirect {
             let wg_counts_gpu = WorkgroupCountsGpu::from(wg_counts);
-            let wg_counts_buf = ResourceProxy::Buffer(recording.upload(
-                "vello.wg_counts",
-                bytemuck::bytes_of(&wg_counts_gpu),
-            ));
+            let wg_counts_buf = ResourceProxy::Buffer(
+                recording.upload("vello.wg_counts", bytemuck::bytes_of(&wg_counts_gpu)),
+            );
             let indirect_buf = BufferProxy::new(
                 buffer_sizes.indirect_count.size_in_bytes().into(),
                 "vello.indirect_dispatch",
@@ -388,7 +385,7 @@ impl Render {
         let flat_wg_x = wg_counts.flatten.0;
         if flat_wg_x > MAX_FLATTEN_WG_PER_SUBMIT {
             let mut gpu_cfg = cpu_config.gpu;
-            let mut base_wg = 0u32;
+            let mut base_wg = 0_u32;
             while base_wg < flat_wg_x {
                 let chunk = (flat_wg_x - base_wg).min(MAX_FLATTEN_WG_PER_SUBMIT);
                 gpu_cfg.flatten_thread_base = base_wg * FLATTEN_THREADS_PER_GROUP;
@@ -559,10 +556,7 @@ impl Render {
         // Buffer for path_count/path_tiling: multi-entry when use_indirect (shared with other stages),
         // otherwise dedicated buffer for just those two stages (single IndirectCount; both write to offset 0).
         let path_indirect_buf = indirect_buf.unwrap_or_else(|| {
-            BufferProxy::new(
-                size_of::<IndirectCount>() as u64,
-                "vello.indirect_count",
-            )
+            BufferProxy::new(size_of::<IndirectCount>() as u64, "vello.indirect_count")
         });
         recording.dispatch(
             shaders.path_count_setup,
