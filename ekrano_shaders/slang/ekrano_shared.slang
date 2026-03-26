@@ -612,8 +612,17 @@ public DrawMonoid map_draw_tag(uint tag_word) {
     return c;
 }
 
-// read_draw_tag_from_scene was moved to individual shaders (draw_leaf, draw_reduce)
-// to avoid requiring goldy_exp import or interface constraints in this shared module.
+public struct DrawTagScanner : IScannable<DrawMonoid> {
+    static DrawMonoid map(uint raw_input) { return map_draw_tag(raw_input); }
+}
+
+// StorageBuffer (not RWStructuredBuffer) for Metal read-only scene access.
+public uint read_draw_tag_from_scene(StorageBuffer<uint> scene, Config config, uint ix) {
+    if (ix < config.n_drawobj) {
+        return scene[config.drawtag_base + ix];
+    }
+    return DRAWTAG_NOP;
+}
 
 // === Blend - mix and compose mode constants ===
 public static const uint MIX_NORMAL = 0;
