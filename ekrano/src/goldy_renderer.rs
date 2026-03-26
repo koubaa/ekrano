@@ -6,15 +6,15 @@
 //!
 //! Use this when building with `--no-default-features --features goldy`.
 
-use goldy::{BufferPool, Device, Texture};
 use goldy::types::{SpatialAccess, TextureFlags, TextureFormat};
+use goldy::{BufferPool, Device, Texture};
 
 use crate::{
+    Error, RenderParams, Result, Scene,
     goldy_engine::GoldyEngine,
     recording::Recording,
     render::Render,
     shaders::{self, FullShaders},
-    Error, RenderParams, Result, Scene,
 };
 use ekrano_encoding::{BumpAllocators, Resolver};
 
@@ -73,35 +73,46 @@ impl GoldyRenderer {
             self.engine.prepare_storage_pool(device, pool_size)?;
 
             let mut render = Render::new();
-            let coarse_recording =
-                render.render_encoding_coarse_with_config(
-                    encoding,
-                    &mut self.resolver,
-                    &self.shaders,
-                    params,
-                    true,
-                    &config,
-                );
+            let coarse_recording = render.render_encoding_coarse_with_config(
+                encoding,
+                &mut self.resolver,
+                &self.shaders,
+                params,
+                true,
+                &config,
+            );
             let bump_buf = render.bump_buf();
 
             let (coarse_future, coarse_completion) =
-                self.engine.submit_recording(device, &coarse_recording, None, "coarse")?;
+                self.engine
+                    .submit_recording(device, &coarse_recording, None, "coarse")?;
 
             let out_image = render.out_image();
             let mut fine_recording = Recording::default();
             render.record_fine(&self.shaders, &mut fine_recording);
 
-            if !coarse_future.wait_timeout(2000).map_err(|e| Error::Shader(e.to_string()))? {
+            if !coarse_future
+                .wait_timeout(2000)
+                .map_err(|e| Error::Shader(e.to_string()))?
+            {
                 log::warn!("Coarse pass exceeded 2s timeout (TDR risk); waiting anyway");
-                coarse_future.wait().map_err(|e| Error::Shader(e.to_string()))?;
+                coarse_future
+                    .wait()
+                    .map_err(|e| Error::Shader(e.to_string()))?;
             }
             self.engine.complete_recording(device, coarse_completion)?;
 
             let bump = self.read_bump(&bump_buf)?;
             self.engine.free_download(bump_buf);
 
-            eprintln!("[BUMP] lines={}, seg_counts={}, segments={}, tile={}, failed=0x{:x}",
-                bump.lines, bump.seg_counts, bump.segments, bump.tile, bump.failed);
+            log::debug!(
+                "[BUMP] lines={}, seg_counts={}, segments={}, tile={}, failed=0x{:x}",
+                bump.lines,
+                bump.seg_counts,
+                bump.segments,
+                bump.tile,
+                bump.failed
+            );
 
             if bump.failed == 0 || attempt == MAX_BUMP_RETRIES {
                 if bump.failed != 0 {
@@ -165,9 +176,10 @@ impl GoldyRenderer {
     }
 
     fn read_bump(&self, bump_buf: &crate::low_level::BufferProxy) -> Result<BumpAllocators> {
-        let data = self.engine.get_download(*bump_buf).ok_or_else(|| {
-            Error::Shader("bump buffer download not available".into())
-        })?;
+        let data = self
+            .engine
+            .get_download(*bump_buf)
+            .ok_or_else(|| Error::Shader("bump buffer download not available".into()))?;
         Ok(bytemuck::pod_read_unaligned::<BumpAllocators>(data))
     }
 }

@@ -4,8 +4,11 @@
 //! Load rendering shaders.
 
 use crate::ShaderId;
-use crate::{Error, recording::{BindType, ImageFormat}};
 use crate::goldy_engine::GoldyEngine;
+use crate::{
+    Error,
+    recording::{BindType, ImageFormat},
+};
 
 // Shaders for the full pipeline
 pub struct FullShaders {

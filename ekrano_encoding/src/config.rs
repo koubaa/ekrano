@@ -7,8 +7,8 @@ use super::{
     BinHeader, Clip, ClipBbox, ClipBic, ClipElement, DrawBbox, DrawMonoid, Layout, LineSoup, Path,
     PathBbox, PathMonoid, PathSegment, Tile,
 };
-use std::mem::size_of;
 use bytemuck::{Pod, Zeroable};
+use std::mem::size_of;
 
 const TILE_WIDTH: u32 = 16;
 const TILE_HEIGHT: u32 = 16;
@@ -342,14 +342,26 @@ impl From<&WorkgroupCounts> for WorkgroupCountsGpu {
         let zero = [0_u32; 4];
         let mut entries = [[0_u32; 4]; N_INDIRECT_STAGES as usize];
         entries[STAGE_PATHTAG_REDUCE as usize] = to_u4(wc.path_reduce);
-        entries[STAGE_PATHTAG_REDUCE2 as usize] =
-            if wc.use_large_path_scan { to_u4(wc.path_reduce2) } else { zero };
-        entries[STAGE_PATHTAG_SCAN1 as usize] =
-            if wc.use_large_path_scan { to_u4(wc.path_scan1) } else { zero };
-        entries[STAGE_PATHTAG_SCAN as usize] =
-            if wc.use_large_path_scan { zero } else { to_u4(wc.path_scan) };
-        entries[STAGE_PATHTAG_SCAN_LARGE as usize] =
-            if wc.use_large_path_scan { to_u4(wc.path_scan) } else { zero };
+        entries[STAGE_PATHTAG_REDUCE2 as usize] = if wc.use_large_path_scan {
+            to_u4(wc.path_reduce2)
+        } else {
+            zero
+        };
+        entries[STAGE_PATHTAG_SCAN1 as usize] = if wc.use_large_path_scan {
+            to_u4(wc.path_scan1)
+        } else {
+            zero
+        };
+        entries[STAGE_PATHTAG_SCAN as usize] = if wc.use_large_path_scan {
+            zero
+        } else {
+            to_u4(wc.path_scan)
+        };
+        entries[STAGE_PATHTAG_SCAN_LARGE as usize] = if wc.use_large_path_scan {
+            to_u4(wc.path_scan)
+        } else {
+            zero
+        };
         entries[STAGE_BBOX_CLEAR as usize] = to_u4(wc.bbox_clear);
         entries[STAGE_FLATTEN as usize] = to_u4(wc.flatten);
         entries[STAGE_DRAW_REDUCE as usize] = to_u4(wc.draw_reduce);
@@ -535,7 +547,10 @@ impl BufferSizes {
         vec![
             (self.path_reduced.len() as usize, size_of::<PathMonoid>()),
             (self.path_reduced2.len() as usize, size_of::<PathMonoid>()),
-            (self.path_reduced_scan.len() as usize, size_of::<PathMonoid>()),
+            (
+                self.path_reduced_scan.len() as usize,
+                size_of::<PathMonoid>(),
+            ),
             (self.path_monoids.len() as usize, size_of::<PathMonoid>()),
             (self.path_bboxes.len() as usize, size_of::<PathBbox>()),
             (self.draw_reduced.len() as usize, size_of::<DrawMonoid>()),

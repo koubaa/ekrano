@@ -2,13 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 #[cfg(feature = "debug_layers")]
+#[allow(dead_code, reason = "stub awaiting Goldy render-pipeline port")]
 mod renderer;
 #[cfg(feature = "debug_layers")]
+#[allow(dead_code, reason = "stub awaiting Goldy render-pipeline port")]
 mod validate;
 
 use std::fmt::Debug;
 
 #[cfg(feature = "debug_layers")]
+#[allow(unused_imports, reason = "stub awaiting Goldy render-pipeline port")]
 pub(crate) use renderer::*;
 
 /// Bitflags for enabled debug operations.

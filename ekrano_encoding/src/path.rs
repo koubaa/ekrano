@@ -115,7 +115,11 @@ impl Style {
         let (dashed, dash_offset, dash_packed) = if stroke.dash_pattern.len() == 2 {
             let on = crate::math::f32_to_f16(stroke.dash_pattern[0] as f32) as u32;
             let off = crate::math::f32_to_f16(stroke.dash_pattern[1] as f32) as u32;
-            (Self::FLAGS_DASHED_BIT, stroke.dash_offset as f32, on | (off << 16))
+            (
+                Self::FLAGS_DASHED_BIT,
+                stroke.dash_offset as f32,
+                on | (off << 16),
+            )
         } else {
             (0, 0.0, 0)
         };
