@@ -174,9 +174,8 @@ jobs:
           - os: macos-latest
             gpu: 'yes'
           - os: windows-latest
-            # TODO: The windows runners theoretically have CPU fallback for GPUs, but
-            # this failed in initial testing
-            gpu: 'no'
+            # GPU snapshot tests use Goldy DX12 on WARP (software rasterizer), same idea as goldy CI.
+            gpu: 'yes'
     steps:
       - uses: actions/checkout@v4
         # We intentionally do not use lfs: true here, instead using the caching method to save LFS bandwidth.
@@ -224,6 +223,28 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.event_name != 'merge_group' }}
+
+      # Same as goldy CI: DX12 + Slang need DXC from the Windows SDK on PATH.
+      - name: Add Windows SDK DXC to PATH
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $sdkBin = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\10.0.*\x64' -Directory |
+                    Sort-Object Name | Select-Object -Last 1
+          if ($sdkBin -and (Test-Path "$($sdkBin.FullName)\dxcompiler.dll")) {
+            Write-Host "Found DXC at: $($sdkBin.FullName)"
+            "$($sdkBin.FullName)" | Out-File -Append -FilePath $env:GITHUB_PATH -Encoding utf8
+          } else {
+            Write-Host "WARNING: dxcompiler.dll not found in Windows SDK"
+          }
+
+      - name: Configure Goldy DX12 WARP (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          echo "GOLDY_BACKEND=dx12" >> "$GITHUB_ENV"
+          echo "GOLDY_DX12_ALLOW_WARP=1" >> "$GITHUB_ENV"
+          echo "GOLDY_DX12_NO_DEBUG=1" >> "$GITHUB_ENV"
 
       - name: cargo nextest
         # TODO: Maybe use --release; the CPU shaders are extremely slow when unoptimised
