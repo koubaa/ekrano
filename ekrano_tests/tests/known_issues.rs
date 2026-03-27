@@ -21,7 +21,7 @@ use ekrano_tests::{TestParams, smoke_snapshot_test_sync, snapshot_test_sync};
 use scenes::ImageCache;
 
 /// A reproduction of <https://github.com/linebender/vello/issues/680>
-fn many_bins(use_cpu: bool) {
+fn many_bins() {
     let mut scene = Scene::new();
     scene.fill(
         ekrano::peniko::Fill::NonZero,
@@ -30,10 +30,7 @@ fn many_bins(use_cpu: bool) {
         None,
         &Rect::new(-5., -5., 256. * 20., 256. * 20.),
     );
-    let params = TestParams {
-        use_cpu,
-        ..TestParams::new("many_bins", 256 * 17, 256 * 17)
-    };
+    let params = TestParams::new("many_bins", 256 * 17, 256 * 17);
     // To view, use EKRANO_DEBUG_TEST=many_bins
     let image = ekrano_tests::render_then_debug_sync(&scene, &params).unwrap();
     assert_eq!(image.format, ImageFormat::Rgba8);
@@ -69,12 +66,9 @@ fn many_bins(use_cpu: bool) {
 
 #[test]
 #[cfg_attr(skip_gpu_tests, ignore)]
-fn many_bins_gpu() {
-    many_bins(false);
+fn many_bins_test() {
+    many_bins();
 }
-
-// many_bins_cpu removed: it tested wgpu CPU-path panic (vello#680). The wgpu backend was
-// removed; goldy is GPU-only and get_scene_image ignores use_cpu.
 
 /// Test for <https://github.com/linebender/vello/issues/1061>
 #[test]

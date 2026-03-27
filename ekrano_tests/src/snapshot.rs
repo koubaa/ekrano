@@ -18,9 +18,8 @@ use nv_flip::FlipPool;
 use crate::{TestParams, env_var_relates_to, render_then_debug, write_png_to_file};
 use anyhow::{Result, anyhow, bail};
 
-fn current_dir(directory: SnapshotDirectory, use_cpu: bool) -> PathBuf {
+fn current_dir(directory: SnapshotDirectory) -> PathBuf {
     let mut path_buf = Path::new(env!("CARGO_MANIFEST_DIR")).join("current");
-    path_buf.push(if use_cpu { "cpu" } else { "gpu" });
     match directory {
         SnapshotDirectory::Smoke => path_buf.push("smoke"),
         SnapshotDirectory::Lfs => { /* Do nothing */ }
@@ -90,25 +89,18 @@ impl Snapshot<'_> {
     }
 
     fn handle_failure(&mut self, message: fmt::Arguments<'_>) -> Result<()> {
-        if env_var_relates_to("EKRANO_TEST_UPDATE", &self.params.name, self.params.use_cpu) {
-            if !self.params.use_cpu {
-                write_png_to_file(
-                    self.params,
-                    &self.reference_path,
-                    &self.raw_rendered,
-                    Some(self.directory.max_size_in_bytes()),
-                    true,
-                )?;
-                eprintln!(
-                    "Updated result for updated test {} to {:?}",
-                    self.params.name, &self.reference_path
-                );
-            } else {
-                eprintln!(
-                    "Skipped updating result for test {} as not GPU test",
-                    self.params.name
-                );
-            }
+        if env_var_relates_to("EKRANO_TEST_UPDATE", &self.params.name) {
+            write_png_to_file(
+                self.params,
+                &self.reference_path,
+                &self.raw_rendered,
+                Some(self.directory.max_size_in_bytes()),
+                true,
+            )?;
+            eprintln!(
+                "Updated result for updated test {} to {:?}",
+                self.params.name, &self.reference_path
+            );
         } else {
             write_png_to_file(
                 self.params,
@@ -209,7 +201,7 @@ pub fn snapshot_test_image(
     params: &TestParams,
     directory: SnapshotDirectory,
 ) -> Result<Snapshot<'_>> {
-    let c_dir = current_dir(directory, params.use_cpu);
+    let c_dir = current_dir(directory);
     std::fs::create_dir_all(&c_dir)?;
     let update_path = c_dir.join(&params.name).with_extension("png");
 
@@ -232,7 +224,7 @@ pub fn snapshot_test_image(
             let size = std::fs::metadata(&reference_path).map(|it| it.len())?;
             if size > directory.max_size_in_bytes()
                 // If we expect to be updating the test, there's no need to fail here.
-                && !env_var_relates_to("EKRANO_TEST_UPDATE", &params.name, params.use_cpu)
+                && !env_var_relates_to("EKRANO_TEST_UPDATE", &params.name)
             {
                 bail!(
                     "Stored result for {test_name} is too large.\n\
@@ -246,25 +238,18 @@ pub fn snapshot_test_image(
             contents.into_rgb8()
         }
         Err(ImageError::IoError(e)) if e.kind() == ErrorKind::NotFound => {
-            if env_var_relates_to("EKRANO_TEST_CREATE", &params.name, params.use_cpu) {
-                if !params.use_cpu {
-                    write_png_to_file(
-                        params,
-                        &reference_path,
-                        &raw_rendered,
-                        Some(directory.max_size_in_bytes()),
-                        true,
-                    )?;
-                    eprintln!(
-                        "Wrote result for new test {} to {:?}",
-                        params.name, &reference_path
-                    );
-                } else {
-                    eprintln!(
-                        "Skipped writing result for new test {} as not GPU test",
-                        params.name
-                    );
-                }
+            if env_var_relates_to("EKRANO_TEST_CREATE", &params.name) {
+                write_png_to_file(
+                    params,
+                    &reference_path,
+                    &raw_rendered,
+                    Some(directory.max_size_in_bytes()),
+                    true,
+                )?;
+                eprintln!(
+                    "Wrote result for new test {} to {:?}",
+                    params.name, &reference_path
+                );
                 return Ok(Snapshot {
                     statistics: None,
                     error_map: None,
@@ -294,7 +279,7 @@ pub fn snapshot_test_image(
             }
         }
         Err(ImageError::Decoding(d)) => {
-            if env_var_relates_to("EKRANO_SKIP_LFS_SNAPSHOTS", &params.name, params.use_cpu) {
+            if env_var_relates_to("EKRANO_SKIP_LFS_SNAPSHOTS", &params.name) {
                 return Ok(Snapshot {
                     statistics: None,
                     error_map: None,

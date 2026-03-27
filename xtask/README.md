@@ -1,25 +1,12 @@
 # Xtask dev utilities
 
-This package provides the following commands:
-
-## Snapshots
+Kompari-based diffing between reference snapshots and latest outputs.
 
 ```bash
-cargo xtask snaphosts-cpu report  # Creates report for snapshots
-cargo xtask snapshots-cpu review  # Interactive test blessing snapshots
-cargo xtask snapshots-cpu dead-snaphosts  # Detects dead snapshots
-cargo xtask snapshots-cpu size-check  # Size check for snapshots
+cargo xtask snapshots report   # HTML report: snapshots/ vs current/
+cargo xtask snapshots review   # Interactive review
+cargo xtask snapshots dead-snapshots  # Find orphan reference images
+cargo xtask snapshots size-check     # Size check
 ```
 
-The same works for `snapshots-gpu`
-
-```bash
-cargo xtask snaphosts-gpu ...
-```
-
-
-## Comparisons
-
-```bash
-cargo xtask comparisons report  # Creates report for comparisons
-```
+Paths are rooted at `ekrano_tests/snapshots` (left) and `ekrano_tests/current` (right).

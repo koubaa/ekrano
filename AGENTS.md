@@ -41,7 +41,7 @@ ekrano/                   # Git root (forked from Vello)
 ├── ekrano_encoding/      # Scene encoding into GPU-friendly streams
 ├── ekrano_shaders/       # Slang compute shaders + optional CPU fallbacks
 ├── ekrano_tests/         # Snapshot / regression test suite
-├── xtask/                # Snapshot diff tooling (kompari)
+├── xtask/                # Kompari: diff snapshots/ vs current/
 ├── examples/
 │   ├── headless/         # Offscreen rendering (primary use case)
 │   ├── scenes/           # Shared scene library for examples and tests

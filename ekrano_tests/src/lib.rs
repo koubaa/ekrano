@@ -38,10 +38,8 @@ use ekrano::peniko::{ImageAlphaType, ImageData};
 use ekrano::{AaConfig, Scene};
 use scenes::{ExampleScene, ImageCache, SceneParams, SimpleText};
 
-mod compare;
 mod snapshot;
 
-pub use compare::{GpuCpuComparison, compare_gpu_cpu, compare_gpu_cpu_sync};
 pub use snapshot::{
     Snapshot, SnapshotDirectory, smoke_snapshot_test_sync, snapshot_test, snapshot_test_sync,
 };
@@ -50,7 +48,6 @@ pub struct TestParams {
     pub width: u32,
     pub height: u32,
     pub base_color: Option<Color>,
-    pub use_cpu: bool,
     pub name: String,
     pub anti_aliasing: AaConfig,
 }
@@ -61,7 +58,6 @@ impl TestParams {
             width,
             height,
             base_color: None,
-            use_cpu: false,
             name: name.into(),
             anti_aliasing: AaConfig::Area,
         }
@@ -74,13 +70,12 @@ pub fn render_then_debug_sync(scene: &Scene, params: &TestParams) -> Result<Imag
 
 pub fn render_then_debug(scene: &Scene, params: &TestParams) -> Result<ImageData> {
     let image = get_scene_image(params, scene)?;
-    let suffix = if params.use_cpu { "cpu" } else { "gpu" };
-    let name = format!("{}_{suffix}", &params.name);
+    let name = params.name.clone();
     let out_path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("debug_outputs")
         .join(name)
         .with_extension("png");
-    if env_var_relates_to("EKRANO_DEBUG_TEST", &params.name, params.use_cpu) {
+    if env_var_relates_to("EKRANO_DEBUG_TEST", &params.name) {
         write_png_to_file(params, &out_path, &image, None, false)?;
         let (width, height) = (image.width, image.height);
         println!("Wrote debug result ({width}x{height}) to {out_path:?}");
@@ -174,25 +169,15 @@ pub fn write_png_to_file(
 /// Determine whether the value of the environment variable `env_var`
 /// includes a specific test.
 /// This is used when updating tests, or dumping the debug output
-fn env_var_relates_to(env_var: &'static str, name: &str, use_cpu: bool) -> bool {
+fn env_var_relates_to(env_var: &'static str, name: &str) -> bool {
     if let Ok(val) = env::var(env_var) {
-        if val.eq_ignore_ascii_case("all")
-            || val.eq_ignore_ascii_case("cpu") && use_cpu
-            || val.eq_ignore_ascii_case("gpu") && !use_cpu
-        {
+        if val.eq_ignore_ascii_case("all") {
             return true;
         }
         for test in val.split(',') {
-            if use_cpu {
-                let test_name = test.trim_end_matches("_cpu");
-                if test_name.eq_ignore_ascii_case(name) {
-                    return true;
-                }
-            } else {
-                let test_name = test.trim_end_matches("_gpu");
-                if test_name.eq_ignore_ascii_case(name) {
-                    return true;
-                }
+            let test_name = test.trim();
+            if test_name.eq_ignore_ascii_case(name) {
+                return true;
             }
         }
     }

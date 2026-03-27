@@ -6,7 +6,7 @@
 use ekrano_tests::{TestParams, encode_test_scene, snapshot_test_sync};
 use scenes::{ExampleScene, test_scenes};
 
-/// Make sure the CPU and GPU renderers match on the test scenes
+/// Snapshot each scene against the LFS reference PNG.
 fn snapshot_test_scene(test_scene: ExampleScene, mut params: TestParams) {
     let scene = encode_test_scene(test_scene, &mut params);
     snapshot_test_sync(scene, &params)
