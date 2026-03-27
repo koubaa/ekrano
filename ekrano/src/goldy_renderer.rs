@@ -70,6 +70,7 @@ impl GoldyRenderer {
             // Safety margin: runtime allocation order may differ from pool_allocs order,
             // causing extra alignment padding. Add 256K to absorb ordering variance.
             let pool_size = base.saturating_add(262144);
+
             self.engine.prepare_storage_pool(device, pool_size)?;
 
             let mut render = Render::new();
@@ -123,6 +124,10 @@ impl GoldyRenderer {
                         bump.failed,
                     );
                 }
+                #[cfg(feature = "debug_layers")]
+                if let Some(captured) = render.take_captured_buffers() {
+                    captured.release_buffers(&mut fine_recording);
+                }
                 return self.engine.run_recording(
                     device,
                     &fine_recording,
@@ -138,6 +143,8 @@ impl GoldyRenderer {
                 attempt + 1,
                 bump.failed,
             );
+            #[cfg(feature = "debug_layers")]
+            render.take_captured_buffers();
             self.engine.clear_transients();
         }
         unreachable!()
