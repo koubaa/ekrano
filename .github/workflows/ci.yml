@@ -265,6 +265,9 @@ jobs:
         run: cargo nextest run --workspace --locked --all-features --no-fail-fast
         env:
           EKRANO_CI_GPU_SUPPORT: ${{ matrix.gpu }}
+          # Skip tests that are too slow on software-emulated GPUs (lavapipe, WARP).
+          # These still run locally on real hardware.
+          EKRANO_CI_SKIP_SLOW: 'yes'
           # Linux: force lavapipe as the sole Vulkan driver and suppress validation layers.
           # LAVAPIPE_ICD is set by the install step above (Linux only); empty string on
           # other platforms, which is harmless (VK_ICD_FILENAMES unset = use all drivers).
