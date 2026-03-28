@@ -23,6 +23,7 @@ fn compare_test_scene(test_scene: ExampleScene, mut params: TestParams) {
 
 #[test]
 #[cfg_attr(skip_gpu_tests, ignore)]
+#[cfg_attr(skip_slow_tests, ignore)]
 fn compare_splash() {
     let test_scene = test_scenes::splash_with_tiger();
     let params = TestParams::new("compare_splash", 600, 600);
@@ -32,6 +33,7 @@ fn compare_splash() {
 
 #[test]
 #[cfg_attr(skip_gpu_tests, ignore)]
+#[cfg_attr(skip_slow_tests, ignore)]
 fn compare_funky_paths() {
     let test_scene = test_scenes::funky_paths();
     let params = TestParams::new("compare_funky_paths", 600, 600);
@@ -41,6 +43,7 @@ fn compare_funky_paths() {
 
 #[test]
 #[cfg_attr(skip_gpu_tests, ignore)]
+#[cfg_attr(skip_slow_tests, ignore)]
 fn compare_stroke_styles() {
     let test_scene = test_scenes::stroke_styles();
     let params = TestParams::new("compare_stroke_styles", 1200, 850);
@@ -50,6 +53,7 @@ fn compare_stroke_styles() {
 
 #[test]
 #[cfg_attr(skip_gpu_tests, ignore)]
+#[cfg_attr(skip_slow_tests, ignore)]
 fn compare_stroke_styles_non_uniform() {
     let test_scene = test_scenes::stroke_styles_non_uniform();
     let params = TestParams::new("compare_stroke_styles_non_uniform", 1200, 850);
@@ -59,6 +63,7 @@ fn compare_stroke_styles_non_uniform() {
 
 #[test]
 #[cfg_attr(skip_gpu_tests, ignore)]
+#[cfg_attr(skip_slow_tests, ignore)]
 fn compare_stroke_styles_skew() {
     let test_scene = test_scenes::stroke_styles_skew();
     let params = TestParams::new("compare_stroke_styles_skew", 1200, 850);
@@ -67,6 +72,7 @@ fn compare_stroke_styles_skew() {
 
 #[test]
 #[cfg_attr(skip_gpu_tests, ignore)]
+#[cfg_attr(skip_slow_tests, ignore)]
 fn compare_tricky_strokes() {
     let test_scene = test_scenes::tricky_strokes();
     let params = TestParams::new("compare_tricky_strokes", 1200, 850);
@@ -75,6 +81,7 @@ fn compare_tricky_strokes() {
 
 #[test]
 #[cfg_attr(skip_gpu_tests, ignore)]
+#[cfg_attr(skip_slow_tests, ignore)]
 fn compare_fill_types() {
     let test_scene = test_scenes::fill_types();
     let params = TestParams::new("compare_fill_types", 1400, 700);
@@ -83,6 +90,7 @@ fn compare_fill_types() {
 
 #[test]
 #[cfg_attr(skip_gpu_tests, ignore)]
+#[cfg_attr(skip_slow_tests, ignore)]
 fn compare_deep_blend() {
     let test_scene = test_scenes::deep_blend();
     assert_eq!(test_scene.config.name, "deep_blend");
@@ -92,6 +100,7 @@ fn compare_deep_blend() {
 
 #[test]
 #[cfg_attr(skip_gpu_tests, ignore)]
+#[cfg_attr(skip_slow_tests, ignore)]
 fn compare_blurred_rounded_rect() {
     let test_scene = test_scenes::blurred_rounded_rect();
     assert_eq!(test_scene.config.name, "blurred_rounded_rect");

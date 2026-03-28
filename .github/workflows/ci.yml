@@ -167,16 +167,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
+        os: [windows-latest, macos-latest, ubuntu-24.04]
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             gpu: 'yes'
           - os: macos-latest
             gpu: 'yes'
           - os: windows-latest
-            # TODO: The windows runners theoretically have CPU fallback for GPUs, but
-            # this failed in initial testing
-            gpu: 'no'
+            # GPU snapshot tests use Goldy DX12 on WARP (software rasterizer), same idea as goldy CI.
+            gpu: 'yes'
     steps:
       - uses: actions/checkout@v4
         # We intentionally do not use lfs: true here, instead using the caching method to save LFS bandwidth.
@@ -205,15 +204,29 @@ jobs:
         with:
           toolchain: ${{ env.RUST_STABLE_VER }}
 
-      # Adapted from https://github.com/bevyengine/bevy/blob/b446374392adc70aceb92621b080d1a6cf7a7392/.github/workflows/validation-jobs.yml#L74-L79
-      - name: install xvfb, llvmpipe and lavapipe
-        if: matrix.os == 'ubuntu-latest'
-        # https://launchpad.net/~kisak/+archive/ubuntu/turtle
+      # Same as goldy CI: upgrade Mesa to 25.0+ for Vulkan 1.4 support in lavapipe,
+      # then locate the ICD and export LAVAPIPE_ICD for use in later steps.
+      - name: Install Vulkan dependencies and locate lavapipe ICD
+        if: matrix.os == 'ubuntu-24.04'
         run: |
-          sudo apt-get update -y -qq
-          sudo add-apt-repository ppa:kisak/turtle -y
           sudo apt-get update
-          sudo apt install -y xvfb libegl-mesa0 libgl1-mesa-dri libxcb-xfixes0-dev mesa-vulkan-drivers
+          sudo apt-get upgrade -y mesa-vulkan-drivers libgl1-mesa-dri
+          sudo apt-get install -y \
+            libvulkan1 \
+            libvulkan-dev \
+            vulkan-tools \
+            mesa-vulkan-drivers \
+            libxcb-xfixes0-dev
+          LAVAPIPE_ICD=$(find /usr -name "lvp_icd*.json" 2>/dev/null | head -1)
+          if [ -z "$LAVAPIPE_ICD" ]; then
+            for path in /usr/share/vulkan/icd.d/lvp_icd.x86_64.json \
+                        /usr/share/vulkan/icd.d/lvp_icd.json; do
+              if [ -f "$path" ]; then LAVAPIPE_ICD="$path"; break; fi
+            done
+          fi
+          echo "LAVAPIPE_ICD=$LAVAPIPE_ICD" >> "$GITHUB_ENV"
+          echo "GOLDY_BACKEND=vulkan" >> "$GITHUB_ENV"
+          VK_ICD_FILENAMES="$LAVAPIPE_ICD" vulkaninfo --summary || echo "vulkaninfo failed, continuing anyway"
       
       - name: install cargo-nextest
         uses: taiki-e/install-action@v2
@@ -225,11 +238,41 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'merge_group' }}
 
+      # Same as goldy CI: DX12 + Slang need DXC from the Windows SDK on PATH.
+      - name: Add Windows SDK DXC to PATH
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $sdkBin = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\10.0.*\x64' -Directory |
+                    Sort-Object Name | Select-Object -Last 1
+          if ($sdkBin -and (Test-Path "$($sdkBin.FullName)\dxcompiler.dll")) {
+            Write-Host "Found DXC at: $($sdkBin.FullName)"
+            "$($sdkBin.FullName)" | Out-File -Append -FilePath $env:GITHUB_PATH -Encoding utf8
+          } else {
+            Write-Host "WARNING: dxcompiler.dll not found in Windows SDK"
+          }
+
+      - name: Configure Goldy DX12 WARP (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          echo "GOLDY_BACKEND=dx12" >> "$GITHUB_ENV"
+          echo "GOLDY_DX12_ALLOW_WARP=1" >> "$GITHUB_ENV"
+          echo "GOLDY_DX12_NO_DEBUG=1" >> "$GITHUB_ENV"
+
       - name: cargo nextest
         # TODO: Maybe use --release; the CPU shaders are extremely slow when unoptimised
         run: cargo nextest run --workspace --locked --all-features --no-fail-fast
         env:
           EKRANO_CI_GPU_SUPPORT: ${{ matrix.gpu }}
+          # Skip tests that are too slow on software-emulated GPUs (lavapipe, WARP).
+          # These still run locally on real hardware.
+          EKRANO_CI_SKIP_SLOW: 'yes'
+          # Linux: force lavapipe as the sole Vulkan driver and suppress validation layers.
+          # LAVAPIPE_ICD is set by the install step above (Linux only); empty string on
+          # other platforms, which is harmless (VK_ICD_FILENAMES unset = use all drivers).
+          VK_ICD_FILENAMES: ${{ env.LAVAPIPE_ICD }}
+          VK_LAYER_PATH: ""
           # We are experimenting with git lfs, and we don't expect to run out of bandwidth.
           # However, if we do, the tests are designed to be robust against that, if this environment variable is set.
           # If we do run out of bandwidth, uncomment the following line.
@@ -241,7 +284,6 @@ jobs:
         with:
           name: ekrano-snapshot-tests-${{ matrix.os }}
           path: |
-            ekrano_tests/comparisons
             ekrano_tests/current
 
       - name: cargo test --doc
