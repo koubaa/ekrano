@@ -197,6 +197,7 @@ void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
                     sh_part_count[local_id.x] = count;
                 }
                 sh_part_count[local_id.x] = part_start_ix + count;
+                GroupMemoryBarrierWithGroupSync();
                 ready_ix = sh_part_count[WG_SIZE - 1];
                 partition_ix += WG_SIZE;
             }

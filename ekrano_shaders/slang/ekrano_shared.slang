@@ -668,10 +668,10 @@ public float4 unpack4x8unorm(uint x) {
     );
 }
 public uint pack4x8unorm(float4 v) {
-    return (uint(saturate(v.x) * 255.0) << 0) |
-           (uint(saturate(v.y) * 255.0) << 8) |
-           (uint(saturate(v.z) * 255.0) << 16) |
-           (uint(saturate(v.w) * 255.0) << 24);
+    return (uint(saturate(v.x) * 255.0 + 0.5) << 0) |
+           (uint(saturate(v.y) * 255.0 + 0.5) << 8) |
+           (uint(saturate(v.z) * 255.0 + 0.5) << 16) |
+           (uint(saturate(v.w) * 255.0 + 0.5) << 24);
 }
 
 // === PTCL structs ===
@@ -922,7 +922,7 @@ public float erf7(float x) {
     return z / sqrt(1.0 + z * z);
 }
 
-public void signed_atomic_min(RWByteAddressBuffer buf, uint addr, int new_val) {
+public void signed_atomic_min(ByteAddressView buf, uint addr, int new_val) {
     uint orig;
     buf.InterlockedCompareExchange(addr, 0, 0, orig);
     while (new_val < int(orig)) {
@@ -932,7 +932,7 @@ public void signed_atomic_min(RWByteAddressBuffer buf, uint addr, int new_val) {
     }
 }
 
-public void signed_atomic_max(RWByteAddressBuffer buf, uint addr, int new_val) {
+public void signed_atomic_max(ByteAddressView buf, uint addr, int new_val) {
     uint orig;
     buf.InterlockedCompareExchange(addr, 0, 0, orig);
     while (new_val > int(orig)) {
@@ -942,7 +942,7 @@ public void signed_atomic_max(RWByteAddressBuffer buf, uint addr, int new_val) {
     }
 }
 
-public Transform read_transform(RWStructuredBuffer<uint> scene, uint transform_base, uint ix) {
+public Transform read_transform(StorageBuffer<uint> scene, uint transform_base, uint ix) {
     uint base = transform_base + ix * 6;
     float c0 = asfloat(scene[base]);
     float c1 = asfloat(scene[base + 1]);

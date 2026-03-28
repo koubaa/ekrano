@@ -799,6 +799,16 @@ impl Render {
             .unwrap()
     }
 
+    pub fn tile_buf(&self) -> BufferProxy {
+        *self
+            .fine_resources
+            .as_ref()
+            .unwrap()
+            .tile_buf
+            .as_buf()
+            .unwrap()
+    }
+
     #[cfg(feature = "debug_layers")]
     pub fn take_captured_buffers(&mut self) -> Option<CapturedBuffers> {
         self.captured_buffers.take()
