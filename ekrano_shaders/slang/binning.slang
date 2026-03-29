@@ -83,7 +83,10 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
     uint my_slice = local_id.x / 32;
     uint my_mask = 1 << (local_id.x & 31);
     while (y < y1) {
-        InterlockedOr(sh_bitmaps[my_slice][y * width_in_bins + x], my_mask);
+        int bin_ix = y * width_in_bins + x;
+        if (bin_ix < int(N_TILE)) {
+            InterlockedOr(sh_bitmaps[my_slice][bin_ix], my_mask);
+        }
         x++;
         if (x == x1) {
             x = x0;
@@ -115,16 +118,18 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
     y = y0;
     while (y < y1) {
         int bin_ix = y * width_in_bins + x;
-        uint out_mask = sh_bitmaps[my_slice][bin_ix];
-        if ((out_mask & my_mask) != 0) {
-            uint idx = countbits(out_mask & (my_mask - 1));
-            if (my_slice > 0) {
-                uint count_ix = my_slice - 1;
-                uint count_packed = sh_count[count_ix / 2][bin_ix];
-                idx += (count_packed >> (16 * (count_ix & 1))) & 0xffff;
+        if (bin_ix < int(N_TILE)) {
+            uint out_mask = sh_bitmaps[my_slice][bin_ix];
+            if ((out_mask & my_mask) != 0) {
+                uint idx = countbits(out_mask & (my_mask - 1));
+                if (my_slice > 0) {
+                    uint count_ix = my_slice - 1;
+                    uint count_packed = sh_count[count_ix / 2][bin_ix];
+                    idx += (count_packed >> (16 * (count_ix & 1))) & 0xffff;
+                }
+                uint offset = config.bin_data_start + sh_chunk_offset[bin_ix];
+                bin_data[offset + idx] = element_ix;
             }
-            uint offset = config.bin_data_start + sh_chunk_offset[bin_ix];
-            bin_data[offset + idx] = element_ix;
         }
         x++;
         if (x == x1) {

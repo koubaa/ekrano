@@ -11,11 +11,11 @@
     clippy::allow_attributes_without_reason
 )]
 
+use ekrano::Scene;
 use ekrano::kurbo::{Affine, Rect};
 use ekrano::peniko::color::palette::css::TRANSPARENT;
 use ekrano::peniko::{Brush, Color, ImageFormat, color::palette};
 use ekrano::peniko::{ImageAlphaType, ImageData, ImageSampler};
-use ekrano::Scene;
 use ekrano_tests::TestParams;
 
 fn simple_square() {

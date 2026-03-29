@@ -11,6 +11,7 @@
 thm = "thm"
 wdth = "wdth"
 ArthurCose = "ArthurCose"
+"PNGs" = "PNGs"
 
 # Match Inside a Word - Case Insensitive
 [default.extend-words]
