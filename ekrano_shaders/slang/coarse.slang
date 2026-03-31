@@ -220,7 +220,6 @@ void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
             drawobj_ix = sh_drawobj_ix[local_id.x];
             tag = scene[config.drawtag_base + drawobj_ix];
         }
-
         uint tile_count = 0;
         if (tag != DRAWTAG_NOP) {
             uint path_ix = draw_monoids[drawobj_ix].path_ix;

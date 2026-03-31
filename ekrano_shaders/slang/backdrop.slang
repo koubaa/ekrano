@@ -8,18 +8,19 @@
 import goldy_exp;
 import ekrano_shared;
 
-static const uint WG_SIZE = 64;
-static const uint LG_WG_SIZE = 6;
+static const uint WG_SIZE = 512;
+static const uint LG_WG_SIZE = 9;
 
-groupshared int sh_backdrop[64];
+groupshared int sh_backdrop[512];
 
-// Slots: 0=config, 1=tiles
+// Slots: 0=config, 1=bump (unused), 2=paths (unused), 3=tiles
+// Must match the dispatch binding order in render.rs: [config, bump, paths, tiles]
 
 [shader("compute")]
-[numthreads(64, 1, 1)]
+[numthreads(512, 1, 1)]
 void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
     Config config = goldy_dyn_broadcast<Config>(0);
-    StorageBuffer<Tile> tiles = goldy_dyn_scattered<Tile>(1);
+    StorageBuffer<Tile> tiles = goldy_dyn_scattered<Tile>(3);
 
     uint width_in_tiles = config.width_in_tiles;
     uint ix = wg_id.x * width_in_tiles + local_id.x;

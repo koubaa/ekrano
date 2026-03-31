@@ -11,14 +11,14 @@
     clippy::allow_attributes_without_reason
 )]
 
+use ekrano::Scene;
 use ekrano::kurbo::{Affine, Rect};
 use ekrano::peniko::color::palette::css::TRANSPARENT;
 use ekrano::peniko::{Brush, Color, ImageFormat, color::palette};
 use ekrano::peniko::{ImageAlphaType, ImageData, ImageSampler};
-use ekrano::{AaConfig, Scene};
 use ekrano_tests::TestParams;
 
-fn simple_square(use_cpu: bool) {
+fn simple_square() {
     let mut scene = Scene::new();
     scene.fill(
         ekrano::peniko::Fill::NonZero,
@@ -27,10 +27,7 @@ fn simple_square(use_cpu: bool) {
         None,
         &Rect::from_center_size((100., 100.), (50., 50.)),
     );
-    let params = TestParams {
-        use_cpu,
-        ..TestParams::new("simple_square", 150, 150)
-    };
+    let params = TestParams::new("simple_square", 150, 150);
     let image = ekrano_tests::render_then_debug_sync(&scene, &params).unwrap();
     assert_eq!(image.format, ImageFormat::Rgba8);
     let mut red_count = 0;
@@ -53,18 +50,15 @@ fn simple_square(use_cpu: bool) {
     assert_eq!(black_count, 150 * 150 - 50 * 50);
 }
 
-fn empty_scene(use_cpu: bool) {
+fn empty_scene() {
     let scene = Scene::new();
 
     // Adding an alpha factor here changes the resulting color *slightly*,
     // presumably due to pre-multiplied alpha.
     // We just assume that alpha scenarios work fine
     let color = palette::css::PLUM;
-    let params = TestParams {
-        use_cpu,
-        base_color: Some(color),
-        ..TestParams::new("simple_square", 150, 150)
-    };
+    let mut params = TestParams::new("simple_square", 150, 150);
+    params.base_color = Some(color);
     let image = ekrano_tests::render_then_debug_sync(&scene, &params).unwrap();
     assert_eq!(image.format, ImageFormat::Rgba8);
     for pixel in image.data.data().chunks_exact(4) {
@@ -78,30 +72,14 @@ fn empty_scene(use_cpu: bool) {
 
 #[test]
 #[cfg_attr(skip_gpu_tests, ignore)]
-fn simple_square_gpu() {
-    simple_square(false);
-}
-
-#[test]
-// The fine shader still requires a GPU, and so we still get a wgpu device
-// skip this for now
-#[cfg_attr(skip_gpu_tests, ignore)]
-fn simple_square_cpu() {
-    simple_square(true);
+fn simple_square_test() {
+    simple_square();
 }
 
 #[test]
 #[cfg_attr(skip_gpu_tests, ignore)]
-fn empty_scene_gpu() {
-    empty_scene(false);
-}
-
-#[test]
-// The fine shader still requires a GPU, and so we still get a wgpu device
-// skip this for now
-#[cfg_attr(skip_gpu_tests, ignore)]
-fn empty_scene_cpu() {
-    empty_scene(true);
+fn empty_scene_test() {
+    empty_scene();
 }
 
 #[test]
@@ -176,14 +154,8 @@ fn premultiplied_image() {
         },
     };
     scene.draw_image(&image, Affine::IDENTITY);
-    let params = TestParams {
-        width: 2,
-        height: 2,
-        base_color: Some(TRANSPARENT),
-        use_cpu: false,
-        name: "bgra".into(),
-        anti_aliasing: AaConfig::Area,
-    };
+    let mut params = TestParams::new("bgra", 2, 2);
+    params.base_color = Some(TRANSPARENT);
     let scene_image = ekrano_tests::render_then_debug_sync(&scene, &params).unwrap();
     assert_eq!(scene_image.format, ImageFormat::Rgba8);
     for (i, pixel) in scene_image.data.data().chunks_exact(4).enumerate() {

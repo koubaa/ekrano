@@ -11,7 +11,9 @@ use ekrano::{
 use ekrano_tests::{TestParams, smoke_snapshot_test_sync};
 use scenes::SimpleText;
 
-fn filled_square(use_cpu: bool) {
+#[test]
+#[cfg_attr(skip_gpu_tests, ignore)]
+fn filled_square() {
     let mut scene = Scene::new();
     scene.fill(
         Fill::NonZero,
@@ -20,16 +22,15 @@ fn filled_square(use_cpu: bool) {
         None,
         &Rect::from_center_size((10., 10.), (6., 6.)),
     );
-    let params = TestParams {
-        use_cpu,
-        ..TestParams::new("filled_square", 20, 20)
-    };
+    let params = TestParams::new("filled_square", 20, 20);
     smoke_snapshot_test_sync(scene, &params)
         .unwrap()
         .assert_mean_less_than(0.01);
 }
 
-fn filled_circle(use_cpu: bool) {
+#[test]
+#[cfg_attr(skip_gpu_tests, ignore)]
+fn filled_circle() {
     let mut scene = Scene::new();
     scene.fill(
         Fill::NonZero,
@@ -38,16 +39,15 @@ fn filled_circle(use_cpu: bool) {
         None,
         &Circle::new((10., 10.), 7.),
     );
-    let params = TestParams {
-        use_cpu,
-        ..TestParams::new("filled_circle", 20, 20)
-    };
+    let params = TestParams::new("filled_circle", 20, 20);
     smoke_snapshot_test_sync(scene, &params)
         .unwrap()
         .assert_mean_less_than(0.01);
 }
 
-fn two_emoji(use_cpu: bool) {
+#[test]
+#[cfg_attr(skip_gpu_tests, ignore)]
+fn two_emoji() {
     let mut scene = Scene::new();
     let mut text = SimpleText::new();
     text.add_colr_emoji_run(
@@ -66,49 +66,8 @@ fn two_emoji(use_cpu: bool) {
         Fill::NonZero,
         "🤠",
     );
-    let params = TestParams {
-        use_cpu,
-        ..TestParams::new("two_emoji", 60, 30)
-    };
+    let params = TestParams::new("two_emoji", 60, 30);
     smoke_snapshot_test_sync(scene, &params)
         .unwrap()
         .assert_mean_less_than(0.01);
-}
-
-#[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
-fn filled_square_gpu() {
-    filled_square(false);
-}
-
-#[test]
-// The fine shader still requires a GPU, and so we still get a wgpu device
-// skip this for now
-#[cfg_attr(skip_gpu_tests, ignore)]
-fn filled_square_cpu() {
-    filled_square(true);
-}
-
-#[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
-fn filled_circle_gpu() {
-    filled_circle(false);
-}
-
-#[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
-fn filled_circle_cpu() {
-    filled_circle(true);
-}
-
-#[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
-fn two_emoji_gpu() {
-    two_emoji(false);
-}
-
-#[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
-fn two_emoji_cpu() {
-    two_emoji(true);
 }

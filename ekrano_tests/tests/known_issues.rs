@@ -21,7 +21,33 @@ use ekrano_tests::{TestParams, smoke_snapshot_test_sync, snapshot_test_sync};
 use scenes::ImageCache;
 
 /// A reproduction of <https://github.com/linebender/vello/issues/680>
-fn many_bins(use_cpu: bool) {
+///
+/// # Test status:
+/// This test seems to be flaky on the Vulkan backend specifically. Some fixes were
+/// applied, and are noted here to help with debugging flakiness later. Possible
+/// synchronization or memory-visibility issue beyond the prefix-sum barrier.
+///
+/// # Test design:
+/// Draws a large red rectangle across a 4352x4352 viewport (17x17 bins, 272x272 tiles).
+/// The coarse shader caps `bin_ix` at 256, so 256 of the 289 bins should render red.
+///
+/// # Fixes applied:
+///
+/// 1. **binning.slang**: Added bounds checks (`bin_ix < N_TILE`) on `sh_bitmaps` writes
+///    to prevent out-of-bounds shared memory access when `bin_ix >= 256`.
+///
+/// 2. **coarse.slang**: Added missing `GroupMemoryBarrierWithGroupSync()` between
+///    `sh_part_count[local_id.x] = part_start_ix + count` and
+///    `ready_ix = sh_part_count[WG_SIZE - 1]`. Without the barrier, subgroup 0 could
+///    read `sh_part_count[255]` before subgroup 7 had written its prefix-sum result,
+///    causing `ready_ix = 0` instead of 1 for a non-deterministic subset of bins.
+///    The tile-count prefix sum already had the equivalent barrier; this one was missing
+///    only on the partition-count prefix sum. Confirmed via SPIR-V disassembly.
+///
+/// 3. **goldy vulkan buffer.rs**: Added `TRANSFER_WRITE → COMPUTE_SHADER` memory
+///    barriers after `cmd_fill_buffer` and `cmd_copy_buffer` in `Buffer::clear`.
+///
+fn many_bins() {
     let mut scene = Scene::new();
     scene.fill(
         ekrano::peniko::Fill::NonZero,
@@ -30,10 +56,7 @@ fn many_bins(use_cpu: bool) {
         None,
         &Rect::new(-5., -5., 256. * 20., 256. * 20.),
     );
-    let params = TestParams {
-        use_cpu,
-        ..TestParams::new("many_bins", 256 * 17, 256 * 17)
-    };
+    let params = TestParams::new("many_bins", 256 * 17, 256 * 17);
     // To view, use EKRANO_DEBUG_TEST=many_bins
     let image = ekrano_tests::render_then_debug_sync(&scene, &params).unwrap();
     assert_eq!(image.format, ImageFormat::Rgba8);
@@ -53,13 +76,15 @@ fn many_bins(use_cpu: bool) {
             (false, false) => panic!("Got unexpected pixel {pixel:?}"),
         }
     }
-    // When #680 is fixed, this will become:
+
+    // When #680 is fully fixed, this will become:
     // let drawn_bins = 17 /* x bins */ * 17 /* y bins*/;
 
-    // The current maximum number of bins (256 with wgpu). Goldy/DX12 gets ~230-251
-    // due to bin_headers OOB when coarse exceeds 256; coarse shader guards bin_ix >= 256.
-    // Goldy typically renders 230-251 bins; require at least 230 for the test to pass.
-    const MIN_RED_COUNT: u32 = 230 * 256 * 256;
+    // The coarse shader caps bin_ix at 256 (see vello #680), so at most 256 of the
+    // 289 bins render.  With the binning OOB fix all 256 should be correct.
+    // The coarse shader caps bin_ix at 256 (see vello #680), so at most 256 of the
+    // 289 bins render.  With the binning OOB fix all 256 should be correct.
+    const MIN_RED_COUNT: u32 = 256 * 256 * 256;
     assert!(
         red_count >= MIN_RED_COUNT,
         "expected at least {MIN_RED_COUNT} red pixels, got {red_count}"
@@ -69,12 +94,9 @@ fn many_bins(use_cpu: bool) {
 
 #[test]
 #[cfg_attr(skip_gpu_tests, ignore)]
-fn many_bins_gpu() {
-    many_bins(false);
+fn many_bins_test() {
+    many_bins();
 }
-
-// many_bins_cpu removed: it tested wgpu CPU-path panic (vello#680). The wgpu backend was
-// removed; goldy is GPU-only and get_scene_image ignores use_cpu.
 
 /// Test for <https://github.com/linebender/vello/issues/1061>
 #[test]
