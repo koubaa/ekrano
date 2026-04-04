@@ -51,6 +51,11 @@ pub(crate) fn goldy_full_shaders(
     let search_path_str = search_path.to_string_lossy();
     let search_paths = [search_path_str.as_ref()];
 
+    // Software renderers (e.g. lavapipe) have a bug where SSA values degrade
+    // across barrier instructions. Disabling Slang optimizations prevents
+    // the CSE that triggers this.
+    let sw_opt = goldy::OptimizationLevel::Default;
+
     let pipeline_setup = engine.add_compute_shader(
         device,
         "pipeline_setup",
@@ -63,7 +68,7 @@ pub(crate) fn goldy_full_shaders(
         device,
         "pathtag_reduce",
         ekrano_shaders::slang::PATHTAG_REDUCE,
-        &[Uniform, BufReadOnly, Buffer],
+        &[BufReadOnly, BufReadOnly, Buffer],
         &search_paths,
         &[],
     )?;
@@ -87,7 +92,7 @@ pub(crate) fn goldy_full_shaders(
         device,
         "pathtag_scan_small",
         ekrano_shaders::slang::PATHTAG_SCAN_SMALL,
-        &[Uniform, BufReadOnly, BufReadOnly, Buffer],
+        &[BufReadOnly, BufReadOnly, BufReadOnly, Buffer],
         &search_paths,
         &[],
     )?;
@@ -95,7 +100,7 @@ pub(crate) fn goldy_full_shaders(
         device,
         "pathtag_scan_large",
         ekrano_shaders::slang::PATHTAG_SCAN_SMALL,
-        &[Uniform, BufReadOnly, BufReadOnly, Buffer],
+        &[BufReadOnly, BufReadOnly, BufReadOnly, Buffer],
         &search_paths,
         &[],
     )?;
@@ -103,7 +108,7 @@ pub(crate) fn goldy_full_shaders(
         device,
         "bbox_clear",
         ekrano_shaders::slang::BBOX_CLEAR,
-        &[Uniform, Buffer],
+        &[BufReadOnly, Buffer],
         &search_paths,
         &[],
     )?;
@@ -111,7 +116,14 @@ pub(crate) fn goldy_full_shaders(
         device,
         "flatten",
         ekrano_shaders::slang::FLATTEN,
-        &[Uniform, BufReadOnly, BufReadOnly, Buffer, Buffer, Buffer],
+        &[
+            BufReadOnly,
+            BufReadOnly,
+            BufReadOnly,
+            Buffer,
+            Buffer,
+            Buffer,
+        ],
         &search_paths,
         &[],
     )?;
@@ -119,7 +131,7 @@ pub(crate) fn goldy_full_shaders(
         device,
         "draw_reduce",
         ekrano_shaders::slang::DRAW_REDUCE,
-        &[Uniform, BufReadOnly, Buffer],
+        &[BufReadOnly, BufReadOnly, Buffer],
         &search_paths,
         &[],
     )?;
@@ -128,7 +140,7 @@ pub(crate) fn goldy_full_shaders(
         "draw_leaf",
         ekrano_shaders::slang::DRAW_LEAF,
         &[
-            Uniform,
+            BufReadOnly,
             BufReadOnly,
             BufReadOnly,
             BufReadOnly,
@@ -152,7 +164,7 @@ pub(crate) fn goldy_full_shaders(
         "clip_leaf",
         ekrano_shaders::slang::CLIP_LEAF,
         &[
-            Uniform,
+            BufReadOnly,
             BufReadOnly,
             BufReadOnly,
             BufReadOnly,
@@ -168,7 +180,7 @@ pub(crate) fn goldy_full_shaders(
         "binning",
         ekrano_shaders::slang::BINNING,
         &[
-            Uniform,
+            BufReadOnly,
             BufReadOnly,
             BufReadOnly,
             BufReadOnly,
@@ -184,7 +196,14 @@ pub(crate) fn goldy_full_shaders(
         device,
         "tile_alloc",
         ekrano_shaders::slang::TILE_ALLOC,
-        &[Uniform, BufReadOnly, BufReadOnly, Buffer, Buffer, Buffer],
+        &[
+            BufReadOnly,
+            BufReadOnly,
+            BufReadOnly,
+            Buffer,
+            Buffer,
+            Buffer,
+        ],
         &search_paths,
         &[],
     )?;
@@ -200,7 +219,14 @@ pub(crate) fn goldy_full_shaders(
         device,
         "path_count",
         ekrano_shaders::slang::PATH_COUNT,
-        &[Uniform, Buffer, BufReadOnly, BufReadOnly, Buffer, Buffer],
+        &[
+            BufReadOnly,
+            Buffer,
+            BufReadOnly,
+            BufReadOnly,
+            Buffer,
+            Buffer,
+        ],
         &search_paths,
         &[],
     )?;
@@ -208,16 +234,16 @@ pub(crate) fn goldy_full_shaders(
         device,
         "backdrop_dyn",
         ekrano_shaders::slang::BACKDROP_DYN,
-        &[Uniform, Buffer, BufReadOnly, Buffer],
+        &[BufReadOnly, Buffer, BufReadOnly, Buffer],
         &search_paths,
         &[],
     )?;
-    let coarse = engine.add_compute_shader(
+    let coarse = engine.add_compute_shader_with_options(
         device,
         "coarse",
         ekrano_shaders::slang::COARSE,
         &[
-            Uniform,
+            BufReadOnly,
             BufReadOnly,
             BufReadOnly,
             BufReadOnly,
@@ -229,6 +255,7 @@ pub(crate) fn goldy_full_shaders(
         ],
         &search_paths,
         &[],
+        sw_opt,
     )?;
     let path_tiling_setup = engine.add_compute_shader(
         device,
@@ -254,7 +281,7 @@ pub(crate) fn goldy_full_shaders(
         &[],
     )?;
     let fine_resources = [
-        Uniform,
+        BufReadOnly,
         BufReadOnly,
         BufReadOnly,
         BufReadOnly,
@@ -264,7 +291,7 @@ pub(crate) fn goldy_full_shaders(
         ImageRead(ImageFormat::Rgba8),
     ];
     let fine_msaa_resources = [
-        Uniform,
+        BufReadOnly,
         BufReadOnly,
         BufReadOnly,
         BufReadOnly,
@@ -274,32 +301,35 @@ pub(crate) fn goldy_full_shaders(
         ImageRead(ImageFormat::Rgba8),
         BufReadOnly, // mask_lut at slot 8
     ];
-    let fine_area = Some(engine.add_compute_shader(
+    let fine_area = Some(engine.add_compute_shader_with_options(
         device,
         "fine_area",
         ekrano_shaders::slang::FINE,
         &fine_resources,
         &search_paths,
         &[],
+        sw_opt,
     )?);
     let fine_msaa8 = engine
-        .add_compute_shader(
+        .add_compute_shader_with_options(
             device,
             "fine_msaa8",
             ekrano_shaders::slang::FINE,
             &fine_msaa_resources,
             &search_paths,
             &[("msaa", "1"), ("msaa8", "1")],
+            sw_opt,
         )
         .ok();
     let fine_msaa16 = engine
-        .add_compute_shader(
+        .add_compute_shader_with_options(
             device,
             "fine_msaa16",
             ekrano_shaders::slang::FINE,
             &fine_msaa_resources,
             &search_paths,
             &[("msaa", "1"), ("msaa16", "1")],
+            sw_opt,
         )
         .ok();
 

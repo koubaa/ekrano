@@ -24,7 +24,7 @@ groupshared uint sh_previous_failed;
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID) {
-    Config config = goldy_dyn_broadcast<Config>(0);
+    Config config = goldy_dyn_buf_ro<Config>(0)[0];
     StorageBuffer<DrawMonoid> draw_monoids = goldy_dyn_buf_ro<DrawMonoid>(1);
     StorageBuffer<PathBbox> path_bbox_buf = goldy_dyn_buf_ro<PathBbox>(2);
     StorageBuffer<float4> clip_bbox_buf = goldy_dyn_buf_ro<float4>(3);

@@ -214,11 +214,37 @@ impl GoldyEngine {
         search_paths: &[&str],
         defines: &[(&str, &str)],
     ) -> Result<ShaderId> {
-        let shader_module = ShaderModule::from_slang_with_paths_and_defines(
+        self.add_compute_shader_with_options(
+            device,
+            _label,
+            slang_source,
+            bindings,
+            search_paths,
+            defines,
+            goldy::OptimizationLevel::Default,
+        )
+    }
+
+    /// Add a compute shader with explicit optimization level.
+    ///
+    /// Use `OptimizationLevel::None` for shaders that hit driver bugs on
+    /// software renderers (e.g. lavapipe SSA corruption across barriers).
+    pub fn add_compute_shader_with_options(
+        &mut self,
+        device: &Device,
+        _label: &'static str,
+        slang_source: &str,
+        bindings: &[BindType],
+        search_paths: &[&str],
+        defines: &[(&str, &str)],
+        optimization_level: goldy::OptimizationLevel,
+    ) -> Result<ShaderId> {
+        let shader_module = ShaderModule::from_slang_with_options(
             device,
             slang_source,
             search_paths,
             defines,
+            optimization_level,
         )
         .map_err(|e| Error::Shader(format!("{:#}", e)))?;
         let pipeline = ComputePipeline::new(device, &shader_module)
@@ -693,7 +719,6 @@ impl GoldyEngine {
                             "submit_recording does not support coarse+fine split; use run_recording".into(),
                         ));
                     }
-
                     let mut pass = encoder.begin_compute_pass();
                     pass.set_pipeline(&self.shaders[shader_id.0].pipeline);
                     if !indices.is_empty() {
@@ -719,7 +744,7 @@ impl GoldyEngine {
                     let bind_types: Vec<_> = self.shaders[shader_id.0].bindings.clone();
                     self.ensure_resources_materialized(device, bindings, &bind_types)?;
                     let indices = collect_bindless_indices(bindings, &bind_types, &self.bind_map)?;
-                    if let Some((gpu_buf, _)) = self.bind_map.get_buf(buf_proxy.id)
+                    if let Some((gpu_buf, _buf_name)) = self.bind_map.get_buf(buf_proxy.id)
                         && let Some(buf) = gpu_buf.as_owned()
                     {
                         let mut pass = encoder.begin_compute_pass();

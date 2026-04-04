@@ -601,7 +601,7 @@ float hypot_fine(float a, float b) {
 [shader("compute")]
 [numthreads(4, 16, 1)]
 void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
-    Config config = goldy_dyn_broadcast<Config>(0);
+    Config config = goldy_dyn_buf_ro<Config>(0)[0];
     StorageBuffer<Segment> segments = goldy_dyn_buf_ro<Segment>(1);
     StorageBuffer<uint> ptcl = goldy_dyn_buf_ro<uint>(2);
     StorageBuffer<uint> info = goldy_dyn_buf_ro<uint>(3);

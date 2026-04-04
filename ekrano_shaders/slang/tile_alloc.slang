@@ -20,7 +20,7 @@ groupshared uint sh_previous_failed;
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID) {
-    Config config = goldy_dyn_broadcast<Config>(0);
+    Config config = goldy_dyn_buf_ro<Config>(0)[0];
     StorageBuffer<uint> scene = goldy_dyn_buf_ro<uint>(1);
     StorageBuffer<float4> draw_bboxes = goldy_dyn_buf_ro<float4>(2);
     StorageBuffer<BumpAllocators> bump = goldy_dyn_scattered<BumpAllocators>(3);

@@ -216,7 +216,7 @@ impl Render {
         }
         let scene_buf = ResourceProxy::Buffer(recording.upload("vello.scene", packed));
         let config_buf_proxy =
-            recording.upload_uniform("vello.config", bytemuck::bytes_of(&cpu_config.gpu));
+            recording.upload("vello.config", bytemuck::bytes_of(&cpu_config.gpu));
         let config_buf = ResourceProxy::Buffer(config_buf_proxy);
         const INDIRECT_STRIDE: u64 = size_of::<IndirectCount>() as u64;
 

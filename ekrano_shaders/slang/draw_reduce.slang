@@ -14,7 +14,7 @@ groupshared DrawMonoid sh_scratch[256];
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
-    Config config = goldy_dyn_broadcast<Config>(0);
+    Config config = goldy_dyn_buf_ro<Config>(0)[0];
     StorageBuffer<uint> scene = goldy_dyn_scattered<uint>(1);
     StorageBuffer<DrawMonoid> reduced = goldy_dyn_scattered<DrawMonoid>(2);
 

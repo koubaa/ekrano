@@ -17,7 +17,7 @@ groupshared TagMonoid sh_scratch[WG_SIZE];
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID) {
-    Config config = goldy_dyn_broadcast<Config>(0);
+    Config config = goldy_dyn_buf_ro<Config>(0)[0];
     StorageBuffer<uint> scene = goldy_dyn_buf_ro<uint>(1);
     StorageBuffer<TagMonoid> reduced = goldy_dyn_scattered<TagMonoid>(2);
 
