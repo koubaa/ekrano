@@ -18,12 +18,15 @@
 pub const MAX_BINDLESS_SLOTS: usize = 16;
 
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 use goldy::types::{SpatialAccess, TextureFlags, TextureFormat};
 use goldy::{
     Buffer, BufferPool, BufferView, ComputeEncoder, ComputePipeline, DataAccess, Device, GpuFuture,
     ShaderModule, Texture,
 };
+
+static DUMP_DIR: LazyLock<Option<String>> = LazyLock::new(|| std::env::var("EKRANO_DUMP_DIR").ok());
 
 use crate::{
     Error, Result,
@@ -411,6 +414,18 @@ impl GoldyEngine {
                     self.ensure_resources_materialized(device, bindings, &bind_types)?;
                     let indices = collect_bindless_indices(bindings, &bind_types, &self.bind_map)?;
 
+                    if let Some(ref dir) = *DUMP_DIR {
+                        self.dump_dispatch(
+                            device,
+                            dispatch_count,
+                            *shader_id,
+                            (*x, *y, *z),
+                            bindings,
+                            &indices,
+                            dir,
+                        );
+                    }
+
                     // Split execution: fine reads ptcl written by coarse. Run coarse+path_tiling first, sync, then fine.
                     let is_fine = output_proxy_id.is_some_and(|oid| {
                         bindings.len() == 8
@@ -450,6 +465,49 @@ impl GoldyEngine {
                     if let Some((gpu_buf, _)) = self.bind_map.get_buf(buf_proxy.id)
                         && let Some(buf) = gpu_buf.as_owned()
                     {
+                        if let Some(ref dir) = *DUMP_DIR {
+                            let mut indirect_dims = [0_u32; 3];
+                            let mut raw = [0_u8; 12];
+                            if buf.read_to_cpu(device, &mut raw).is_ok() {
+                                let off = *offset as usize;
+                                if off + 12 <= raw.len() {
+                                    for i in 0..3 {
+                                        indirect_dims[i] = u32::from_le_bytes([
+                                            raw[off + i * 4],
+                                            raw[off + i * 4 + 1],
+                                            raw[off + i * 4 + 2],
+                                            raw[off + i * 4 + 3],
+                                        ]);
+                                    }
+                                }
+                            } else {
+                                let full_size = buf.size() as usize;
+                                let mut full = vec![0_u8; full_size];
+                                if buf.read_to_cpu(device, &mut full).is_ok() {
+                                    let off = *offset as usize;
+                                    if off + 12 <= full.len() {
+                                        for i in 0..3 {
+                                            indirect_dims[i] = u32::from_le_bytes([
+                                                full[off + i * 4],
+                                                full[off + i * 4 + 1],
+                                                full[off + i * 4 + 2],
+                                                full[off + i * 4 + 3],
+                                            ]);
+                                        }
+                                    }
+                                }
+                            }
+                            self.dump_dispatch(
+                                device,
+                                dispatch_count,
+                                *shader_id,
+                                (indirect_dims[0], indirect_dims[1], indirect_dims[2]),
+                                bindings,
+                                &indices,
+                                dir,
+                            );
+                        }
+
                         let mut pass = encoder.begin_compute_pass();
                         pass.set_pipeline(&self.shaders[shader_id.0].pipeline);
                         if !indices.is_empty() {
@@ -710,6 +768,18 @@ impl GoldyEngine {
                     self.ensure_resources_materialized(device, bindings, &bind_types)?;
                     let indices = collect_bindless_indices(bindings, &bind_types, &self.bind_map)?;
 
+                    if let Some(ref dir) = *DUMP_DIR {
+                        self.dump_dispatch(
+                            device,
+                            dispatch_count,
+                            *shader_id,
+                            (*x, *y, *z),
+                            bindings,
+                            &indices,
+                            dir,
+                        );
+                    }
+
                     let is_fine = output_proxy_id.is_some_and(|oid| {
                         bindings.len() == 8
                             && matches!(bindings.get(5), Some(ResourceProxy::Image(ip)) if ip.id == oid)
@@ -747,6 +817,34 @@ impl GoldyEngine {
                     if let Some((gpu_buf, _buf_name)) = self.bind_map.get_buf(buf_proxy.id)
                         && let Some(buf) = gpu_buf.as_owned()
                     {
+                        if let Some(ref dir) = *DUMP_DIR {
+                            let mut indirect_dims = [0_u32; 3];
+                            let full_size = buf.size() as usize;
+                            let mut full = vec![0_u8; full_size];
+                            if buf.read_to_cpu(device, &mut full).is_ok() {
+                                let off = *offset as usize;
+                                if off + 12 <= full.len() {
+                                    for i in 0..3 {
+                                        indirect_dims[i] = u32::from_le_bytes([
+                                            full[off + i * 4],
+                                            full[off + i * 4 + 1],
+                                            full[off + i * 4 + 2],
+                                            full[off + i * 4 + 3],
+                                        ]);
+                                    }
+                                }
+                            }
+                            self.dump_dispatch(
+                                device,
+                                dispatch_count,
+                                *shader_id,
+                                (indirect_dims[0], indirect_dims[1], indirect_dims[2]),
+                                bindings,
+                                &indices,
+                                dir,
+                            );
+                        }
+
                         let mut pass = encoder.begin_compute_pass();
                         pass.set_pipeline(&self.shaders[shader_id.0].pipeline);
                         if !indices.is_empty() {
@@ -825,6 +923,88 @@ impl GoldyEngine {
         self.bind_map.buf_map.clear();
         self.downloads.clear();
         self.storage_pool = None;
+    }
+
+    /// Dump all buffer bindings for a dispatch to `$EKRANO_DUMP_DIR/dispatch_N/`.
+    #[allow(
+        clippy::print_stdout,
+        reason = "dump_dispatch prints manifest paths to stdout for debugging when dump is enabled"
+    )]
+    fn dump_dispatch(
+        &self,
+        device: &Device,
+        dispatch_idx: usize,
+        shader_id: ShaderId,
+        dims: (u32, u32, u32),
+        bindings: &[ResourceProxy],
+        indices: &[u32],
+        dump_dir: &str,
+    ) {
+        use std::io::Write;
+        let dir = format!("{dump_dir}/dispatch_{dispatch_idx}");
+        std::fs::create_dir_all(&dir).ok();
+
+        let mut manifest = std::fs::File::create(format!("{dir}/manifest.txt")).unwrap();
+        writeln!(manifest, "shader_id: {}", shader_id.0).unwrap();
+        writeln!(manifest, "dispatch: ({}, {}, {})", dims.0, dims.1, dims.2).unwrap();
+        writeln!(manifest, "num_bindings: {}", bindings.len()).unwrap();
+        writeln!(manifest, "push_constants: {:?}", indices).unwrap();
+
+        for (i, res) in bindings.iter().enumerate() {
+            match res {
+                ResourceProxy::Buffer(proxy) | ResourceProxy::BufferRange { proxy, .. } => {
+                    if let Some((gpu_buf, name)) = self.bind_map.get_buf(proxy.id) {
+                        let size = gpu_buf.size() as usize;
+                        writeln!(
+                            manifest,
+                            "binding[{i}]: buf name={name} size={size} bindless={}",
+                            gpu_buf.bindless_index().unwrap_or(u32::MAX)
+                        )
+                        .unwrap();
+
+                        let mut data = vec![0_u8; size];
+                        let ok = match gpu_buf {
+                            GpuBuffer::Owned(buf) => buf.read_to_cpu(device, &mut data).is_ok(),
+                            GpuBuffer::Pooled(view) => {
+                                if let Some(ref pool) = self.storage_pool {
+                                    let full_size = pool.backing_buffer().size() as usize;
+                                    let mut full = vec![0_u8; full_size];
+                                    if pool.backing_buffer().read_to_cpu(device, &mut full).is_ok()
+                                    {
+                                        let off = view.offset() as usize;
+                                        data.copy_from_slice(&full[off..off + size]);
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    false
+                                }
+                            }
+                        };
+                        if ok {
+                            std::fs::write(format!("{dir}/buf_{i}.bin"), &data).ok();
+                        } else {
+                            writeln!(manifest, "  (read failed)").unwrap();
+                        }
+                    }
+                }
+                ResourceProxy::Image(proxy) => {
+                    writeln!(
+                        manifest,
+                        "binding[{i}]: image {}x{} id={}",
+                        proxy.width, proxy.height, proxy.id.0
+                    )
+                    .unwrap();
+                }
+            }
+        }
+        println!(
+            "[dump] dispatch_{dispatch_idx}: shader={} dims={:?} bindings={}",
+            shader_id.0,
+            dims,
+            bindings.len()
+        );
     }
 }
 
