@@ -216,7 +216,7 @@ impl Render {
         }
         let scene_buf = ResourceProxy::Buffer(recording.upload("vello.scene", packed));
         let config_buf_proxy =
-            recording.upload_uniform("vello.config", bytemuck::bytes_of(&cpu_config.gpu));
+            recording.upload("vello.config", bytemuck::bytes_of(&cpu_config.gpu));
         let config_buf = ResourceProxy::Buffer(config_buf_proxy);
         const INDIRECT_STRIDE: u64 = size_of::<IndirectCount>() as u64;
 
@@ -389,14 +389,14 @@ impl Render {
             while base_wg < flat_wg_x {
                 let chunk = (flat_wg_x - base_wg).min(MAX_FLATTEN_WG_PER_SUBMIT);
                 gpu_cfg.flatten_thread_base = base_wg * FLATTEN_THREADS_PER_GROUP;
-                recording.push(Command::UploadUniform(
+                recording.push(Command::Upload(
                     config_buf_proxy,
                     bytemuck::bytes_of(&gpu_cfg).to_vec(),
                 ));
                 recording.dispatch(shaders.flatten, (chunk, 1, 1), flatten_bindings);
                 base_wg += chunk;
             }
-            recording.push(Command::UploadUniform(
+            recording.push(Command::Upload(
                 config_buf_proxy,
                 bytemuck::bytes_of(&cpu_config.gpu).to_vec(),
             ));

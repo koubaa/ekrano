@@ -204,29 +204,11 @@ jobs:
         with:
           toolchain: ${{ env.RUST_STABLE_VER }}
 
-      # Same as goldy CI: upgrade Mesa to 25.0+ for Vulkan 1.4 support in lavapipe,
-      # then locate the ICD and export LAVAPIPE_ICD for use in later steps.
+      # Shared script: installs Mesa/lavapipe, locates the ICD, exports env vars.
+      # Also used by ci/Dockerfile for local reproduction.
       - name: Install Vulkan dependencies and locate lavapipe ICD
         if: matrix.os == 'ubuntu-24.04'
-        run: |
-          sudo apt-get update
-          sudo apt-get upgrade -y mesa-vulkan-drivers libgl1-mesa-dri
-          sudo apt-get install -y \
-            libvulkan1 \
-            libvulkan-dev \
-            vulkan-tools \
-            mesa-vulkan-drivers \
-            libxcb-xfixes0-dev
-          LAVAPIPE_ICD=$(find /usr -name "lvp_icd*.json" 2>/dev/null | head -1)
-          if [ -z "$LAVAPIPE_ICD" ]; then
-            for path in /usr/share/vulkan/icd.d/lvp_icd.x86_64.json \
-                        /usr/share/vulkan/icd.d/lvp_icd.json; do
-              if [ -f "$path" ]; then LAVAPIPE_ICD="$path"; break; fi
-            done
-          fi
-          echo "LAVAPIPE_ICD=$LAVAPIPE_ICD" >> "$GITHUB_ENV"
-          echo "GOLDY_BACKEND=vulkan" >> "$GITHUB_ENV"
-          VK_ICD_FILENAMES="$LAVAPIPE_ICD" vulkaninfo --summary || echo "vulkaninfo failed, continuing anyway"
+        run: bash ci/setup-ubuntu.sh
       
       - name: install cargo-nextest
         uses: taiki-e/install-action@v2

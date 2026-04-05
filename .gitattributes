@@ -1,3 +1,6 @@
 # LFS settings
 # If changing, also change in .github/workflows/ci.yml
 ekrano_tests/snapshots/*.png filter=lfs diff=lfs merge=lfs -text
+
+# Shell scripts must keep LF endings (Docker/Linux will choke on CRLF)
+*.sh text eol=lf

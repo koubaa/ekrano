@@ -51,7 +51,7 @@ int search_link(inout Bic bic, uint ix_in) {
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
-    Config config = goldy_dyn_broadcast<Config>(0);
+    Config config = goldy_dyn_buf_ro<Config>(0)[0];
     StorageBuffer<ClipInp> clip_inp = goldy_dyn_buf_ro<ClipInp>(1);
     StorageBuffer<PathBbox> path_bboxes = goldy_dyn_buf_ro<PathBbox>(2);
     StorageBuffer<Bic> reduced = goldy_dyn_buf_ro<Bic>(3);

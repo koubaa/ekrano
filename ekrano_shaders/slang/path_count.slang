@@ -12,7 +12,7 @@ import ekrano_shared;
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void cs_main(uint3 global_id : SV_DispatchThreadID) {
-    Config config = goldy_dyn_broadcast<Config>(0);
+    Config config = goldy_dyn_buf_ro<Config>(0)[0];
     StorageBuffer<BumpAllocators> bump = goldy_dyn_scattered<BumpAllocators>(1);
     StorageBuffer<LineSoup> lines = goldy_dyn_buf_ro<LineSoup>(2);
     StorageBuffer<Path> paths = goldy_dyn_buf_ro<Path>(3);

@@ -94,6 +94,7 @@ pub fn get_scene_image(params: &TestParams, scene: &Scene) -> Result<ImageData, 
     use goldy::{DeviceType, Instance};
 
     let instance = Instance::new()?;
+
     let device = instance
         .create_device(DeviceType::DiscreteGpu)
         .or_else(|_| instance.create_device(DeviceType::IntegratedGpu))

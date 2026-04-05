@@ -19,7 +19,7 @@ groupshared int sh_backdrop[512];
 [shader("compute")]
 [numthreads(512, 1, 1)]
 void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
-    Config config = goldy_dyn_broadcast<Config>(0);
+    Config config = goldy_dyn_buf_ro<Config>(0)[0];
     StorageBuffer<Tile> tiles = goldy_dyn_scattered<Tile>(3);
 
     uint width_in_tiles = config.width_in_tiles;

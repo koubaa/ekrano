@@ -119,7 +119,7 @@ void write_blurred_rounded_rect(uint rgba_color, uint info_offset,
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
-    Config config = goldy_dyn_broadcast<Config>(0);
+    Config config = goldy_dyn_buf_ro<Config>(0)[0];
     StorageBuffer<uint> scene = goldy_dyn_buf_ro<uint>(1);
     StorageBuffer<DrawMonoid> draw_monoids = goldy_dyn_buf_ro<DrawMonoid>(2);
     StorageBuffer<BinHeader> bin_headers = goldy_dyn_buf_ro<BinHeader>(3);
@@ -277,16 +277,6 @@ void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
             int backdrop_val = even_odd ? (abs(tile.backdrop) & 1) : tile.backdrop;
             bool backdrop_clear = (backdrop_val == 0);
             bool include_tile = (n_segs != 0) || (backdrop_clear == is_clip) || is_blend;
-            if ((bin_tile_x + x) < config.width_in_tiles &&
-                (bin_tile_y + y) < config.height_in_tiles)
-            {
-                if (include_tile) {
-                    InterlockedAdd(bump[0].blend, 1);
-                }
-                if (n_segs != 0) {
-                    InterlockedAdd(bump[0].binning, 1);
-                }
-            }
             if (include_tile &&
                 (bin_tile_x + x) < config.width_in_tiles &&
                 (bin_tile_y + y) < config.height_in_tiles)
