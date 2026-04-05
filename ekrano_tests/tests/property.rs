@@ -78,6 +78,35 @@ fn simple_square_test() {
 
 #[test]
 #[cfg_attr(skip_gpu_tests, ignore)]
+fn tiny_red_2x2_test() {
+    let mut scene = Scene::new();
+    scene.fill(
+        ekrano::peniko::Fill::NonZero,
+        Affine::IDENTITY,
+        &Brush::Solid(palette::css::RED),
+        None,
+        &Rect::from_origin_size((0., 0.), (2., 2.)),
+    );
+    let params = TestParams::new("tiny_red_2x2", 2, 2);
+    let image = ekrano_tests::render_then_debug_sync(&scene, &params).unwrap();
+    assert_eq!(image.format, ImageFormat::Rgba8);
+    let mut red_count = 0;
+    for pixel in image.data.data().chunks_exact(4) {
+        let &[r, g, b, a] = pixel else { unreachable!() };
+        if r == 255 && g == 0 && b == 0 && a == 255 {
+            red_count += 1;
+        } else {
+            eprintln!("pixel: [{r}, {g}, {b}, {a}]");
+        }
+    }
+    assert_eq!(
+        red_count, 4,
+        "expected 4 red pixels in 2x2, got {red_count}"
+    );
+}
+
+#[test]
+#[cfg_attr(skip_gpu_tests, ignore)]
 fn empty_scene_test() {
     empty_scene();
 }

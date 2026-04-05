@@ -6,9 +6,6 @@ Ekrano is a fork of [Vello](https://github.com/linebender/vello) (v0.7.0), a GPU
 by the Linebender project. The fork retains the full-GPU compute pipeline and removes the hybrid CPU/sparse-strips
 backend, targeting Vulkan 1.4+/DX12/Metal 2+ exclusively via the Goldy GPU abstraction layer.
 
-Vello is dual-licensed Apache-2.0 OR MIT. Ekrano inherits both licenses and adds its own contributions
-under the same dual-license terms.
-
 ## Copyright Headers
 
 **DO NOT remove or replace existing Vello copyright headers from source files.**
@@ -51,14 +48,6 @@ ekrano/                   # Git root (forked from Vello)
 └── LICENSE-MIT           # Must not be modified
 ```
 
-## Development Phases
-
-- **Phase 1** (complete): Build/test/run baseline
-- **Phase 2** (complete): Strip to full-GPU pipeline; remove hybrid backend, mobile, WASM
-- **Phase 2.4** (complete): Rebrand vello → ekrano
-- **Phase 2.5** (todo): Make `render_to_texture` the primary API; remove surface/swapchain path
-- **Phase 3a** (complete): Goldy backend with Slang shaders (Vulkan / DX12)
-- **Phase 3c** (in progress): Exploit Goldy features. Phase 1 indirect dispatch done (all stages); BDA deferred; bump overflow handling done.
 
 ## Test Commands
 
@@ -69,3 +58,6 @@ EKRANO_CI_GPU_SUPPORT=yes cargo test -p ekrano_tests  # force GPU snapshot tests
 EKRANO_TEST_UPDATE=all cargo test -p ekrano_tests     # update snapshot references
 EKRANO_TEST_CREATE=all cargo test -p ekrano_tests     # create new snapshots
 ```
+## Linting (do at the end of each agent interaction after code changes)
+
+`cargo fmt`
