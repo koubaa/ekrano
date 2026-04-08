@@ -120,11 +120,11 @@ void write_blurred_rounded_rect(uint rgba_color, uint info_offset,
 [numthreads(256, 1, 1)]
 void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
     Config config = goldy_dyn_buf_ro<Config>(0)[0];
-    StorageBuffer<uint> scene = goldy_dyn_buf_ro<uint>(1);
-    StorageBuffer<DrawMonoid> draw_monoids = goldy_dyn_buf_ro<DrawMonoid>(2);
-    StorageBuffer<BinHeader> bin_headers = goldy_dyn_buf_ro<BinHeader>(3);
-    StorageBuffer<uint> info_bin_data = goldy_dyn_buf_ro<uint>(4);
-    StorageBuffer<Path> paths = goldy_dyn_buf_ro<Path>(5);
+    ReadOnlyBuffer<uint> scene = goldy_dyn_buf_ro<uint>(1);
+    ReadOnlyBuffer<DrawMonoid> draw_monoids = goldy_dyn_buf_ro<DrawMonoid>(2);
+    ReadOnlyBuffer<BinHeader> bin_headers = goldy_dyn_buf_ro<BinHeader>(3);
+    ReadOnlyBuffer<uint> info_bin_data = goldy_dyn_buf_ro<uint>(4);
+    ReadOnlyBuffer<Path> paths = goldy_dyn_buf_ro<Path>(5);
     StorageBuffer<Tile> tiles = goldy_dyn_scattered<Tile>(6);
     StorageBuffer<BumpAllocators> bump = goldy_dyn_scattered<BumpAllocators>(7);
     StorageBuffer<uint> ptcl = goldy_dyn_scattered<uint>(8);

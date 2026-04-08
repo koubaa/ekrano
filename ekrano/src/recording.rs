@@ -32,6 +32,10 @@ pub struct BufferProxy {
     pub size: u64,
     pub id: ResourceId,
     pub name: &'static str,
+    /// Structured buffer element stride in bytes.
+    /// When set, the GPU backend uses this for `StructureByteStride` in SRV/UAV descriptors.
+    /// When `None`, the engine falls back to a name-based lookup.
+    pub element_stride: Option<u32>,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -125,6 +129,23 @@ impl Recording {
         let data = data.into();
         let buf_proxy = BufferProxy::new(data.len() as u64, name);
         self.push(Command::Upload(buf_proxy, data));
+        buf_proxy
+    }
+
+    /// Upload a typed value, automatically setting the element stride from `T`.
+    ///
+    /// Preferred over [`upload`](Self::upload) when the data maps to a
+    /// `StructuredBuffer<T>` in the shader, because it propagates the correct
+    /// `StructureByteStride` to the GPU descriptor.
+    pub fn upload_typed<T: bytemuck::Pod>(
+        &mut self,
+        name: &'static str,
+        data: &T,
+    ) -> BufferProxy {
+        let bytes = bytemuck::bytes_of(data).to_vec();
+        let buf_proxy =
+            BufferProxy::with_stride(bytes.len() as u64, name, size_of::<T>() as u32);
+        self.push(Command::Upload(buf_proxy, bytes));
         buf_proxy
     }
 
@@ -236,7 +257,29 @@ impl BufferProxy {
     pub fn new(size: u64, name: &'static str) -> Self {
         let id = ResourceId::next();
         debug_assert!(size > 0);
-        Self { id, size, name }
+        Self {
+            id,
+            size,
+            name,
+            element_stride: None,
+        }
+    }
+
+    /// Create a proxy with an explicit structured buffer element stride.
+    pub fn with_stride(size: u64, name: &'static str, element_stride: u32) -> Self {
+        let id = ResourceId::next();
+        debug_assert!(size > 0);
+        debug_assert!(element_stride > 0);
+        debug_assert!(
+            size.is_multiple_of(element_stride as u64),
+            "buffer size {size} not divisible by element stride {element_stride}"
+        );
+        Self {
+            id,
+            size,
+            name,
+            element_stride: Some(element_stride),
+        }
     }
 }
 

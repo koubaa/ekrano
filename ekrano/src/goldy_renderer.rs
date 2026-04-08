@@ -114,7 +114,6 @@ impl GoldyRenderer {
                 bump.tile,
                 bump.failed
             );
-
             if bump.failed == 0 || attempt == MAX_BUMP_RETRIES {
                 if bump.failed != 0 {
                     log::warn!(

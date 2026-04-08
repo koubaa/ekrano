@@ -10,8 +10,8 @@ use crate::{AaConfig, RenderParams};
 use std::mem::size_of;
 
 use ekrano_encoding::{
-    Encoding, IndirectCount, Resolver, WorkgroupCountsGpu, WorkgroupSize, make_mask_lut,
-    make_mask_lut_16,
+    BumpAllocators, Encoding, IndirectCount, Resolver, WorkgroupCountsGpu, WorkgroupSize,
+    make_mask_lut, make_mask_lut_16,
 };
 use ekrano_encoding::{
     STAGE_BACKDROP, STAGE_BBOX_CLEAR, STAGE_BINNING, STAGE_CLIP_LEAF, STAGE_CLIP_REDUCE,
@@ -215,20 +215,19 @@ impl Render {
             packed.resize(size_of::<u32>(), u8::MAX);
         }
         let scene_buf = ResourceProxy::Buffer(recording.upload("vello.scene", packed));
-        let config_buf_proxy =
-            recording.upload("vello.config", bytemuck::bytes_of(&cpu_config.gpu));
+        let config_buf_proxy = recording.upload_typed("vello.config", &cpu_config.gpu);
         let config_buf = ResourceProxy::Buffer(config_buf_proxy);
         const INDIRECT_STRIDE: u64 = size_of::<IndirectCount>() as u64;
 
         let use_indirect = shaders.pipeline_setup.is_some();
         let indirect_buf = if use_indirect {
             let wg_counts_gpu = WorkgroupCountsGpu::from(wg_counts);
-            let wg_counts_buf = ResourceProxy::Buffer(
-                recording.upload("vello.wg_counts", bytemuck::bytes_of(&wg_counts_gpu)),
-            );
-            let indirect_buf = BufferProxy::new(
+            let wg_counts_buf =
+                ResourceProxy::Buffer(recording.upload_typed("vello.wg_counts", &wg_counts_gpu));
+            let indirect_buf = BufferProxy::with_stride(
                 buffer_sizes.indirect_count.size_in_bytes().into(),
                 "vello.indirect_dispatch",
+                size_of::<IndirectCount>() as u32,
             );
             recording.dispatch(
                 shaders.pipeline_setup.unwrap(),
@@ -366,9 +365,10 @@ impl Render {
             INDIRECT_STRIDE,
             [config_buf, path_bbox_buf],
         );
-        let bump_buf = BufferProxy::new(
+        let bump_buf = BufferProxy::with_stride(
             buffer_sizes.bump_alloc.size_in_bytes().into(),
             "vello.bump_buf",
+            size_of::<BumpAllocators>() as u32,
         );
         recording.clear_all(bump_buf);
         let bump_buf = ResourceProxy::Buffer(bump_buf);
@@ -556,7 +556,11 @@ impl Render {
         // Buffer for path_count/path_tiling: multi-entry when use_indirect (shared with other stages),
         // otherwise dedicated buffer for just those two stages (single IndirectCount; both write to offset 0).
         let path_indirect_buf = indirect_buf.unwrap_or_else(|| {
-            BufferProxy::new(size_of::<IndirectCount>() as u64, "vello.indirect_count")
+            BufferProxy::with_stride(
+                size_of::<IndirectCount>() as u64,
+                "vello.indirect_count",
+                size_of::<IndirectCount>() as u32,
+            )
         });
         recording.dispatch(
             shaders.path_count_setup,
@@ -649,9 +653,10 @@ impl Render {
         recording.free_resource(bin_header_buf);
         recording.free_resource(path_buf);
         let out_image = ImageProxy::new(params.width, params.height, ImageFormat::Rgba8);
-        let blend_spill_buf = BufferProxy::new(
+        let blend_spill_buf = BufferProxy::with_stride(
             buffer_sizes.blend_spill.size_in_bytes().into(),
             "vello.blend_spill",
+            size_of::<u32>() as u32,
         );
         self.fine_wg_count = Some(wg_counts.fine);
         self.fine_resources = Some(FineResources {

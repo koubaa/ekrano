@@ -52,10 +52,10 @@ int search_link(inout Bic bic, uint ix_in) {
 [numthreads(256, 1, 1)]
 void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
     Config config = goldy_dyn_buf_ro<Config>(0)[0];
-    StorageBuffer<ClipInp> clip_inp = goldy_dyn_buf_ro<ClipInp>(1);
-    StorageBuffer<PathBbox> path_bboxes = goldy_dyn_buf_ro<PathBbox>(2);
-    StorageBuffer<Bic> reduced = goldy_dyn_buf_ro<Bic>(3);
-    StorageBuffer<ClipEl> clip_els = goldy_dyn_buf_ro<ClipEl>(4);
+    ReadOnlyBuffer<ClipInp> clip_inp = goldy_dyn_buf_ro<ClipInp>(1);
+    ReadOnlyBuffer<PathBbox> path_bboxes = goldy_dyn_buf_ro<PathBbox>(2);
+    ReadOnlyBuffer<Bic> reduced = goldy_dyn_buf_ro<Bic>(3);
+    ReadOnlyBuffer<ClipEl> clip_els = goldy_dyn_buf_ro<ClipEl>(4);
     StorageBuffer<DrawMonoid> draw_monoids = goldy_dyn_scattered<DrawMonoid>(5);
     StorageBuffer<float4> clip_bboxes = goldy_dyn_scattered<float4>(6);
 

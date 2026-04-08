@@ -18,9 +18,9 @@ groupshared DrawMonoid sh_scratch[256];
 [numthreads(256, 1, 1)]
 void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
     Config config = goldy_dyn_buf_ro<Config>(0)[0];
-    StorageBuffer<uint> scene = goldy_dyn_buf_ro<uint>(1);
-    StorageBuffer<DrawMonoid> reduced = goldy_dyn_buf_ro<DrawMonoid>(2);
-    StorageBuffer<PathBbox> path_bbox = goldy_dyn_buf_ro<PathBbox>(3);
+    ReadOnlyBuffer<uint> scene = goldy_dyn_buf_ro<uint>(1);
+    ReadOnlyBuffer<DrawMonoid> reduced = goldy_dyn_buf_ro<DrawMonoid>(2);
+    ReadOnlyBuffer<PathBbox> path_bbox = goldy_dyn_buf_ro<PathBbox>(3);
     StorageBuffer<DrawMonoid> draw_monoid = goldy_dyn_scattered<DrawMonoid>(4);
     StorageBuffer<uint> info = goldy_dyn_scattered<uint>(5);
     StorageBuffer<ClipInp> clip_inp = goldy_dyn_scattered<ClipInp>(6);

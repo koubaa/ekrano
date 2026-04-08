@@ -159,20 +159,23 @@ impl GoldyEngine {
             match res {
                 ResourceProxy::Buffer(proxy) | ResourceProxy::BufferRange { proxy, .. } => {
                     if self.bind_map.get_buf(proxy.id).is_none() {
+                        let stride = proxy
+                            .element_stride
+                            .or_else(|| element_stride_for_buffer(proxy.name));
                         let gpu_buf = if !is_pool_exempt(proxy.name)
                             && let Some(pool) = self.storage_pool.as_mut()
                         {
-                            let stride = element_stride_for_buffer(proxy.name);
                             let view = pool
                                 .alloc_bytes(proxy.size, stride)
                                 .map_err(|e| Error::Shader(e.to_string()))?;
                             GpuBuffer::Pooled(view)
                         } else {
-                            let buf = self.pool.get_buf(
+                            let buf = self.pool.get_buf_with_stride(
                                 device,
                                 proxy.size,
                                 proxy.name,
                                 DataAccess::Scattered,
+                                stride,
                             )?;
                             buf.clear(device, 0, proxy.size)
                                 .map_err(|e| Error::Shader(e.to_string()))?;
@@ -292,11 +295,15 @@ impl GoldyEngine {
         for command in &recording.commands {
             match command {
                 Command::Upload(buf_proxy, bytes) => {
-                    let buf = self.pool.get_buf(
+                    let stride = buf_proxy
+                        .element_stride
+                        .or_else(|| element_stride_for_buffer(buf_proxy.name));
+                    let buf = self.pool.get_buf_with_stride(
                         device,
                         buf_proxy.size,
                         buf_proxy.name,
                         DataAccess::Scattered,
+                        stride,
                     )?;
                     buf.write(0, bytes)
                         .map_err(|e| Error::Shader(e.to_string()))?;
@@ -384,11 +391,15 @@ impl GoldyEngine {
                         }
                     } else {
                         // Lazy allocation: buffer not yet materialized (cf. wgpu pending_clears).
-                        let buf = self.pool.get_buf(
+                        let stride = buf_proxy
+                            .element_stride
+                            .or_else(|| element_stride_for_buffer(buf_proxy.name));
+                        let buf = self.pool.get_buf_with_stride(
                             device,
                             buf_proxy.size,
                             buf_proxy.name,
                             DataAccess::Scattered,
+                            stride,
                         )?;
                         let clear_size = size.unwrap_or(buf.size() - offset);
                         buf.clear(device, *offset, clear_size)
@@ -451,6 +462,7 @@ impl GoldyEngine {
                             .dispatch(device)
                             .map_err(|e| Error::Shader(e.to_string()))?;
                         encoder = ComputeEncoder::new();
+
                     }
                 }
                 Command::DispatchIndirect(shader_id, buf_proxy, offset, bindings) => {
@@ -648,11 +660,15 @@ impl GoldyEngine {
         for command in &recording.commands {
             match command {
                 Command::Upload(buf_proxy, bytes) => {
-                    let buf = self.pool.get_buf(
+                    let stride = buf_proxy
+                        .element_stride
+                        .or_else(|| element_stride_for_buffer(buf_proxy.name));
+                    let buf = self.pool.get_buf_with_stride(
                         device,
                         buf_proxy.size,
                         buf_proxy.name,
                         DataAccess::Scattered,
+                        stride,
                     )?;
                     buf.write(0, bytes)
                         .map_err(|e| Error::Shader(e.to_string()))?;
@@ -1046,17 +1062,31 @@ impl ResourcePool {
         name: &'static str,
         access: DataAccess,
     ) -> Result<Buffer> {
+        self.get_buf_with_stride(device, size, name, access, None)
+    }
+
+    fn get_buf_with_stride(
+        &mut self,
+        device: &Device,
+        size: u64,
+        name: &'static str,
+        access: DataAccess,
+        stride: Option<u32>,
+    ) -> Result<Buffer> {
         let key = BufferKey { size, access, name };
         let pool = self.bufs.entry(key).or_default();
         if let Some(buf) = pool.pop() {
             return Ok(buf);
         }
-        let stride = element_stride_for_buffer(name);
+        let stride = stride.or_else(|| element_stride_for_buffer(name));
         Buffer::new_with_stride(device, size, access, stride)
             .map_err(|e| Error::Shader(e.to_string()))
     }
 }
 
+/// Fallback stride lookup for buffers that don't carry an explicit `element_stride`
+/// in their [`BufferProxy`]. Prefer setting `BufferProxy::element_stride` at the
+/// creation site instead of adding new entries here.
 fn element_stride_for_buffer(name: &str) -> Option<u32> {
     match name {
         "vello.path_buf" => Some(32),
@@ -1073,13 +1103,30 @@ fn element_stride_for_buffer(name: &str) -> Option<u32> {
         "vello.draw_reduced_buf" => Some(16),
         "vello.reduced_buf" => Some(20),
         "vello.reduced2_buf" => Some(20),
+        "vello.reduced_scan_buf" => Some(20),
         "vello.draw_bbox_buf" => Some(16),
         "vello.bin_header_buf" => Some(8),
         "vello.clip_inp_buf" => Some(8),
         "vello.clip_el_buf" => Some(32),
         "vello.clip_bic_buf" => Some(8),
         "vello.clip_bbox_buf" => Some(16),
-        _ => Some(4),
+        "vello.indirect_dispatch" => Some(16),
+        "vello.indirect_count" => Some(16),
+        "vello.config" => Some(96),
+        "vello.wg_counts" => Some(320),
+        "vello.scene" | "vello.blend_spill" | "vello.mask_lut" => Some(4),
+        _ => {
+            debug_assert!(
+                false,
+                "unknown buffer stride for '{name}' — add entry to element_stride_for_buffer \
+                 or set BufferProxy::element_stride at the creation site"
+            );
+            log::warn!(
+                "unknown buffer stride for '{name}', defaulting to 4 — add entry to \
+                 element_stride_for_buffer or set BufferProxy::element_stride"
+            );
+            Some(4)
+        }
     }
 }
 
@@ -1089,20 +1136,25 @@ fn element_stride_for_buffer(name: &str) -> Option<u32> {
 /// indices must not exceed `MAX_BINDLESS_SLOTS` (Goldy's push constant limit).
 fn collect_bindless_indices(
     resources: &[ResourceProxy],
-    _bind_types: &[BindType],
+    bind_types: &[BindType],
     bind_map: &BindMap,
 ) -> Result<Vec<u32>, Error> {
     let mut indices = Vec::with_capacity(resources.len());
-    for res in resources.iter() {
+    for (i, res) in resources.iter().enumerate() {
+        let is_read_only = matches!(bind_types.get(i), Some(BindType::BufReadOnly));
         let idx = match res {
-            ResourceProxy::Buffer(proxy) => bind_map
-                .get_buf(proxy.id)
-                .and_then(|(buf, _)| buf.bindless_index())
-                .ok_or_else(|| Error::Shader("buffer not found or has no bindless index".into()))?,
-            ResourceProxy::BufferRange { proxy, .. } => bind_map
-                .get_buf(proxy.id)
-                .and_then(|(buf, _)| buf.bindless_index())
-                .ok_or_else(|| Error::Shader("buffer not found or has no bindless index".into()))?,
+            ResourceProxy::Buffer(proxy) | ResourceProxy::BufferRange { proxy, .. } => {
+                let (buf, _) = bind_map
+                    .get_buf(proxy.id)
+                    .ok_or_else(|| Error::Shader("buffer not found".into()))?;
+                if is_read_only {
+                    buf.bindless_srv_index()
+                        .ok_or_else(|| Error::Shader("buffer has no SRV index".into()))?
+                } else {
+                    buf.bindless_index()
+                        .ok_or_else(|| Error::Shader("buffer has no bindless index".into()))?
+                }
+            }
             ResourceProxy::Image(proxy) => bind_map
                 .get_image(proxy.id)
                 .and_then(|(tex, _)| tex.bindless_index())
