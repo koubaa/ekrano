@@ -22,8 +22,8 @@ use std::sync::LazyLock;
 
 use goldy::types::{SpatialAccess, TextureFlags, TextureFormat};
 use goldy::{
-    Buffer, BufferPool, BufferView, ComputeEncoder, ComputePipeline, DataAccess, Device, GpuFuture,
-    ShaderModule, Texture,
+    Buffer, BufferPool, BufferView, ComputeEncoder, ComputePipeline, DataAccess, Device,
+    DeviceType, GpuFuture, ShaderModule, Texture,
 };
 
 static DUMP_DIR: LazyLock<Option<String>> = LazyLock::new(|| std::env::var("EKRANO_DUMP_DIR").ok());
@@ -126,6 +126,14 @@ fn is_pool_exempt(name: &str) -> bool {
             | "vello.segments_buf"
             | "vello.path_buf"
     )
+}
+
+/// WARP has a bug where SRV descriptors with `FirstElement != 0` on structured
+/// buffer pool views read incorrect data (reads from element 0 instead of
+/// `FirstElement`). Disable pooling entirely on software adapters so every
+/// buffer gets its own allocation with `FirstElement = 0`.
+fn use_pool(device: &Device) -> bool {
+    device.device_type() != DeviceType::Cpu
 }
 
 #[derive(Hash, PartialEq, Eq)]
@@ -903,6 +911,9 @@ impl GoldyEngine {
     /// Prepare the storage pool for a recording. Creates or resets the pool with the given size.
     /// Call before `run_recording` when the pipeline will use pooled buffers.
     pub fn prepare_storage_pool(&mut self, device: &Device, pool_size: u64) -> Result<()> {
+        if !use_pool(device) {
+            return Ok(());
+        }
         let need_new = match &self.storage_pool {
             Some(pool) => pool.capacity() < pool_size,
             None => true,
