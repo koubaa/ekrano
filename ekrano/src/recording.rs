@@ -137,14 +137,9 @@ impl Recording {
     /// Preferred over [`upload`](Self::upload) when the data maps to a
     /// `StructuredBuffer<T>` in the shader, because it propagates the correct
     /// `StructureByteStride` to the GPU descriptor.
-    pub fn upload_typed<T: bytemuck::Pod>(
-        &mut self,
-        name: &'static str,
-        data: &T,
-    ) -> BufferProxy {
+    pub fn upload_typed<T: bytemuck::Pod>(&mut self, name: &'static str, data: &T) -> BufferProxy {
         let bytes = bytemuck::bytes_of(data).to_vec();
-        let buf_proxy =
-            BufferProxy::with_stride(bytes.len() as u64, name, size_of::<T>() as u32);
+        let buf_proxy = BufferProxy::with_stride(bytes.len() as u64, name, size_of::<T>() as u32);
         self.push(Command::Upload(buf_proxy, bytes));
         buf_proxy
     }

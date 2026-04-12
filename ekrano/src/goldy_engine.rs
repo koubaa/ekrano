@@ -471,7 +471,6 @@ impl GoldyEngine {
                             .dispatch(device)
                             .map_err(|e| Error::Shader(e.to_string()))?;
                         encoder = ComputeEncoder::new();
-
                     }
                 }
                 Command::DispatchIndirect(shader_id, buf_proxy, offset, bindings) => {
