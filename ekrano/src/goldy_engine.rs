@@ -259,6 +259,7 @@ impl GoldyEngine {
             search_paths,
             defines,
             optimization_level,
+            &[],
         )
         .map_err(|e| Error::Shader(format!("{:#}", e)))?;
         let pipeline = ComputePipeline::new(device, &shader_module)
