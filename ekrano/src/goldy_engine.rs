@@ -436,7 +436,12 @@ impl GoldyEngine {
                     }
                     let bind_types: Vec<_> = self.shaders[shader_id.0].bindings.clone();
                     self.ensure_resources_materialized(device, bindings, &bind_types)?;
-                    let indices = collect_bindless_indices(bindings, &bind_types, &self.bind_map, force_uav(device))?;
+                    let indices = collect_bindless_indices(
+                        bindings,
+                        &bind_types,
+                        &self.bind_map,
+                        force_uav(device),
+                    )?;
 
                     if let Some(ref dir) = *DUMP_DIR {
                         self.dump_dispatch(
@@ -485,7 +490,12 @@ impl GoldyEngine {
                     )?;
                     let bind_types: Vec<_> = self.shaders[shader_id.0].bindings.clone();
                     self.ensure_resources_materialized(device, bindings, &bind_types)?;
-                    let indices = collect_bindless_indices(bindings, &bind_types, &self.bind_map, force_uav(device))?;
+                    let indices = collect_bindless_indices(
+                        bindings,
+                        &bind_types,
+                        &self.bind_map,
+                        force_uav(device),
+                    )?;
                     if let Some((gpu_buf, _)) = self.bind_map.get_buf(buf_proxy.id)
                         && let Some(buf) = gpu_buf.as_owned()
                     {
@@ -794,7 +804,12 @@ impl GoldyEngine {
                     }
                     let bind_types: Vec<_> = self.shaders[shader_id.0].bindings.clone();
                     self.ensure_resources_materialized(device, bindings, &bind_types)?;
-                    let indices = collect_bindless_indices(bindings, &bind_types, &self.bind_map, force_uav(device))?;
+                    let indices = collect_bindless_indices(
+                        bindings,
+                        &bind_types,
+                        &self.bind_map,
+                        force_uav(device),
+                    )?;
 
                     if let Some(ref dir) = *DUMP_DIR {
                         self.dump_dispatch(
@@ -841,7 +856,12 @@ impl GoldyEngine {
                     )?;
                     let bind_types: Vec<_> = self.shaders[shader_id.0].bindings.clone();
                     self.ensure_resources_materialized(device, bindings, &bind_types)?;
-                    let indices = collect_bindless_indices(bindings, &bind_types, &self.bind_map, force_uav(device))?;
+                    let indices = collect_bindless_indices(
+                        bindings,
+                        &bind_types,
+                        &self.bind_map,
+                        force_uav(device),
+                    )?;
                     if let Some((gpu_buf, _buf_name)) = self.bind_map.get_buf(buf_proxy.id)
                         && let Some(buf) = gpu_buf.as_owned()
                     {
@@ -1157,8 +1177,7 @@ fn collect_bindless_indices(
 ) -> Result<Vec<u32>, Error> {
     let mut indices = Vec::with_capacity(resources.len());
     for (i, res) in resources.iter().enumerate() {
-        let is_read_only =
-            !all_uav && matches!(bind_types.get(i), Some(BindType::BufReadOnly));
+        let is_read_only = !all_uav && matches!(bind_types.get(i), Some(BindType::BufReadOnly));
         let idx = match res {
             ResourceProxy::Buffer(proxy) | ResourceProxy::BufferRange { proxy, .. } => {
                 let (buf, _) = bind_map
