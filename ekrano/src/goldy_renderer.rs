@@ -12,7 +12,6 @@ use goldy::{BufferPool, Device, Texture};
 use crate::{
     Error, RenderParams, Result, Scene,
     goldy_engine::GoldyEngine,
-    recording::Recording,
     render::Render,
     shaders::{self, FullShaders},
 };
@@ -43,8 +42,11 @@ impl GoldyRenderer {
 
     /// Render a scene to the given texture.
     ///
-    /// Uses robust rendering: runs the coarse pass, reads back the bump allocator,
-    /// and retries with larger buffers if any stage overflowed.
+    /// Uses robust rendering with deferred bump validation: coarse and fine
+    /// passes execute back-to-back on the GPU in a single submission (no CPU
+    /// readback stall between them). The bump allocator is checked *after*
+    /// both passes complete; if any stage overflowed, the frame is re-rendered
+    /// with larger buffers.
     pub fn render_to_texture(
         &mut self,
         device: &Device,
@@ -74,7 +76,7 @@ impl GoldyRenderer {
             self.engine.prepare_storage_pool(device, pool_size)?;
 
             let mut render = Render::new();
-            let coarse_recording = render.render_encoding_coarse_with_config(
+            let mut recording = render.render_encoding_coarse_with_config(
                 encoding,
                 &mut self.resolver,
                 &self.shaders,
@@ -83,25 +85,21 @@ impl GoldyRenderer {
                 &config,
             );
             let bump_buf = render.bump_buf();
-
-            let (coarse_future, coarse_completion) =
-                self.engine
-                    .submit_recording(device, &coarse_recording, None, "coarse")?;
-
             let out_image = render.out_image();
-            let mut fine_recording = Recording::default();
-            render.record_fine(&self.shaders, &mut fine_recording);
 
-            if !coarse_future
-                .wait_timeout(2000)
-                .map_err(|e| Error::Shader(e.to_string()))?
-            {
-                log::warn!("Coarse pass exceeded 2s timeout (TDR risk); waiting anyway");
-                coarse_future
-                    .wait()
-                    .map_err(|e| Error::Shader(e.to_string()))?;
+            render.record_fine(&self.shaders, &mut recording);
+
+            #[cfg(feature = "debug_layers")]
+            if let Some(captured) = render.take_captured_buffers() {
+                captured.release_buffers(&mut recording);
             }
-            self.engine.complete_recording(device, coarse_completion)?;
+
+            self.engine.run_recording(
+                device,
+                &recording,
+                Some((&out_image, texture)),
+                "coarse+fine",
+            )?;
 
             let bump = self.read_bump(&bump_buf)?;
             self.engine.free_download(bump_buf);
@@ -123,27 +121,15 @@ impl GoldyRenderer {
                         bump.failed,
                     );
                 }
-                #[cfg(feature = "debug_layers")]
-                if let Some(captured) = render.take_captured_buffers() {
-                    captured.release_buffers(&mut fine_recording);
-                }
-                return self.engine.run_recording(
-                    device,
-                    &fine_recording,
-                    Some((&out_image, texture)),
-                    "fine",
-                );
+                return Ok(());
             }
 
-            // Build a new config with grown buffer sizes for retry.
             retry_config = Some(config.with_bump_estimates(&bump));
             log::info!(
                 "Bump overflow on attempt {} (failed: 0x{:x}), retrying with larger buffers",
                 attempt + 1,
                 bump.failed,
             );
-            #[cfg(feature = "debug_layers")]
-            render.take_captured_buffers();
             self.engine.clear_transients();
         }
         unreachable!()
