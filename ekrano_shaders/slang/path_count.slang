@@ -14,8 +14,8 @@ import ekrano_shared;
 void cs_main(uint3 global_id : SV_DispatchThreadID) {
     Config config = goldy_dyn_buf_ro<Config>(0)[0];
     StorageBuffer<BumpAllocators> bump = goldy_dyn_scattered<BumpAllocators>(1);
-    StorageBuffer<LineSoup> lines = goldy_dyn_buf_ro<LineSoup>(2);
-    StorageBuffer<Path> paths = goldy_dyn_buf_ro<Path>(3);
+    ReadOnlyBuffer<LineSoup> lines = goldy_dyn_buf_ro<LineSoup>(2);
+    ReadOnlyBuffer<Path> paths = goldy_dyn_buf_ro<Path>(3);
     StorageBuffer<Tile> tile = goldy_dyn_scattered<Tile>(4);
     StorageBuffer<SegmentCount> seg_counts = goldy_dyn_scattered<SegmentCount>(5);
 

@@ -21,7 +21,7 @@ groupshared uint sh_offset[256];
 void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID) {
     Config config = goldy_dyn_buf_ro<Config>(0)[0];
     StorageBuffer<BumpAllocators> bump = goldy_dyn_scattered<BumpAllocators>(1);
-    StorageBuffer<Path> paths = goldy_dyn_buf_ro<Path>(2);
+    ReadOnlyBuffer<Path> paths = goldy_dyn_buf_ro<Path>(2);
     StorageBuffer<Tile> tiles = goldy_dyn_scattered<Tile>(3);
 
     if (local_id.x == 0) {

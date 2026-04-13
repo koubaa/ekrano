@@ -616,7 +616,14 @@ public struct DrawTagScanner : IScannable<DrawMonoid> {
     static DrawMonoid map(uint raw_input) { return map_draw_tag(raw_input); }
 }
 
-// StorageBuffer (not RWStructuredBuffer) for Metal read-only scene access.
+// Read-only scene: use ReadOnlyBuffer when bound via goldy_dyn_buf_ro; StorageBuffer when RW binding (e.g. draw_reduce).
+public uint read_draw_tag_from_scene(ReadOnlyBuffer<uint> scene, Config config, uint ix) {
+    if (ix < config.n_drawobj) {
+        return scene[config.drawtag_base + ix];
+    }
+    return DRAWTAG_NOP;
+}
+
 public uint read_draw_tag_from_scene(StorageBuffer<uint> scene, Config config, uint ix) {
     if (ix < config.n_drawobj) {
         return scene[config.drawtag_base + ix];
@@ -940,6 +947,20 @@ public void signed_atomic_max(ByteAddressView buf, uint addr, int new_val) {
         buf.InterlockedCompareExchange(addr, expected, uint(new_val), orig);
         if (orig == expected) break;
     }
+}
+
+public Transform read_transform(ReadOnlyBuffer<uint> scene, uint transform_base, uint ix) {
+    uint base = transform_base + ix * 6;
+    float c0 = asfloat(scene[base]);
+    float c1 = asfloat(scene[base + 1]);
+    float c2 = asfloat(scene[base + 2]);
+    float c3 = asfloat(scene[base + 3]);
+    float c4 = asfloat(scene[base + 4]);
+    float c5 = asfloat(scene[base + 5]);
+    Transform r;
+    r.matrx = float4(c0, c1, c2, c3);
+    r.translate = float2(c4, c5);
+    return r;
 }
 
 public Transform read_transform(StorageBuffer<uint> scene, uint transform_base, uint ix) {

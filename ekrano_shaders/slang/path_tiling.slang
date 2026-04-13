@@ -15,10 +15,10 @@ static const float EPSILON = 1e-6;
 [numthreads(256, 1, 1)]
 void cs_main(uint3 global_id : SV_DispatchThreadID) {
     StorageBuffer<BumpAllocators> bump = goldy_dyn_scattered<BumpAllocators>(0);
-    StorageBuffer<SegmentCount> seg_counts = goldy_dyn_buf_ro<SegmentCount>(1);
-    StorageBuffer<LineSoup> lines = goldy_dyn_buf_ro<LineSoup>(2);
-    StorageBuffer<Path> paths = goldy_dyn_buf_ro<Path>(3);
-    StorageBuffer<Tile> tiles = goldy_dyn_buf_ro<Tile>(4);
+    ReadOnlyBuffer<SegmentCount> seg_counts = goldy_dyn_buf_ro<SegmentCount>(1);
+    ReadOnlyBuffer<LineSoup> lines = goldy_dyn_buf_ro<LineSoup>(2);
+    ReadOnlyBuffer<Path> paths = goldy_dyn_buf_ro<Path>(3);
+    ReadOnlyBuffer<Tile> tiles = goldy_dyn_buf_ro<Tile>(4);
     StorageBuffer<Segment> segments = goldy_dyn_scattered<Segment>(5);
 
     uint n_segments = bump[0].seg_counts;
