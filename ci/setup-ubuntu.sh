@@ -20,8 +20,6 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 $SUDO apt-get update
-# Upgrade Mesa to 25.0+ for Vulkan 1.4 support in lavapipe.
-$SUDO apt-get upgrade -y mesa-vulkan-drivers libgl1-mesa-dri
 $SUDO apt-get install -y \
     libvulkan1 \
     libvulkan-dev \
@@ -29,18 +27,19 @@ $SUDO apt-get install -y \
     mesa-vulkan-drivers \
     libxcb-xfixes0-dev
 
-# --- Locate lavapipe ICD ------------------------------------------------
+# --- Install patched lavapipe from mesa-fork ----------------------------
+# Workaround for https://gitlab.freedesktop.org/mesa/mesa/-/work_items/15227
+# Remove this block and restore mesa-vulkan-drivers from apt once the
+# upstream fix reaches the Ubuntu 24.04 packages.
 
-LAVAPIPE_ICD=$(find /usr -name "lvp_icd*.json" 2>/dev/null | head -1)
-if [ -z "$LAVAPIPE_ICD" ]; then
-    for path in /usr/share/vulkan/icd.d/lvp_icd.x86_64.json \
-                /usr/share/vulkan/icd.d/lvp_icd.json; do
-        if [ -f "$path" ]; then LAVAPIPE_ICD="$path"; break; fi
-    done
-fi
+MESA_FORK_URL="https://github.com/koubaa/mesa-fork/releases/download/v1/lavapipe-fix.tar.gz"
+MESA_DIR="/opt/mesa-fork"
+$SUDO mkdir -p "$MESA_DIR"
+curl -sL "$MESA_FORK_URL" | $SUDO tar xz -C "$MESA_DIR"
+LAVAPIPE_ICD="$MESA_DIR/lvp_icd.x86_64.json"
 
-if [ -z "$LAVAPIPE_ICD" ]; then
-    echo "WARNING: Could not locate lavapipe ICD JSON" >&2
+if [ ! -f "$LAVAPIPE_ICD" ]; then
+    echo "WARNING: Could not locate lavapipe ICD JSON at $LAVAPIPE_ICD" >&2
 fi
 
 # --- Export environment --------------------------------------------------
