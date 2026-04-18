@@ -310,9 +310,17 @@ impl GoldyEngine {
         let mut deferred_free_images: Vec<ResourceId> = Vec::new();
         let mut dispatch_count: usize = 0;
 
-        if let Some((proxy, tex)) = output {
+        // The output image is inserted with a fresh `ResourceId` per frame (see
+        // `render.rs::out_image()`), and is never matched by a `FreeImage` command
+        // in the recording. Track its id so we can evict it from `bind_map` after
+        // the flush below — otherwise `bind_map.image_map` grows unbounded,
+        // leaks borrowed swapchain textures, and eventually triggers OOM or the
+        // "image … exists but has no bindless index" error when stale entries
+        // reference unregistered surface drawables.
+        let output_image_id = output.map(|(proxy, tex)| {
             self.bind_map.insert_image(proxy.id, tex.clone(), "output");
-        }
+            proxy.id
+        });
 
         for command in &recording.commands {
             match command {
@@ -573,6 +581,9 @@ impl GoldyEngine {
         for id in deferred_free_images {
             self.bind_map.remove_image(id);
         }
+        if let Some(id) = output_image_id {
+            self.bind_map.remove_image(id);
+        }
         Ok(())
     }
 
@@ -609,9 +620,7 @@ impl GoldyEngine {
     ) -> Result<()> {
         Self::submit_graph(graph, device, last_future)?;
         if let Some(future) = last_future.take() {
-            future
-                .wait()
-                .map_err(|e| Error::Shader(e.to_string()))?;
+            future.wait().map_err(|e| Error::Shader(e.to_string()))?;
         }
         Ok(())
     }
