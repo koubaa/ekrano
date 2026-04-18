@@ -54,10 +54,14 @@ impl GoldyRenderer {
         texture: &Texture,
         params: &RenderParams,
     ) -> Result<()> {
+        use std::time::Instant;
+        let frame_start = Instant::now();
+
         let encoding = scene.encoding();
         let mut retry_config: Option<ekrano_encoding::RenderConfig> = None;
 
         for attempt in 0..=MAX_BUMP_RETRIES {
+            let t0 = Instant::now();
             let config = retry_config.take().unwrap_or_else(|| {
                 let mut packed = vec![];
                 let (layout, _, _) = self.resolver.resolve(encoding, &mut packed);
@@ -68,13 +72,16 @@ impl GoldyRenderer {
                     &params.base_color,
                 )
             });
+            let t_resolve = t0.elapsed();
+
             let base = BufferPool::padded_size(&config.buffer_sizes.pool_allocs());
-            // Safety margin: runtime allocation order may differ from pool_allocs order,
-            // causing extra alignment padding. Add 256K to absorb ordering variance.
             let pool_size = base.saturating_add(262144);
 
+            let t1 = Instant::now();
             self.engine.prepare_storage_pool(device, pool_size)?;
+            let t_pool = t1.elapsed();
 
+            let t2 = Instant::now();
             let mut render = Render::new();
             let mut recording = render.render_encoding_coarse_with_config(
                 encoding,
@@ -86,23 +93,41 @@ impl GoldyRenderer {
             );
             let bump_buf = render.bump_buf();
             let out_image = render.out_image();
+            let t_coarse = t2.elapsed();
 
+            let t3 = Instant::now();
             render.record_fine(&self.shaders, &mut recording);
+            let t_fine_record = t3.elapsed();
 
             #[cfg(feature = "debug_layers")]
             if let Some(captured) = render.take_captured_buffers() {
                 captured.release_buffers(&mut recording);
             }
 
+            let t4 = Instant::now();
             self.engine.run_recording(
                 device,
                 &recording,
                 Some((&out_image, texture)),
                 "coarse+fine",
             )?;
+            let t_gpu = t4.elapsed();
 
+            let t5 = Instant::now();
             let bump = self.read_bump(&bump_buf)?;
             self.engine.free_download(bump_buf);
+            let t_bump = t5.elapsed();
+
+            log::info!(
+                "[PERF] resolve={:.2}ms pool={:.2}ms coarse_record={:.2}ms fine_record={:.2}ms gpu={:.2}ms bump_read={:.2}ms total={:.2}ms",
+                t_resolve.as_secs_f64() * 1000.0,
+                t_pool.as_secs_f64() * 1000.0,
+                t_coarse.as_secs_f64() * 1000.0,
+                t_fine_record.as_secs_f64() * 1000.0,
+                t_gpu.as_secs_f64() * 1000.0,
+                t_bump.as_secs_f64() * 1000.0,
+                frame_start.elapsed().as_secs_f64() * 1000.0,
+            );
 
             log::debug!(
                 "[BUMP] lines={}, seg_counts={}, segments={}, tile={}, failed=0x{:x}",

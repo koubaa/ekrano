@@ -22,8 +22,8 @@ use std::sync::LazyLock;
 
 use goldy::types::{SpatialAccess, TextureFlags, TextureFormat};
 use goldy::{
-    Buffer, BufferPool, BufferView, ComputeEncoder, ComputePipeline, DataAccess, Device,
-    DeviceType, ShaderModule, Texture,
+    Buffer, BufferPool, BufferView, ComputeGraph, ComputePipeline, DataAccess, Device, DeviceType,
+    NodeAccess, ShaderModule, Texture,
 };
 
 static DUMP_DIR: LazyLock<Option<String>> = LazyLock::new(|| std::env::var("EKRANO_DUMP_DIR").ok());
@@ -71,6 +71,14 @@ impl GpuBuffer {
         match self {
             Self::Owned(b) => Some(b),
             Self::Pooled(_) => None,
+        }
+    }
+
+    #[allow(dead_code, reason = "symmetric with as_owned; used in tests")]
+    fn as_view(&self) -> Option<&BufferView> {
+        match self {
+            Self::Owned(_) => None,
+            Self::Pooled(v) => Some(v),
         }
     }
 }
@@ -264,11 +272,30 @@ impl GoldyEngine {
     ///
     /// `output` maps the recording's output image proxy to the actual texture to render into.
     /// The caller gets both from `render::render_full()` which returns `(Recording, target)`.
-    #[allow(
-        clippy::modulo_one,
-        clippy::manual_is_multiple_of,
-        reason = "DISPATCHES_PER_SUBMIT is intentionally 1 (flush every dispatch for TDR safety)"
-    )]
+    ///
+    /// Dispatches are accumulated into a [`ComputeGraph`] which analyzes
+    /// resource dependencies and inserts per-resource barriers, replacing the
+    /// previous per-dispatch command buffer submission pattern.  When a
+    /// CPU-side command (Upload, Clear, …) appears after dispatches have been
+    /// queued, the graph is flushed first so the CPU write is visible to
+    /// subsequent GPU work.
+    /// Execute a recording.
+    ///
+    /// `output` maps the recording's output image proxy to the actual texture to render into.
+    /// The caller gets both from `render::render_full()` which returns `(Recording, target)`.
+    ///
+    /// Dispatches are accumulated into a [`ComputeGraph`] which analyzes
+    /// resource dependencies and inserts per-resource barriers, replacing the
+    /// previous per-dispatch command buffer submission pattern.
+    ///
+    /// Two flush modes keep the CPU and GPU busy in parallel:
+    /// - **Non-blocking** (`submit_graph`): for Upload commands that allocate
+    ///   fresh resources — the prior graph is submitted but not waited on,
+    ///   because the new buffer has its own descriptor slot and Metal's queue
+    ///   serialization + reference counting keep the old buffer alive.
+    /// - **Blocking** (`flush_graph`): for Clear / `WriteImage` commands that
+    ///   mutate existing memory via CPU memset — we must wait for in-flight
+    ///   GPU reads to complete first.
     pub fn run_recording(
         &mut self,
         device: &Device,
@@ -276,13 +303,12 @@ impl GoldyEngine {
         output: Option<(&ImageProxy, &Texture)>,
         _label: &'static str,
     ) -> Result<()> {
-        let mut encoder = ComputeEncoder::new();
+        let mut graph = ComputeGraph::new();
+        let mut last_future: Option<goldy::GpuFuture> = None;
         let mut pending_downloads: Vec<BufferProxy> = Vec::new();
         let mut deferred_free_buffers: Vec<ResourceId> = Vec::new();
         let mut deferred_free_images: Vec<ResourceId> = Vec::new();
         let mut dispatch_count: usize = 0;
-
-        let output_proxy_id = output.map(|(p, _)| p.id);
 
         if let Some((proxy, tex)) = output {
             self.bind_map.insert_image(proxy.id, tex.clone(), "output");
@@ -291,6 +317,7 @@ impl GoldyEngine {
         for command in &recording.commands {
             match command {
                 Command::Upload(buf_proxy, bytes) => {
+                    Self::submit_graph(&mut graph, device, &mut last_future)?;
                     let stride = buf_proxy
                         .element_stride
                         .or_else(|| element_stride_for_buffer(buf_proxy.name));
@@ -307,6 +334,7 @@ impl GoldyEngine {
                         .insert_buf(buf_proxy.id, GpuBuffer::Owned(buf), buf_proxy.name);
                 }
                 Command::UploadUniform(buf_proxy, bytes) => {
+                    Self::submit_graph(&mut graph, device, &mut last_future)?;
                     let buf = self.pool.get_buf(
                         device,
                         buf_proxy.size,
@@ -319,6 +347,7 @@ impl GoldyEngine {
                         .insert_buf(buf_proxy.id, GpuBuffer::Owned(buf), buf_proxy.name);
                 }
                 Command::UploadImage(image_proxy, bytes) => {
+                    Self::submit_graph(&mut graph, device, &mut last_future)?;
                     let format = image_format_to_goldy(image_proxy.format);
                     let texture = Texture::with_data(
                         device,
@@ -334,9 +363,9 @@ impl GoldyEngine {
                         .insert_image(image_proxy.id, texture, "uploaded_image");
                 }
                 Command::WriteImage(image_proxy, [x, y], image_data) => {
+                    Self::flush_graph(&mut graph, device, &mut last_future)?;
                     if self.bind_map.get_image(image_proxy.id).is_none() {
                         let format = image_format_to_goldy(image_proxy.format);
-                        // WriteImage textures are read by shaders as Texture2D (Interpolated), not RWTexture2D
                         let tex = Texture::new(
                             device,
                             image_proxy.width,
@@ -370,6 +399,7 @@ impl GoldyEngine {
                     pending_downloads.push(*buf_proxy);
                 }
                 Command::Clear(buf_proxy, offset, size) => {
+                    Self::flush_graph(&mut graph, device, &mut last_future)?;
                     if let Some((gpu_buf, _)) = self.bind_map.get_buf(buf_proxy.id) {
                         let clear_size = size.unwrap_or(gpu_buf.size() - offset);
                         match gpu_buf {
@@ -386,7 +416,6 @@ impl GoldyEngine {
                             }
                         }
                     } else {
-                        // Lazy allocation: buffer not yet materialized (cf. wgpu pending_clears).
                         let stride = buf_proxy
                             .element_stride
                             .or_else(|| element_stride_for_buffer(buf_proxy.name));
@@ -438,32 +467,13 @@ impl GoldyEngine {
                         );
                     }
 
-                    // Split execution: fine reads ptcl written by coarse. Run coarse+path_tiling first, sync, then fine.
-                    let is_fine = output_proxy_id.is_some_and(|oid| {
-                        bindings.len() == 8
-                            && matches!(bindings.get(5), Some(ResourceProxy::Image(ip)) if ip.id == oid)
-                    });
-                    if is_fine {
-                        encoder
-                            .dispatch(device)
-                            .map_err(|e| Error::Shader(e.to_string()))?;
-                        encoder = ComputeEncoder::new();
-                    }
-
-                    let mut pass = encoder.begin_compute_pass();
-                    pass.set_pipeline(&self.shaders[shader_id.0].pipeline);
+                    let mut node = graph.node("dispatch", &self.shaders[shader_id.0].pipeline);
+                    node = self.bind_graph_resources(node, bindings, &bind_types);
                     if !indices.is_empty() {
-                        pass.set_push_constants_raw(&indices);
+                        node = node.push_constants_raw(&indices);
                     }
-                    pass.dispatch(*x, *y, *z);
+                    node.dispatch(*x, *y, *z);
                     dispatch_count += 1;
-
-                    if dispatch_count % Self::DISPATCHES_PER_SUBMIT == 0 {
-                        encoder
-                            .dispatch(device)
-                            .map_err(|e| Error::Shader(e.to_string()))?;
-                        encoder = ComputeEncoder::new();
-                    }
                 }
                 Command::DispatchIndirect(shader_id, buf_proxy, offset, bindings) => {
                     self.ensure_resources_materialized(
@@ -480,12 +490,12 @@ impl GoldyEngine {
                         force_uav(device),
                     )?;
                     if let Some((gpu_buf, _)) = self.bind_map.get_buf(buf_proxy.id)
-                        && let Some(buf) = gpu_buf.as_owned()
+                        && let Some(indirect_buf) = gpu_buf.as_owned()
                     {
                         if let Some(ref dir) = *DUMP_DIR {
                             let mut indirect_dims = [0_u32; 3];
                             let mut raw = [0_u8; 12];
-                            if buf.read_to_cpu(device, &mut raw).is_ok() {
+                            if indirect_buf.read_to_cpu(device, &mut raw).is_ok() {
                                 let off = *offset as usize;
                                 if off + 12 <= raw.len() {
                                     for i in 0..3 {
@@ -498,9 +508,9 @@ impl GoldyEngine {
                                     }
                                 }
                             } else {
-                                let full_size = buf.size() as usize;
+                                let full_size = indirect_buf.size() as usize;
                                 let mut full = vec![0_u8; full_size];
-                                if buf.read_to_cpu(device, &mut full).is_ok() {
+                                if indirect_buf.read_to_cpu(device, &mut full).is_ok() {
                                     let off = *offset as usize;
                                     if off + 12 <= full.len() {
                                         for i in 0..3 {
@@ -525,20 +535,15 @@ impl GoldyEngine {
                             );
                         }
 
-                        let mut pass = encoder.begin_compute_pass();
-                        pass.set_pipeline(&self.shaders[shader_id.0].pipeline);
+                        let mut node =
+                            graph.node("dispatch_indirect", &self.shaders[shader_id.0].pipeline);
+                        node = self.bind_graph_resources(node, bindings, &bind_types);
+                        node = node.bind_buffer(indirect_buf, NodeAccess::Read);
                         if !indices.is_empty() {
-                            pass.set_push_constants_raw(&indices);
+                            node = node.push_constants_raw(&indices);
                         }
-                        pass.dispatch_indirect(buf, *offset);
+                        node.dispatch_indirect(indirect_buf, *offset);
                         dispatch_count += 1;
-
-                        if dispatch_count % Self::DISPATCHES_PER_SUBMIT == 0 {
-                            encoder
-                                .dispatch(device)
-                                .map_err(|e| Error::Shader(e.to_string()))?;
-                            encoder = ComputeEncoder::new();
-                        }
                     }
                 }
                 #[cfg(feature = "debug_layers")]
@@ -546,9 +551,7 @@ impl GoldyEngine {
             }
         }
 
-        encoder
-            .dispatch(device)
-            .map_err(|e| Error::Shader(e.to_string()))?;
+        Self::flush_graph(&mut graph, device, &mut last_future)?;
 
         // Downloads must happen before frees, since a recording may download
         // and then free the same buffer.
@@ -573,9 +576,86 @@ impl GoldyEngine {
         Ok(())
     }
 
-    /// Max dispatches per GPU submission to avoid TDR on large workloads.
-    /// Each submission resets the GPU timeout watchdog.
-    const DISPATCHES_PER_SUBMIT: usize = 1;
+    /// Submit the current graph non-blocking if it has pending nodes.
+    ///
+    /// Safe for Upload commands that allocate fresh GPU resources: the old
+    /// buffer's descriptor slot is never reused (monotonic index allocation)
+    /// and Metal's command buffer reference counting keeps the backing memory
+    /// alive until the GPU finishes.
+    fn submit_graph(
+        graph: &mut ComputeGraph,
+        device: &Device,
+        last_future: &mut Option<goldy::GpuFuture>,
+    ) -> Result<()> {
+        if graph.is_empty() {
+            return Ok(());
+        }
+        let future = graph
+            .submit(device)
+            .map_err(|e| Error::Shader(e.to_string()))?;
+        *last_future = Some(future);
+        *graph = ComputeGraph::new();
+        Ok(())
+    }
+
+    /// Submit the current graph and block until all prior GPU work completes.
+    ///
+    /// Required before CPU-side mutations (Clear, `WriteImage`) that touch
+    /// memory that in-flight dispatches may still be reading.
+    fn flush_graph(
+        graph: &mut ComputeGraph,
+        device: &Device,
+        last_future: &mut Option<goldy::GpuFuture>,
+    ) -> Result<()> {
+        Self::submit_graph(graph, device, last_future)?;
+        if let Some(future) = last_future.take() {
+            future
+                .wait()
+                .map_err(|e| Error::Shader(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Bind a dispatch's resources to a graph node for dependency tracking.
+    ///
+    /// For each `ResourceProxy` in `bindings`, looks up the corresponding
+    /// `GpuBuffer` or `Texture` in the bind map and registers it on the
+    /// node with the appropriate [`NodeAccess`] derived from `bind_types`.
+    fn bind_graph_resources<'a>(
+        &self,
+        mut node: goldy::NodeBuilder<'a>,
+        bindings: &[ResourceProxy],
+        bind_types: &[BindType],
+    ) -> goldy::NodeBuilder<'a> {
+        for (i, res) in bindings.iter().enumerate() {
+            let access = bind_types
+                .get(i)
+                .copied()
+                .map(bind_type_to_node_access)
+                .unwrap_or(NodeAccess::ReadWrite);
+
+            match res {
+                ResourceProxy::Buffer(proxy) | ResourceProxy::BufferRange { proxy, .. } => {
+                    if let Some((gpu_buf, _)) = self.bind_map.get_buf(proxy.id) {
+                        match gpu_buf {
+                            GpuBuffer::Owned(buf) => {
+                                node = node.bind_buffer(buf, access);
+                            }
+                            GpuBuffer::Pooled(view) => {
+                                node = node.bind_buffer_view(view, access);
+                            }
+                        }
+                    }
+                }
+                ResourceProxy::Image(proxy) => {
+                    if let Some((tex, _)) = self.bind_map.get_image(proxy.id) {
+                        node = node.bind_texture(tex, access);
+                    }
+                }
+            }
+        }
+        node
+    }
 
     /// Get downloaded buffer data, if the recording contained a Download command for it.
     pub fn get_download(&self, buf: BufferProxy) -> Option<&[u8]> {
@@ -718,6 +798,13 @@ fn image_format_to_goldy(_format: crate::recording::ImageFormat) -> TextureForma
     TextureFormat::Rgba8Unorm
 }
 
+fn bind_type_to_node_access(bt: BindType) -> NodeAccess {
+    match bt {
+        BindType::Buffer | BindType::Image(_) => NodeAccess::ReadWrite,
+        BindType::BufReadOnly | BindType::Uniform | BindType::ImageRead(_) => NodeAccess::Read,
+    }
+}
+
 impl BindMap {
     fn insert_buf(&mut self, id: ResourceId, gpu_buf: GpuBuffer, name: &'static str) {
         self.buf_map.insert(id, (gpu_buf, name));
@@ -846,10 +933,23 @@ fn collect_bindless_indices(
                         .ok_or_else(|| Error::Shader("buffer has no bindless index".into()))?
                 }
             }
-            ResourceProxy::Image(proxy) => bind_map
-                .get_image(proxy.id)
-                .and_then(|(tex, _)| tex.bindless_index())
-                .ok_or_else(|| Error::Shader("image not found or has no bindless index".into()))?,
+            ResourceProxy::Image(proxy) => {
+                let entry = bind_map.get_image(proxy.id);
+                match entry {
+                    Some((tex, name)) => tex.bindless_index().ok_or_else(|| {
+                        Error::Shader(format!(
+                            "image '{}' (id={}) exists but has no bindless index",
+                            name, proxy.id.0
+                        ))
+                    })?,
+                    None => {
+                        return Err(Error::Shader(format!(
+                            "image not found in bind map (id={}, {}x{})",
+                            proxy.id.0, proxy.width, proxy.height
+                        )));
+                    }
+                }
+            }
         };
         indices.push(idx);
     }
