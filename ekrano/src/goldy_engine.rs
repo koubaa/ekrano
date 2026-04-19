@@ -301,7 +301,7 @@ impl GoldyEngine {
         device: &Device,
         recording: &Recording,
         output: Option<(&ImageProxy, &Texture)>,
-        _label: &'static str,
+        label: &'static str,
     ) -> Result<()> {
         let mut graph = ComputeGraph::new();
         let mut last_future: Option<goldy::GpuFuture> = None;
@@ -325,34 +325,75 @@ impl GoldyEngine {
         for command in &recording.commands {
             match command {
                 Command::Upload(buf_proxy, bytes) => {
+                    // Reuse the existing buffer bound to this ResourceId if its
+                    // size and access category still match. Allocating a fresh
+                    // Buffer on every Upload would burn a bindless slot per
+                    // call; in the chunked flatten path we Upload `vello.config`
+                    // ~90× per frame, which exhausts the 64-slot storage-buffer
+                    // argument buffer and aliases descriptors across in-flight
+                    // command buffers (observed as `config.lines_size=0` in
+                    // binning and a STAGE_FLATTEN retry cascade). `buf.write`
+                    // issues a queue-ordered blit under the hood so the bytes
+                    // become visible to subsequent dispatches even while prior
+                    // dispatches that still reference the buffer are in flight.
                     Self::submit_graph(&mut graph, device, &mut last_future)?;
-                    let stride = buf_proxy
-                        .element_stride
-                        .or_else(|| element_stride_for_buffer(buf_proxy.name));
-                    let buf = self.pool.get_buf_with_stride(
-                        device,
-                        buf_proxy.size,
-                        buf_proxy.name,
-                        DataAccess::Scattered,
-                        stride,
-                    )?;
-                    buf.write(0, bytes)
-                        .map_err(|e| Error::Shader(e.to_string()))?;
-                    self.bind_map
-                        .insert_buf(buf_proxy.id, GpuBuffer::Owned(buf), buf_proxy.name);
+                    if let Some((GpuBuffer::Owned(existing), _)) =
+                        self.bind_map.get_buf(buf_proxy.id)
+                        && existing.size() >= bytes.len() as u64
+                        && existing.access() == DataAccess::Scattered
+                    {
+                        existing
+                            .write(0, bytes)
+                            .map_err(|e| Error::Shader(e.to_string()))?;
+                    } else {
+                        let stride = buf_proxy
+                            .element_stride
+                            .or_else(|| element_stride_for_buffer(buf_proxy.name));
+                        let buf = self.pool.get_buf_with_stride(
+                            device,
+                            buf_proxy.size,
+                            buf_proxy.name,
+                            DataAccess::Scattered,
+                            stride,
+                        )?;
+                        buf.write(0, bytes)
+                            .map_err(|e| Error::Shader(e.to_string()))?;
+                        self.bind_map.insert_buf(
+                            buf_proxy.id,
+                            GpuBuffer::Owned(buf),
+                            buf_proxy.name,
+                        );
+                    }
                 }
                 Command::UploadUniform(buf_proxy, bytes) => {
+                    // Same rationale as Command::Upload: reusing the existing
+                    // Broadcast buffer avoids churning the uniform-buffer
+                    // bindless slot pool on repeated uploads to the same
+                    // ResourceId.
                     Self::submit_graph(&mut graph, device, &mut last_future)?;
-                    let buf = self.pool.get_buf(
-                        device,
-                        buf_proxy.size,
-                        buf_proxy.name,
-                        DataAccess::Broadcast,
-                    )?;
-                    buf.write(0, bytes)
-                        .map_err(|e| Error::Shader(e.to_string()))?;
-                    self.bind_map
-                        .insert_buf(buf_proxy.id, GpuBuffer::Owned(buf), buf_proxy.name);
+                    if let Some((GpuBuffer::Owned(existing), _)) =
+                        self.bind_map.get_buf(buf_proxy.id)
+                        && existing.size() >= bytes.len() as u64
+                        && existing.access() == DataAccess::Broadcast
+                    {
+                        existing
+                            .write(0, bytes)
+                            .map_err(|e| Error::Shader(e.to_string()))?;
+                    } else {
+                        let buf = self.pool.get_buf(
+                            device,
+                            buf_proxy.size,
+                            buf_proxy.name,
+                            DataAccess::Broadcast,
+                        )?;
+                        buf.write(0, bytes)
+                            .map_err(|e| Error::Shader(e.to_string()))?;
+                        self.bind_map.insert_buf(
+                            buf_proxy.id,
+                            GpuBuffer::Owned(buf),
+                            buf_proxy.name,
+                        );
+                    }
                 }
                 Command::UploadImage(image_proxy, bytes) => {
                     Self::submit_graph(&mut graph, device, &mut last_future)?;
@@ -583,6 +624,34 @@ impl GoldyEngine {
         }
         if let Some(id) = output_image_id {
             self.bind_map.remove_image(id);
+        }
+        // Leak canary: anything left in bind_map after a full recording finishes
+        // is a per-frame allocation that was never explicitly freed. Each
+        // surviving buffer consumes a bindless slot, so in a steady-state
+        // render loop even 1 leaked buffer per frame eats through Metal's
+        // 64-slot argument buffer in a couple of seconds.
+        if !self.bind_map.buf_map.is_empty() || !self.bind_map.image_map.is_empty() {
+            let leaked_bufs: Vec<_> = self
+                .bind_map
+                .buf_map
+                .values()
+                .map(|(_, n)| *n)
+                .collect();
+            let leaked_images: Vec<_> = self
+                .bind_map
+                .image_map
+                .values()
+                .map(|(_, n)| *n)
+                .collect();
+            log::warn!(
+                "bind_map not fully drained at end of run_recording ({}): \
+                 bufs={} images={} leaked_bufs={:?} leaked_images={:?}",
+                label,
+                leaked_bufs.len(),
+                leaked_images.len(),
+                leaked_bufs,
+                leaked_images,
+            );
         }
         Ok(())
     }
