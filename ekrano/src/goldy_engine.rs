@@ -756,6 +756,17 @@ impl GoldyEngine {
             None => true,
         };
         if need_new {
+            // Drop the old pool first so its backing buffer refcount hits
+            // zero before we touch the heap allocator. Then ask the backend
+            // to right-size the primary heap and release overflow heaps:
+            // without this, each pool growth event (retry cascade or
+            // first-NON-EMPTY-frame) leaves behind a `size * 2` overflow
+            // heap that nothing reclaims, stacking up to >1 GB extra GPU
+            // memory for a complex Lottie scene. `reset_buffer_heaps`
+            // blocks internally until in-flight GPU work finishes so it is
+            // safe to call here even though we may be mid-frame.
+            self.storage_pool = None;
+            device.reset_buffer_heaps();
             let pool =
                 BufferPool::new(device, pool_size).map_err(|e| Error::Shader(e.to_string()))?;
             pool.backing_buffer()
