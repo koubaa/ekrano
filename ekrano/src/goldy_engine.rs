@@ -318,7 +318,7 @@ impl GoldyEngine {
         // "image … exists but has no bindless index" error when stale entries
         // reference unregistered surface drawables.
         let output_image_id = output.map(|(proxy, tex)| {
-            self.bind_map.insert_image(proxy.id, tex.clone(), "output");
+            self.bind_map.insert_image(proxy.id, tex.borrow(), "output");
             proxy.id
         });
 
