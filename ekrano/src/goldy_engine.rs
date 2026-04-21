@@ -631,18 +631,8 @@ impl GoldyEngine {
         // render loop even 1 leaked buffer per frame eats through Metal's
         // 64-slot argument buffer in a couple of seconds.
         if !self.bind_map.buf_map.is_empty() || !self.bind_map.image_map.is_empty() {
-            let leaked_bufs: Vec<_> = self
-                .bind_map
-                .buf_map
-                .values()
-                .map(|(_, n)| *n)
-                .collect();
-            let leaked_images: Vec<_> = self
-                .bind_map
-                .image_map
-                .values()
-                .map(|(_, n)| *n)
-                .collect();
+            let leaked_bufs: Vec<_> = self.bind_map.buf_map.values().map(|(_, n)| *n).collect();
+            let leaked_images: Vec<_> = self.bind_map.image_map.values().map(|(_, n)| *n).collect();
             log::warn!(
                 "bind_map not fully drained at end of run_recording ({}): \
                  bufs={} images={} leaked_bufs={:?} leaked_images={:?}",
