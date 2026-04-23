@@ -80,6 +80,7 @@ const TEXT: &str = "✅👀🎉🤠";
 
 #[test]
 #[cfg_attr(skip_gpu_tests, ignore)]
+#[cfg_attr(skip_slow_tests, ignore)]
 fn big_colr() {
     let font_size = 48.;
     let scene = encode_noto_colr(TEXT, font_size);
@@ -128,6 +129,7 @@ fn colr_undef() {
 
 #[test]
 #[cfg_attr(skip_gpu_tests, ignore)]
+#[cfg_attr(skip_slow_tests, ignore)]
 fn big_bitmap() {
     let font_size = 48.;
     let scene = encode_noto_bitmap(TEXT, font_size);
