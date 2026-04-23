@@ -275,27 +275,15 @@ impl GoldyEngine {
     ///
     /// Dispatches are accumulated into a [`ComputeGraph`] which analyzes
     /// resource dependencies and inserts per-resource barriers, replacing the
-    /// previous per-dispatch command buffer submission pattern.  When a
-    /// CPU-side command (Upload, Clear, …) appears after dispatches have been
-    /// queued, the graph is flushed first so the CPU write is visible to
-    /// subsequent GPU work.
-    /// Execute a recording.
-    ///
-    /// `output` maps the recording's output image proxy to the actual texture to render into.
-    /// The caller gets both from `render::render_full()` which returns `(Recording, target)`.
-    ///
-    /// Dispatches are accumulated into a [`ComputeGraph`] which analyzes
-    /// resource dependencies and inserts per-resource barriers, replacing the
     /// previous per-dispatch command buffer submission pattern.
     ///
-    /// Two flush modes keep the CPU and GPU busy in parallel:
-    /// - **Non-blocking** (`submit_graph`): for Upload commands that allocate
-    ///   fresh resources — the prior graph is submitted but not waited on,
-    ///   because the new buffer has its own descriptor slot and Metal's queue
-    ///   serialization + reference counting keep the old buffer alive.
-    /// - **Blocking** (`flush_graph`): for Clear / `WriteImage` commands that
-    ///   mutate existing memory via CPU memset — we must wait for in-flight
-    ///   GPU reads to complete first.
+    /// Graph submission is deferred as long as possible to allow the graph to
+    /// batch dispatches and insert barriers efficiently. An intermediate
+    /// submit is only needed when an Upload *reuses* an existing buffer
+    /// (prior dispatches may still be reading the old contents). Fresh buffer
+    /// allocations and image uploads don't require a submit because the new
+    /// resource has never been seen by the GPU. A blocking flush happens for
+    /// `Clear`/`WriteImage` commands that mutate memory via CPU memset.
     pub fn run_recording(
         &mut self,
         device: &Device,
@@ -336,16 +324,19 @@ impl GoldyEngine {
                     // issues a queue-ordered blit under the hood so the bytes
                     // become visible to subsequent dispatches even while prior
                     // dispatches that still reference the buffer are in flight.
-                    Self::submit_graph(&mut graph, device, &mut last_future)?;
                     if let Some((GpuBuffer::Owned(existing), _)) =
                         self.bind_map.get_buf(buf_proxy.id)
                         && existing.size() >= bytes.len() as u64
                         && existing.access() == DataAccess::Scattered
                     {
+                        // Buffer is being reused — flush pending dispatches that
+                        // may still read the old contents before overwriting.
+                        Self::submit_graph(&mut graph, device, &mut last_future)?;
                         existing
                             .write(0, bytes)
                             .map_err(|e| Error::Shader(e.to_string()))?;
                     } else {
+                        // Fresh buffer — no GPU work references it yet.
                         let stride = buf_proxy
                             .element_stride
                             .or_else(|| element_stride_for_buffer(buf_proxy.name));
@@ -370,12 +361,12 @@ impl GoldyEngine {
                     // Broadcast buffer avoids churning the uniform-buffer
                     // bindless slot pool on repeated uploads to the same
                     // ResourceId.
-                    Self::submit_graph(&mut graph, device, &mut last_future)?;
                     if let Some((GpuBuffer::Owned(existing), _)) =
                         self.bind_map.get_buf(buf_proxy.id)
                         && existing.size() >= bytes.len() as u64
                         && existing.access() == DataAccess::Broadcast
                     {
+                        Self::submit_graph(&mut graph, device, &mut last_future)?;
                         existing
                             .write(0, bytes)
                             .map_err(|e| Error::Shader(e.to_string()))?;
@@ -396,7 +387,6 @@ impl GoldyEngine {
                     }
                 }
                 Command::UploadImage(image_proxy, bytes) => {
-                    Self::submit_graph(&mut graph, device, &mut last_future)?;
                     let format = image_format_to_goldy(image_proxy.format);
                     let texture = Texture::with_data(
                         device,
