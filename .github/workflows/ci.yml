@@ -245,8 +245,7 @@ jobs:
         if: matrix.os == 'windows-latest'
         shell: bash
         run: |
-          echo "GOLDY_BACKEND=dx12" >> "$GITHUB_ENV"
-          echo "GOLDY_DX12_ALLOW_WARP=1" >> "$GITHUB_ENV"
+          echo "GOLDY_DX12_FORCE_WARP=1" >> "$GITHUB_ENV"
           echo "GOLDY_DX12_NO_DEBUG=1" >> "$GITHUB_ENV"
 
       # Install redistributable WARP next to the test binaries. Without this,
