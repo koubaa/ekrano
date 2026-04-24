@@ -1,9 +1,9 @@
 // Copyright 2023 the Vello Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT OR Unlicense
 
-use ekrano_encoding::{BinHeader, BumpAllocators, ConfigUniform, DrawMonoid, PathBbox};
+use ekrano_encoding::{BinHeader, BumpAllocators, ConfigUniform, DrawMonoid, DrawTag, PathBbox};
 
-use super::CpuBinding;
+use super::{CpuBinding, util::read_draw_tag_from_scene};
 
 const WG_SIZE: usize = 256;
 const TILE_WIDTH: usize = 16;
@@ -25,6 +25,7 @@ fn bbox_intersect(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
 fn binning_main(
     n_wg: u32,
     config: &ConfigUniform,
+    scene: &[u32],
     draw_monoids: &[DrawMonoid],
     path_bbox_buf: &[PathBbox],
     clip_bbox_buf: &[[f32; 4]],
@@ -46,19 +47,24 @@ fn binning_main(
             let mut y1 = 0;
             if element_ix < config.layout.n_draw_objects as usize {
                 let draw_monoid = draw_monoids[element_ix];
+                let draw_tag = DrawTag(read_draw_tag_from_scene(config, scene, element_ix as u32));
                 let mut clip_bbox = [-1e9, -1e9, 1e9, 1e9];
                 if draw_monoid.clip_ix > 0 {
                     assert!(draw_monoid.clip_ix - 1 < config.layout.n_clips);
                     clip_bbox = clip_bbox_buf[draw_monoid.clip_ix as usize - 1];
                 }
-                let path_bbox = path_bbox_buf[draw_monoid.path_ix as usize];
-                let pb = [
-                    path_bbox.x0 as f32,
-                    path_bbox.y0 as f32,
-                    path_bbox.x1 as f32,
-                    path_bbox.y1 as f32,
-                ];
-                let bbox = bbox_intersect(clip_bbox, pb);
+                let bbox = if draw_tag == DrawTag::SET_BLEND_MODE {
+                    clip_bbox
+                } else {
+                    let path_bbox = path_bbox_buf[draw_monoid.path_ix as usize];
+                    let pb = [
+                        path_bbox.x0 as f32,
+                        path_bbox.y0 as f32,
+                        path_bbox.x1 as f32,
+                        path_bbox.y1 as f32,
+                    ];
+                    bbox_intersect(clip_bbox, pb)
+                };
                 intersected_bbox[element_ix] = bbox;
                 if bbox[0] < bbox[2] && bbox[1] < bbox[3] {
                     x0 = (bbox[0] * SX).floor() as i32;
@@ -105,16 +111,18 @@ fn binning_main(
 
 pub fn binning(n_wg: u32, resources: &[CpuBinding<'_>]) {
     let config = resources[0].as_typed();
-    let draw_monoids = resources[1].as_slice();
-    let path_bbox_buf = resources[2].as_slice();
-    let clip_bbox_buf = resources[3].as_slice();
-    let mut intersected_bbox = resources[4].as_slice_mut();
-    let mut bump = resources[5].as_typed_mut();
-    let mut bin_data = resources[6].as_slice_mut();
-    let mut bin_header = resources[7].as_slice_mut();
+    let scene = resources[1].as_slice();
+    let draw_monoids = resources[2].as_slice();
+    let path_bbox_buf = resources[3].as_slice();
+    let clip_bbox_buf = resources[4].as_slice();
+    let mut intersected_bbox = resources[5].as_slice_mut();
+    let mut bump = resources[6].as_typed_mut();
+    let mut bin_data = resources[7].as_slice_mut();
+    let mut bin_header = resources[8].as_slice_mut();
     binning_main(
         n_wg,
         &config,
+        &scene,
         &draw_monoids,
         &path_bbox_buf,
         &clip_bbox_buf,

@@ -160,6 +160,6 @@ fn snapshot_luminance_mask() {
 #[cfg_attr(skip_gpu_tests, ignore)]
 fn image_luminance_mask() {
     let test_scene = test_scenes::image_luminance_mask();
-    let params = TestParams::new("image_luminance_mask", 350, 250);
+    let params = TestParams::new("image_luminance_mask", 200, 140);
     snapshot_test_scene(test_scene, params);
 }

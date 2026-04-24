@@ -12,11 +12,38 @@ use ekrano::{
     Scene,
     peniko::{ImageData, ImageFormat},
 };
-use image::{DynamicImage, ImageError};
+use image::ImageError;
 use nv_flip::FlipPool;
 
-use crate::{TestParams, env_var_relates_to, render_then_debug, write_png_to_file};
-use anyhow::{Result, anyhow, bail};
+use crate::{
+    TestParams, env_var_relates_to, render_then_debug,
+    rgba_straight_composite_black_to_rgb, rgba_straight_composite_to_rgb,
+    write_png_to_file,
+};
+
+/// Composite RGBA data over the test's `base_color` (defaulting to black).
+///
+/// vello_sparse references are rendered onto an opaque-white surface.
+/// Setting `params.base_color = Some(WHITE)` for those tests makes both the
+/// reference and rendered images composite over white, so the white
+/// "background" regions match each other.
+fn composite_bg(
+    params: &TestParams,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> anyhow::Result<image::RgbImage> {
+    if let Some(color) = params.base_color {
+        let u = color.premultiply().to_rgba8().to_u32();
+        let r = ((u >> 24) & 0xFF) as u8;
+        let g = ((u >> 16) & 0xFF) as u8;
+        let b = ((u >>  8) & 0xFF) as u8;
+        rgba_straight_composite_to_rgb(width, height, rgba, [r, g, b])
+    } else {
+        rgba_straight_composite_black_to_rgb(width, height, rgba)
+    }
+}
+use anyhow::{Result, bail};
 
 fn current_dir(directory: SnapshotDirectory) -> PathBuf {
     let mut path_buf = Path::new(env!("CARGO_MANIFEST_DIR")).join("current");
@@ -235,7 +262,9 @@ pub fn snapshot_test_image(
                 );
             }
 
-            contents.into_rgb8()
+        let rgba = contents.into_rgba8();
+        let result = composite_bg(params, rgba.width(), rgba.height(), rgba.as_raw())?;
+        result
         }
         Err(ImageError::IoError(e)) if e.kind() == ErrorKind::NotFound => {
             if env_var_relates_to("EKRANO_TEST_CREATE", &params.name) {
@@ -323,14 +352,12 @@ pub fn snapshot_test_image(
     }
     // Compare the images using nv-flip
     assert_eq!(raw_rendered.format, ImageFormat::Rgba8);
-    let rendered_data: DynamicImage = image::RgbaImage::from_raw(
+    let rendered_data = composite_bg(
+        params,
         raw_rendered.width,
         raw_rendered.height,
-        raw_rendered.data.as_ref().to_vec(),
-    )
-    .ok_or(anyhow!("Couldn't create image"))?
-    .into();
-    let rendered_data = rendered_data.to_rgb8();
+        raw_rendered.data.as_ref(),
+    )?;
     let expected = nv_flip::FlipImageRgb8::with_data(
         expected_data.width(),
         expected_data.height(),

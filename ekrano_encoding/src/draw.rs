@@ -40,7 +40,16 @@ impl DrawTag {
     pub const BEGIN_CLIP: Self = Self(0x49);
 
     /// End layer/clip.
-    pub const END_CLIP: Self = Self(0x21);
+    /// Scene payload: duplicate [`DrawBeginClip`] words (blend + alpha); `(tag >> 2) & 7 == 2`.
+    pub const END_CLIP: Self = Self(0x09);
+
+    /// End a filter layer (same as [`Self::END_CLIP`] for compositing params, plus layer index).
+    /// Scene payload: [`DrawBeginClip`] words + `u32` filter layer index; `(tag >> 2) & 7 == 3`.
+    pub const END_CLIP_FILTER: Self = Self(0x0D);
+
+    /// Set per-draw blend mode for subsequent fills (non-isolated blending).
+    /// Scene data: one `u32` packed like [`DrawBeginClip::new`](DrawBeginClip::new).
+    pub const SET_BLEND_MODE: Self = Self(0x04);
 }
 
 impl DrawTag {
@@ -254,7 +263,11 @@ impl Monoid for DrawMonoid {
 
     fn new(tag: DrawTag) -> Self {
         Self {
-            path_ix: (tag != DrawTag::NOP) as u32,
+            // SET_BLEND_MODE has a dummy PathTag::PATH on the Rust side, so it counts as a path.
+            path_ix: match tag {
+                DrawTag::NOP => 0,
+                _ => 1,
+            },
             clip_ix: tag.0 & 1,
             scene_offset: (tag.0 >> 2) & 0x7,
             info_offset: (tag.0 >> 6) & 0xf,

@@ -36,6 +36,8 @@ pub struct FullShaders {
     pub fine_area: Option<ShaderId>,
     pub fine_msaa8: Option<ShaderId>,
     pub fine_msaa16: Option<ShaderId>,
+    /// Full-frame filter chain after fine raster (optional).
+    pub filter_pass: Option<ShaderId>,
     // 2-level dispatch works for CPU pathtag scan even for large
     // inputs, 3-level is not yet implemented.
     pub pathtag_is_cpu: bool,
@@ -280,6 +282,8 @@ pub(crate) fn goldy_full_shaders(
         &search_paths,
         &[],
     )?;
+    // Must match `fine.slang`: slots 6/7 = gradients/image_atlas, 8 = mask_atlas,
+    // non-MSAA filter snapshots 9–12; MSAA mask_lut 9, filter snapshots 10–13.
     let fine_resources = [
         BufReadOnly,
         BufReadOnly,
@@ -289,6 +293,11 @@ pub(crate) fn goldy_full_shaders(
         Image(ImageFormat::Rgba8),
         ImageRead(ImageFormat::Rgba8),
         ImageRead(ImageFormat::Rgba8),
+        ImageRead(ImageFormat::Rgba8), // mask_atlas
+        Image(ImageFormat::Rgba8),
+        Image(ImageFormat::Rgba8),
+        Image(ImageFormat::Rgba8),
+        Image(ImageFormat::Rgba8),
     ];
     let fine_msaa_resources = [
         BufReadOnly,
@@ -299,7 +308,12 @@ pub(crate) fn goldy_full_shaders(
         Image(ImageFormat::Rgba8),
         ImageRead(ImageFormat::Rgba8),
         ImageRead(ImageFormat::Rgba8),
-        BufReadOnly, // mask_lut at slot 8
+        ImageRead(ImageFormat::Rgba8), // mask_atlas
+        BufReadOnly,                   // mask_lut
+        Image(ImageFormat::Rgba8),
+        Image(ImageFormat::Rgba8),
+        Image(ImageFormat::Rgba8),
+        Image(ImageFormat::Rgba8),
     ];
     let fine_area = Some(engine.add_compute_shader_with_options(
         device,
@@ -333,6 +347,21 @@ pub(crate) fn goldy_full_shaders(
         )
         .ok();
 
+    let filter_pass = engine
+        .add_compute_shader(
+            device,
+            "filter_pass",
+            ekrano_shaders::slang::FILTER_PASS,
+            &[
+                BufReadOnly,
+                ImageRead(ImageFormat::Rgba8),
+                Image(ImageFormat::Rgba8),
+            ],
+            &search_paths,
+            &[],
+        )
+        .ok();
+
     Ok(FullShaders {
         pipeline_setup: Some(pipeline_setup),
         pathtag_reduce,
@@ -357,6 +386,7 @@ pub(crate) fn goldy_full_shaders(
         fine_area,
         fine_msaa8,
         fine_msaa16,
+        filter_pass,
         pathtag_is_cpu: false,
     })
 }

@@ -1,7 +1,7 @@
 // Copyright 2024 the Vello Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Vello tests.
+//! Ekrano test utilities.
 
 // LINEBENDER LINT SET - lib.rs - v2
 // See https://linebender.org/wiki/canonical-lints/
@@ -36,9 +36,53 @@ use ekrano::kurbo::{Affine, Vec2};
 use ekrano::peniko::{Blob, Color, ImageFormat, color::palette};
 use ekrano::peniko::{ImageAlphaType, ImageData};
 use ekrano::{AaConfig, Scene};
+use image::RgbImage;
 use scenes::{ExampleScene, ImageCache, SceneParams, SimpleText};
 
 mod snapshot;
+
+/// Straight (unassociated) RGBA composited onto a solid background colour.
+///
+/// With `bg = [0, 0, 0]` this is the traditional "composite over black" used by
+/// tests that compare against Goldy-generated references.  Passing `[255, 255, 255]`
+/// is appropriate when comparing against vello_sparse references, which are
+/// rendered onto an opaque-white surface.
+pub(crate) fn rgba_straight_composite_to_rgb(
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+    bg: [u8; 3],
+) -> Result<RgbImage> {
+    let expected_len = width as usize * height as usize * 4;
+    if rgba.len() != expected_len {
+        bail!(
+            "RGBA buffer length {} != {}x{}x4",
+            rgba.len(),
+            width,
+            height
+        );
+    }
+    let [bg_r, bg_g, bg_b] = [bg[0] as u32, bg[1] as u32, bg[2] as u32];
+    let mut rgb_buf = Vec::with_capacity(width as usize * height as usize * 3);
+    for chunk in rgba.chunks_exact(4) {
+        let a = chunk[3] as u32;
+        let inv_a = 255 - a;
+        let r = ((chunk[0] as u32 * a + bg_r * inv_a) / 255).min(255) as u8;
+        let g = ((chunk[1] as u32 * a + bg_g * inv_a) / 255).min(255) as u8;
+        let b = ((chunk[2] as u32 * a + bg_b * inv_a) / 255).min(255) as u8;
+        rgb_buf.extend_from_slice(&[r, g, b]);
+    }
+    RgbImage::from_raw(width, height, rgb_buf).ok_or_else(|| anyhow!("Couldn't create rgb image"))
+}
+
+/// Convenience wrapper: composite over black (legacy behaviour).
+pub(crate) fn rgba_straight_composite_black_to_rgb(
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> Result<RgbImage> {
+    rgba_straight_composite_to_rgb(width, height, rgba, [0, 0, 0])
+}
 
 pub use snapshot::{
     Snapshot, SnapshotDirectory, smoke_snapshot_test_sync, snapshot_test, snapshot_test_sync,
@@ -47,7 +91,16 @@ pub use snapshot::{
 pub struct TestParams {
     pub width: u32,
     pub height: u32,
+    /// Background color used when compositing the rendered RGBA output for snapshot comparison.
+    /// Also used as the GPU render clear color unless `render_clear_color` overrides it.
     pub base_color: Option<Color>,
+    /// Override for the GPU render clear color only.
+    ///
+    /// When set, the renderer uses this as its `base_color` (the surface clear color) while
+    /// `base_color` is still used for snapshot comparison compositing.  Use
+    /// `Some(Color::TRANSPARENT)` to render onto a transparent surface so that filter shaders
+    /// can detect drawn vs. undrawn pixels via `src.a`.
+    pub render_clear_color: Option<Color>,
     pub name: String,
     pub anti_aliasing: AaConfig,
 }
@@ -58,6 +111,7 @@ impl TestParams {
             width,
             height,
             base_color: None,
+            render_clear_color: None,
             name: name.into(),
             anti_aliasing: AaConfig::Area,
         }
@@ -105,7 +159,9 @@ pub fn get_scene_image(params: &TestParams, scene: &Scene) -> Result<ImageData, 
     let width = params.width;
     let height = params.height;
     let render_params = RenderParams {
-        base_color: params.base_color.unwrap_or(palette::css::BLACK),
+        base_color: params.render_clear_color
+            .or(params.base_color)
+            .unwrap_or(palette::css::BLACK),
         width,
         height,
         antialiasing_method: params.anti_aliasing,

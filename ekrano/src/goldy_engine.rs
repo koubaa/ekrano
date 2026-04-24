@@ -28,6 +28,8 @@ use goldy::{
 
 static DUMP_DIR: LazyLock<Option<String>> = LazyLock::new(|| std::env::var("EKRANO_DUMP_DIR").ok());
 
+use std::mem::size_of;
+
 use crate::{
     Error, Result,
     low_level::{BufferProxy, Command, ImageProxy, Recording, ResourceId, ResourceProxy, ShaderId},
@@ -439,9 +441,10 @@ impl GoldyEngine {
                     }
 
                     // Split execution: fine reads ptcl written by coarse. Run coarse+path_tiling first, sync, then fine.
+                    // Fine binding count: 13 = area (+4 filter snapshots), 14 = MSAA + mask_lut +4 filters.
                     let is_fine = output_proxy_id.is_some_and(|oid| {
-                        bindings.len() == 8
-                            && matches!(bindings.get(5), Some(ResourceProxy::Image(ip)) if ip.id == oid)
+                        matches!(bindings.get(5), Some(ResourceProxy::Image(ip)) if ip.id == oid)
+                            && matches!(bindings.len(), 13 | 14)
                     });
                     if is_fine {
                         encoder
@@ -802,7 +805,8 @@ fn element_stride_for_buffer(name: &str) -> Option<u32> {
         "vello.clip_bbox_buf" => Some(16),
         "vello.indirect_dispatch" => Some(16),
         "vello.indirect_count" => Some(16),
-        "vello.config" => Some(96),
+        // Must match `ConfigUniform` / Slang `Config` (includes `mask_active`).
+        "vello.config" => Some(size_of::<ekrano_encoding::ConfigUniform>() as u32),
         "vello.wg_counts" => Some(320),
         "vello.scene" | "vello.blend_spill" | "vello.mask_lut" => Some(4),
         _ => {

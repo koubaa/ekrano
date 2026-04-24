@@ -1,18 +1,18 @@
 // Copyright 2022 the Vello Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use crate::DrawBeginClip;
+use crate::{DrawBeginClip, FilterPrimitive, LayerFilterEffect};
 
 use super::{
-    DrawBlurRoundedRect, DrawColor, DrawImage, DrawLinearGradient, DrawRadialGradient,
-    DrawSweepGradient, DrawTag, Glyph, GlyphRun, NormalizedCoord, Patch, PathEncoder, PathTag,
-    Style, Transform,
+    CoverageMask, DrawBlurRoundedRect, DrawColor, DrawImage, DrawLinearGradient,
+    DrawRadialGradient, DrawSweepGradient, DrawTag, Glyph, GlyphRun, NormalizedCoord, Patch,
+    PathEncoder, PathTag, Style, Transform,
 };
 
 use peniko::color::{DynamicColor, palette};
 use peniko::kurbo::{Shape, Stroke};
 use peniko::{
-    BrushRef, ColorStop, Extend, Fill, GradientKind, ImageBrushRef, ImageSampler,
+    BlendMode, BrushRef, ColorStop, Extend, Fill, GradientKind, ImageBrushRef, ImageSampler,
     LinearGradientPosition, RadialGradientPosition, SweepGradientPosition,
 };
 
@@ -50,6 +50,18 @@ pub struct Encoding {
     pub n_open_clips: u32,
     /// Flags that capture the current state of the encoding.
     pub flags: u32,
+    /// Optional full-frame mask sampled during fine rasterization (must match render size).
+    pub coverage_mask: Option<CoverageMask>,
+    /// If set, the next [`Self::encode_begin_clip`] associates this filter with that layer.
+    pending_layer_filter: Option<FilterPrimitive>,
+    /// Stack parallel to open clips: `Some` when the matching `BEGIN_CLIP` had a pending filter.
+    clip_filter_stack: Vec<Option<FilterPrimitive>>,
+    /// Parallel to open clips: parameters for matching [`encode_end_clip`](Self::encode_end_clip) data.
+    begin_clip_stack: Vec<DrawBeginClip>,
+    /// Filters recorded when a filtered layer ends (`encode_end_clip`).
+    ///
+    /// Applied after fine: each entry is filtered in isolation, then composited back (see `ekrano`).
+    pub layer_filter_effects: Vec<LayerFilterEffect>,
 }
 
 impl Encoding {
@@ -87,6 +99,11 @@ impl Encoding {
         self.n_clips = 0;
         self.n_open_clips = 0;
         self.flags = 0;
+        self.coverage_mask = None;
+        self.pending_layer_filter = None;
+        self.clip_filter_stack.clear();
+        self.begin_clip_stack.clear();
+        self.layer_filter_effects.clear();
         self.resources.reset();
     }
 
@@ -159,6 +176,16 @@ impl Encoding {
         self.n_clips += other.n_clips;
         self.n_open_clips += other.n_open_clips;
         self.flags = other.flags;
+        if other.coverage_mask.is_some() {
+            self.coverage_mask = other.coverage_mask.clone();
+        }
+        self.pending_layer_filter = other.pending_layer_filter.clone();
+        self.clip_filter_stack
+            .extend_from_slice(&other.clip_filter_stack);
+        self.begin_clip_stack
+            .extend_from_slice(&other.begin_clip_stack);
+        self.layer_filter_effects
+            .extend_from_slice(&other.layer_filter_effects);
         if let Some(transform) = *transform {
             self.transforms
                 .extend(other.transforms.iter().map(|x| transform * *x));
@@ -351,6 +378,32 @@ impl Encoding {
         self.draw_data.push(rgba);
     }
 
+    /// Sets the blend mode for subsequent per-draw compositing (non-isolated blending).
+    ///
+    /// This inserts a draw object into the stream; it does not draw geometry by itself.
+    /// Call before fills/strokes that should use this mode. Default is normal `SrcOver`.
+    pub fn encode_set_blend_mode(&mut self, blend: BlendMode) {
+        // #region agent log af15c3 - H1: SET_BLEND_MODE encoded with dummy PATH, confirm path_ix offset
+        {
+            use std::io::Write as _;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("C:\\Dev\\kob3\\debug-af15c3.log") {
+                let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+                let _ = writeln!(f, r#"{{"sessionId":"af15c3","runId":"pre-fix","hypothesisId":"H1","timestamp":{ts},"location":"encoding.rs:encode_set_blend_mode","message":"SET_BLEND_MODE encoded, about to push dummy PathTag::PATH","data":{{"n_paths_before":{},"draw_tags_len_before":{}}}}}"#,
+                    self.n_paths, self.draw_tags.len());
+            }
+        }
+        // #endregion
+        self.draw_tags.push(DrawTag::SET_BLEND_MODE);
+        let packed = ((blend.mix as u32) << 8) | blend.compose as u32;
+        self.draw_data.push(packed);
+        // Every draw tag must have a corresponding path slot so that n_paths == draw_tags.len().
+        // Without this, GPU shaders that iterate up to n_draw_objects (= n_paths) would skip
+        // draw objects inserted after SET_BLEND_MODE, and the path[] array indexing would diverge
+        // between tile_alloc (uses drawobj_ix) and flatten/path_count (uses path-tag prefix index).
+        self.path_tags.push(PathTag::PATH);
+        self.n_paths += 1;
+    }
+
     /// Encodes a linear gradient brush.
     pub fn encode_linear_gradient(
         &mut self,
@@ -476,6 +529,9 @@ impl Encoding {
 
     /// Encodes a begin clip command.
     pub fn encode_begin_clip(&mut self, parameters: DrawBeginClip) {
+        self.clip_filter_stack
+            .push(self.pending_layer_filter.take());
+        self.begin_clip_stack.push(parameters);
         self.draw_tags.push(DrawTag::BEGIN_CLIP);
         self.draw_data
             .extend_from_slice(bytemuck::cast_slice(bytemuck::bytes_of(&parameters)));
@@ -483,10 +539,44 @@ impl Encoding {
         self.n_open_clips += 1;
     }
 
+    /// Associates [`FilterPrimitive`] with the next [`Self::encode_begin_clip`] (called by `ekrano::Scene::push_filter_layer`).
+    pub fn set_pending_layer_filter(&mut self, filter: Option<FilterPrimitive>) {
+        self.pending_layer_filter = filter;
+    }
+
     /// Encodes an end clip command.
     pub fn encode_end_clip(&mut self) {
         if self.n_open_clips > 0 {
-            self.draw_tags.push(DrawTag::END_CLIP);
+            let filter_for_layer = self.clip_filter_stack.pop();
+            let parameters = self
+                .begin_clip_stack
+                .pop()
+                .expect("encode_end_clip without matching encode_begin_clip");
+            // `pop()` is `Option<Option<FilterPrimitive>>`: inner None = regular layer (no filter).
+            // Only `Some(Some(_))` is a real filter layer; do not use `pop().is_some()` on the outer option.
+            let has_filter = matches!(&filter_for_layer, Some(Some(_)));
+            let mut pushed_layer_index: u32 = 0;
+            if let Some(f) = filter_for_layer.flatten() {
+                let layer_index = self.layer_filter_effects.len() as u32;
+                pushed_layer_index = layer_index;
+                self.layer_filter_effects.push(LayerFilterEffect {
+                    primitive: f,
+                    layer_blend: parameters.blend_mode,
+                    layer_alpha: parameters.alpha,
+                    layer_index,
+                });
+            }
+            // Coarse/fine read `scene[dd]`… for END_CLIP / END_CLIP_FILTER.
+            if has_filter {
+                self.draw_tags.push(DrawTag::END_CLIP_FILTER);
+                self.draw_data
+                    .extend_from_slice(bytemuck::cast_slice(bytemuck::bytes_of(&parameters)));
+                self.draw_data.push(pushed_layer_index);
+            } else {
+                self.draw_tags.push(DrawTag::END_CLIP);
+                self.draw_data
+                    .extend_from_slice(bytemuck::cast_slice(bytemuck::bytes_of(&parameters)));
+            }
             // This is a dummy path, and will go away with the new clip impl.
             self.path_tags.push(PathTag::PATH);
             self.n_paths += 1;

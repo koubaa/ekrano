@@ -62,6 +62,8 @@ public struct Config {
 
     public uint flatten_thread_base;
 
+    public uint mask_active;
+
 };
 
 // Tile geometry
@@ -196,7 +198,10 @@ public static const uint DRAWTAG_FILL_SWEEP_GRADIENT = 0x254;
 public static const uint DRAWTAG_FILL_IMAGE = 0x28C;
 public static const uint DRAWTAG_BLURRED_ROUNDED_RECT = 0x2d4;
 public static const uint DRAWTAG_BEGIN_CLIP = 0x49;
-public static const uint DRAWTAG_END_CLIP = 0x21;
+public static const uint DRAWTAG_END_CLIP = 0x09;
+/// Same scene payload size as [`DRAWTAG_END_CLIP`] plus one `u32` layer index (3 words total).
+public static const uint DRAWTAG_END_CLIP_FILTER = 0x0D;
+public static const uint DRAWTAG_SET_BLEND_MODE = 0x04;
 public static const uint DRAW_INFO_FLAGS_FILL_RULE_BIT = 1;
 
 // === Tile ===
@@ -413,6 +418,9 @@ public static const uint CMD_BEGIN_CLIP = 10;
 public static const uint CMD_END_CLIP = 11;
 public static const uint CMD_JUMP = 12;
 public static const uint CMD_BLUR_RECT = 13;
+public static const uint CMD_SET_BLEND_MODE = 14;
+/// Like [`CMD_END_CLIP`] but writes isolated layer to filter textures; 4 words in ptcl.
+public static const uint CMD_END_CLIP_FILTER = 15;
 
 public struct CmdFill {
     public uint size_and_rule;
@@ -605,6 +613,8 @@ extension DrawMonoid : IMonoid {
 
 public DrawMonoid map_draw_tag(uint tag_word) {
     DrawMonoid c;
+    // SET_BLEND_MODE gets a dummy PathTag::PATH on the Rust encoding side so that every draw tag
+    // has a corresponding physical path slot. path_ix must count it here to stay in sync.
     c.path_ix = (tag_word != DRAWTAG_NOP) ? 1u : 0u;
     c.clip_ix = tag_word & 1u;
     c.scene_offset = (tag_word >> 2u) & 0x07u;
@@ -779,8 +789,10 @@ public float3 blend_hard_light(float3 cb, float3 cs) {
     return select(cs <= 0.5, cb * 2.0 * cs, blend_screen(cb, 2.0 * cs - 1.0));
 }
 public float3 blend_soft_light(float3 cb, float3 cs) {
+    // D(Cb): sqrt approximation for Cb > 0.25, polynomial for Cb <= 0.25.
     float3 d = select(cb <= 0.25, ((16.0 * cb - 12.0) * cb + 4.0) * cb, sqrt(cb));
-    return select(cs <= 0.5, cb + (2.0 * cs - 1.0) * (d - cb), cb - (1.0 - 2.0 * cs) * cb * (1.0 - cb));
+    // CSS spec: cs <= 0.5 → simple formula; cs > 0.5 → complex formula using D.
+    return select(cs <= 0.5, cb - (1.0 - 2.0 * cs) * cb * (1.0 - cb), cb + (2.0 * cs - 1.0) * (d - cb));
 }
 public float blend_sat(float3 c) {
     return max(c.x, max(c.y, c.z)) - min(c.x, min(c.y, c.z));
@@ -802,16 +814,14 @@ public float3 blend_clip_color(float3 c) {
 public float3 blend_set_lum(float3 c, float l) {
     return blend_clip_color(c + (l - blend_lum(c)));
 }
+/// SetSat per the CSS Compositing spec: map Cmin → 0, Cmax → s, scale Cmid proportionally.
+/// Ported from vello_cpu's `set_sat`: `(c - mn) * s / sat` applied per-channel.
 public float3 blend_set_sat(float3 c, float s) {
-    float r = c.r, g = c.g, b = c.b;
-    if (r <= g) {
-        if (g <= b) { if (max(b,r)>min(b,r)) { g = ((g-min(b,r))*s)/(max(b,r)-min(b,r)); b = s; } else { g = b = 0; } r = 0; }
-        else if (r <= b) { if (max(g,r)>min(g,r)) { b = ((b-min(g,r))*s)/(max(g,r)-min(g,r)); g = s; } else { b = g = 0; } r = 0; }
-        else { if (max(g,b)>min(g,b)) { r = ((r-min(g,b))*s)/(max(g,b)-min(g,b)); g = s; } else { r = g = 0; } b = 0; }
-    } else if (r <= b) { if (max(g,r)>min(g,r)) { b = ((b-min(g,r))*s)/(max(g,r)-min(g,r)); r = s; } else { b = r = 0; } g = 0; }
-    else if (g <= b) { if (max(b,g)>min(b,g)) { r = ((r-min(b,g))*s)/(max(b,g)-min(b,g)); b = s; } else { r = b = 0; } g = 0; }
-    else { if (max(b,r)>min(b,r)) { g = ((g-min(b,r))*s)/(max(b,r)-min(b,r)); b = s; } else { g = b = 0; } r = 0; }
-    return float3(r, g, b);
+    float mn = min(c.x, min(c.y, c.z));
+    float mx = max(c.x, max(c.y, c.z));
+    float sat = mx - mn;
+    if (sat == 0.0) return float3(0.0, 0.0, 0.0);
+    return (c - mn) * s / sat;
 }
 public float3 blend_mix(float3 cb, float3 cs, uint mode) {
     if (mode == MIX_MULTIPLY) return cb * cs;
@@ -919,6 +929,25 @@ public void composite_strip(inout float4 rgba[PIXELS_PER_THREAD], float4 fg, flo
     for (uint i = 0; i < PIXELS_PER_THREAD; i++) {
         float4 fg_i = fg * area[i];
         rgba[i] = premul_over(rgba[i], fg_i);
+    }
+}
+
+/// Per-draw compositing with optional non-isolated blend mode (`CMD_SET_BLEND_MODE` state).
+public void composite_draw(
+    inout float4 rgba[PIXELS_PER_THREAD],
+    float4 fg,
+    float area[PIXELS_PER_THREAD],
+    uint blend_mode,
+    float mask_w[PIXELS_PER_THREAD]
+) {
+    uint BLEND_DEFAULT = (MIX_NORMAL << 8) | COMPOSE_SRC_OVER;
+    for (uint i = 0; i < PIXELS_PER_THREAD; i++) {
+        float4 fg_i = fg * area[i] * mask_w[i];
+        if ((blend_mode & 0x7FFFu) == BLEND_DEFAULT) {
+            rgba[i] = premul_over(rgba[i], fg_i);
+        } else {
+            rgba[i] = blend_mix_compose(rgba[i], fg_i, blend_mode);
+        }
     }
 }
 

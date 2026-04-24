@@ -125,7 +125,7 @@ pub mod low_level {
         BindType, BufferProxy, Command, ImageFormat, ImageProxy, Recording, ResourceId,
         ResourceProxy, ShaderId,
     };
-    pub use crate::render::Render;
+    pub use crate::render::{Render, record_filter_effects};
     pub use crate::shaders::FullShaders;
     /// Temporary export, used in `with_winit` for stats
     pub use ekrano_encoding::BumpAllocators;

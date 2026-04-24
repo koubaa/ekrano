@@ -104,6 +104,16 @@ void write_end_clip(CmdEndClip end_clip, inout uint cmd_offset, inout uint cmd_l
     cmd_offset += 3;
 }
 
+void write_end_clip_filter(CmdEndClip end_clip, uint layer_idx, inout uint cmd_offset, inout uint cmd_limit,
+    StorageBuffer<uint> ptcl, StorageBuffer<BumpAllocators> bump, Config config) {
+    alloc_cmd(cmd_offset, cmd_limit, ptcl, bump, config, 4);
+    ptcl[cmd_offset] = CMD_END_CLIP_FILTER;
+    ptcl[cmd_offset + 1] = end_clip.blend;
+    ptcl[cmd_offset + 2] = asuint(end_clip.alpha);
+    ptcl[cmd_offset + 3] = layer_idx;
+    cmd_offset += 4;
+}
+
 void write_blurred_rounded_rect(uint rgba_color, uint info_offset,
     inout uint cmd_offset, inout uint cmd_limit,
     StorageBuffer<uint> ptcl, StorageBuffer<BumpAllocators> bump, Config config) {
@@ -112,6 +122,14 @@ void write_blurred_rounded_rect(uint rgba_color, uint info_offset,
     ptcl[cmd_offset + 1] = info_offset;
     ptcl[cmd_offset + 2] = rgba_color;
     cmd_offset += 3;
+}
+
+void write_set_blend_mode(uint blend_packed, inout uint cmd_offset, inout uint cmd_limit,
+    StorageBuffer<uint> ptcl, StorageBuffer<BumpAllocators> bump, Config config) {
+    alloc_cmd(cmd_offset, cmd_limit, ptcl, bump, config, 2);
+    ptcl[cmd_offset] = CMD_SET_BLEND_MODE;
+    ptcl[cmd_offset + 1] = blend_packed;
+    cmd_offset += 2;
 }
 
 // Slots: 0=config, 1=scene, 2=draw_monoids, 3=bin_headers, 4=info_bin_data, 5=paths, 6=tiles, 7=bump, 8=ptcl
@@ -276,7 +294,8 @@ void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
             uint n_segs = tile.segment_count_or_ix;
             int backdrop_val = even_odd ? (abs(tile.backdrop) & 1) : tile.backdrop;
             bool backdrop_clear = (backdrop_val == 0);
-            bool include_tile = (n_segs != 0) || (backdrop_clear == is_clip) || is_blend;
+            bool include_tile = (tag == DRAWTAG_SET_BLEND_MODE) || (n_segs != 0) ||
+                (backdrop_clear == is_clip) || is_blend;
             if (include_tile &&
                 (bin_tile_x + x) < config.width_in_tiles &&
                 (bin_tile_y + y) < config.height_in_tiles)
@@ -349,11 +368,23 @@ void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
                     end_clip.alpha = asfloat(scene[dd + 1]);
                     write_end_clip(end_clip, cmd_offset, cmd_limit, ptcl, bump, config);
                     render_blend_depth--;
+                } else if (drawtag == DRAWTAG_END_CLIP_FILTER) {
+                    clip_depth--;
+                    write_path(tile, tile_ix, draw_flags, cmd_offset, cmd_limit, ptcl, bump, tiles, config);
+                    CmdEndClip end_clip;
+                    end_clip.blend = scene[dd];
+                    end_clip.alpha = asfloat(scene[dd + 1]);
+                    uint layer_idx = scene[dd + 2];
+                    write_end_clip_filter(end_clip, layer_idx, cmd_offset, cmd_limit, ptcl, bump, config);
+                    render_blend_depth--;
+                } else if (drawtag == DRAWTAG_SET_BLEND_MODE) {
+                    write_set_blend_mode(scene[dd], cmd_offset, cmd_limit, ptcl, bump, config);
                 }
             } else {
                 if (drawtag == DRAWTAG_BEGIN_CLIP)
                     clip_depth++;
-                else if (drawtag == DRAWTAG_END_CLIP) {
+                else if (drawtag == DRAWTAG_SET_BLEND_MODE) {
+                } else if (drawtag == DRAWTAG_END_CLIP || drawtag == DRAWTAG_END_CLIP_FILTER) {
                     if (clip_depth == clip_zero_depth)
                         clip_zero_depth = 0;
                     clip_depth--;

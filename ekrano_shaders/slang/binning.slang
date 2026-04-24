@@ -18,20 +18,21 @@ groupshared uint sh_count[N_SUBSLICE][N_TILE];
 groupshared uint sh_chunk_offset[N_TILE];
 groupshared uint sh_previous_failed;
 
-// Slots: 0=config, 1=draw_monoids, 2=path_bbox_buf, 3=clip_bbox_buf, 4=intersected_bbox,
-//       5=bump, 6=bin_data, 7=bin_header
+// Slots: 0=config, 1=scene, 2=draw_monoids, 3=path_bbox_buf, 4=clip_bbox_buf, 5=intersected_bbox,
+//       6=bump, 7=bin_data, 8=bin_header
 
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID) {
     Config config = goldy_dyn_buf_ro<Config>(0)[0];
-    ReadOnlyBuffer<DrawMonoid> draw_monoids = goldy_dyn_buf_ro<DrawMonoid>(1);
-    ReadOnlyBuffer<PathBbox> path_bbox_buf = goldy_dyn_buf_ro<PathBbox>(2);
-    ReadOnlyBuffer<float4> clip_bbox_buf = goldy_dyn_buf_ro<float4>(3);
-    StorageBuffer<float4> intersected_bbox = goldy_dyn_scattered<float4>(4);
-    StorageBuffer<BumpAllocators> bump = goldy_dyn_scattered<BumpAllocators>(5);
-    StorageBuffer<uint> bin_data = goldy_dyn_scattered<uint>(6);
-    StorageBuffer<BinHeader> bin_header = goldy_dyn_scattered<BinHeader>(7);
+    ReadOnlyBuffer<uint> scene = goldy_dyn_buf_ro<uint>(1);
+    ReadOnlyBuffer<DrawMonoid> draw_monoids = goldy_dyn_buf_ro<DrawMonoid>(2);
+    ReadOnlyBuffer<PathBbox> path_bbox_buf = goldy_dyn_buf_ro<PathBbox>(3);
+    ReadOnlyBuffer<float4> clip_bbox_buf = goldy_dyn_buf_ro<float4>(4);
+    StorageBuffer<float4> intersected_bbox = goldy_dyn_scattered<float4>(5);
+    StorageBuffer<BumpAllocators> bump = goldy_dyn_scattered<BumpAllocators>(6);
+    StorageBuffer<uint> bin_data = goldy_dyn_scattered<uint>(7);
+    StorageBuffer<BinHeader> bin_header = goldy_dyn_scattered<BinHeader>(8);
 
     for (uint i = 0; i < N_SLICE; i++) {
         sh_bitmaps[i][local_id.x] = 0;
@@ -53,14 +54,21 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
     int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
     if (element_ix < config.n_drawobj) {
         DrawMonoid draw_monoid = draw_monoids[element_ix];
+        uint draw_tag = scene[config.drawtag_base + element_ix];
         float4 clip_bbox = Bbox2D.infinite().v;
         if (draw_monoid.clip_ix > 0) {
             uint clip_idx = min(draw_monoid.clip_ix - 1, config.n_clip - 1);
             clip_bbox = clip_bbox_buf[clip_idx];
         }
-        PathBbox path_bbox = path_bbox_buf[draw_monoid.path_ix];
-        float4 pb = float4(float(path_bbox.x0), float(path_bbox.y0), float(path_bbox.x1), float(path_bbox.y1));
-        float4 bbox = bbox_intersect(clip_bbox, pb);
+        float4 bbox;
+        if (draw_tag == DRAWTAG_SET_BLEND_MODE) {
+            // Per-draw blend state applies everywhere in the current clip (no path bbox).
+            bbox = clip_bbox;
+        } else {
+            PathBbox path_bbox = path_bbox_buf[draw_monoid.path_ix];
+            float4 pb = float4(float(path_bbox.x0), float(path_bbox.y0), float(path_bbox.x1), float(path_bbox.y1));
+            bbox = bbox_intersect(clip_bbox, pb);
+        }
         intersected_bbox[element_ix] = bbox;
 
         if (bbox.x < bbox.z && bbox.y < bbox.w) {

@@ -11,8 +11,8 @@
 import goldy_exp;
 import ekrano_shared;
 
-// Slots: 0=config, 1=segments, 2=ptcl, 3=info, 4=blend_spill, 5=output, 6=gradients, 7=image_atlas
-// MSAA adds mask_lut at 8
+// Slots: 0=config, 1=segments, 2=ptcl, 3=info, 4=blend_spill, 5=output, 6=gradients, 7=image_atlas, 8=mask_atlas
+// Non-MSAA: filter layer snapshots at 9–12. MSAA: mask_lut at 9, filter snapshots at 10–13.
 
 // When msaa is defined, bindings add mask_lut at slot 8. fill_path_ms provides true MSAA.
 #ifdef msaa
@@ -609,8 +609,18 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
     RWTexture2D<float4> output = goldy_dyn_direct_spatial<float4>(5);
     Texture2D<float4> gradients = goldy_dyn_interpolated<float4>(6);
     Texture2D<float4> image_atlas = goldy_dyn_interpolated<float4>(7);
+    Texture2D<float4> mask_atlas = goldy_dyn_interpolated<float4>(8);
 #ifdef msaa
-    ReadOnlyBuffer<uint> mask_lut = goldy_dyn_buf_ro<uint>(8);
+    ReadOnlyBuffer<uint> mask_lut = goldy_dyn_buf_ro<uint>(9);
+    RWTexture2D<float4> filter_tex0 = goldy_dyn_direct_spatial<float4>(10);
+    RWTexture2D<float4> filter_tex1 = goldy_dyn_direct_spatial<float4>(11);
+    RWTexture2D<float4> filter_tex2 = goldy_dyn_direct_spatial<float4>(12);
+    RWTexture2D<float4> filter_tex3 = goldy_dyn_direct_spatial<float4>(13);
+#else
+    RWTexture2D<float4> filter_tex0 = goldy_dyn_direct_spatial<float4>(9);
+    RWTexture2D<float4> filter_tex1 = goldy_dyn_direct_spatial<float4>(10);
+    RWTexture2D<float4> filter_tex2 = goldy_dyn_direct_spatial<float4>(11);
+    RWTexture2D<float4> filter_tex3 = goldy_dyn_direct_spatial<float4>(12);
 #endif
 
     uint actual_y = wg_id.y + config.tile_y_offset;
@@ -622,9 +632,20 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
     float4 rgba[4];
     for (uint i = 0; i < 4; i++) rgba[i] = base_color;
 
+    float mask_w[4];
+    for (uint mi = 0; mi < 4; mi++) {
+        if (config.mask_active != 0u) {
+            uint2 mc = uint2(uint(xy.x) + mi, uint(xy.y));
+            mask_w[mi] = mask_atlas.Load(int3(int2(mc), 0)).r;
+        } else {
+            mask_w[mi] = 1.0;
+        }
+    }
+
     uint blend_stack[4][4];
     uint clip_depth = 0;
     float area[4];
+    uint draw_blend = (MIX_NORMAL << 8) | COMPOSE_SRC_OVER;
     uint cmd_ix = tile_ix * PTCL_INITIAL_ALLOC;
     uint blend_offset = ptcl[cmd_ix];
     cmd_ix += 1;
@@ -644,10 +665,13 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
         } else if (tag == CMD_SOLID) {
             for (uint i = 0; i < 4; i++) area[i] = 1.0;
             cmd_ix += 1;
+        } else if (tag == CMD_SET_BLEND_MODE) {
+            draw_blend = ptcl[cmd_ix + 1];
+            cmd_ix += 2;
         } else if (tag == CMD_COLOR) {
             CmdColor color = read_color(ptcl, cmd_ix);
             float4 fg = unpack4x8unorm(color.rgba_color);
-            composite_strip(rgba, fg, area);
+            composite_draw(rgba, fg, area, draw_blend, mask_w);
             cmd_ix += 2;
         } else if (tag == CMD_BEGIN_CLIP) {
             if (clip_depth < BLEND_STACK_SPLIT) {
@@ -679,7 +703,7 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
                     bg_rgba = blend_spill[blend_offset + blend_in_scratch * TILE_WIDTH * TILE_HEIGHT + local_tile_ix + i];
                 }
                 float4 bg = unpack4x8unorm(bg_rgba);
-                float4 fg = rgba[i] * area[i] * end_clip.alpha;
+                float4 fg = rgba[i] * area[i] * mask_w[i] * end_clip.alpha;
                 if (end_clip.blend == LUMINANCE_MASK_LAYER) {
                     if (area[i] == 0.0) { rgba[i] = bg; continue; }
                     float luminance = clamp(svg_lum(unpremultiply(fg)) * fg.a, 0.0, 1.0);
@@ -689,6 +713,37 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
                 }
             }
             cmd_ix += 3;
+        } else if (tag == CMD_END_CLIP_FILTER) {
+            CmdEndClip end_clip;
+            end_clip.blend = ptcl[cmd_ix + 1];
+            end_clip.alpha = asfloat(ptcl[cmd_ix + 2]);
+            uint layer_idx = ptcl[cmd_ix + 3];
+            clip_depth -= 1;
+            for (uint i = 0; i < 4; i++) {
+                uint bg_rgba;
+                if (clip_depth < BLEND_STACK_SPLIT)
+                    bg_rgba = blend_stack[clip_depth][i];
+                else {
+                    uint blend_in_scratch = clip_depth - BLEND_STACK_SPLIT;
+                    uint local_tile_ix = local_id.x * PIXELS_PER_THREAD + local_id.y * TILE_WIDTH;
+                    bg_rgba = blend_spill[blend_offset + blend_in_scratch * TILE_WIDTH * TILE_HEIGHT + local_tile_ix + i];
+                }
+                float4 bg = unpack4x8unorm(bg_rgba);
+                float4 fg = rgba[i] * area[i] * mask_w[i] * end_clip.alpha;
+                uint2 coords = uint2(uint(xy.x) + i, uint(xy.y));
+                if (coords.x < config.target_width && coords.y < config.target_height) {
+                    if (layer_idx == 0u)
+                        filter_tex0[coords] = fg;
+                    else if (layer_idx == 1u)
+                        filter_tex1[coords] = fg;
+                    else if (layer_idx == 2u)
+                        filter_tex2[coords] = fg;
+                    else
+                        filter_tex3[coords] = fg;
+                }
+                rgba[i] = bg;
+            }
+            cmd_ix += 4;
         } else if (tag == CMD_JUMP) {
             cmd_ix = ptcl[cmd_ix + 1];
         } else if (tag == CMD_BLUR_RECT) {
@@ -720,8 +775,12 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
                 float d = d_pos + d_neg - r1;
                 float alpha = scale * (erf7(inv_std_dev * (min_edge + d)) - erf7(inv_std_dev * d));
                 float4 fg_rgba = blur_rgba * alpha;
-                float4 fg_i = fg_rgba * area[i];
-                rgba[i] = premul_over(rgba[i], fg_i);
+                float4 fg_i = fg_rgba * area[i] * mask_w[i];
+                float4 bg = rgba[i];
+                uint BLEND_DEFAULT = (MIX_NORMAL << 8) | COMPOSE_SRC_OVER;
+                rgba[i] = ((draw_blend & 0x7FFFu) == BLEND_DEFAULT)
+                    ? premul_over(bg, fg_i)
+                    : blend_mix_compose(bg, fg_i, draw_blend);
             }
             cmd_ix += 3;
         } else if (tag == CMD_LIN_GRAD) {
@@ -732,8 +791,11 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
                 float t = extend_mode_normalized(my_d, lin.extend_mode);
                 int2 grad_coord = int2(round(t * float(GRADIENT_WIDTH - 1)), int(lin.index));
                 float4 fg_rgba = gradients.Load(int3(grad_coord, 0));
-                float4 fg_i = fg_rgba * area[i];
-                rgba[i] = premul_over(rgba[i], fg_i);
+                float4 fg_i = fg_rgba * area[i] * mask_w[i];
+                uint BLEND_DEFAULT = (MIX_NORMAL << 8) | COMPOSE_SRC_OVER;
+                rgba[i] = ((draw_blend & 0x7FFFu) == BLEND_DEFAULT)
+                    ? premul_over(rgba[i], fg_i)
+                    : blend_mix_compose(rgba[i], fg_i, draw_blend);
             }
             cmd_ix += 3;
         } else if (tag == CMD_RAD_GRAD) {
@@ -771,8 +833,11 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
                     t = is_swapped ? (1.0 - t) : t;
                     int2 grad_coord = int2(round(t * float(GRADIENT_WIDTH - 1)), int(rad.index));
                     float4 fg_rgba = gradients.Load(int3(grad_coord, 0));
-                    float4 fg_i = fg_rgba * area[i];
-                    rgba[i] = premul_over(rgba[i], fg_i);
+                    float4 fg_i = fg_rgba * area[i] * mask_w[i];
+                    uint BLEND_DEFAULT_R = (MIX_NORMAL << 8) | COMPOSE_SRC_OVER;
+                    rgba[i] = ((draw_blend & 0x7FFFu) == BLEND_DEFAULT_R)
+                        ? premul_over(rgba[i], fg_i)
+                        : blend_mix_compose(rgba[i], fg_i, draw_blend);
                 }
             }
             cmd_ix += 3;
@@ -795,8 +860,11 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
                 float t = extend_mode_normalized(phi, sweep.extend_mode);
                 int2 grad_coord = int2(round(t * float(GRADIENT_WIDTH - 1)), int(sweep.index));
                 float4 fg_rgba = gradients.Load(int3(grad_coord, 0));
-                float4 fg_i = fg_rgba * area[i];
-                rgba[i] = premul_over(rgba[i], fg_i);
+                float4 fg_i = fg_rgba * area[i] * mask_w[i];
+                uint BLEND_DEFAULT_S = (MIX_NORMAL << 8) | COMPOSE_SRC_OVER;
+                rgba[i] = ((draw_blend & 0x7FFFu) == BLEND_DEFAULT_S)
+                    ? premul_over(rgba[i], fg_i)
+                    : blend_mix_compose(rgba[i], fg_i, draw_blend);
             }
             cmd_ix += 3;
         } else if (tag == CMD_IMAGE) {
@@ -813,8 +881,11 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
                         atlas_uv += image.atlas_offset;
                         float2 atlas_uv_clamped = clamp(atlas_uv, image.atlas_offset, atlas_max);
                         float4 fg_rgba = maybe_premul_alpha(image_atlas.Load(int3(int2(atlas_uv_clamped), 0)), image.alpha_type);
-                        float4 fg_i = pixel_format(fg_rgba * area[i] * image.alpha, image.format);
-                        rgba[i] = premul_over(rgba[i], fg_i);
+                        float4 fg_i = pixel_format(fg_rgba * area[i] * mask_w[i] * image.alpha, image.format);
+                        uint BLEND_DEFAULT_IL = (MIX_NORMAL << 8) | COMPOSE_SRC_OVER;
+                        rgba[i] = ((draw_blend & 0x7FFFu) == BLEND_DEFAULT_IL)
+                            ? premul_over(rgba[i], fg_i)
+                            : blend_mix_compose(rgba[i], fg_i, draw_blend);
                     }
                 }
             } else {
@@ -835,8 +906,11 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
                         float4 c = maybe_premul_alpha(image_atlas.Load(int3(uv11.x, uv00.y, 0)), image.alpha_type);
                         float4 d = maybe_premul_alpha(image_atlas.Load(int3(uv11, 0)), image.alpha_type);
                         float4 fg_rgba = lerp(lerp(a, b, uv_frac.y), lerp(c, d, uv_frac.y), uv_frac.x);
-                        float4 fg_i = pixel_format(fg_rgba * area[i] * image.alpha, image.format);
-                        rgba[i] = premul_over(rgba[i], fg_i);
+                        float4 fg_i = pixel_format(fg_rgba * area[i] * mask_w[i] * image.alpha, image.format);
+                        uint BLEND_DEFAULT_IM = (MIX_NORMAL << 8) | COMPOSE_SRC_OVER;
+                        rgba[i] = ((draw_blend & 0x7FFFu) == BLEND_DEFAULT_IM)
+                            ? premul_over(rgba[i], fg_i)
+                            : blend_mix_compose(rgba[i], fg_i, draw_blend);
                     }
                 }
             }

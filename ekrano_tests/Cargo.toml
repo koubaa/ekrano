@@ -23,3 +23,9 @@ image = { workspace = true, features = ["png"] }
 
 scenes = { workspace = true }
 oxipng = { workspace = true, features = ["freestanding", "parallel"] }
+
+# Used by integration test binaries (tests/filters.rs, tests/blend_modes.rs) but
+# not by src/lib.rs; listed as a dev-dependency to avoid the
+# `unused_crate_dependencies` lint on the library compilation unit.
+[dev-dependencies]
+ekrano_encoding = { workspace = true }

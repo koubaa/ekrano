@@ -10,7 +10,8 @@ use ekrano_encoding::{
 
 use super::{
     CMD_BEGIN_CLIP, CMD_BLUR_RECT, CMD_COLOR, CMD_END, CMD_END_CLIP, CMD_FILL, CMD_IMAGE, CMD_JUMP,
-    CMD_LIN_GRAD, CMD_RAD_GRAD, CMD_SOLID, CMD_SWEEP_GRAD, CpuBinding, PTCL_INITIAL_ALLOC,
+    CMD_LIN_GRAD, CMD_RAD_GRAD, CMD_SET_BLEND_MODE, CMD_SOLID, CMD_SWEEP_GRAD, CpuBinding,
+    PTCL_INITIAL_ALLOC,
 };
 
 // Tiles per bin
@@ -178,6 +179,19 @@ impl TileState {
         self.write(ptcl, 2, f32::to_bits(alpha));
         self.cmd_offset += 3;
     }
+
+    fn write_set_blend_mode(
+        &mut self,
+        config: &ConfigUniform,
+        bump: &mut BumpAllocators,
+        ptcl: &mut [u32],
+        blend_packed: u32,
+    ) {
+        self.alloc_cmd(2, config, bump, ptcl);
+        self.write(ptcl, 0, CMD_SET_BLEND_MODE);
+        self.write(ptcl, 1, blend_packed);
+        self.cmd_offset += 2;
+    }
 }
 
 fn coarse_main(
@@ -216,15 +230,25 @@ fn coarse_main(
                 let drawobj_ix = info_bin_data[(start + i) as usize];
                 let tag = scene[(drawtag_base + drawobj_ix) as usize];
                 if DrawTag(tag) != DrawTag::NOP {
-                    let draw_monoid = draw_monoids[drawobj_ix as usize];
-                    let path_ix = draw_monoid.path_ix;
-                    let path = paths[path_ix as usize];
+                    let path_ix = draw_monoids[drawobj_ix as usize].path_ix as usize;
+                    let path = paths[path_ix];
                     let dx = path.bbox[0] as i32 - bin_tile_x as i32;
                     let dy = path.bbox[1] as i32 - bin_tile_y as i32;
                     let x0 = dx.clamp(0, N_TILE_X as i32);
                     let y0 = dy.clamp(0, N_TILE_Y as i32);
                     let x1 = (path.bbox[2] as i32 - bin_tile_x as i32).clamp(0, N_TILE_X as i32);
                     let y1 = (path.bbox[3] as i32 - bin_tile_y as i32).clamp(0, N_TILE_Y as i32);
+                    // #region agent log af15c3 - H1: confirm SET_BLEND_MODE gets 0 tiles in CPU coarse
+                    if DrawTag(tag) == DrawTag::SET_BLEND_MODE && bin == 0 {
+                        use std::io::Write as _;
+                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("C:\\Dev\\kob3\\debug-af15c3.log") {
+                            let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+                            let tile_count = (x1 - x0) * (y1 - y0);
+                            let _ = writeln!(f, r#"{{"sessionId":"af15c3","runId":"pre-fix","hypothesisId":"H1","timestamp":{ts},"location":"cpu/coarse.rs:bin_build","message":"SET_BLEND_MODE tile_count in bin 0","data":{{"drawobj_ix":{},"path_ix":{},"bbox":[{},{},{},{}],"tile_count":{}}}}}"#,
+                                drawobj_ix, path_ix, path.bbox[0], path.bbox[1], path.bbox[2], path.bbox[3], tile_count);
+                        }
+                    }
+                    // #endregion
                     for y in y0..y1 {
                         for x in x0..x1 {
                             compacted[(y * N_TILE_X as i32 + x) as usize].push(drawobj_ix);
@@ -251,8 +275,7 @@ fn coarse_main(
                 let drawtag = scene[(drawtag_base + drawobj_ix) as usize];
                 if clip_zero_depth == 0 {
                     let draw_monoid = draw_monoids[*drawobj_ix as usize];
-                    let path_ix = draw_monoid.path_ix;
-                    let path = paths[path_ix as usize];
+                    let path = paths[draw_monoid.path_ix as usize];
                     let bbox = path.bbox;
                     let stride = bbox[2] - bbox[0];
                     let x = bin_tile_x + tile_x - bbox[0];
@@ -280,7 +303,10 @@ fn coarse_main(
                     } else {
                         tile.backdrop
                     } == 0;
-                    let include_tile = n_segs != 0 || (backdrop_clear == is_clip) || is_blend;
+                    let include_tile = DrawTag(drawtag) == DrawTag::SET_BLEND_MODE
+                        || n_segs != 0
+                        || (backdrop_clear == is_clip)
+                        || is_blend;
                     if include_tile {
                         match DrawTag(drawtag) {
                             DrawTag::COLOR => {
@@ -359,6 +385,10 @@ fn coarse_main(
                                 tile_state.write_end_clip(config, bump, ptcl, blend, alpha);
                                 render_blend_depth -= 1;
                             }
+                            DrawTag::SET_BLEND_MODE => {
+                                let packed = scene[dd as usize];
+                                tile_state.write_set_blend_mode(config, bump, ptcl, packed);
+                            }
                             _ => todo!(),
                         }
                     }
@@ -366,6 +396,7 @@ fn coarse_main(
                     // In "clip zero" state, suppress all drawing
                     match DrawTag(drawtag) {
                         DrawTag::BEGIN_CLIP => clip_depth += 1,
+                        DrawTag::SET_BLEND_MODE => {}
                         DrawTag::END_CLIP => {
                             if clip_depth == clip_zero_depth {
                                 clip_zero_depth = 0;

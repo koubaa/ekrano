@@ -32,10 +32,12 @@
 mod binning;
 mod clip;
 mod config;
+mod coverage_mask;
 mod draw;
 mod encoding;
 #[cfg(feature = "bump_estimate")]
 mod estimate;
+mod filter;
 mod glyph;
 mod glyph_cache;
 mod image_cache;
@@ -57,11 +59,13 @@ pub use config::{
     STAGE_PATHTAG_SCAN_LARGE, STAGE_PATHTAG_SCAN1, STAGE_TILE_ALLOC, WorkgroupCounts,
     WorkgroupCountsGpu, WorkgroupSize,
 };
+pub use coverage_mask::CoverageMask;
 pub use draw::{
     DRAW_INFO_FLAGS_FILL_RULE_BIT, DrawBbox, DrawBeginClip, DrawBlurRoundedRect, DrawColor,
     DrawImage, DrawLinearGradient, DrawMonoid, DrawRadialGradient, DrawSweepGradient, DrawTag,
 };
 pub use encoding::{Encoding, Resources, StreamOffsets};
+pub use filter::{Filter, FilterEdgeMode, FilterPrimitive, FilterUniform, LayerFilterEffect};
 pub use glyph::{Glyph, GlyphRun};
 pub use mask::{make_mask_lut, make_mask_lut_16};
 pub use math::Transform;

@@ -98,9 +98,9 @@ fn many_bins_test() {
     many_bins();
 }
 
-/// Test for <https://github.com/linebender/vello/issues/1061>
+/// Regression test for <https://github.com/linebender/vello/issues/1061>
+/// (Fixed in ekrano by the `END_CLIP` draw-data encoding fix.)
 #[test]
-#[should_panic]
 #[cfg_attr(skip_gpu_tests, ignore)]
 fn test_layer_size() {
     let mut scene = Scene::new();

@@ -218,7 +218,8 @@ void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
             }
         }
 
-        if (tag_word == DRAWTAG_BEGIN_CLIP || tag_word == DRAWTAG_END_CLIP) {
+        if (tag_word == DRAWTAG_BEGIN_CLIP || tag_word == DRAWTAG_END_CLIP ||
+            tag_word == DRAWTAG_END_CLIP_FILTER) {
             ClipInp clip_el;
             clip_el.ix = ix;
             clip_el.path_ix = (tag_word == DRAWTAG_BEGIN_CLIP) ? int(m.path_ix) : int(~ix);

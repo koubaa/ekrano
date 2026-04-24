@@ -12,7 +12,7 @@ use goldy::{BufferPool, Device, Texture};
 use crate::{
     Error, RenderParams, Result, Scene,
     goldy_engine::GoldyEngine,
-    render::Render,
+    render::{self, Render},
     shaders::{self, FullShaders},
 };
 use ekrano_encoding::{BumpAllocators, Resolver};
@@ -72,7 +72,6 @@ impl GoldyRenderer {
             // Safety margin: runtime allocation order may differ from pool_allocs order,
             // causing extra alignment padding. Add 256K to absorb ordering variance.
             let pool_size = base.saturating_add(262144);
-
             self.engine.prepare_storage_pool(device, pool_size)?;
 
             let mut render = Render::new();
@@ -86,8 +85,18 @@ impl GoldyRenderer {
             );
             let bump_buf = render.bump_buf();
             let out_image = render.out_image();
+            let filter_layers = render.filter_layer_textures();
 
-            render.record_fine(&self.shaders, &mut recording);
+            render.record_fine(encoding, &self.shaders, &mut recording);
+            render::record_filter_effects(
+                encoding,
+                &self.shaders,
+                &mut recording,
+                params.width,
+                params.height,
+                &filter_layers,
+                out_image,
+            );
 
             #[cfg(feature = "debug_layers")]
             if let Some(captured) = render.take_captured_buffers() {

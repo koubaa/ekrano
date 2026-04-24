@@ -6,11 +6,12 @@ use std::sync::Arc;
 #[cfg(feature = "bump_estimate")]
 use ekrano_encoding::BumpAllocatorMemory;
 use ekrano_encoding::{
-    DrawBeginClip, Encoding, Glyph, GlyphRun, NormalizedCoord, Patch, Transform,
+    CoverageMask, DrawBeginClip, Encoding, Filter, Glyph, GlyphRun, NormalizedCoord, Patch,
+    Transform,
 };
 use peniko::{
     BlendMode, Blob, Brush, BrushRef, Color, ColorStop, ColorStops, ColorStopsSource, Compose,
-    Extend, Fill, FontData, Gradient, ImageBrush, ImageBrushRef, ImageData, StyleRef,
+    Extend, Fill, FontData, Gradient, ImageBrush, ImageBrushRef, ImageData, Mix, StyleRef,
     color::{AlphaColor, DynamicColor, Srgb, palette},
     kurbo::{Affine, BezPath, Point, Rect, Shape, Stroke, StrokeOpts, Vec2},
 };
@@ -195,6 +196,114 @@ impl Scene {
         clip: &impl Shape,
     ) {
         self.push_layer_inner(DrawBeginClip::clip(), clip_style.into(), transform, clip);
+    }
+
+    /// Sets how subsequent geometry is composited into the current layer (per-draw / non-isolated blending).
+    ///
+    /// This encodes a stream command; call before [`Self::fill`], [`Self::stroke`], etc. Default is
+    /// normal alpha-over (`SrcOver`). Use [`Self::reset_draw_blend_mode`] to restore the default.
+    pub fn set_blend_mode(&mut self, blend: impl Into<BlendMode>) {
+        self.encoding.encode_set_blend_mode(blend.into());
+    }
+
+    /// Restores per-draw blending to normal source-over compositing.
+    pub fn reset_draw_blend_mode(&mut self) {
+        self.encoding
+            .encode_set_blend_mode(BlendMode::new(Mix::Normal, Compose::SrcOver));
+    }
+
+    /// Sets a full-frame coverage mask (`width` × `height` bytes, row-major).
+    /// Dimensions must match the render target when calling [`crate::GoldyRenderer::render_to_texture`].
+    pub fn set_coverage_mask(&mut self, mask: CoverageMask) {
+        self.encoding.coverage_mask = Some(mask);
+    }
+
+    /// Clears the coverage mask set by [`Self::set_coverage_mask`].
+    pub fn clear_coverage_mask(&mut self) {
+        self.encoding.coverage_mask = None;
+    }
+
+    /// Alias for [`Self::set_coverage_mask`] (vello_cpu-style name).
+    #[doc(alias = "set_coverage_mask")]
+    pub fn set_mask(&mut self, mask: CoverageMask) {
+        self.set_coverage_mask(mask);
+    }
+
+    /// Clears the mask set by [`Self::set_mask`].
+    #[doc(alias = "clear_coverage_mask")]
+    pub fn clear_mask(&mut self) {
+        self.clear_coverage_mask();
+    }
+
+    /// Applies a full-frame alpha mask for subsequent draws (same GPU path as [`Self::set_coverage_mask`]).
+    ///
+    /// For a **shape-based** mask layer, use [`Self::push_luminance_mask_layer`].
+    #[doc(alias = "set_coverage_mask")]
+    pub fn push_mask_layer(&mut self, mask: CoverageMask) {
+        self.set_coverage_mask(mask);
+    }
+
+    /// Pushes a clipped layer and records a [`Filter`] for GPU post-processing.
+    ///
+    /// Filters are applied to the **full output texture** after rasterization, in scene order (see
+    /// [`ekrano_encoding::Encoding::layer_filter_effects`]). True per-layer isolation matches
+    /// `vello_cpu` when a single filtered layer fills the viewport.
+    #[expect(
+        single_use_lifetimes,
+        reason = "False positive: https://github.com/rust-lang/rust/issues/129255"
+    )]
+    pub fn push_filter_layer<'a>(
+        &mut self,
+        filter: impl Into<Filter>,
+        clip_style: impl Into<StyleRef<'a>>,
+        transform: Affine,
+        clip: &impl Shape,
+    ) {
+        // For flood filters, record the clip shape's bounding rect so the shader can
+        // constrain the flood to only the layer's region (matching vello_sparse's
+        // per-layer-pixmap semantics).
+        let primitive = filter.into().0;
+        let primitive = match primitive {
+            ekrano_encoding::FilterPrimitive::Flood { color, .. } => {
+                let bb = clip.bounding_box();
+                let x0 = bb.x0.max(0.0) as u32;
+                let y0 = bb.y0.max(0.0) as u32;
+                let x1 = bb.x1.max(0.0) as u32;
+                let y1 = bb.y1.max(0.0) as u32;
+                ekrano_encoding::FilterPrimitive::Flood { color, clip_rect: [x0, y0, x1, y1] }
+            }
+            other => other,
+        };
+        self.encoding.set_pending_layer_filter(Some(primitive));
+        self.push_layer(
+            clip_style,
+            BlendMode::new(Mix::Normal, Compose::SrcOver),
+            1.0,
+            transform,
+            clip,
+        );
+    }
+
+    /// Same as [`Self::push_clip_layer`] — non-isolated clip path API alias.
+    ///
+    /// GPU path: uses the same tile/layer pipeline as other clips (reuses the blend stack rather than
+    /// a separate sparse clip coverage buffer).
+    #[expect(
+        single_use_lifetimes,
+        reason = "False positive: https://github.com/rust-lang/rust/issues/129255"
+    )]
+    pub fn push_clip_path<'a>(
+        &mut self,
+        clip_style: impl Into<StyleRef<'a>>,
+        transform: Affine,
+        clip: &impl Shape,
+    ) {
+        self.push_clip_layer(clip_style, transform, clip);
+    }
+
+    /// Pops a clip path opened with [`Self::push_clip_path`].
+    pub fn pop_clip_path(&mut self) {
+        self.pop_layer();
     }
 
     /// Helper for logic shared between [`Self::push_layer`] and [`Self::push_luminance_mask_layer`]
