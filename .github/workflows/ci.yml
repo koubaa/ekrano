@@ -78,10 +78,9 @@ jobs:
         run: git clone --depth 1 --branch ${{ env.GOLDY_BRANCH }} ${{ env.GOLDY_REPO }} ../goldy
 
       - name: install stable toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_STABLE_VER }}
-          components: rustfmt
+        run: |
+          rustup toolchain install ${{ env.RUST_STABLE_VER }} --profile minimal --component rustfmt
+          rustup default ${{ env.RUST_STABLE_VER }}
 
       - name: cargo fmt
         # Use explicit package list instead of --all, which would also check
@@ -117,10 +116,9 @@ jobs:
         run: git clone --depth 1 --branch ${{ env.GOLDY_BRANCH }} ${{ env.GOLDY_REPO }} ../goldy
 
       - name: install stable toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_STABLE_VER }}
-          components: clippy
+        run: |
+          rustup toolchain install ${{ env.RUST_STABLE_VER }} --profile minimal --component clippy
+          rustup default ${{ env.RUST_STABLE_VER }}
 
       - name: restore cache
         uses: Swatinem/rust-cache@v2
@@ -197,9 +195,9 @@ jobs:
         continue-on-error: true
 
       - name: install stable toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_STABLE_VER }}
+        run: |
+          rustup toolchain install ${{ env.RUST_STABLE_VER }} --profile minimal
+          rustup default ${{ env.RUST_STABLE_VER }}
 
       # Shared script: installs Mesa/lavapipe, locates the ICD, exports env vars.
       # Also used by ci/Dockerfile for local reproduction.
@@ -207,24 +205,22 @@ jobs:
         if: matrix.os == 'ubuntu-24.04'
         run: bash ci/setup-ubuntu.sh
       
-      - name: install cargo-nextest
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest
+      - name: install cargo-nextest (Unix)
+        if: runner.os != 'Windows'
+        run: curl -LsSf https://get.nexte.st/latest/${{ runner.os == 'macOS' && 'mac' || 'linux' }} | tar zxf - -C ${CARGO_HOME:-~/.cargo}/bin
+
+      - name: install cargo-nextest (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tmp = Join-Path $env:RUNNER_TEMP 'nextest.zip'
+          Invoke-WebRequest -Uri 'https://get.nexte.st/latest/windows' -OutFile $tmp
+          Expand-Archive $tmp -DestinationPath "$env:USERPROFILE\.cargo\bin" -Force
 
       - name: restore cache
         uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.event_name != 'merge_group' }}
-
-      # The Data Science Windows Server 2019 image has WSL present but no distro
-      # installed. Without this, `bash` resolves to C:\Windows\system32\bash.EXE
-      # (WSL) rather than Git's bash, breaking any action that shells out to bash
-      # (e.g. dtolnay/rust-toolchain).
-      - name: Prefer Git bash over WSL bash (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: echo "C:\Program Files\Git\bin" >> $env:GITHUB_PATH
 
       # DX12 + Slang need DXC from the Windows SDK on PATH.
       - name: Add Windows SDK DXC to PATH
@@ -242,9 +238,8 @@ jobs:
 
       - name: Configure Goldy DX12 (Windows)
         if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          echo "GOLDY_DX12_NO_DEBUG=1" >> "$GITHUB_ENV"
+        shell: pwsh
+        run: echo "GOLDY_DX12_NO_DEBUG=1" >> $env:GITHUB_ENV
 
       - name: cargo nextest
         # TODO: Maybe use --release; the CPU shaders are extremely slow when unoptimised
@@ -289,9 +284,9 @@ jobs:
         run: git clone --depth 1 --branch ${{ env.GOLDY_BRANCH }} ${{ env.GOLDY_REPO }} ../goldy
 
       - name: install msrv toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_MIN_VER }}
+        run: |
+          rustup toolchain install ${{ env.RUST_MIN_VER }} --profile minimal
+          rustup default ${{ env.RUST_MIN_VER }}
 
       - name: restore cache
         uses: Swatinem/rust-cache@v2
@@ -313,7 +308,9 @@ jobs:
         run: git clone --depth 1 --branch ${{ env.GOLDY_BRANCH }} ${{ env.GOLDY_REPO }} ../goldy
 
       - name: install nightly toolchain
-        uses: dtolnay/rust-toolchain@nightly
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustup default nightly
 
       - name: restore cache
         uses: Swatinem/rust-cache@v2
