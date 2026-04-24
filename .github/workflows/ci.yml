@@ -17,13 +17,8 @@ env:
   # Goldy is an external path dependency (sibling repo). CI clones it at this branch.
   GOLDY_BRANCH: "main"
   GOLDY_REPO: "https://github.com/koubaa/goldy.git"
-  # Redistributable WARP via NuGet (Microsoft.Direct3D.WARP). Dropped next to the
-  # test binaries on Windows CI to override the older OS-provided d3d10warp.dll
-  # that ships with windows-latest runners. Needed because ekrano snapshot tests
-  # (e.g. snapshot_many_clips) fail on the stock runner WARP but pass on the
-  # NuGet version, which carries several codegen/clipping fixes.
-  # https://www.nuget.org/packages/Microsoft.Direct3D.WARP
-  WARP_NUGET_VERSION: "1.0.18"
+  # Windows snapshot tests run on a GitHub larger GPU runner (Tesla T4).
+  # Runner name: ekrano-windows-t4-gpu.
 
 
 # Rationale
@@ -114,8 +109,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        # TODO: re-enable windows-latest when Windows CI is green again
-        os: [macos-latest, ubuntu-latest]
+        os: [macos-latest, ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -171,17 +165,14 @@ jobs:
   test-stable:
     name: cargo test
     needs: prime-lfs-cache
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        # TODO: re-enable windows-latest when Windows CI is green again
-        os: [macos-latest, ubuntu-24.04]
         include:
-          - os: ubuntu-24.04
-            gpu: 'yes'
-          - os: macos-latest
-            gpu: 'yes'
+          - { os: ubuntu-24.04,          runner: ubuntu-24.04,          gpu: 'yes' }
+          - { os: macos-latest,          runner: macos-latest,          gpu: 'yes' }
+          - { os: windows-t4-gpu,        runner: ekrano-windows-t4-gpu, gpu: 'yes' }
     steps:
       - uses: actions/checkout@v4
         # We intentionally do not use lfs: true here, instead using the caching method to save LFS bandwidth.
@@ -226,9 +217,9 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'merge_group' }}
 
-      # Same as goldy CI: DX12 + Slang need DXC from the Windows SDK on PATH.
+      # DX12 + Slang need DXC from the Windows SDK on PATH.
       - name: Add Windows SDK DXC to PATH
-        if: matrix.os == 'windows-latest'
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $sdkBin = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\10.0.*\x64' -Directory |
@@ -240,55 +231,20 @@ jobs:
             Write-Host "WARNING: dxcompiler.dll not found in Windows SDK"
           }
 
-      - name: Configure Goldy DX12 WARP (Windows)
-        if: matrix.os == 'windows-latest'
+      - name: Configure Goldy DX12 (Windows)
+        if: runner.os == 'Windows'
         shell: bash
         run: |
-          echo "GOLDY_DX12_FORCE_WARP=1" >> "$GITHUB_ENV"
           echo "GOLDY_DX12_NO_DEBUG=1" >> "$GITHUB_ENV"
-
-      # Install redistributable WARP next to the test binaries. Without this,
-      # windows-latest uses the OS d3d10warp.dll (older Windows Server build),
-      # which has compute-shader codegen bugs that corrupt the snapshot_many_clips
-      # render. d3d12.dll probes the EXE directory for d3d10warp.dll before
-      # falling back to System32, so dropping it in target\debug\deps\ (where
-      # nextest launches test binaries from) takes precedence.
-      - name: Install redistributable WARP (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          $version = "${{ env.WARP_NUGET_VERSION }}"
-          $workDir = "$env:RUNNER_TEMP\warp-nuget"
-          # A .nupkg is just a zip. Download and expand without requiring nuget.exe.
-          # Expand-Archive is strict about the .zip extension, so save it as .zip.
-          $nupkg   = Join-Path $workDir "Microsoft.Direct3D.WARP.$version.zip"
-          $extract = Join-Path $workDir "extract"
-          $url     = "https://www.nuget.org/api/v2/package/Microsoft.Direct3D.WARP/$version"
-          New-Item -ItemType Directory -Force -Path $workDir | Out-Null
-          Invoke-WebRequest -Uri $url -OutFile $nupkg -UseBasicParsing
-          Expand-Archive -Path $nupkg -DestinationPath $extract -Force
-          $warpDll = Get-ChildItem -Path $extract -Filter d3d10warp.dll -Recurse |
-                     Where-Object { $_.FullName -like '*\x64\*' } |
-                     Select-Object -First 1
-          if (-not $warpDll) {
-            Write-Host "ERROR: d3d10warp.dll not found under $extract"
-            Get-ChildItem $extract -Recurse | Select-Object -ExpandProperty FullName
-            exit 1
-          }
-          Write-Host "Using WARP $($warpDll.VersionInfo.FileVersion) from: $($warpDll.FullName)"
-          New-Item -ItemType Directory -Force -Path target\debug\deps | Out-Null
-          New-Item -ItemType Directory -Force -Path target\debug       | Out-Null
-          Copy-Item $warpDll.FullName target\debug\deps\d3d10warp.dll -Force
-          Copy-Item $warpDll.FullName target\debug\d3d10warp.dll      -Force
-          "WARP_DLL=$($warpDll.FullName)" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
 
       - name: cargo nextest
         # TODO: Maybe use --release; the CPU shaders are extremely slow when unoptimised
         run: cargo nextest run --workspace --locked --all-features --no-fail-fast
         env:
           EKRANO_CI_GPU_SUPPORT: ${{ matrix.gpu }}
-          # Skip tests that are too slow on software-emulated GPUs (lavapipe, WARP).
-          # These still run locally on real hardware.
+          # Skip tests that are too slow on lavapipe (Linux software Vulkan).
+          # Windows runs on a real T4; macOS runs on real Apple GPU.
+          # These tests still run locally on any real hardware.
           EKRANO_CI_SKIP_SLOW: 'yes'
           # Linux: force lavapipe as the sole Vulkan driver and suppress validation layers.
           # LAVAPIPE_ICD is set by the install step above (Linux only); empty string on
@@ -304,7 +260,7 @@ jobs:
         uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: ekrano-snapshot-tests-${{ matrix.os }}
+          name: ekrano-snapshot-tests-${{ matrix.runner }}
           path: |
             ekrano_tests/current
 
@@ -316,8 +272,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        # TODO: re-enable windows-latest when Windows CI is green again
-        os: [macos-latest, ubuntu-latest]
+        os: [macos-latest, ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
 
