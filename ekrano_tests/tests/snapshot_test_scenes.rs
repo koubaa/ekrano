@@ -15,7 +15,6 @@ fn snapshot_test_scene(test_scene: ExampleScene, mut params: TestParams) {
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn snapshot_splash() {
     let test_scene = test_scenes::splash_with_tiger();
     let params = TestParams::new("splash", 300, 300);
@@ -24,7 +23,6 @@ fn snapshot_splash() {
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn snapshot_funky_paths() {
     let test_scene = test_scenes::funky_paths();
     let params = TestParams::new("funky_paths", 600, 600);
@@ -33,7 +31,6 @@ fn snapshot_funky_paths() {
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn snapshot_stroke_styles() {
     let test_scene = test_scenes::stroke_styles();
     let params = TestParams::new("stroke_styles", 600, 425);
@@ -42,7 +39,6 @@ fn snapshot_stroke_styles() {
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn snapshot_stroke_styles_non_uniform() {
     let test_scene = test_scenes::stroke_styles_non_uniform();
     let params = TestParams::new("stroke_styles_non_uniform", 600, 425);
@@ -51,7 +47,6 @@ fn snapshot_stroke_styles_non_uniform() {
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn snapshot_stroke_styles_skew() {
     let test_scene = test_scenes::stroke_styles_skew();
     let params = TestParams::new("stroke_styles_skew", 600, 425);
@@ -59,7 +54,6 @@ fn snapshot_stroke_styles_skew() {
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn snapshot_tricky_strokes() {
     let test_scene = test_scenes::tricky_strokes();
     let params = TestParams::new("tricky_strokes", 600, 425);
@@ -67,7 +61,6 @@ fn snapshot_tricky_strokes() {
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn snapshot_fill_types() {
     let test_scene = test_scenes::fill_types();
     let params = TestParams::new("fill_types", 700, 350);
@@ -75,7 +68,6 @@ fn snapshot_fill_types() {
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn snapshot_deep_blend() {
     let test_scene = test_scenes::deep_blend();
     let params = TestParams::new("deep_blend", 200, 200);
@@ -83,7 +75,6 @@ fn snapshot_deep_blend() {
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn snapshot_gradient_extend() {
     let test_scene = test_scenes::gradient_extend();
     let params = TestParams::new("gradient_extend", 200, 200);
@@ -91,7 +82,6 @@ fn snapshot_gradient_extend() {
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn snapshot_many_clips() {
     let test_scene = test_scenes::many_clips();
     let params = TestParams::new("many_clips", 200, 200);
@@ -99,7 +89,6 @@ fn snapshot_many_clips() {
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn snapshot_clip_test() {
     let test_scene = test_scenes::clip_test();
     let params = TestParams::new("clip_test", 512, 768);
@@ -107,7 +96,6 @@ fn snapshot_clip_test() {
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn snapshot_blurred_rounded_rect() {
     let test_scene = test_scenes::blurred_rounded_rect();
     let params = TestParams::new("blurred_rounded_rect", 400, 400);
@@ -115,7 +103,6 @@ fn snapshot_blurred_rounded_rect() {
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn snapshot_longpathdash_butt() {
     let test_scene = test_scenes::longpathdash_butt();
     let params = TestParams::new("longpathdash_butt", 440, 80);
@@ -123,7 +110,6 @@ fn snapshot_longpathdash_butt() {
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn snapshot_image_sampling() {
     let test_scene = test_scenes::image_sampling();
     let params = TestParams::new("image_sampling", 400, 400);
@@ -131,7 +117,6 @@ fn snapshot_image_sampling() {
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn snapshot_image_extend_modes_bilinear() {
     let test_scene = test_scenes::image_extend_modes_bilinear();
     let params = TestParams::new("image_extend_modes_bilinear", 400, 400);
@@ -139,7 +124,6 @@ fn snapshot_image_extend_modes_bilinear() {
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn snapshot_image_extend_modes_nearest_neighbor() {
     let test_scene = test_scenes::image_extend_modes_nearest_neighbor();
     let params = TestParams::new("image_extend_modes_nearest_neighbor", 400, 400);
@@ -147,7 +131,6 @@ fn snapshot_image_extend_modes_nearest_neighbor() {
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn snapshot_luminance_mask() {
     let test_scene = test_scenes::luminance_mask();
     // This has been manually validated to match the example in
@@ -157,9 +140,8 @@ fn snapshot_luminance_mask() {
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn image_luminance_mask() {
     let test_scene = test_scenes::image_luminance_mask();
-    let params = TestParams::new("image_luminance_mask", 200, 140);
+    let params = TestParams::new("image_luminance_mask", 350, 250);
     snapshot_test_scene(test_scene, params);
 }

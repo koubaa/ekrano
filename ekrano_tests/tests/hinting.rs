@@ -41,7 +41,6 @@ fn encode_hinted_text(text: &str, font_size: f32) -> Scene {
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn simple_hinted() {
     let font_size = 12.;
     let scene = encode_hinted_text("The quick brown fox", font_size);
@@ -56,7 +55,6 @@ fn simple_hinted() {
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn scaled_hinted() {
     let font_size = 12.;
     let text_scene = encode_hinted_text("The quick brown fox", font_size);
@@ -74,7 +72,7 @@ fn scaled_hinted() {
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
+#[cfg_attr(skip_slow_tests, ignore)]
 fn integer_translation() {
     let font_size = 12.;
     let text_scene = encode_hinted_text("The quick brown fox", font_size);
@@ -92,7 +90,7 @@ fn integer_translation() {
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
+#[cfg_attr(skip_slow_tests, ignore)]
 fn non_integer_translation() {
     let font_size = 12.;
     let text_scene = encode_hinted_text("The quick brown fox", font_size);

@@ -5,7 +5,12 @@
 //!
 //! Ported from `vello_sparse_tests/tests/filter.rs`, translating the stateful
 //! `vello_cpu::Renderer` API to ekrano's `Scene` API.
-//! Test names and reference PNGs match those in `vello_sparse_tests`.
+//! Test names are shared with `vello_sparse_tests`, but the reference PNGs in
+//! `ekrano_tests/snapshots/` are **ekrano-specific** baselines rather than the
+//! vello_sparse golden images — the two renderers accumulate small numerical
+//! rounding differences (GPU vs CPU, different AA approaches, premul rounding)
+//! that make direct reuse impractical.  Divergence from vello_sparse is expected
+//! and acceptable; what matters is consistency across ekrano builds.
 //!
 //! ## Background colour
 //! vello_sparse initialises its render surface to opaque **white** before each
@@ -50,7 +55,6 @@ fn vp(w: f64, h: f64) -> Rect {
 
 /// Gaussian blur with small radius (`std_dev` = 2.0, no decimation).
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn filter_gaussian_blur_no_decimation() {
     let mut scene = Scene::new();
     let filter = Filter(FilterPrimitive::GaussianBlur {
@@ -67,7 +71,6 @@ fn filter_gaussian_blur_no_decimation() {
 
 /// Gaussian blur with larger radius (`std_dev` = 4.0, uses decimation).
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn filter_gaussian_blur_with_decimation() {
     let mut scene = Scene::new();
     let filter = Filter(FilterPrimitive::GaussianBlur {
@@ -84,7 +87,6 @@ fn filter_gaussian_blur_with_decimation() {
 
 /// Zero blur acts as identity (no-op).
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn filter_gaussian_blur_zero() {
     let mut scene = Scene::new();
     let filter = Filter(FilterPrimitive::GaussianBlur {
@@ -101,7 +103,6 @@ fn filter_gaussian_blur_zero() {
 
 /// Blur with very large `std_dev` (= 20.0) — shape barely visible.
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn filter_extreme_blur() {
     let mut scene = Scene::new();
     let filter = Filter(FilterPrimitive::GaussianBlur {
@@ -118,7 +119,6 @@ fn filter_extreme_blur() {
 
 /// Blur on semi-transparent shapes — fully-opaque (left) and 50%-transparent (right).
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn filter_transparent_shapes() {
     let mut scene = Scene::new();
     let filter = Filter(FilterPrimitive::GaussianBlur {
@@ -160,7 +160,6 @@ fn blur_with_edge_mode(edge_mode: FilterEdgeMode) -> Scene {
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn filter_gaussian_blur_edge_mode_duplicate() {
     let mut params = TestParams::new("filter_gaussian_blur_edge_mode_duplicate", 256, 100);
     params.base_color = Some(WHITE);
@@ -169,7 +168,6 @@ fn filter_gaussian_blur_edge_mode_duplicate() {
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn filter_gaussian_blur_edge_mode_wrap() {
     let mut params = TestParams::new("filter_gaussian_blur_edge_mode_wrap", 256, 100);
     params.base_color = Some(WHITE);
@@ -178,7 +176,6 @@ fn filter_gaussian_blur_edge_mode_wrap() {
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn filter_gaussian_blur_edge_mode_mirror() {
     let mut params = TestParams::new("filter_gaussian_blur_edge_mode_mirror", 256, 100);
     params.base_color = Some(WHITE);
@@ -195,7 +192,6 @@ fn filter_gaussian_blur_edge_mode_mirror() {
 /// restricts the flood to that rect, matching vello_sparse's auto-bounded
 /// per-layer-pixmap semantics.
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn filter_flood() {
     let mut scene = Scene::new();
     let filter = Filter(FilterPrimitive::Flood { color: TOMATO.premultiply(), clip_rect: [0; 4] });
@@ -214,7 +210,6 @@ fn filter_flood() {
 
 /// Flood filter on a star-shaped fill (no extra clip wrapper).
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn filter_flood_star() {
     let mut scene = Scene::new();
     let filter = Filter(FilterPrimitive::Flood { color: TOMATO.premultiply(), clip_rect: [0; 4] });
@@ -236,7 +231,6 @@ fn filter_flood_star() {
 
 /// Drop shadow with sub-pixel offsets.
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn filter_drop_shadow_fractional_offset() {
     let mut scene = Scene::new();
     let filter = Filter(FilterPrimitive::DropShadow {
@@ -256,7 +250,6 @@ fn filter_drop_shadow_fractional_offset() {
 
 /// Drop shadow with zero offset (shadow directly behind).
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn filter_drop_shadow_zero_offset() {
     let mut scene = Scene::new();
     let filter = Filter(FilterPrimitive::DropShadow {
@@ -281,7 +274,6 @@ fn filter_drop_shadow_zero_offset() {
 /// Reference stroke + marker use a zero-blur filter layer as an identity pass-through
 /// (ekrano does not render top-level draws outside a layer).
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn filter_offset() {
     let mut scene = Scene::new();
     let filter = Filter(FilterPrimitive::Offset { dx: 18.0, dy: -12.0 });
@@ -316,7 +308,6 @@ fn filter_offset() {
 ///
 /// TODO: nested filter layers require multi-pass fine, not yet implemented.
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn filter_nested_layers() {
     let mut scene = Scene::new();
     let blur = Filter(FilterPrimitive::GaussianBlur { std_dev: 2.0, edge_mode: FilterEdgeMode::None });
@@ -343,7 +334,6 @@ fn filter_nested_layers() {
 ///
 /// TODO: nested filter layers require multi-pass fine, not yet implemented.
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn filter_empty_layers() {
     let mut scene = Scene::new();
     let filter = Filter(FilterPrimitive::GaussianBlur { std_dev: 4.0, edge_mode: FilterEdgeMode::None });

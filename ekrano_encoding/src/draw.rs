@@ -37,7 +37,14 @@ impl DrawTag {
     pub const BLUR_RECT: Self = Self(0x2d4); // info: 11, scene: 5 (DrawBlurRoundedRect)
 
     /// Begin layer/clip.
-    pub const BEGIN_CLIP: Self = Self(0x49);
+    ///
+    /// Scene payload: [`DrawBeginClip`] words + a `u32` "filter layer index" slot that's
+    /// populated by [`Encoding::encode_end_clip`] when the layer has a filter. The extra
+    /// word exists to work around [`clip_leaf.slang`]'s scene-offset rewrite: it copies
+    /// `BEGIN_CLIP`'s `scene_offset` to the matching `END_CLIP[_FILTER]`'s monoid, so any
+    /// data `END_CLIP_FILTER` needs at coarse time (`scene[dd + 2]`) has to live in the
+    /// matching `BEGIN_CLIP`'s scene slot. `(tag >> 2) & 7 == 3`.
+    pub const BEGIN_CLIP: Self = Self(0x4D);
 
     /// End layer/clip.
     /// Scene payload: duplicate [`DrawBeginClip`] words (blend + alpha); `(tag >> 2) & 7 == 2`.

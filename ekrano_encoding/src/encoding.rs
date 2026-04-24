@@ -56,8 +56,10 @@ pub struct Encoding {
     pending_layer_filter: Option<FilterPrimitive>,
     /// Stack parallel to open clips: `Some` when the matching `BEGIN_CLIP` had a pending filter.
     clip_filter_stack: Vec<Option<FilterPrimitive>>,
-    /// Parallel to open clips: parameters for matching [`encode_end_clip`](Self::encode_end_clip) data.
-    begin_clip_stack: Vec<DrawBeginClip>,
+    /// Parallel to open clips. Stores `(parameters, layer_idx_slot)` for each open
+    /// `BEGIN_CLIP`; `layer_idx_slot` is the `u32` index into [`Self::draw_data`] where
+    /// `encode_end_clip` backfills the matching filter's layer index (zeroed until then).
+    begin_clip_stack: Vec<(DrawBeginClip, usize)>,
     /// Filters recorded when a filtered layer ends (`encode_end_clip`).
     ///
     /// Applied after fine: each entry is filtered in isolation, then composited back (see `ekrano`).
@@ -531,10 +533,15 @@ impl Encoding {
     pub fn encode_begin_clip(&mut self, parameters: DrawBeginClip) {
         self.clip_filter_stack
             .push(self.pending_layer_filter.take());
-        self.begin_clip_stack.push(parameters);
         self.draw_tags.push(DrawTag::BEGIN_CLIP);
         self.draw_data
             .extend_from_slice(bytemuck::cast_slice(bytemuck::bytes_of(&parameters)));
+        // Reserve a u32 `layer_idx` slot; `encode_end_clip` backfills it when this
+        // clip turns out to be a filter layer. See the `DrawTag::BEGIN_CLIP` doc for
+        // why the layer index lives on `BEGIN_CLIP` rather than `END_CLIP_FILTER`.
+        let layer_idx_slot = self.draw_data.len();
+        self.draw_data.push(0);
+        self.begin_clip_stack.push((parameters, layer_idx_slot));
         self.n_clips += 1;
         self.n_open_clips += 1;
     }
@@ -548,7 +555,7 @@ impl Encoding {
     pub fn encode_end_clip(&mut self) {
         if self.n_open_clips > 0 {
             let filter_for_layer = self.clip_filter_stack.pop();
-            let parameters = self
+            let (parameters, layer_idx_slot) = self
                 .begin_clip_stack
                 .pop()
                 .expect("encode_end_clip without matching encode_begin_clip");
@@ -566,11 +573,20 @@ impl Encoding {
                     layer_index,
                 });
             }
+            // Backfill the `BEGIN_CLIP`'s reserved `layer_idx` slot. `coarse.slang`
+            // reads this via `scene[dd + 2]` on `END_CLIP_FILTER` because `clip_leaf.slang`
+            // has already rewritten `END_CLIP_FILTER`'s `scene_offset` to point at the
+            // matching `BEGIN_CLIP`'s scene data.
+            self.draw_data[layer_idx_slot] = pushed_layer_index;
             // Coarse/fine read `scene[dd]`… for END_CLIP / END_CLIP_FILTER.
             if has_filter {
                 self.draw_tags.push(DrawTag::END_CLIP_FILTER);
                 self.draw_data
                     .extend_from_slice(bytemuck::cast_slice(bytemuck::bytes_of(&parameters)));
+                // `END_CLIP_FILTER`'s own `scene_offset` is clobbered by `clip_leaf.slang`
+                // (see [`DrawTag::BEGIN_CLIP`]), so this word is unused at coarse time, but
+                // we still reserve it to keep the draw-tag stream's scene sizes accurate for
+                // the prefix-sum-driven draw_monoids.
                 self.draw_data.push(pushed_layer_index);
             } else {
                 self.draw_tags.push(DrawTag::END_CLIP);

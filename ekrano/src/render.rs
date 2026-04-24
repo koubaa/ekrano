@@ -253,8 +253,8 @@ impl Render {
         let use_indirect = shaders.pipeline_setup.is_some();
         let indirect_buf = if use_indirect {
             let wg_counts_gpu = WorkgroupCountsGpu::from(wg_counts);
-            let wg_counts_buf =
-                ResourceProxy::Buffer(recording.upload_typed("vello.wg_counts", &wg_counts_gpu));
+            let wg_counts_buf_proxy = recording.upload_typed("vello.wg_counts", &wg_counts_gpu);
+            let wg_counts_buf = ResourceProxy::Buffer(wg_counts_buf_proxy);
             let indirect_buf = BufferProxy::with_stride(
                 buffer_sizes.indirect_count.size_in_bytes().into(),
                 "vello.indirect_dispatch",
@@ -265,6 +265,14 @@ impl Render {
                 (1, 1, 1),
                 [wg_counts_buf, indirect_buf.into()],
             );
+            // wg_counts is only read by the one pipeline_setup dispatch that
+            // translates it into `vello.indirect_dispatch`; nothing else
+            // needs it, so free the upload to reclaim its bindless slot this
+            // frame. Without this, the buffer leaks ~1 slot/frame and
+            // exhausts Metal's 64-slot storage-buffer argument buffer after
+            // a few seconds of rendering (observed panic:
+            // "storage-buffer bindless slots exhausted (64 max)").
+            recording.free_buffer(wg_counts_buf_proxy);
             Some(indirect_buf)
         } else {
             None
@@ -827,8 +835,14 @@ impl Render {
             if let Some(fs) = shaders.filter_pass {
                 let wg = (width_px.div_ceil(16), height_px.div_ceil(16), 1);
                 let u_clear = FilterUniform::clear_transparent(width_px, height_px);
+                // `pass_kind == 7` ignores `src`, but we still have to bind
+                // SOMETHING to slot 1 and it must not alias `dst` (DX12 can't
+                // transition the same resource to two states in one
+                // dispatch). `out_image` is a `Direct` (UAV) texture like
+                // the filter_layers, so the bindless category matches the
+                // `Image` slot declaration.
                 for fl in &fine.filter_layers {
-                    filter_dispatch(recording, fs, &u_clear, wg, *fl, *fl);
+                    filter_dispatch(recording, fs, &u_clear, wg, fine.out_image, *fl);
                 }
             } else {
                 log::warn!("filter_pass shader unavailable; cannot clear filter layer textures");

@@ -12,7 +12,6 @@ use ekrano_tests::{TestParams, smoke_snapshot_test_sync};
 use scenes::SimpleText;
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn filled_square() {
     let mut scene = Scene::new();
     scene.fill(
@@ -29,7 +28,6 @@ fn filled_square() {
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn filled_circle() {
     let mut scene = Scene::new();
     scene.fill(
@@ -46,7 +44,6 @@ fn filled_circle() {
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn two_emoji() {
     let mut scene = Scene::new();
     let mut text = SimpleText::new();

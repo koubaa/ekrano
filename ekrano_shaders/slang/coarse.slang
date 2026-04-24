@@ -374,6 +374,12 @@ void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
                     CmdEndClip end_clip;
                     end_clip.blend = scene[dd];
                     end_clip.alpha = asfloat(scene[dd + 1]);
+                    // `layer_idx` lives in the matching `BEGIN_CLIP`'s scene data because
+                    // `clip_leaf.slang` overwrites this `END_CLIP_FILTER`'s `scene_offset`
+                    // with the `BEGIN_CLIP`'s (same override that lets `END_CLIP` read the
+                    // clip's blend/alpha). `DrawTag::BEGIN_CLIP`'s scene slot reserves
+                    // `scene[dd + 2]` for the filter layer index, backfilled in
+                    // `encode_end_clip`. 0 means "no filter" (should not hit this branch).
                     uint layer_idx = scene[dd + 2];
                     write_end_clip_filter(end_clip, layer_idx, cmd_offset, cmd_limit, ptcl, bump, config);
                     render_blend_depth--;

@@ -57,11 +57,11 @@ float2 edge_coord(int2 p, uint2 dim, uint edge_mode) {
     return float2(float(x), float(y));
 }
 
-float4 sample_tex(Texture2D<float4> tex, int2 p, uint2 dim, uint edge_mode) {
+float4 sample_tex(RWTexture2D<float4> tex, int2 p, uint2 dim, uint edge_mode) {
     float2 ec = edge_coord(p, dim, edge_mode);
     if (ec.x < 0.0)
         return float4(0, 0, 0, 0);
-    return tex.Load(int3(int2(ec), 0));
+    return tex[uint2(int2(ec))];
 }
 
 float gaussian_weight(int i, float std_dev) {
@@ -75,7 +75,13 @@ float gaussian_weight(int i, float std_dev) {
 [numthreads(16, 16, 1)]
 void cs_main(uint3 gid : SV_DispatchThreadID) {
     FilterUniform u = goldy_dyn_buf_ro<FilterUniform>(0)[0];
-    Texture2D<float4> src = goldy_dyn_interpolated<float4>(1);
+    // `src` is a UAV (RWTexture2D) rather than a sampled texture so it can
+    // alias the same storage-image (`Direct`) that fine writes into. Goldy
+    // materializes a texture as EITHER SRV or UAV — never both — so sampling
+    // a fine-written filter layer would require a separate copy. The shader
+    // only uses integer `.Load()` / `src[p]` access here, so a UAV read is
+    // equivalent.
+    RWTexture2D<float4> src = goldy_dyn_direct_spatial<float4>(1);
     RWTexture2D<float4> dst = goldy_dyn_direct_spatial<float4>(2);
 
     uint2 dim = uint2(u.width, u.height);
@@ -98,7 +104,7 @@ void cs_main(uint3 gid : SV_DispatchThreadID) {
         uint cy0 = asuint(u.std_dev);
         uint cx1 = asuint(u.dx);
         uint cy1 = asuint(u.dy);
-        float4 s = src.Load(int3(p, 0));
+        float4 s = src[uint2(p)];
         bool in_clip = gid.x >= cx0 && gid.x < cx1 && gid.y >= cy0 && gid.y < cy1;
         if (in_clip) {
             float4 flood = unpack4x8unorm(u.color);
@@ -111,7 +117,7 @@ void cs_main(uint3 gid : SV_DispatchThreadID) {
 
     if (u.pass_kind == 5u) {
         // copy
-        dst[gid.xy] = src.Load(int3(p, 0));
+        dst[gid.xy] = src[uint2(p)];
         return;
     }
 
@@ -165,7 +171,7 @@ void cs_main(uint3 gid : SV_DispatchThreadID) {
         float blur_a = wsum > 0.0 ? a_acc / wsum : 0.0;
         float4 sh = unpack4x8unorm(u.color);
         sh *= blur_a;
-        float4 fg = src.Load(int3(p, 0));
+        float4 fg = src[uint2(p)];
         // premul over: out = shadow + (1 - shadow.a) * fg ... actually shadow under fg: out = fg + (1-fg.a)*shadow
         dst[gid.xy] = fg + (1.0 - fg.a) * sh;
         return;
@@ -173,7 +179,7 @@ void cs_main(uint3 gid : SV_DispatchThreadID) {
 
     if (u.pass_kind == 6u) {
         // Composite premultiplied filtered layer (`src`) over straight-alpha `dst`.
-        float4 fg = src.Load(int3(p, 0));
+        float4 fg = src[uint2(p)];
         float4 bg_s = dst[gid.xy];
         float4 bg_pm = float4(bg_s.rgb * bg_s.a, bg_s.a);
         float4 out_pm = blend_mix_compose(bg_pm, fg, u.edge_mode);
@@ -187,5 +193,5 @@ void cs_main(uint3 gid : SV_DispatchThreadID) {
         return;
     }
 
-    dst[gid.xy] = src.Load(int3(p, 0));
+    dst[gid.xy] = src[uint2(p)];
 }

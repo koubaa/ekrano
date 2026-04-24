@@ -182,6 +182,10 @@ pub(crate) fn goldy_full_shaders(
         "binning",
         ekrano_shaders::slang::BINNING,
         &[
+            // Slots match `binning.slang`:
+            // 0=config, 1=scene, 2=draw_monoids, 3=path_bbox_buf, 4=clip_bbox_buf (all SRV),
+            // 5=intersected_bbox, 6=bump, 7=bin_data, 8=bin_header (all UAV).
+            BufReadOnly,
             BufReadOnly,
             BufReadOnly,
             BufReadOnly,
@@ -354,7 +358,12 @@ pub(crate) fn goldy_full_shaders(
             ekrano_shaders::slang::FILTER_PASS,
             &[
                 BufReadOnly,
-                ImageRead(ImageFormat::Rgba8),
+                // `src` is bound as a UAV (storage image) rather than SRV so
+                // it can share the same texture storage that fine writes
+                // (Goldy textures are materialized as either UAV or SRV; a
+                // fine-written filter layer has no SRV descriptor). The
+                // filter_pass shader only integer-loads from `src`.
+                Image(ImageFormat::Rgba8),
                 Image(ImageFormat::Rgba8),
             ],
             &search_paths,

@@ -5,7 +5,11 @@
 //!
 //! Ported from `vello_sparse_tests/tests/mix.rs`, translating the stateful
 //! `vello_cpu::Renderer` API to ekrano's `Scene` API.
-//! Test names and reference PNGs match those in `vello_sparse_tests`.
+//! Test names are shared with `vello_sparse_tests`, but the reference PNGs in
+//! `ekrano_tests/snapshots/` are **ekrano-specific** baselines rather than the
+//! vello_sparse golden images — small numerical rounding differences between the
+//! GPU and CPU paths make direct reuse impractical.  Divergence from vello_sparse
+//! is expected and acceptable; what matters is consistency across ekrano builds.
 //!
 //! ## Top-level draws
 //! In ekrano, `scene.fill()` and similar calls placed *outside* any layer are not
@@ -76,7 +80,6 @@ fn non_isolated_blend(mix: Mix) -> Scene {
 
 /// Non-isolated `Difference` blend: lime overlaps blue with difference compositing.
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn mix_non_isolated_difference() {
     let mut params = TestParams::new("mix_non_isolated_difference", 100, 100);
     params.base_color = Some(WHITE);
@@ -87,7 +90,6 @@ fn mix_non_isolated_difference() {
 
 /// Non-isolated `SoftLight` blend.
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn mix_non_isolated_soft_light() {
     let mut params = TestParams::new("mix_non_isolated_soft_light", 100, 100);
     params.base_color = Some(WHITE);
@@ -98,7 +100,6 @@ fn mix_non_isolated_soft_light() {
 
 /// Non-isolated `ColorDodge` blend.
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn mix_non_isolated_color_dodge() {
     let mut params = TestParams::new("mix_non_isolated_color_dodge", 100, 100);
     params.base_color = Some(WHITE);
@@ -120,7 +121,6 @@ fn mix_non_isolated_color_dodge() {
 
 /// 16 × 8 grid exercising all standard `Mix` blend modes against 8 base colors.
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn mix_modes_non_gradient_test_matrix() {
     let mut scene = Scene::new();
     let vp = viewport(80.0, 160.0);

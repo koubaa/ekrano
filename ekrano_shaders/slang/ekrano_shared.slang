@@ -197,7 +197,7 @@ public static const uint DRAWTAG_FILL_RAD_GRADIENT = 0x29c;
 public static const uint DRAWTAG_FILL_SWEEP_GRADIENT = 0x254;
 public static const uint DRAWTAG_FILL_IMAGE = 0x28C;
 public static const uint DRAWTAG_BLURRED_ROUNDED_RECT = 0x2d4;
-public static const uint DRAWTAG_BEGIN_CLIP = 0x49;
+public static const uint DRAWTAG_BEGIN_CLIP = 0x4D;
 public static const uint DRAWTAG_END_CLIP = 0x09;
 /// Same scene payload size as [`DRAWTAG_END_CLIP`] plus one `u32` layer index (3 words total).
 public static const uint DRAWTAG_END_CLIP_FILTER = 0x0D;

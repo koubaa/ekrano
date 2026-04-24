@@ -45,6 +45,15 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
     uint failed = sh_previous_failed;
     if (failed != 0) {
         if (global_id.x == 0) {
+            // Diagnostic: on STAGE_FLATTEN overflow, stash the GPU-observed
+            // lines/lines_size into the unused binning/ptcl counters so the
+            // CPU retry path can compare against its own values. If the CPU
+            // thinks `config.lines_size` was 2M but the GPU reports 0, the
+            // buffer write never reached the GPU (was a bindless-slot
+            // aliasing bug). Uncomment to re-enable next time the flatten
+            // retry cascade reappears.
+            //   bump[0].binning = bump[0].lines;
+            //   bump[0].ptcl = config.lines_size;
             InterlockedOr(bump[0].failed, STAGE_FLATTEN);
         }
         return;

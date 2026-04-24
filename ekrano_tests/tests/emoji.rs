@@ -79,7 +79,7 @@ fn encode_apple_bitmap(text: &str, font_size: f32) -> Scene {
 const TEXT: &str = "✅👀🎉🤠";
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
+#[cfg_attr(skip_slow_tests, ignore)]
 fn big_colr() {
     let font_size = 48.;
     let scene = encode_noto_colr(TEXT, font_size);
@@ -95,7 +95,7 @@ fn big_colr() {
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
+#[cfg_attr(skip_slow_tests, ignore)]
 fn little_colr() {
     let font_size = 10.;
     let scene = encode_noto_colr(TEXT, font_size);
@@ -110,7 +110,7 @@ fn little_colr() {
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
+#[cfg_attr(skip_slow_tests, ignore)]
 fn colr_undef() {
     let font_size = 10.;
     // This emoji isn't in the subset we have made
@@ -127,7 +127,7 @@ fn colr_undef() {
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
+#[cfg_attr(skip_slow_tests, ignore)]
 fn big_bitmap() {
     let font_size = 48.;
     let scene = encode_noto_bitmap(TEXT, font_size);
@@ -143,7 +143,6 @@ fn big_bitmap() {
 
 #[test]
 #[cfg(target_os = "macos")]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn big_bitmap_apple() {
     let font_size = 48.;
     let scene = encode_apple_bitmap(TEXT, font_size);
@@ -158,7 +157,7 @@ fn big_bitmap_apple() {
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
+#[cfg_attr(skip_slow_tests, ignore)]
 fn little_bitmap() {
     let font_size = 10.;
     let scene = encode_noto_bitmap(TEXT, font_size);
@@ -173,7 +172,7 @@ fn little_bitmap() {
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
+#[cfg_attr(skip_slow_tests, ignore)]
 fn bitmap_undef() {
     let font_size = 10.;
     // This emoji isn't in the subset we have made

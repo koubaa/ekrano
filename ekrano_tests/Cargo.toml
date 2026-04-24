@@ -23,6 +23,8 @@ image = { workspace = true, features = ["png"] }
 
 scenes = { workspace = true }
 oxipng = { workspace = true, features = ["freestanding", "parallel"] }
+env_logger = { workspace = true }
+log = { workspace = true }
 
 # Used by integration test binaries (tests/filters.rs, tests/blend_modes.rs) but
 # not by src/lib.rs; listed as a dev-dependency to avoid the
