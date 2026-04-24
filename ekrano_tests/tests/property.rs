@@ -71,13 +71,11 @@ fn empty_scene() {
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn simple_square_test() {
     simple_square();
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn tiny_red_2x2_test() {
     let mut scene = Scene::new();
     scene.fill(
@@ -106,13 +104,11 @@ fn tiny_red_2x2_test() {
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn empty_scene_test() {
     empty_scene();
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn bgra_image() {
     let mut scene = Scene::new();
     let colors = [
@@ -156,7 +152,6 @@ fn bgra_image() {
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn premultiplied_image() {
     let mut scene = Scene::new();
     let colors = [
