@@ -250,6 +250,24 @@ jobs:
         shell: powershell
         run: echo "GOLDY_DX12_NO_DEBUG=1" >> $env:GITHUB_ENV
 
+      # Goldy exports D3D12SDKVersion=614 and D3D12SDKPath=".\\D3D12\\" so the
+      # loader picks up D3D12Core.dll from .\D3D12\ next to each test binary.
+      # This replaces the old Windows Server 2019 system d3d12.dll and exposes
+      # Enhanced Barriers (D3D12_FEATURE_D3D12_OPTIONS12) on the T4 GPU runner.
+      - name: Deploy D3D12 Agility SDK (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $nupkg = Join-Path $env:RUNNER_TEMP 'd3d12agility.nupkg'
+          Invoke-WebRequest -Uri 'https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.614.1' -OutFile $nupkg
+          $extract = Join-Path $env:RUNNER_TEMP 'd3d12agility'
+          Expand-Archive -Path $nupkg -DestinationPath $extract -Force
+          $dst = 'target\debug\deps\D3D12'
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          Copy-Item "$extract\build\native\bin\x64\D3D12Core.dll" $dst
+          Copy-Item "$extract\build\native\bin\x64\d3d12SDKLayers.dll" $dst -ErrorAction SilentlyContinue
+          Write-Host "Deployed D3D12 Agility SDK 1.614.1 to $dst"
+
       - name: cargo nextest
         # TODO: Maybe use --release; the CPU shaders are extremely slow when unoptimised
         run: cargo nextest run --workspace --locked --all-features --no-fail-fast
