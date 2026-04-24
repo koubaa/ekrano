@@ -509,8 +509,10 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "ekrano",
+ "env_logger",
  "goldy",
  "image",
+ "log",
  "nv-flip",
  "oxipng",
  "png 0.17.16",

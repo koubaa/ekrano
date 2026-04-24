@@ -23,3 +23,5 @@ image = { workspace = true, features = ["png"] }
 
 scenes = { workspace = true }
 oxipng = { workspace = true, features = ["freestanding", "parallel"] }
+env_logger = { workspace = true }
+log = { workspace = true }
