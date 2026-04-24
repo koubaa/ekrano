@@ -258,10 +258,10 @@ jobs:
         if: runner.os == 'Windows'
         shell: powershell
         run: |
-          $nupkg = Join-Path $env:RUNNER_TEMP 'd3d12agility.nupkg'
-          Invoke-WebRequest -Uri 'https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.614.1' -OutFile $nupkg
+          $zip = Join-Path $env:RUNNER_TEMP 'd3d12agility.zip'
+          Invoke-WebRequest -Uri 'https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.614.1' -OutFile $zip
           $extract = Join-Path $env:RUNNER_TEMP 'd3d12agility'
-          Expand-Archive -Path $nupkg -DestinationPath $extract -Force
+          Expand-Archive -Path $zip -DestinationPath $extract -Force
           $dst = 'target\debug\deps\D3D12'
           New-Item -ItemType Directory -Force -Path $dst | Out-Null
           Copy-Item "$extract\build\native\bin\x64\D3D12Core.dll" $dst
