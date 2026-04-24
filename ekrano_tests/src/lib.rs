@@ -31,6 +31,21 @@ use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::{Arc, Once};
 
+/// D3D12 Agility SDK opt-in: the D3D12 loader calls GetProcAddress on the
+/// running .exe to find these two symbols. CI deploys D3D12Core.dll into
+/// `target\debug\deps\D3D12\` so this path resolves correctly for nextest.
+#[cfg(target_os = "windows")]
+mod _d3d12_agility_sdk {
+    #[no_mangle]
+    #[used]
+    pub static D3D12SDKVersion: u32 = 614;
+
+    #[no_mangle]
+    #[used]
+    pub static D3D12SDKPath: *const std::ffi::c_char =
+        b".\\D3D12\\\0".as_ptr().cast::<std::ffi::c_char>();
+}
+
 use log as _;
 
 use anyhow::{Result, anyhow, bail};

@@ -231,15 +231,44 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'merge_group' }}
 
-      # Windows GPU runner is Server 2019 (build 17763 / version 1809).
-      # Goldy's DX12 backend requires Enhanced Barriers (D3D12_OPTIONS12),
-      # which needs the Agility SDK — but that requires Windows 10 1909+.
-      # Server 2019 is the only GitHub GPU image with T4 passthrough
-      # (actions/runner-images#13417), so we use Vulkan on Windows instead.
-      - name: Configure Goldy backend (Windows)
+      # DX12 + Slang need DXC from the Windows SDK on PATH.
+      - name: Add Windows SDK DXC to PATH
         if: runner.os == 'Windows'
         shell: powershell
-        run: echo "GOLDY_BACKEND=vulkan" >> $env:GITHUB_ENV
+        run: |
+          $sdkBin = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\10.0.*\x64' -Directory |
+                    Sort-Object Name | Select-Object -Last 1
+          if ($sdkBin -and (Test-Path "$($sdkBin.FullName)\dxcompiler.dll")) {
+            Write-Host "Found DXC at: $($sdkBin.FullName)"
+            "$($sdkBin.FullName)" | Out-File -Append -FilePath $env:GITHUB_PATH -Encoding utf8
+          } else {
+            Write-Host "WARNING: dxcompiler.dll not found in Windows SDK"
+          }
+
+      - name: Configure Goldy DX12 (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: echo "GOLDY_DX12_NO_DEBUG=1" >> $env:GITHUB_ENV
+
+      # Deploy D3D12 Agility SDK so Goldy can use Enhanced Barriers on
+      # Windows Server 2019 (the only GitHub GPU image with T4 passthrough).
+      - name: Deploy D3D12 Agility SDK (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'd3d12agility.zip'
+          Invoke-WebRequest -Uri 'https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.614.1' -OutFile $zip
+          $extract = Join-Path $env:RUNNER_TEMP 'd3d12agility'
+          Expand-Archive -Path $zip -DestinationPath $extract -Force
+          $src = "$extract\build\native\bin\x64"
+          Write-Host "SDK contents:" ; Get-ChildItem $src
+          $depsDir = 'target\debug\deps'
+          New-Item -ItemType Directory -Force -Path $depsDir | Out-Null
+          $d3d12Dir = Join-Path $depsDir 'D3D12'
+          New-Item -ItemType Directory -Force -Path $d3d12Dir | Out-Null
+          Copy-Item "$src\D3D12Core.dll" $d3d12Dir
+          Copy-Item "$src\d3d12SDKLayers.dll" $d3d12Dir -ErrorAction SilentlyContinue
+          Write-Host "Deployed Agility SDK 1.614.1 to $d3d12Dir"
 
       - name: cargo nextest
         # TODO: Maybe use --release; the CPU shaders are extremely slow when unoptimised
