@@ -194,7 +194,16 @@ jobs:
         run: git lfs checkout '${{ join(fromJson(env.LFS_FILES), ''' ''') }}'
         continue-on-error: true
 
+      - name: install rustup (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          Invoke-WebRequest -Uri 'https://win.rustup.rs/x86_64' -OutFile "$env:RUNNER_TEMP\rustup-init.exe"
+          & "$env:RUNNER_TEMP\rustup-init.exe" -y --default-toolchain ${{ env.RUST_STABLE_VER }} --profile minimal
+          echo "$env:USERPROFILE\.cargo\bin" >> $env:GITHUB_PATH
+
       - name: install stable toolchain
+        if: runner.os != 'Windows'
         run: |
           rustup toolchain install ${{ env.RUST_STABLE_VER }} --profile minimal
           rustup default ${{ env.RUST_STABLE_VER }}
@@ -211,7 +220,7 @@ jobs:
 
       - name: install cargo-nextest (Windows)
         if: runner.os == 'Windows'
-        shell: pwsh
+        shell: powershell
         run: |
           $tmp = Join-Path $env:RUNNER_TEMP 'nextest.zip'
           Invoke-WebRequest -Uri 'https://get.nexte.st/latest/windows' -OutFile $tmp
@@ -225,7 +234,7 @@ jobs:
       # DX12 + Slang need DXC from the Windows SDK on PATH.
       - name: Add Windows SDK DXC to PATH
         if: runner.os == 'Windows'
-        shell: pwsh
+        shell: powershell
         run: |
           $sdkBin = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\10.0.*\x64' -Directory |
                     Sort-Object Name | Select-Object -Last 1
@@ -238,7 +247,7 @@ jobs:
 
       - name: Configure Goldy DX12 (Windows)
         if: runner.os == 'Windows'
-        shell: pwsh
+        shell: powershell
         run: echo "GOLDY_DX12_NO_DEBUG=1" >> $env:GITHUB_ENV
 
       - name: cargo nextest
