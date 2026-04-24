@@ -112,6 +112,7 @@ fn little_colr() {
 
 #[test]
 #[cfg_attr(skip_gpu_tests, ignore)]
+#[cfg_attr(skip_slow_tests, ignore)]
 fn colr_undef() {
     let font_size = 10.;
     // This emoji isn't in the subset we have made
@@ -176,6 +177,7 @@ fn little_bitmap() {
 
 #[test]
 #[cfg_attr(skip_gpu_tests, ignore)]
+#[cfg_attr(skip_slow_tests, ignore)]
 fn bitmap_undef() {
     let font_size = 10.;
     // This emoji isn't in the subset we have made
