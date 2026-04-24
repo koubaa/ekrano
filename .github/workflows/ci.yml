@@ -217,6 +217,15 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'merge_group' }}
 
+      # The Data Science Windows Server 2019 image has WSL present but no distro
+      # installed. Without this, `bash` resolves to C:\Windows\system32\bash.EXE
+      # (WSL) rather than Git's bash, breaking any action that shells out to bash
+      # (e.g. dtolnay/rust-toolchain).
+      - name: Prefer Git bash over WSL bash (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: echo "C:\Program Files\Git\bin" >> $env:GITHUB_PATH
+
       # DX12 + Slang need DXC from the Windows SDK on PATH.
       - name: Add Windows SDK DXC to PATH
         if: runner.os == 'Windows'
