@@ -14,7 +14,6 @@ use scenes::SimpleText;
 
 /// Test created from <https://github.com/linebender/vello/issues/616>
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn rounded_rectangle_watertight() {
     let mut scene = Scene::new();
     let rect = RoundedRect::new(60.0, 10.0, 80.0, 30.0, 10.0);
@@ -31,7 +30,6 @@ const DATA_IMAGE_PNG: &[u8] = include_bytes!("../snapshots/smoke/data_image_roun
 
 /// Test for <https://github.com/linebender/vello/issues/972>
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn test_data_image_roundtrip_extend_pad() {
     let mut scene = Scene::new();
     let mut images = ImageCache::new();
@@ -54,7 +52,6 @@ fn test_data_image_roundtrip_extend_pad() {
 
 /// Test created from <https://github.com/linebender/vello/issues/662>
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 fn stroke_width_zero() {
     let mut scene = Scene::new();
     let stroke = Stroke::new(0.0);
@@ -69,7 +66,6 @@ fn stroke_width_zero() {
 }
 
 #[test]
-#[cfg_attr(skip_gpu_tests, ignore)]
 #[expect(clippy::cast_possible_truncation, reason = "Test code")]
 fn text_stroke_width_zero() {
     let font_size = 12.;

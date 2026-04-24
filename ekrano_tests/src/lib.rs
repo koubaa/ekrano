@@ -29,7 +29,9 @@
 use std::env;
 use std::io::ErrorKind;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Once};
+
+use log as _;
 
 use anyhow::{Result, anyhow, bail};
 use ekrano::kurbo::{Affine, Vec2};
@@ -90,6 +92,11 @@ pub fn render_then_debug(scene: &Scene, params: &TestParams) -> Result<ImageData
 }
 
 pub fn get_scene_image(params: &TestParams, scene: &Scene) -> Result<ImageData, anyhow::Error> {
+    static INIT_LOGGER: Once = Once::new();
+    INIT_LOGGER.call_once(|| {
+        env_logger::init();
+    });
+
     use ekrano::{GoldyRenderer, RenderParams};
     use goldy::{DeviceType, Instance};
 
