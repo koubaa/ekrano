@@ -8,6 +8,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use anyhow::{Result, bail};
 use ekrano::{
     Scene,
     peniko::{ImageData, ImageFormat},
@@ -22,7 +23,7 @@ use crate::{
 
 /// Composite RGBA data over the test's `base_color` (defaulting to black).
 ///
-/// vello_sparse references are rendered onto an opaque-white surface.
+/// `vello_sparse` references are rendered onto an opaque-white surface.
 /// Setting `params.base_color = Some(WHITE)` for those tests makes both the
 /// reference and rendered images composite over white, so the white
 /// "background" regions match each other.
@@ -31,7 +32,7 @@ fn composite_bg(
     width: u32,
     height: u32,
     rgba: &[u8],
-) -> anyhow::Result<image::RgbImage> {
+) -> Result<image::RgbImage> {
     if let Some(color) = params.base_color {
         let u = color.premultiply().to_rgba8().to_u32();
         let r = ((u >> 24) & 0xFF) as u8;
@@ -42,8 +43,6 @@ fn composite_bg(
         rgba_straight_composite_black_to_rgb(width, height, rgba)
     }
 }
-use anyhow::{Result, bail};
-
 fn current_dir(directory: SnapshotDirectory) -> PathBuf {
     let mut path_buf = Path::new(env!("CARGO_MANIFEST_DIR")).join("current");
     match directory {
@@ -262,8 +261,7 @@ pub fn snapshot_test_image(
             }
 
             let rgba = contents.into_rgba8();
-            let result = composite_bg(params, rgba.width(), rgba.height(), rgba.as_raw())?;
-            result
+            composite_bg(params, rgba.width(), rgba.height(), rgba.as_raw())?
         }
         Err(ImageError::IoError(e)) if e.kind() == ErrorKind::NotFound => {
             if env_var_relates_to("EKRANO_TEST_CREATE", &params.name) {

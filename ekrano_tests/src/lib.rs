@@ -25,6 +25,11 @@
     clippy::print_stdout,
     clippy::allow_attributes_without_reason
 )]
+// `ekrano_encoding` is a dev-dependency for integration tests (e.g. `tests/filters.rs`), not for `src/`.
+#![allow(
+    unused_crate_dependencies,
+    reason = "dev-dependency only referenced from integration tests"
+)]
 
 use std::env;
 use std::io::ErrorKind;
@@ -47,7 +52,7 @@ mod snapshot;
 ///
 /// With `bg = [0, 0, 0]` this is the traditional "composite over black" used by
 /// tests that compare against Goldy-generated references.  Passing `[255, 255, 255]`
-/// is appropriate when comparing against vello_sparse references, which are
+/// is appropriate when comparing against `vello_sparse` references, which are
 /// rendered onto an opaque-white surface.
 pub(crate) fn rgba_straight_composite_to_rgb(
     width: u32,

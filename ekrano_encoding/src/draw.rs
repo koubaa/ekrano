@@ -39,8 +39,8 @@ impl DrawTag {
     /// Begin layer/clip.
     ///
     /// Scene payload: [`DrawBeginClip`] words + a `u32` "filter layer index" slot that's
-    /// populated by [`Encoding::encode_end_clip`] when the layer has a filter. The extra
-    /// word exists to work around [`clip_leaf.slang`]'s scene-offset rewrite: it copies
+    /// populated by [`Encoding::encode_end_clip`](crate::encoding::Encoding::encode_end_clip) when the layer has a filter. The extra
+    /// word exists to work around `clip_leaf.slang`'s scene-offset rewrite: it copies
     /// `BEGIN_CLIP`'s `scene_offset` to the matching `END_CLIP[_FILTER]`'s monoid, so any
     /// data `END_CLIP_FILTER` needs at coarse time (`scene[dd + 2]`) has to live in the
     /// matching `BEGIN_CLIP`'s scene slot. `(tag >> 2) & 7 == 3`.

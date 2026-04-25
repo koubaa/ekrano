@@ -7,13 +7,13 @@
 //! `vello_cpu::Renderer` API to ekrano's `Scene` API.
 //! Test names are shared with `vello_sparse_tests`, but the reference PNGs in
 //! `ekrano_tests/snapshots/` are **ekrano-specific** baselines rather than the
-//! vello_sparse golden images — the two renderers accumulate small numerical
+//! `vello_sparse` golden images — the two renderers accumulate small numerical
 //! rounding differences (GPU vs CPU, different AA approaches, premul rounding)
-//! that make direct reuse impractical.  Divergence from vello_sparse is expected
+//! that make direct reuse impractical.  Divergence from `vello_sparse` is expected
 //! and acceptable; what matters is consistency across ekrano builds.
 //!
 //! ## Background colour
-//! vello_sparse initialises its render surface to opaque **white** before each
+//! `vello_sparse` initialises its render surface to opaque **white** before each
 //! test; the filter shaders therefore operate on white-backed content.  We
 //! replicate this via two complementary mechanisms:
 //!
@@ -295,7 +295,7 @@ fn filter_gaussian_blur_edge_mode_mirror() {
 ///
 /// The filter layer's clip is `drawn_rect`, which tells `push_filter_layer` to
 /// record those bounds in `FilterPrimitive::Flood::clip_rect`.  The shader then
-/// restricts the flood to that rect, matching vello_sparse's auto-bounded
+/// restricts the flood to that rect, matching `vello_sparse`'s auto-bounded
 /// per-layer-pixmap semantics.
 #[test]
 fn filter_flood() {

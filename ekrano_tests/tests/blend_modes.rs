@@ -7,8 +7,8 @@
 //! `vello_cpu::Renderer` API to ekrano's `Scene` API.
 //! Test names are shared with `vello_sparse_tests`, but the reference PNGs in
 //! `ekrano_tests/snapshots/` are **ekrano-specific** baselines rather than the
-//! vello_sparse golden images — small numerical rounding differences between the
-//! GPU and CPU paths make direct reuse impractical.  Divergence from vello_sparse
+//! `vello_sparse` golden images — small numerical rounding differences between the
+//! GPU and CPU paths make direct reuse impractical.  Divergence from `vello_sparse`
 //! is expected and acceptable; what matters is consistency across ekrano builds.
 //!
 //! ## Top-level draws
