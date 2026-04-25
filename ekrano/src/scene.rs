@@ -270,7 +270,10 @@ impl Scene {
                 let y0 = bb.y0.max(0.0) as u32;
                 let x1 = bb.x1.max(0.0) as u32;
                 let y1 = bb.y1.max(0.0) as u32;
-                ekrano_encoding::FilterPrimitive::Flood { color, clip_rect: [x0, y0, x1, y1] }
+                ekrano_encoding::FilterPrimitive::Flood {
+                    color,
+                    clip_rect: [x0, y0, x1, y1],
+                }
             }
             other => other,
         };

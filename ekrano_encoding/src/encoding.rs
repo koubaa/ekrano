@@ -564,8 +564,7 @@ impl Encoding {
                 pushed_layer_index = layer_index;
                 // This layer is nested if any still-open clip in the stack is also a filter layer.
                 // True when at least one inner filter layer was encoded while this clip was open.
-                let is_nested =
-                    self.layer_filter_effects.len() as u32 > filter_count_at_begin;
+                let is_nested = self.layer_filter_effects.len() as u32 > filter_count_at_begin;
                 self.layer_filter_effects.push(LayerFilterEffect {
                     primitive: f,
                     layer_blend: parameters.blend_mode,

@@ -159,8 +159,20 @@ fn mix_modes_non_gradient_test_matrix() {
 
     // Dark background layer — ekrano requires fills to be inside a layer,
     // so we give the background its own push/pop.
-    scene.push_layer(Fill::NonZero, BlendMode::new(Mix::Normal, Compose::SrcOver), 1.0, Affine::IDENTITY, &vp);
-    scene.fill(Fill::NonZero, Affine::IDENTITY, Color::from_rgb8(30, 30, 30), None, &vp);
+    scene.push_layer(
+        Fill::NonZero,
+        BlendMode::new(Mix::Normal, Compose::SrcOver),
+        1.0,
+        Affine::IDENTITY,
+        &vp,
+    );
+    scene.fill(
+        Fill::NonZero,
+        Affine::IDENTITY,
+        Color::from_rgb8(30, 30, 30),
+        None,
+        &vp,
+    );
     scene.pop_layer();
 
     for (row, mix_mode) in mix_modes.iter().enumerate() {
@@ -179,7 +191,13 @@ fn mix_modes_non_gradient_test_matrix() {
 
             // Destination (base color) in its own layer, so fills are rendered.
             // Direct scene.fill() calls outside any layer are not rendered by ekrano.
-            scene.push_layer(Fill::NonZero, BlendMode::new(Mix::Normal, Compose::SrcOver), 1.0, Affine::IDENTITY, &cell);
+            scene.push_layer(
+                Fill::NonZero,
+                BlendMode::new(Mix::Normal, Compose::SrcOver),
+                1.0,
+                Affine::IDENTITY,
+                &cell,
+            );
             scene.fill(Fill::NonZero, Affine::IDENTITY, *base_color, None, &cell);
             scene.pop_layer();
 
@@ -191,8 +209,20 @@ fn mix_modes_non_gradient_test_matrix() {
                 Affine::IDENTITY,
                 &cell,
             );
-            scene.fill(Fill::NonZero, Affine::IDENTITY, ORANGE.with_alpha(0.7), None, &blend_rect);
-            scene.fill(Fill::NonZero, Affine::IDENTITY, Color::WHITE.with_alpha(0.5), None, &white_rect);
+            scene.fill(
+                Fill::NonZero,
+                Affine::IDENTITY,
+                ORANGE.with_alpha(0.7),
+                None,
+                &blend_rect,
+            );
+            scene.fill(
+                Fill::NonZero,
+                Affine::IDENTITY,
+                Color::WHITE.with_alpha(0.5),
+                None,
+                &white_rect,
+            );
             scene.pop_layer();
         }
     }

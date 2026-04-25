@@ -16,9 +16,8 @@ use image::ImageError;
 use nv_flip::FlipPool;
 
 use crate::{
-    TestParams, env_var_relates_to, render_then_debug,
-    rgba_straight_composite_black_to_rgb, rgba_straight_composite_to_rgb,
-    write_png_to_file,
+    TestParams, env_var_relates_to, render_then_debug, rgba_straight_composite_black_to_rgb,
+    rgba_straight_composite_to_rgb, write_png_to_file,
 };
 
 /// Composite RGBA data over the test's `base_color` (defaulting to black).
@@ -37,7 +36,7 @@ fn composite_bg(
         let u = color.premultiply().to_rgba8().to_u32();
         let r = ((u >> 24) & 0xFF) as u8;
         let g = ((u >> 16) & 0xFF) as u8;
-        let b = ((u >>  8) & 0xFF) as u8;
+        let b = ((u >> 8) & 0xFF) as u8;
         rgba_straight_composite_to_rgb(width, height, rgba, [r, g, b])
     } else {
         rgba_straight_composite_black_to_rgb(width, height, rgba)
@@ -262,9 +261,9 @@ pub fn snapshot_test_image(
                 );
             }
 
-        let rgba = contents.into_rgba8();
-        let result = composite_bg(params, rgba.width(), rgba.height(), rgba.as_raw())?;
-        result
+            let rgba = contents.into_rgba8();
+            let result = composite_bg(params, rgba.width(), rgba.height(), rgba.as_raw())?;
+            result
         }
         Err(ImageError::IoError(e)) if e.kind() == ErrorKind::NotFound => {
             if env_var_relates_to("EKRANO_TEST_CREATE", &params.name) {

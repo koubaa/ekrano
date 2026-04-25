@@ -828,10 +828,7 @@ impl Render {
 
         let width_px = fine.out_image.width;
         let height_px = fine.out_image.height;
-        if !encoding.layer_filter_effects.is_empty()
-            && width_px > 0
-            && height_px > 0
-        {
+        if !encoding.layer_filter_effects.is_empty() && width_px > 0 && height_px > 0 {
             if let Some(fs) = shaders.filter_pass {
                 let wg = (width_px.div_ceil(16), height_px.div_ceil(16), 1);
                 let u_clear = FilterUniform::clear_transparent(width_px, height_px);
@@ -1055,7 +1052,11 @@ pub fn record_filter_effects(
         let u_comp = FilterUniform::composite_filtered_layer(width, height, effect.layer_blend);
         filter_dispatch(recording, shader, &u_comp, wg, ft, out_image);
     }
-    for effect in encoding.layer_filter_effects.iter().filter(|e| !e.is_nested) {
+    for effect in encoding
+        .layer_filter_effects
+        .iter()
+        .filter(|e| !e.is_nested)
+    {
         let idx = (effect.layer_index as usize).min(3);
         let ft = filter_layers[idx];
         let u_comp = FilterUniform::composite_filtered_layer(width, height, effect.layer_blend);

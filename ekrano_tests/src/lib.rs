@@ -166,7 +166,8 @@ pub fn get_scene_image(params: &TestParams, scene: &Scene) -> Result<ImageData, 
     let width = params.width;
     let height = params.height;
     let render_params = RenderParams {
-        base_color: params.render_clear_color
+        base_color: params
+            .render_clear_color
             .or(params.base_color)
             .unwrap_or(palette::css::BLACK),
         width,
