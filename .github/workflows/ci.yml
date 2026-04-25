@@ -230,6 +230,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.event_name != 'merge_group' }}
+          cache-on-failure: true
 
       # DX12 + Slang need DXC from the Windows SDK on PATH.
       - name: Add Windows SDK DXC to PATH
