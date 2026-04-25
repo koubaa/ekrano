@@ -238,17 +238,6 @@ fn coarse_main(
                     let y0 = dy.clamp(0, N_TILE_Y as i32);
                     let x1 = (path.bbox[2] as i32 - bin_tile_x as i32).clamp(0, N_TILE_X as i32);
                     let y1 = (path.bbox[3] as i32 - bin_tile_y as i32).clamp(0, N_TILE_Y as i32);
-                    // #region agent log af15c3 - H1: confirm SET_BLEND_MODE gets 0 tiles in CPU coarse
-                    if DrawTag(tag) == DrawTag::SET_BLEND_MODE && bin == 0 {
-                        use std::io::Write as _;
-                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("C:\\Dev\\kob3\\debug-af15c3.log") {
-                            let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
-                            let tile_count = (x1 - x0) * (y1 - y0);
-                            let _ = writeln!(f, r#"{{"sessionId":"af15c3","runId":"pre-fix","hypothesisId":"H1","timestamp":{ts},"location":"cpu/coarse.rs:bin_build","message":"SET_BLEND_MODE tile_count in bin 0","data":{{"drawobj_ix":{},"path_ix":{},"bbox":[{},{},{},{}],"tile_count":{}}}}}"#,
-                                drawobj_ix, path_ix, path.bbox[0], path.bbox[1], path.bbox[2], path.bbox[3], tile_count);
-                        }
-                    }
-                    // #endregion
                     for y in y0..y1 {
                         for x in x0..x1 {
                             compacted[(y * N_TILE_X as i32 + x) as usize].push(drawobj_ix);

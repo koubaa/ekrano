@@ -706,7 +706,9 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
                 // Pixel is outside the layer path — background passes through regardless
                 // of blend mode. This is required for Compose::Clear and other "source-only"
                 // modes that would otherwise overwrite the background even with zero coverage.
-                if (area[i] == 0.0) { rgba[i] = bg; continue; }
+                // Use a threshold rather than exact zero to handle floating-point imprecision
+                // in the path rasterizer across GPU backends (e.g. Metal vs DX12/Vulkan).
+                if (area[i] < (1.0 / 510.0)) { rgba[i] = bg; continue; }
                 float4 fg = rgba[i] * area[i] * mask_w[i] * end_clip.alpha;
                 if (end_clip.blend == LUMINANCE_MASK_LAYER) {
                     float luminance = clamp(svg_lum(unpremultiply(fg)) * fg.a, 0.0, 1.0);
@@ -737,7 +739,7 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
                     bg_rgba = blend_spill[blend_offset + blend_in_scratch * TILE_WIDTH * TILE_HEIGHT + local_tile_ix + i];
                 }
                 float4 bg = unpack4x8unorm(bg_rgba);
-                if (area[i] == 0.0) { rgba[i] = bg; continue; }
+                if (area[i] < (1.0 / 510.0)) { rgba[i] = bg; continue; }
                 float4 fg = rgba[i] * area[i] * mask_w[i] * end_clip.alpha;
                 uint2 coords = uint2(uint(xy.x) + i, uint(xy.y));
                 if (coords.x < config.target_width && coords.y < config.target_height) {

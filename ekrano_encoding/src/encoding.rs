@@ -389,16 +389,6 @@ impl Encoding {
     /// This inserts a draw object into the stream; it does not draw geometry by itself.
     /// Call before fills/strokes that should use this mode. Default is normal `SrcOver`.
     pub fn encode_set_blend_mode(&mut self, blend: BlendMode) {
-        // #region agent log af15c3 - H1: SET_BLEND_MODE encoded with dummy PATH, confirm path_ix offset
-        {
-            use std::io::Write as _;
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("C:\\Dev\\kob3\\debug-af15c3.log") {
-                let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
-                let _ = writeln!(f, r#"{{"sessionId":"af15c3","runId":"pre-fix","hypothesisId":"H1","timestamp":{ts},"location":"encoding.rs:encode_set_blend_mode","message":"SET_BLEND_MODE encoded, about to push dummy PathTag::PATH","data":{{"n_paths_before":{},"draw_tags_len_before":{}}}}}"#,
-                    self.n_paths, self.draw_tags.len());
-            }
-        }
-        // #endregion
         self.draw_tags.push(DrawTag::SET_BLEND_MODE);
         let packed = ((blend.mix as u32) << 8) | blend.compose as u32;
         self.draw_data.push(packed);

@@ -153,17 +153,6 @@ pub fn resolve_solid_paths_only(encoding: &Encoding, packed: &mut Vec<u8>) -> La
     layout.style_base = size_to_words(data.len());
     data.extend_from_slice(bytemuck::cast_slice(&encoding.styles));
     layout.n_draw_objects = layout.n_paths;
-    // #region agent log af15c3 - H1: log draw_tags with SET_BLEND_MODE entries to confirm zero-bbox path scenario
-    {
-        use std::io::Write as _;
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("C:\\Dev\\kob3\\debug-af15c3.log") {
-            let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
-            let n_set_blend = encoding.draw_tags.iter().filter(|&&t| t == DrawTag::SET_BLEND_MODE).count();
-            let _ = writeln!(f, r#"{{"sessionId":"af15c3","runId":"pre-fix","hypothesisId":"H1","timestamp":{ts},"location":"resolve.rs:pack_scene","message":"scene packed","data":{{"n_draw_objects":{},"n_paths":{},"n_set_blend_mode":{}}}}}"#,
-                layout.n_draw_objects, layout.n_paths, n_set_blend);
-        }
-    }
-    // #endregion
     assert_eq!(buffer_size, data.len());
     layout
 }
