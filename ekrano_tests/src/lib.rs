@@ -36,14 +36,17 @@ use std::sync::{Arc, Once};
 /// `target\debug\deps\D3D12\` so this path resolves correctly for nextest.
 #[cfg(target_os = "windows")]
 mod _d3d12_agility_sdk {
+    struct SyncPtr(*const std::ffi::c_char);
+    unsafe impl Sync for SyncPtr {}
+
     #[no_mangle]
     #[used]
     pub static D3D12SDKVersion: u32 = 614;
 
     #[no_mangle]
     #[used]
-    pub static D3D12SDKPath: *const std::ffi::c_char =
-        b".\\D3D12\\\0".as_ptr().cast::<std::ffi::c_char>();
+    pub static D3D12SDKPath: SyncPtr =
+        SyncPtr(b".\\D3D12\\\0".as_ptr().cast::<std::ffi::c_char>());
 }
 
 use log as _;
