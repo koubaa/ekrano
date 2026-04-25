@@ -56,10 +56,14 @@ pub struct Encoding {
     pending_layer_filter: Option<FilterPrimitive>,
     /// Stack parallel to open clips: `Some` when the matching `BEGIN_CLIP` had a pending filter.
     clip_filter_stack: Vec<Option<FilterPrimitive>>,
-    /// Parallel to open clips. Stores `(parameters, layer_idx_slot)` for each open
-    /// `BEGIN_CLIP`; `layer_idx_slot` is the `u32` index into [`Self::draw_data`] where
-    /// `encode_end_clip` backfills the matching filter's layer index (zeroed until then).
-    begin_clip_stack: Vec<(DrawBeginClip, usize)>,
+    /// Parallel to open clips. Stores `(parameters, layer_idx_slot, filter_count_at_begin)`.
+    ///
+    /// - `parameters` / `layer_idx_slot`: the [`DrawBeginClip`] and the index into
+    ///   [`Self::draw_data`] where `encode_end_clip` backfills the filter's layer index.
+    /// - `filter_count_at_begin`: snapshot of `layer_filter_effects.len()` taken when the
+    ///   matching `BEGIN_CLIP` was encoded. Used by `encode_end_clip` to detect whether any
+    ///   inner filter layers were encoded while this clip was open (i.e. `is_nested`).
+    begin_clip_stack: Vec<(DrawBeginClip, usize, u32)>,
     /// Filters recorded when a filtered layer ends (`encode_end_clip`).
     ///
     /// Applied after fine: each entry is filtered in isolation, then composited back (see `ekrano`).
@@ -541,7 +545,9 @@ impl Encoding {
         // why the layer index lives on `BEGIN_CLIP` rather than `END_CLIP_FILTER`.
         let layer_idx_slot = self.draw_data.len();
         self.draw_data.push(0);
-        self.begin_clip_stack.push((parameters, layer_idx_slot));
+        let filter_count_at_begin = self.layer_filter_effects.len() as u32;
+        self.begin_clip_stack
+            .push((parameters, layer_idx_slot, filter_count_at_begin));
         self.n_clips += 1;
         self.n_open_clips += 1;
     }
@@ -555,7 +561,7 @@ impl Encoding {
     pub fn encode_end_clip(&mut self) {
         if self.n_open_clips > 0 {
             let filter_for_layer = self.clip_filter_stack.pop();
-            let (parameters, layer_idx_slot) = self
+            let (parameters, layer_idx_slot, filter_count_at_begin) = self
                 .begin_clip_stack
                 .pop()
                 .expect("encode_end_clip without matching encode_begin_clip");
@@ -566,11 +572,16 @@ impl Encoding {
             if let Some(f) = filter_for_layer.flatten() {
                 let layer_index = self.layer_filter_effects.len() as u32;
                 pushed_layer_index = layer_index;
+                // This layer is nested if any still-open clip in the stack is also a filter layer.
+                // True when at least one inner filter layer was encoded while this clip was open.
+                let is_nested =
+                    self.layer_filter_effects.len() as u32 > filter_count_at_begin;
                 self.layer_filter_effects.push(LayerFilterEffect {
                     primitive: f,
                     layer_blend: parameters.blend_mode,
                     layer_alpha: parameters.alpha,
                     layer_index,
+                    is_nested,
                 });
             }
             // Backfill the `BEGIN_CLIP`'s reserved `layer_idx` slot. `coarse.slang`

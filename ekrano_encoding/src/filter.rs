@@ -61,6 +61,12 @@ pub struct LayerFilterEffect {
     pub layer_alpha: f32,
     /// Index into per-layer filter textures (0..N-1), assigned when the layer ends.
     pub layer_index: u32,
+    /// True when this filter layer is enclosed by another filter layer.
+    ///
+    /// For nested drop-shadow layers the shadow must be rendered without including the
+    /// source foreground pixels (`fg`) in the output — the inner layer's filtered result
+    /// is composited on top separately. Non-nested (standalone) filters are unaffected.
+    pub is_nested: bool,
 }
 
 /// GPU uniform for simple filter compute passes (matches `filter_*.slang` `FilterUniform`).
@@ -169,6 +175,32 @@ impl FilterUniform {
             height,
             edge_mode: edge.as_u32(),
             pass_kind: 4,
+            std_dev,
+            dx,
+            dy,
+            color: shadow_rgba,
+            _pad: 0,
+        }
+    }
+
+    /// Drop shadow for a **nested** filter layer: emits only the shadow pixels (no foreground).
+    ///
+    /// Used when the drop-shadow layer wraps an inner filter layer whose filtered content is
+    /// composited separately on top, so that the inner layer's soft/blurred edges are preserved.
+    pub fn drop_shadow_nested(
+        width: u32,
+        height: u32,
+        dx: f32,
+        dy: f32,
+        std_dev: f32,
+        shadow_rgba: u32,
+        edge: FilterEdgeMode,
+    ) -> Self {
+        Self {
+            width,
+            height,
+            edge_mode: edge.as_u32(),
+            pass_kind: 8,
             std_dev,
             dx,
             dy,

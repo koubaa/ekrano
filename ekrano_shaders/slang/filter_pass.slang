@@ -122,9 +122,10 @@ void cs_main(uint3 gid : SV_DispatchThreadID) {
     }
 
     if (u.pass_kind == 2u) {
-        // offset
+        // Offset: pull from src[p - off] so that content at (x,y) moves to (x+dx, y+dy)
+        // (matches CPU push semantics: positive dx shifts right, positive dy shifts down).
         int2 off = int2(int(floor(u.dx + 0.5)), int(floor(u.dy + 0.5)));
-        float4 c = sample_tex(src, p + off, dim, u.edge_mode);
+        float4 c = sample_tex(src, p - off, dim, u.edge_mode);
         dst[gid.xy] = c;
         return;
     }
@@ -152,9 +153,10 @@ void cs_main(uint3 gid : SV_DispatchThreadID) {
     }
 
     if (u.pass_kind == 4u) {
-        // drop shadow: blur alpha of offset source, colorize, composite under current pixel
+        // drop shadow: blur alpha of offset source, colorize, composite under current pixel.
+        // Use 3-sigma radius to match vello-sparse's reference shadow kernel.
         float std_dev = max(u.std_dev, 1e-4);
-        int r = int(min(32.0, ceil(2.5 * std_dev)));
+        int r = int(min(32.0, ceil(3.0 * std_dev)));
         int2 off = int2(int(floor(u.dx + 0.5)), int(floor(u.dy + 0.5)));
         int2 q = p - off;
         float a_acc = 0.0;
@@ -172,7 +174,7 @@ void cs_main(uint3 gid : SV_DispatchThreadID) {
         float4 sh = unpack4x8unorm(u.color);
         sh *= blur_a;
         float4 fg = src[uint2(p)];
-        // premul over: out = shadow + (1 - shadow.a) * fg ... actually shadow under fg: out = fg + (1-fg.a)*shadow
+        // premul over: shadow under fg: out = fg + (1-fg.a)*shadow
         dst[gid.xy] = fg + (1.0 - fg.a) * sh;
         return;
     }
@@ -190,6 +192,33 @@ void cs_main(uint3 gid : SV_DispatchThreadID) {
 
     if (u.pass_kind == 7u) {
         dst[gid.xy] = float4(0, 0, 0, 0);
+        return;
+    }
+
+    if (u.pass_kind == 8u) {
+        // Drop shadow for a nested layer: produce ONLY the shadow (no foreground pixel).
+        // The inner layer's filtered content is composited on top separately, so including fg
+        // here would overwrite blurred edges produced by the inner filter.
+        // Use 3-sigma radius to match vello-sparse's reference shadow kernel.
+        float std_dev = max(u.std_dev, 1e-4);
+        int r = int(min(32.0, ceil(3.0 * std_dev)));
+        int2 off = int2(int(floor(u.dx + 0.5)), int(floor(u.dy + 0.5)));
+        int2 q = p - off;
+        float a_acc = 0.0;
+        float wsum = 0.0;
+        for (int i = -r; i <= r; i++) {
+            for (int j = -r; j <= r; j++) {
+                float w = gaussian_weight(i, std_dev) * gaussian_weight(j, std_dev);
+                int2 sp = q + int2(i, j);
+                float4 sc = sample_tex(src, sp, dim, u.edge_mode);
+                a_acc += sc.a * w;
+                wsum += w;
+            }
+        }
+        float blur_a = wsum > 0.0 ? a_acc / wsum : 0.0;
+        float4 sh = unpack4x8unorm(u.color);
+        sh *= blur_a;
+        dst[gid.xy] = sh;
         return;
     }
 

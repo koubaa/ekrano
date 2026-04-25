@@ -381,6 +381,11 @@ void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
                     // `scene[dd + 2]` for the filter layer index, backfilled in
                     // `encode_end_clip`. 0 means "no filter" (should not hit this branch).
                     uint layer_idx = scene[dd + 2];
+                    // Pack "is nested inside another filter layer" into the top bit.
+                    // Fine uses this to composite the layer result back into rgba so that
+                    // the enclosing filter layer can capture it in its own snapshot.
+                    if (render_blend_depth > 1u)
+                        layer_idx |= 0x80000000u;
                     write_end_clip_filter(end_clip, layer_idx, cmd_offset, cmd_limit, ptcl, bump, config);
                     render_blend_depth--;
                 } else if (drawtag == DRAWTAG_SET_BLEND_MODE) {

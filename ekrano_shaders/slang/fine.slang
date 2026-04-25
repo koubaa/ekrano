@@ -703,9 +703,12 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
                     bg_rgba = blend_spill[blend_offset + blend_in_scratch * TILE_WIDTH * TILE_HEIGHT + local_tile_ix + i];
                 }
                 float4 bg = unpack4x8unorm(bg_rgba);
+                // Pixel is outside the layer path — background passes through regardless
+                // of blend mode. This is required for Compose::Clear and other "source-only"
+                // modes that would otherwise overwrite the background even with zero coverage.
+                if (area[i] == 0.0) { rgba[i] = bg; continue; }
                 float4 fg = rgba[i] * area[i] * mask_w[i] * end_clip.alpha;
                 if (end_clip.blend == LUMINANCE_MASK_LAYER) {
-                    if (area[i] == 0.0) { rgba[i] = bg; continue; }
                     float luminance = clamp(svg_lum(unpremultiply(fg)) * fg.a, 0.0, 1.0);
                     rgba[i] = bg * luminance;
                 } else {
@@ -717,7 +720,12 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
             CmdEndClip end_clip;
             end_clip.blend = ptcl[cmd_ix + 1];
             end_clip.alpha = asfloat(ptcl[cmd_ix + 2]);
-            uint layer_idx = ptcl[cmd_ix + 3];
+            uint layer_idx_raw = ptcl[cmd_ix + 3];
+            // Top bit signals that this filter layer is nested inside another filter layer.
+            // When set, composite the layer result back into rgba so that the enclosing
+            // filter layer can capture the accumulated content in its own snapshot.
+            bool is_nested = (layer_idx_raw & 0x80000000u) != 0u;
+            uint layer_idx = layer_idx_raw & 0x7FFFFFFFu;
             clip_depth -= 1;
             for (uint i = 0; i < 4; i++) {
                 uint bg_rgba;
@@ -729,6 +737,7 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
                     bg_rgba = blend_spill[blend_offset + blend_in_scratch * TILE_WIDTH * TILE_HEIGHT + local_tile_ix + i];
                 }
                 float4 bg = unpack4x8unorm(bg_rgba);
+                if (area[i] == 0.0) { rgba[i] = bg; continue; }
                 float4 fg = rgba[i] * area[i] * mask_w[i] * end_clip.alpha;
                 uint2 coords = uint2(uint(xy.x) + i, uint(xy.y));
                 if (coords.x < config.target_width && coords.y < config.target_height) {
@@ -741,7 +750,13 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
                     else
                         filter_tex3[coords] = fg;
                 }
-                rgba[i] = bg;
+                // For nested layers, composite fg back into rgba so the enclosing filter
+                // layer can see this layer's contribution in its own snapshot capture.
+                // For top-level filter layers, restore the saved background as usual.
+                if (is_nested)
+                    rgba[i] = blend_mix_compose(bg, fg, end_clip.blend);
+                else
+                    rgba[i] = bg;
             }
             cmd_ix += 4;
         } else if (tag == CMD_JUMP) {

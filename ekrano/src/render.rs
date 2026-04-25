@@ -970,6 +970,7 @@ pub fn record_filter_effects(
     let wg = (width.div_ceil(16), height.div_ceil(16), 1);
     let scratch = ImageProxy::new(width, height, ImageFormat::Rgba8);
 
+    // Phase 1 (inner → outer): run each filter, leaving the result in `ft = filter_layers[idx]`.
     for effect in &encoding.layer_filter_effects {
         let idx = (effect.layer_index as usize).min(3);
         let ft = filter_layers[idx];
@@ -1000,20 +1001,63 @@ pub fn record_filter_effects(
                 color,
                 edge_mode,
             } => {
-                let u = FilterUniform::drop_shadow(
-                    width,
-                    height,
-                    *dx,
-                    *dy,
-                    *std_dev,
-                    premul_srgb_u32(*color),
-                    *edge_mode,
-                );
+                let u = if effect.is_nested {
+                    // For nested drop-shadow layers, compute the shadow from the inner layer's
+                    // *filtered* (e.g. blurred) result rather than from the raw fine capture.
+                    // This matches vello-sparse, which derives the shadow alpha from the blurred
+                    // content; it also prevents the outer composite from overwriting soft edges
+                    // produced by the inner filter. The inner layer lives at index `idx - 1`.
+                    let inner_idx = (effect.layer_index as usize).saturating_sub(1).min(3);
+                    let inner_ft = filter_layers[inner_idx];
+                    let u = FilterUniform::drop_shadow_nested(
+                        width,
+                        height,
+                        *dx,
+                        *dy,
+                        *std_dev,
+                        premul_srgb_u32(*color),
+                        *edge_mode,
+                    );
+                    filter_dispatch(recording, shader, &u, wg, inner_ft, scratch);
+                    let u_copy = FilterUniform::copy(width, height);
+                    filter_dispatch(recording, shader, &u_copy, wg, scratch, ft);
+                    // Shadow is already in `ft`; skip the redundant dispatch below.
+                    continue;
+                } else {
+                    FilterUniform::drop_shadow(
+                        width,
+                        height,
+                        *dx,
+                        *dy,
+                        *std_dev,
+                        premul_srgb_u32(*color),
+                        *edge_mode,
+                    )
+                };
                 filter_dispatch(recording, shader, &u, wg, ft, scratch);
                 let u_copy = FilterUniform::copy(width, height);
                 filter_dispatch(recording, shader, &u_copy, wg, scratch, ft);
             }
         }
+    }
+
+    // Phase 2: composite each filtered layer onto out_image in two rounds.
+    //
+    // Round A — `is_nested=true` (outer wrappers): these layers *enclose* inner filter layers and
+    // their results must land **underneath** the inner content. Composited first.
+    //
+    // Round B — `is_nested=false` (inner / standalone): composited afterwards, on top.
+    // Sequential (non-nested) peer layers fall here and keep their natural forward order so that
+    // the later-encoded layer composites on top of the earlier one, as authored.
+    for effect in encoding.layer_filter_effects.iter().filter(|e| e.is_nested) {
+        let idx = (effect.layer_index as usize).min(3);
+        let ft = filter_layers[idx];
+        let u_comp = FilterUniform::composite_filtered_layer(width, height, effect.layer_blend);
+        filter_dispatch(recording, shader, &u_comp, wg, ft, out_image);
+    }
+    for effect in encoding.layer_filter_effects.iter().filter(|e| !e.is_nested) {
+        let idx = (effect.layer_index as usize).min(3);
+        let ft = filter_layers[idx];
         let u_comp = FilterUniform::composite_filtered_layer(width, height, effect.layer_blend);
         filter_dispatch(recording, shader, &u_comp, wg, ft, out_image);
     }
