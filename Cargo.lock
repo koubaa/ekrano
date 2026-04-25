@@ -508,6 +508,7 @@ name = "ekrano_tests"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "cc",
  "ekrano",
  "env_logger",
  "goldy",

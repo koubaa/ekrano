@@ -253,6 +253,8 @@ jobs:
 
       # Deploy D3D12 Agility SDK so Goldy can use Enhanced Barriers on
       # Windows Server 2019 (the only GitHub GPU image with T4 passthrough).
+      # The build.rs in ekrano_tests reads D3D12_AGILITY_SDK_PATH and
+      # D3D12_AGILITY_SDK_VERSION to emit the required PE exports.
       - name: Deploy D3D12 Agility SDK (Windows)
         if: runner.os == 'Windows'
         shell: powershell
@@ -270,6 +272,8 @@ jobs:
           Copy-Item "$src\D3D12Core.dll" $d3d12Dir
           Copy-Item "$src\d3d12SDKLayers.dll" $d3d12Dir -ErrorAction SilentlyContinue
           Write-Host "Deployed Agility SDK 1.614.1 to $d3d12Dir"
+          echo "D3D12_AGILITY_SDK_PATH=.\\D3D12\\" >> $env:GITHUB_ENV
+          echo "D3D12_AGILITY_SDK_VERSION=614" >> $env:GITHUB_ENV
 
       - name: cargo nextest
         # TODO: Maybe use --release; the CPU shaders are extremely slow when unoptimised
