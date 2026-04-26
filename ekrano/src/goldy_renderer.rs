@@ -12,7 +12,7 @@ use goldy::{BufferPool, Device, Texture};
 use crate::{
     Error, RenderParams, Result, Scene,
     goldy_engine::GoldyEngine,
-    render::Render,
+    render::{self, Render},
     shaders::{self, FullShaders},
 };
 use ekrano_encoding::{BumpAllocators, Resolver};
@@ -134,10 +134,20 @@ impl GoldyRenderer {
             );
             let bump_buf = render.bump_buf();
             let out_image = render.out_image();
+            let filter_layers = render.filter_layer_textures();
             let t_coarse = t2.elapsed();
 
             let t3 = Instant::now();
-            render.record_fine(&self.shaders, &mut recording);
+            render.record_fine(encoding, &self.shaders, &mut recording);
+            render::record_filter_effects(
+                encoding,
+                &self.shaders,
+                &mut recording,
+                params.width,
+                params.height,
+                &filter_layers,
+                out_image,
+            );
             let t_fine_record = t3.elapsed();
 
             #[cfg(feature = "debug_layers")]

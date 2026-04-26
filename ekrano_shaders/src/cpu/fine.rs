@@ -3,7 +3,10 @@
 
 use ekrano_encoding::{ConfigUniform, PathSegment, Tile};
 
-use super::{CMD_COLOR, CMD_END, CMD_FILL, CMD_JUMP, CMD_SOLID, CpuTexture, PTCL_INITIAL_ALLOC};
+use super::{
+    CMD_COLOR, CMD_END, CMD_FILL, CMD_JUMP, CMD_SET_BLEND_MODE, CMD_SOLID, CpuTexture,
+    PTCL_INITIAL_ALLOC,
+};
 
 // These should also move into a common area
 const TILE_WIDTH: usize = 16;
@@ -132,6 +135,7 @@ fn fine_main(
         let mut cmd_ix = tile_ix * PTCL_INITIAL_ALLOC;
         // skip over blend stack allocation
         cmd_ix += 1;
+        let mut draw_blend: u32 = 3_u32; // MIX_NORMAL | COMPOSE_SRC_OVER
         loop {
             let tag = ptcl[cmd_ix as usize];
             if tag == CMD_END {
@@ -148,6 +152,10 @@ fn fine_main(
                 }
                 CMD_SOLID => {
                     area.fill(1.0);
+                    cmd_ix += 1;
+                }
+                CMD_SET_BLEND_MODE => {
+                    draw_blend = ptcl[(cmd_ix + 1) as usize];
                     cmd_ix += 2;
                 }
                 CMD_COLOR => {

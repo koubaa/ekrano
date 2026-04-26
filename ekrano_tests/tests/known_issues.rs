@@ -97,9 +97,9 @@ fn many_bins_test() {
     many_bins();
 }
 
-/// Test for <https://github.com/linebender/vello/issues/1061>
+/// Regression test for <https://github.com/linebender/vello/issues/1061>
+/// (Fixed in ekrano by the `END_CLIP` draw-data encoding fix.)
 #[test]
-#[should_panic]
 fn test_layer_size() {
     let mut scene = Scene::new();
     scene.fill(
@@ -124,7 +124,11 @@ fn test_layer_size() {
         &Rect::from_origin_size((20.0, 20.0), (20., 20.)),
     );
     scene.pop_layer();
-    let params = TestParams::new("layer_size", 60, 60);
+    // Compose::Clear makes the layer region transparent; compositing over white
+    // makes the hole visible as white.  The reference was generated on a white-
+    // surface renderer (vello-sparse), so we match that here.
+    let mut params = TestParams::new("layer_size", 60, 60);
+    params.base_color = Some(palette::css::WHITE);
     smoke_snapshot_test_sync(scene, &params)
         .unwrap()
         .assert_mean_less_than(0.001);

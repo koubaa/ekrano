@@ -37,10 +37,26 @@ impl DrawTag {
     pub const BLUR_RECT: Self = Self(0x2d4); // info: 11, scene: 5 (DrawBlurRoundedRect)
 
     /// Begin layer/clip.
-    pub const BEGIN_CLIP: Self = Self(0x49);
+    ///
+    /// Scene payload: [`DrawBeginClip`] words + a `u32` "filter layer index" slot that's
+    /// populated by [`Encoding::encode_end_clip`](crate::encoding::Encoding::encode_end_clip) when the layer has a filter. The extra
+    /// word exists to work around `clip_leaf.slang`'s scene-offset rewrite: it copies
+    /// `BEGIN_CLIP`'s `scene_offset` to the matching `END_CLIP[_FILTER]`'s monoid, so any
+    /// data `END_CLIP_FILTER` needs at coarse time (`scene[dd + 2]`) has to live in the
+    /// matching `BEGIN_CLIP`'s scene slot. `(tag >> 2) & 7 == 3`.
+    pub const BEGIN_CLIP: Self = Self(0x4D);
 
     /// End layer/clip.
-    pub const END_CLIP: Self = Self(0x21);
+    /// Scene payload: duplicate [`DrawBeginClip`] words (blend + alpha); `(tag >> 2) & 7 == 2`.
+    pub const END_CLIP: Self = Self(0x09);
+
+    /// End a filter layer (same as [`Self::END_CLIP`] for compositing params, plus layer index).
+    /// Scene payload: [`DrawBeginClip`] words + `u32` filter layer index; `(tag >> 2) & 7 == 3`.
+    pub const END_CLIP_FILTER: Self = Self(0x0D);
+
+    /// Set per-draw blend mode for subsequent fills (non-isolated blending).
+    /// Scene data: one `u32` packed like [`DrawBeginClip::new`](DrawBeginClip::new).
+    pub const SET_BLEND_MODE: Self = Self(0x04);
 }
 
 impl DrawTag {
@@ -254,7 +270,11 @@ impl Monoid for DrawMonoid {
 
     fn new(tag: DrawTag) -> Self {
         Self {
-            path_ix: (tag != DrawTag::NOP) as u32,
+            // SET_BLEND_MODE has a dummy PathTag::PATH on the Rust side, so it counts as a path.
+            path_ix: match tag {
+                DrawTag::NOP => 0,
+                _ => 1,
+            },
             clip_ix: tag.0 & 1,
             scene_offset: (tag.0 >> 2) & 0x7,
             info_offset: (tag.0 >> 6) & 0xf,

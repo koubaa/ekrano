@@ -42,7 +42,7 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
         drawtag = scene[config.drawtag_base + drawobj_ix];
     }
     int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
-    if (drawtag != DRAWTAG_NOP && drawtag != DRAWTAG_END_CLIP) {
+    if (drawtag != DRAWTAG_NOP && drawtag != DRAWTAG_END_CLIP && drawtag != DRAWTAG_END_CLIP_FILTER) {
         float4 bbox = draw_bboxes[drawobj_ix];
         if (bbox.x < bbox.z && bbox.y < bbox.w) {
             x0 = int(floor(bbox.x * SX));

@@ -509,6 +509,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "ekrano",
+ "ekrano_encoding",
  "env_logger",
  "goldy",
  "image",

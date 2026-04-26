@@ -15,7 +15,7 @@ groupshared DrawMonoid sh_scratch[256];
 [numthreads(256, 1, 1)]
 void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
     Config config = goldy_dyn_buf_ro<Config>(0)[0];
-    StorageBuffer<uint> scene = goldy_dyn_scattered<uint>(1);
+    ReadOnlyBuffer<uint> scene = goldy_dyn_buf_ro<uint>(1);
     StorageBuffer<DrawMonoid> reduced = goldy_dyn_scattered<DrawMonoid>(2);
 
     uint num_blocks_total = (config.n_drawobj + (WG_SIZE - 1)) / WG_SIZE;

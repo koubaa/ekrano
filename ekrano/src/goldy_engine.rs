@@ -28,6 +28,8 @@ use goldy::{
 
 static DUMP_DIR: LazyLock<Option<String>> = LazyLock::new(|| std::env::var("EKRANO_DUMP_DIR").ok());
 
+use std::mem::size_of;
+
 use crate::{
     Error, Result,
     low_level::{BufferProxy, Command, ImageProxy, Recording, ResourceId, ResourceProxy, ShaderId},
@@ -958,7 +960,8 @@ fn element_stride_for_buffer(name: &str) -> Option<u32> {
         "vello.clip_bbox_buf" => Some(16),
         "vello.indirect_dispatch" => Some(16),
         "vello.indirect_count" => Some(16),
-        "vello.config" => Some(96),
+        // Must match `ConfigUniform` / Slang `Config` (includes `mask_active`).
+        "vello.config" => Some(size_of::<ekrano_encoding::ConfigUniform>() as u32),
         "vello.wg_counts" => Some(320),
         "vello.scene" | "vello.blend_spill" | "vello.mask_lut" => Some(4),
         _ => {

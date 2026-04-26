@@ -6,7 +6,7 @@ use peniko::{Extend, ImageData};
 use std::ops::Range;
 use std::sync::Arc;
 
-use super::{DrawTag, Encoding, PathTag, StreamOffsets, Style, Transform};
+use super::{DrawBeginClip, DrawTag, Encoding, PathTag, StreamOffsets, Style, Transform};
 
 use crate::glyph_cache::GlyphCache;
 use crate::image_cache::{ImageCache, Images};
@@ -142,6 +142,10 @@ pub fn resolve_solid_paths_only(encoding: &Encoding, packed: &mut Vec<u8>) -> La
     // Draw data stream
     layout.draw_data_base = size_to_words(data.len());
     data.extend_from_slice(bytemuck::cast_slice(&encoding.draw_data));
+    for _ in 0..encoding.n_open_clips {
+        let clip = DrawBeginClip::clip();
+        data.extend_from_slice(bytemuck::cast_slice(bytemuck::bytes_of(&clip)));
+    }
     // Transform stream
     layout.transform_base = size_to_words(data.len());
     data.extend_from_slice(bytemuck::cast_slice(&encoding.transforms));
@@ -305,6 +309,10 @@ impl Resolver {
             }
             if pos < stream.len() {
                 data.extend_from_slice(bytemuck::cast_slice(&stream[pos..]));
+            }
+            for _ in 0..encoding.n_open_clips {
+                let clip = DrawBeginClip::clip();
+                data.extend_from_slice(bytemuck::cast_slice(bytemuck::bytes_of(&clip)));
             }
         }
         // Transform stream
@@ -599,7 +607,10 @@ impl SceneBufferSizes {
                 &encoding.draw_tags,
                 patch_sizes.draw_tags + encoding.n_open_clips as usize,
             )
-            + slice_size_in_bytes(&encoding.draw_data, patch_sizes.draw_data)
+            + slice_size_in_bytes(
+                &encoding.draw_data,
+                patch_sizes.draw_data + 2 * encoding.n_open_clips as usize,
+            )
             + slice_size_in_bytes(&encoding.transforms, patch_sizes.transforms)
             + slice_size_in_bytes(&encoding.styles, patch_sizes.styles);
         Self {

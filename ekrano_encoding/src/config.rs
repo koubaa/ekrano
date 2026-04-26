@@ -190,10 +190,12 @@ pub struct ConfigUniform {
     /// Global thread index offset for chunked flatten dispatches (0 = default).
     /// Must be a multiple of the flatten workgroup size (256).
     pub flatten_thread_base: u32,
+    /// Non-zero if [`crate::encoding::Encoding::coverage_mask`] is set (fine stage samples `mask_atlas`).
+    pub mask_active: u32,
 }
 
 /// CPU side setup and configuration.
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub struct RenderConfig {
     /// GPU side configuration.
     pub gpu: ConfigUniform,
@@ -229,6 +231,7 @@ impl RenderConfig {
                 ptcl_size: buffer_sizes.ptcl.len(),
                 tile_y_offset: 0,
                 flatten_thread_base: 0,
+                mask_active: 0,
                 layout: *layout,
             },
             workgroup_counts,

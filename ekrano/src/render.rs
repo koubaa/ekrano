@@ -10,9 +10,11 @@ use crate::{AaConfig, RenderParams};
 use std::mem::size_of;
 
 use ekrano_encoding::{
-    BumpAllocators, Encoding, IndirectCount, Resolver, WorkgroupCountsGpu, WorkgroupSize,
-    make_mask_lut, make_mask_lut_16,
+    BumpAllocators, Encoding, FilterPrimitive, FilterUniform, IndirectCount, Resolver,
+    WorkgroupCountsGpu, WorkgroupSize, make_mask_lut, make_mask_lut_16,
 };
+use peniko::color::{PremulColor, Srgb};
+
 use ekrano_encoding::{
     STAGE_BACKDROP, STAGE_BBOX_CLEAR, STAGE_BINNING, STAGE_CLIP_LEAF, STAGE_CLIP_REDUCE,
     STAGE_COARSE, STAGE_DRAW_LEAF, STAGE_DRAW_REDUCE, STAGE_FLATTEN, STAGE_PATH_COUNT,
@@ -52,9 +54,13 @@ struct FineResources {
     gradient_image: ResourceProxy,
     info_bin_data_buf: ResourceProxy,
     image_atlas: ResourceProxy,
+    /// R8-equivalent RGBA (`.r` channel) full-frame mask; 1×1 white when unused.
+    mask_atlas: ResourceProxy,
     blend_spill_buf: ResourceProxy,
 
     out_image: ImageProxy,
+    /// Premultiplied snapshots for up to four isolated filter layers (see `fine.slang`).
+    filter_layers: [ImageProxy; 4],
 }
 
 /// A collection of internal buffers that are used for debug visualization when the
@@ -188,9 +194,34 @@ impl Render {
         for image in images.images {
             recording.write_image(image_atlas, image.1, image.2, image.0.clone());
         }
-        let default_config =
-            RenderConfig::new(&layout, params.width, params.height, &params.base_color);
-        let cpu_config = config_override.unwrap_or(&default_config);
+        let mask_atlas = ResourceProxy::Image(match &encoding.coverage_mask {
+            Some(m) => {
+                let mut rgba = Vec::with_capacity(m.data.len() * 4);
+                for &b in m.data.iter() {
+                    rgba.extend_from_slice(&[b, b, b, 255]);
+                }
+                recording.upload_image(m.width, m.height, ImageFormat::Rgba8, rgba)
+            }
+            None => recording.upload_image(1, 1, ImageFormat::Rgba8, vec![255, 255, 255, 255]),
+        });
+        let mut cpu_config_owned = match config_override {
+            Some(c) => *c,
+            None => RenderConfig::new(&layout, params.width, params.height, &params.base_color),
+        };
+        if encoding.coverage_mask.is_some() {
+            cpu_config_owned.gpu.mask_active = 1;
+        }
+        let cpu_config = &cpu_config_owned;
+        if let Some(ref m) = encoding.coverage_mask {
+            assert_eq!(
+                m.width, params.width,
+                "coverage_mask width must match render width"
+            );
+            assert_eq!(
+                m.height, params.height,
+                "coverage_mask height must match render height"
+            );
+        }
         // HACK: The coarse workgroup counts is the number of active bins.
         if (cpu_config.workgroup_counts.coarse.0
             * cpu_config.workgroup_counts.coarse.1
@@ -526,6 +557,7 @@ impl Render {
             INDIRECT_STRIDE,
             [
                 config_buf,
+                scene_buf,
                 draw_monoid_buf,
                 path_bbox_buf,
                 clip_bbox_buf,
@@ -661,6 +693,12 @@ impl Render {
         recording.free_resource(bin_header_buf);
         recording.free_resource(path_buf);
         let out_image = ImageProxy::new(params.width, params.height, ImageFormat::Rgba8);
+        let filter_layers = [
+            ImageProxy::new(params.width, params.height, ImageFormat::Rgba8),
+            ImageProxy::new(params.width, params.height, ImageFormat::Rgba8),
+            ImageProxy::new(params.width, params.height, ImageFormat::Rgba8),
+            ImageProxy::new(params.width, params.height, ImageFormat::Rgba8),
+        ];
         let blend_spill_buf = BufferProxy::with_stride(
             buffer_sizes.blend_spill.size_in_bytes().into(),
             "vello.blend_spill",
@@ -683,7 +721,9 @@ impl Render {
             info_bin_data_buf,
             blend_spill_buf: ResourceProxy::Buffer(blend_spill_buf),
             image_atlas: ResourceProxy::Image(image_atlas),
+            mask_atlas,
             out_image,
+            filter_layers,
         });
         if robust {
             recording.download(*bump_buf.as_buf().unwrap());
@@ -722,7 +762,13 @@ impl Render {
     /// dispatches to avoid GPU TDR on large workloads. Each row gets a
     /// separate config buffer with `tile_y_offset` set, so the fine shader
     /// knows which tile row to process.
-    pub fn record_fine(&mut self, shaders: &FullShaders, recording: &mut Recording) {
+    /// `encoding` is used to clear per-layer filter textures before fine when filters are present.
+    pub fn record_fine(
+        &mut self,
+        encoding: &Encoding,
+        shaders: &FullShaders,
+        recording: &mut Recording,
+    ) {
         let fine_wg_count = self.fine_wg_count.take().unwrap();
         let mut fine = self.fine_resources.take().unwrap();
         let width_in_tiles = fine_wg_count.0;
@@ -741,6 +787,7 @@ impl Render {
             ResourceProxy::Image(fine.out_image),
             fine.gradient_image,
             fine.image_atlas,
+            fine.mask_atlas,
         ];
 
         let shader = match fine.aa_config {
@@ -775,6 +822,30 @@ impl Render {
         if let Some(mask) = msaa_mask_buf {
             fine_resources.push(mask);
         }
+        for fl in &fine.filter_layers {
+            fine_resources.push(ResourceProxy::Image(*fl));
+        }
+
+        let width_px = fine.out_image.width;
+        let height_px = fine.out_image.height;
+        if !encoding.layer_filter_effects.is_empty() && width_px > 0 && height_px > 0 {
+            if let Some(fs) = shaders.filter_pass {
+                let wg = (width_px.div_ceil(16), height_px.div_ceil(16), 1);
+                let u_clear = FilterUniform::clear_transparent(width_px, height_px);
+                // `pass_kind == 7` ignores `src`, but we still have to bind
+                // SOMETHING to slot 1 and it must not alias `dst` (DX12 can't
+                // transition the same resource to two states in one
+                // dispatch). `out_image` is a `Direct` (UAV) texture like
+                // the filter_layers, so the bindless category matches the
+                // `Image` slot declaration.
+                for fl in &fine.filter_layers {
+                    filter_dispatch(recording, fs, &u_clear, wg, fine.out_image, *fl);
+                }
+            } else {
+                log::warn!("filter_pass shader unavailable; cannot clear filter layer textures");
+            }
+        }
+
         recording.dispatch(
             shader,
             (width_in_tiles, height_in_tiles, 1),
@@ -787,6 +858,7 @@ impl Render {
         recording.free_resource(fine.ptcl_buf);
         recording.free_resource(fine.gradient_image);
         recording.free_resource(fine.image_atlas);
+        recording.free_resource(fine.mask_atlas);
         recording.free_resource(fine.info_bin_data_buf);
         recording.free_resource(fine.blend_spill_buf);
         if let Some(mask_buf) = self.mask_buf.take() {
@@ -800,6 +872,13 @@ impl Render {
     /// map.
     pub fn out_image(&self) -> ImageProxy {
         self.fine_resources.as_ref().unwrap().out_image
+    }
+
+    /// Per-layer filter snapshot textures (same size as [`Self::out_image`]).
+    ///
+    /// Call before [`Self::record_fine`] consumes fine resources.
+    pub fn filter_layer_textures(&self) -> [ImageProxy; 4] {
+        self.fine_resources.as_ref().unwrap().filter_layers
     }
 
     pub fn bump_buf(&self) -> BufferProxy {
@@ -826,4 +905,164 @@ impl Render {
     pub fn take_captured_buffers(&mut self) -> Option<CapturedBuffers> {
         self.captured_buffers.take()
     }
+}
+
+fn premul_srgb_u32(c: PremulColor<Srgb>) -> u32 {
+    c.to_rgba8().to_u32()
+}
+
+fn filter_dispatch(
+    recording: &mut Recording,
+    shader: crate::ShaderId,
+    uniform: &FilterUniform,
+    wg: (u32, u32, u32),
+    src: ImageProxy,
+    dst: ImageProxy,
+) {
+    let buf = recording.upload_typed("vello.filter_uniform", uniform);
+    recording.dispatch(
+        shader,
+        wg,
+        [
+            ResourceProxy::Buffer(buf),
+            ResourceProxy::Image(src),
+            ResourceProxy::Image(dst),
+        ],
+    );
+    recording.free_buffer(buf);
+}
+
+/// Per-layer filter chain for [`Encoding::layer_filter_effects`] after fine rasterization.
+///
+/// Each [`ekrano_encoding::LayerFilterEffect`] runs its [`FilterPrimitive`] on the corresponding
+/// entry in `filter_layers` (premultiplied snapshot written during fine), then composites onto
+/// `out_image` using the layer blend mode. Uses a scratch buffer the size of the target.
+pub fn record_filter_effects(
+    encoding: &Encoding,
+    shaders: &FullShaders,
+    recording: &mut Recording,
+    width: u32,
+    height: u32,
+    filter_layers: &[ImageProxy; 4],
+    out_image: ImageProxy,
+) {
+    let free_filter_images = |recording: &mut Recording| {
+        for fl in filter_layers {
+            recording.free_image(*fl);
+        }
+    };
+
+    if width == 0 || height == 0 {
+        return;
+    }
+    if encoding.layer_filter_effects.is_empty() {
+        free_filter_images(recording);
+        return;
+    }
+    let Some(shader) = shaders.filter_pass else {
+        log::warn!("filter_pass shader unavailable; skipping layer_filter_effects");
+        free_filter_images(recording);
+        return;
+    };
+    let wg = (width.div_ceil(16), height.div_ceil(16), 1);
+    let scratch = ImageProxy::new(width, height, ImageFormat::Rgba8);
+
+    // Phase 1 (inner → outer): run each filter, leaving the result in `ft = filter_layers[idx]`.
+    for effect in &encoding.layer_filter_effects {
+        let idx = (effect.layer_index as usize).min(3);
+        let ft = filter_layers[idx];
+        match &effect.primitive {
+            FilterPrimitive::GaussianBlur { std_dev, edge_mode } => {
+                let u_h = FilterUniform::gaussian_blur(width, height, true, *std_dev, *edge_mode);
+                filter_dispatch(recording, shader, &u_h, wg, ft, scratch);
+                let u_v = FilterUniform::gaussian_blur(width, height, false, *std_dev, *edge_mode);
+                filter_dispatch(recording, shader, &u_v, wg, scratch, ft);
+            }
+            FilterPrimitive::Offset { dx, dy } => {
+                let edge = ekrano_encoding::FilterEdgeMode::Duplicate;
+                let u = FilterUniform::offset(width, height, *dx, *dy, edge);
+                filter_dispatch(recording, shader, &u, wg, ft, scratch);
+                let u_copy = FilterUniform::copy(width, height);
+                filter_dispatch(recording, shader, &u_copy, wg, scratch, ft);
+            }
+            FilterPrimitive::Flood { color, clip_rect } => {
+                let u = FilterUniform::flood(width, height, premul_srgb_u32(*color), *clip_rect);
+                filter_dispatch(recording, shader, &u, wg, ft, scratch);
+                let u_copy = FilterUniform::copy(width, height);
+                filter_dispatch(recording, shader, &u_copy, wg, scratch, ft);
+            }
+            FilterPrimitive::DropShadow {
+                dx,
+                dy,
+                std_dev,
+                color,
+                edge_mode,
+            } => {
+                let u = if effect.is_nested {
+                    // For nested drop-shadow layers, compute the shadow from the inner layer's
+                    // *filtered* (e.g. blurred) result rather than from the raw fine capture.
+                    // This matches vello-sparse, which derives the shadow alpha from the blurred
+                    // content; it also prevents the outer composite from overwriting soft edges
+                    // produced by the inner filter. The inner layer lives at index `idx - 1`.
+                    let inner_idx = (effect.layer_index as usize).saturating_sub(1).min(3);
+                    let inner_ft = filter_layers[inner_idx];
+                    let u = FilterUniform::drop_shadow_nested(
+                        width,
+                        height,
+                        *dx,
+                        *dy,
+                        *std_dev,
+                        premul_srgb_u32(*color),
+                        *edge_mode,
+                    );
+                    filter_dispatch(recording, shader, &u, wg, inner_ft, scratch);
+                    let u_copy = FilterUniform::copy(width, height);
+                    filter_dispatch(recording, shader, &u_copy, wg, scratch, ft);
+                    // Shadow is already in `ft`; skip the redundant dispatch below.
+                    continue;
+                } else {
+                    FilterUniform::drop_shadow(
+                        width,
+                        height,
+                        *dx,
+                        *dy,
+                        *std_dev,
+                        premul_srgb_u32(*color),
+                        *edge_mode,
+                    )
+                };
+                filter_dispatch(recording, shader, &u, wg, ft, scratch);
+                let u_copy = FilterUniform::copy(width, height);
+                filter_dispatch(recording, shader, &u_copy, wg, scratch, ft);
+            }
+        }
+    }
+
+    // Phase 2: composite each filtered layer onto out_image in two rounds.
+    //
+    // Round A — `is_nested=true` (outer wrappers): these layers *enclose* inner filter layers and
+    // their results must land **underneath** the inner content. Composited first.
+    //
+    // Round B — `is_nested=false` (inner / standalone): composited afterwards, on top.
+    // Sequential (non-nested) peer layers fall here and keep their natural forward order so that
+    // the later-encoded layer composites on top of the earlier one, as authored.
+    for effect in encoding.layer_filter_effects.iter().filter(|e| e.is_nested) {
+        let idx = (effect.layer_index as usize).min(3);
+        let ft = filter_layers[idx];
+        let u_comp = FilterUniform::composite_filtered_layer(width, height, effect.layer_blend);
+        filter_dispatch(recording, shader, &u_comp, wg, ft, out_image);
+    }
+    for effect in encoding
+        .layer_filter_effects
+        .iter()
+        .filter(|e| !e.is_nested)
+    {
+        let idx = (effect.layer_index as usize).min(3);
+        let ft = filter_layers[idx];
+        let u_comp = FilterUniform::composite_filtered_layer(width, height, effect.layer_blend);
+        filter_dispatch(recording, shader, &u_comp, wg, ft, out_image);
+    }
+
+    recording.free_image(scratch);
+    free_filter_images(recording);
 }
