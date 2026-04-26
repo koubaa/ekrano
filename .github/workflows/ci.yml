@@ -199,6 +199,13 @@ jobs:
           # The files targeted with git lfs
           key: ekrano-lfs-${{ needs.prime-lfs-cache.outputs.lfs-hash }}
           enableCrossOsArchive: true
+
+      - name: Install Git LFS
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git-lfs
+          git lfs install --local
   
       - name: Checkout LFS files
         # `git lfs checkout` requires that each individual glob is a separate command line argument.
