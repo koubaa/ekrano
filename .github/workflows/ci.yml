@@ -171,7 +171,7 @@ jobs:
   test-stable:
     name: cargo test
     needs: prime-lfs-cache
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
@@ -179,8 +179,10 @@ jobs:
         os: [macos-latest, ubuntu-24.04]
         include:
           - os: ubuntu-24.04
+            runner: linux-gpu
             gpu: 'yes'
           - os: macos-latest
+            runner: macos-latest
             gpu: 'yes'
     steps:
       - uses: actions/checkout@v4
@@ -210,11 +212,27 @@ jobs:
         with:
           toolchain: ${{ env.RUST_STABLE_VER }}
 
-      # Shared script: installs Mesa/lavapipe, locates the ICD, exports env vars.
+      # Shared script: installs Vulkan tooling and build dependencies.
       # Also used by ci/Dockerfile for local reproduction.
-      - name: Install Vulkan dependencies and locate lavapipe ICD
+      - name: Install Vulkan dependencies
         if: matrix.os == 'ubuntu-24.04'
         run: bash ci/setup-ubuntu.sh
+
+      - name: Print Vulkan GPU information
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          nvidia-smi
+          vulkaninfo --summary
+
+          NVIDIA_VK_ICD="$(find /usr /etc -path '*/vulkan/icd.d/nvidia_icd*.json' -print -quit 2>/dev/null)"
+          if [ -z "$NVIDIA_VK_ICD" ]; then
+            echo "ERROR: NVIDIA Vulkan ICD not found" >&2
+            exit 1
+          fi
+
+          echo "NVIDIA_VK_ICD=$NVIDIA_VK_ICD" >> "$GITHUB_ENV"
+          echo "Using NVIDIA Vulkan ICD: $NVIDIA_VK_ICD"
+          VK_ICD_FILENAMES="$NVIDIA_VK_ICD" vulkaninfo --summary
       
       - name: install cargo-nextest
         uses: taiki-e/install-action@v2
@@ -290,10 +308,9 @@ jobs:
           # Skip tests that are too slow on software-emulated GPUs (lavapipe, WARP).
           # These still run locally on real hardware.
           EKRANO_CI_SKIP_SLOW: 'yes'
-          # Linux: force lavapipe as the sole Vulkan driver and suppress validation layers.
-          # LAVAPIPE_ICD is set by the install step above (Linux only); empty string on
-          # other platforms, which is harmless (VK_ICD_FILENAMES unset = use all drivers).
-          VK_ICD_FILENAMES: ${{ env.LAVAPIPE_ICD }}
+          # Linux GPU runner: force the NVIDIA Vulkan ICD so tests do not fall back to lavapipe.
+          # Other platforms leave this empty, which is harmless for the current test matrix.
+          VK_ICD_FILENAMES: ${{ env.NVIDIA_VK_ICD }}
           VK_LAYER_PATH: ""
           # We are experimenting with git lfs, and we don't expect to run out of bandwidth.
           # However, if we do, the tests are designed to be robust against that, if this environment variable is set.
