@@ -4,6 +4,7 @@
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use goldy::types::BufferFlags;
 use peniko::ImageData;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -36,6 +37,8 @@ pub struct BufferProxy {
     /// When set, the GPU backend uses this for `StructureByteStride` in SRV/UAV descriptors.
     /// When `None`, the engine falls back to a name-based lookup.
     pub element_stride: Option<u32>,
+    /// Goldy buffer creation flags (e.g. [`BufferFlags::CPU_COHERENT`] for host-readable bump data).
+    pub buffer_flags: BufferFlags,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -257,11 +260,22 @@ impl BufferProxy {
             size,
             name,
             element_stride: None,
+            buffer_flags: BufferFlags::empty(),
         }
     }
 
     /// Create a proxy with an explicit structured buffer element stride.
     pub fn with_stride(size: u64, name: &'static str, element_stride: u32) -> Self {
+        Self::with_stride_and_flags(size, name, element_stride, BufferFlags::empty())
+    }
+
+    /// [`Self::with_stride`] with Goldy [`BufferFlags`].
+    pub fn with_stride_and_flags(
+        size: u64,
+        name: &'static str,
+        element_stride: u32,
+        buffer_flags: BufferFlags,
+    ) -> Self {
         let id = ResourceId::next();
         debug_assert!(size > 0);
         debug_assert!(element_stride > 0);
@@ -274,6 +288,7 @@ impl BufferProxy {
             size,
             name,
             element_stride: Some(element_stride),
+            buffer_flags,
         }
     }
 }

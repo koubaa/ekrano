@@ -21,6 +21,7 @@ use ekrano_encoding::{
     STAGE_PATH_TILING, STAGE_PATHTAG_REDUCE, STAGE_PATHTAG_REDUCE2, STAGE_PATHTAG_SCAN,
     STAGE_PATHTAG_SCAN_LARGE, STAGE_PATHTAG_SCAN1, STAGE_TILE_ALLOC,
 };
+use goldy::types::BufferFlags;
 
 /// State for a render in progress.
 pub struct Render {
@@ -404,10 +405,11 @@ impl Render {
             INDIRECT_STRIDE,
             [config_buf, path_bbox_buf],
         );
-        let bump_buf = BufferProxy::with_stride(
+        let bump_buf = BufferProxy::with_stride_and_flags(
             buffer_sizes.bump_alloc.size_in_bytes().into(),
             "vello.bump_buf",
             size_of::<BumpAllocators>() as u32,
+            BufferFlags::CPU_COHERENT,
         );
         recording.clear_all(bump_buf);
         let bump_buf = ResourceProxy::Buffer(bump_buf);
