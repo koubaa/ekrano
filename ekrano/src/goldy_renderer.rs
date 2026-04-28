@@ -20,6 +20,19 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 const MAX_BUMP_RETRIES: usize = 2;
 
+/// Per-frame render statistics returned by [`GoldyRenderer::render_to_texture`].
+///
+/// Non-zero `bump_retries` means the GPU bump allocator overflowed at least once
+/// and the frame was re-rendered with larger buffers.  Callers that want to surface
+/// this to the user (e.g. to detect scenes that are too complex for the default
+/// buffer estimates) can print a warning when `bump_retries > 0`.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct FrameStats {
+    /// Number of times the bump allocator overflowed and the frame was retried.
+    /// Zero on a clean frame.
+    pub bump_retries: u32,
+}
+
 /// Upper bound applied to observed bump counters before they're fed into
 /// `RenderConfig::with_bump_estimates`. Legitimate scenes need far less than
 /// this (the tiger hits ~13K segments, paris-30k a few hundred thousand),
@@ -88,18 +101,22 @@ impl GoldyRenderer {
     /// readback stall between them). The bump allocator is checked *after*
     /// both passes complete; if any stage overflowed, the frame is re-rendered
     /// with larger buffers.
+    ///
+    /// Returns [`FrameStats`] on success. Check [`FrameStats::bump_retries`] to detect
+    /// scenes that required buffer reallocation (e.g. to print a warning to stdout).
     pub fn render_to_texture(
         &mut self,
         device: &Device,
         scene: &Scene,
         texture: &Texture,
         params: &RenderParams,
-    ) -> Result<()> {
+    ) -> Result<FrameStats> {
         use std::time::Instant;
         let frame_start = Instant::now();
 
         let encoding = scene.encoding();
         let mut retry_config: Option<ekrano_encoding::RenderConfig> = None;
+        let mut stats = FrameStats::default();
 
         for attempt in 0..=MAX_BUMP_RETRIES {
             let t0 = Instant::now();
@@ -226,9 +243,10 @@ impl GoldyRenderer {
                         bump.failed,
                     );
                 }
-                return Ok(());
+                return Ok(stats);
             }
 
+            stats.bump_retries += 1;
             log::info!(
                 "Bump overflow on attempt {} (failed: 0x{:x}), retrying with larger buffers",
                 attempt + 1,
@@ -275,7 +293,8 @@ impl GoldyRenderer {
         )
         .map_err(|e| Error::Shader(e.to_string()))?;
 
-        self.render_to_texture(device, scene, &texture, params)?;
+        self.render_to_texture(device, scene, &texture, params)
+            .map(|_| ())?;
 
         // Free pool and transient buffer memory before readback so the staging
         // buffer allocation doesn't fail on memory-constrained workloads.
@@ -289,10 +308,6 @@ impl GoldyRenderer {
     }
 
     fn read_bump(&self, bump_buf: &crate::low_level::BufferProxy) -> Result<BumpAllocators> {
-        let data = self
-            .engine
-            .get_download(*bump_buf)
-            .ok_or_else(|| Error::Shader("bump buffer download not available".into()))?;
-        Ok(bytemuck::pod_read_unaligned::<BumpAllocators>(data))
+        self.engine.read_bump_allocators(bump_buf)
     }
 }

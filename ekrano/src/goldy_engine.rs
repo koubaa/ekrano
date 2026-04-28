@@ -20,7 +20,7 @@ pub const MAX_BINDLESS_SLOTS: usize = 16;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-use goldy::types::{SpatialAccess, TextureFlags, TextureFormat};
+use goldy::types::{BufferFlags, SpatialAccess, TextureFlags, TextureFormat};
 use goldy::{
     Buffer, BufferPool, BufferView, ComputeGraph, ComputePipeline, DataAccess, Device, DeviceType,
     NodeAccess, ShaderModule, Texture,
@@ -138,6 +138,7 @@ struct BufferKey {
     size: u64,
     access: DataAccess,
     name: &'static str,
+    buffer_flags: BufferFlags,
 }
 
 #[derive(Default)]
@@ -181,6 +182,7 @@ impl GoldyEngine {
                                 proxy.name,
                                 DataAccess::Scattered,
                                 stride,
+                                proxy.buffer_flags,
                             )?;
                             buf.clear(device, 0, proxy.size)
                                 .map_err(|e| Error::Shader(e.to_string()))?;
@@ -330,6 +332,7 @@ impl GoldyEngine {
                         self.bind_map.get_buf(buf_proxy.id)
                         && existing.size() >= bytes.len() as u64
                         && existing.access() == DataAccess::Scattered
+                        && existing.flags() == buf_proxy.buffer_flags
                     {
                         // Buffer is being reused — flush pending dispatches that
                         // may still read the old contents before overwriting.
@@ -348,6 +351,7 @@ impl GoldyEngine {
                             buf_proxy.name,
                             DataAccess::Scattered,
                             stride,
+                            buf_proxy.buffer_flags,
                         )?;
                         buf.write(0, bytes)
                             .map_err(|e| Error::Shader(e.to_string()))?;
@@ -466,6 +470,7 @@ impl GoldyEngine {
                             buf_proxy.name,
                             DataAccess::Scattered,
                             stride,
+                            buf_proxy.buffer_flags,
                         )?;
                         let clear_size = size.unwrap_or(buf.size() - offset);
                         buf.clear(device, *offset, clear_size)
@@ -600,6 +605,17 @@ impl GoldyEngine {
             if let Some((gpu_buf, _)) = self.bind_map.get_buf(buf_proxy.id)
                 && let GpuBuffer::Owned(buf) = gpu_buf
             {
+                if buf.flags().contains(BufferFlags::CPU_COHERENT) {
+                    device
+                        .copy_to_coherent_readback(buf)
+                        .map_err(|e| Error::Shader(e.to_string()))?;
+                    let size = buf.size() as usize;
+                    let mut output = vec![0_u8; size];
+                    buf.read_coherent(0, &mut output)
+                        .map_err(|e| Error::Shader(e.to_string()))?;
+                    self.downloads.insert(buf_proxy.id, output);
+                    continue;
+                }
                 let size = buf.size() as usize;
                 let mut output = vec![0_u8; size];
                 buf.read_to_cpu(device, &mut output)
@@ -718,8 +734,24 @@ impl GoldyEngine {
     }
 
     /// Get downloaded buffer data, if the recording contained a Download command for it.
+    ///
+    /// For `CPU_COHERENT` buffers this is filled during `run_recording`'s download pass
+    /// (after `copy_to_coherent_readback` on Direct3D 12) so it is available after
+    /// resources are removed from the bind map.
     pub fn get_download(&self, buf: BufferProxy) -> Option<&[u8]> {
         self.downloads.get(&buf.id).map(|v| v.as_slice())
+    }
+
+    /// Read [`ekrano_encoding::BumpAllocators`] from a `vello.bump_buf` created with
+    /// [`BufferFlags::CPU_COHERENT`], after `run_recording`.
+    pub fn read_bump_allocators(
+        &self,
+        proxy: &BufferProxy,
+    ) -> Result<ekrano_encoding::BumpAllocators> {
+        let data = self
+            .get_download(*proxy)
+            .ok_or_else(|| Error::Shader("bump buffer download not available".into()))?;
+        Ok(bytemuck::pod_read_unaligned(data))
     }
 
     /// Free a downloaded buffer from the engine's storage.
@@ -910,7 +942,7 @@ impl ResourcePool {
         name: &'static str,
         access: DataAccess,
     ) -> Result<Buffer> {
-        self.get_buf_with_stride(device, size, name, access, None)
+        self.get_buf_with_stride(device, size, name, access, None, BufferFlags::empty())
     }
 
     fn get_buf_with_stride(
@@ -920,14 +952,20 @@ impl ResourcePool {
         name: &'static str,
         access: DataAccess,
         stride: Option<u32>,
+        buffer_flags: BufferFlags,
     ) -> Result<Buffer> {
-        let key = BufferKey { size, access, name };
+        let key = BufferKey {
+            size,
+            access,
+            name,
+            buffer_flags,
+        };
         let pool = self.bufs.entry(key).or_default();
         if let Some(buf) = pool.pop() {
             return Ok(buf);
         }
         let stride = stride.or_else(|| element_stride_for_buffer(name));
-        Buffer::new_with_stride(device, size, access, stride)
+        Buffer::new_with_stride_and_flags(device, size, access, stride, buffer_flags)
             .map_err(|e| Error::Shader(e.to_string()))
     }
 }
