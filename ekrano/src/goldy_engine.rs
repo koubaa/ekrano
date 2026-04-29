@@ -18,17 +18,19 @@
 pub const MAX_BINDLESS_SLOTS: usize = 16;
 
 use std::collections::HashMap;
+use std::mem;
 use std::sync::LazyLock;
 
+use goldy::backend::ComputeCommand;
 use goldy::types::{BufferFlags, SpatialAccess, TextureFlags, TextureFormat};
 use goldy::{
     Buffer, BufferPool, BufferView, ComputeGraph, ComputePipeline, DataAccess, Device, DeviceType,
-    NodeAccess, ShaderModule, Texture,
+    GpuFuture, NodeAccess, ShaderModule, Texture,
 };
 
 static DUMP_DIR: LazyLock<Option<String>> = LazyLock::new(|| std::env::var("EKRANO_DUMP_DIR").ok());
 
-use std::mem::size_of;
+use mem::size_of;
 
 use crate::{
     Error, Result,
@@ -86,7 +88,6 @@ impl GpuBuffer {
 }
 
 /// Goldy-based recording executor.
-#[derive(Default)]
 pub struct GoldyEngine {
     shaders: Vec<GoldyShader>,
     pool: ResourcePool,
@@ -95,6 +96,35 @@ pub struct GoldyEngine {
     downloads: HashMap<ResourceId, Vec<u8>>,
     /// Single large buffer pool for storage buffers (Phase 3c). None until `prepare_storage_pool`.
     storage_pool: Option<BufferPool>,
+    /// When set, the next non-empty `submit_graph` prepends a full clear of the pool backing buffer.
+    pool_clear_in_next_submit: bool,
+    /// GPU work from the previous `run_recording` (submitted, not yet waited).
+    prev_frame_future: Option<GpuFuture>,
+    prev_pending_downloads: Vec<BufferProxy>,
+    prev_deferred_free_buffers: Vec<ResourceId>,
+    prev_deferred_free_images: Vec<ResourceId>,
+    prev_output_image_id: Option<ResourceId>,
+    /// Bump allocator values read after the **previous** submit's GPU work completed.
+    last_drained_bump: Option<ekrano_encoding::BumpAllocators>,
+}
+
+impl Default for GoldyEngine {
+    fn default() -> Self {
+        Self {
+            shaders: Vec::new(),
+            pool: ResourcePool::default(),
+            bind_map: BindMap::default(),
+            downloads: HashMap::new(),
+            storage_pool: None,
+            pool_clear_in_next_submit: false,
+            prev_frame_future: None,
+            prev_pending_downloads: Vec::new(),
+            prev_deferred_free_buffers: Vec::new(),
+            prev_deferred_free_images: Vec::new(),
+            prev_output_image_id: None,
+            last_drained_bump: None,
+        }
+    }
 }
 
 struct GoldyShader {
@@ -151,13 +181,77 @@ impl GoldyEngine {
         Self::default()
     }
 
+    /// Waits on the GPU work from the last [`GoldyEngine::run_recording`] submission and fills
+    /// [`GoldyEngine::get_download`] / [`GoldyEngine::take_last_drained_bump`].
+    ///
+    /// Call after `run_recording` when you need readback from that submission immediately
+    /// (e.g. same-frame bump overflow checks). Omit between application frames so the next
+    /// `run_recording` drains completed work at the start (**pipelined** steady state).
+    pub fn finish_frame_for_readback(&mut self, device: &Device) -> Result<()> {
+        self.drain_completed_submit(device)?;
+        Ok(())
+    }
+
+    /// Wait for any in-flight queued submission (`prev_frame_future`).
+    ///
+    /// Use before `clear_transients`, screenshot readback paths, etc.
+    pub fn wait_until_gpu_idle(&mut self, device: &Device) -> Result<()> {
+        self.drain_completed_submit(device)
+    }
+
+    fn drain_completed_submit(&mut self, device: &Device) -> Result<()> {
+        let Some(fut) = self.prev_frame_future.take() else {
+            return Ok(());
+        };
+        fut.wait().map_err(|e| Error::Shader(e.to_string()))?;
+
+        let pending = mem::take(&mut self.prev_pending_downloads);
+        let bump_name = Self::bumps_buf_static_name();
+
+        for buf_proxy in pending {
+            if let Some((gpu_buf, _)) = self.bind_map.get_buf(buf_proxy.id)
+                && let GpuBuffer::Owned(buf) = gpu_buf
+            {
+                let size = buf.size() as usize;
+                let mut output = vec![0_u8; size];
+                buf.read_to_cpu(device, &mut output)
+                    .map_err(|e| Error::Shader(e.to_string()))?;
+                self.downloads.insert(buf_proxy.id, output);
+                if buf_proxy.name == bump_name {
+                    if let Some(data) = self.downloads.get(&buf_proxy.id) {
+                        self.last_drained_bump = Some(bytemuck::pod_read_unaligned(data));
+                    }
+                }
+            }
+        }
+
+        for id in self.prev_deferred_free_buffers.drain(..) {
+            self.bind_map.remove_buf(id);
+        }
+        for id in self.prev_deferred_free_images.drain(..) {
+            self.bind_map.remove_image(id);
+        }
+        if let Some(id) = self.prev_output_image_id.take() {
+            self.bind_map.remove_image(id);
+        }
+        Ok(())
+    }
+
+    fn bumps_buf_static_name() -> &'static str {
+        "vello.bump_buf"
+    }
+
     /// Ensure all resources in bindings are materialized (cf. wgpu lazy materialization).
     /// Buffers that are only written by a shader are never Upload/Clear'd; images like
     /// `gradient_image` or `image_atlas` may be 1x1 placeholders never uploaded.
     /// For images: Image (read-write) needs Direct/UAV; `ImageRead` needs Interpolated/SRV.
+    ///
+    /// Fresh storage buffers are zeroed via [`ComputeCommand::ClearBuffer`] injected into
+    /// `graph.prelude` (batched with dispatches) instead of a blocking clear.
     fn ensure_resources_materialized(
         &mut self,
         device: &Device,
+        graph: &mut ComputeGraph,
         bindings: &[ResourceProxy],
         bind_types: &[BindType],
     ) -> Result<()> {
@@ -184,8 +278,11 @@ impl GoldyEngine {
                                 stride,
                                 proxy.buffer_flags,
                             )?;
-                            buf.clear(device, 0, proxy.size)
-                                .map_err(|e| Error::Shader(e.to_string()))?;
+                            graph.prelude.push(ComputeCommand::ClearBuffer {
+                                buffer: buf.gpu_buffer_handle(),
+                                offset: 0,
+                                size: proxy.size,
+                            });
                             GpuBuffer::Owned(buf)
                         };
                         self.bind_map.insert_buf(proxy.id, gpu_buf, proxy.name);
@@ -281,13 +378,10 @@ impl GoldyEngine {
     /// resource dependencies and inserts per-resource barriers, replacing the
     /// previous per-dispatch command buffer submission pattern.
     ///
-    /// Graph submission is deferred as long as possible to allow the graph to
-    /// batch dispatches and insert barriers efficiently. An intermediate
-    /// submit is only needed when an Upload *reuses* an existing buffer
-    /// (prior dispatches may still be reading the old contents). Fresh buffer
-    /// allocations and image uploads don't require a submit because the new
-    /// resource has never been seen by the GPU. A blocking flush happens for
-    /// `Clear`/`WriteImage` commands that mutate memory via CPU memset.
+    /// Graph submission is deferred until a flush-triggering upload or explicit
+    /// [`flush_graph`]. Completed GPU work may be drained at the **start**
+    /// of the next [`run_recording`] (pipelining) unless the caller uses
+    /// [`finish_frame_for_readback`].
     pub fn run_recording(
         &mut self,
         device: &Device,
@@ -295,20 +389,15 @@ impl GoldyEngine {
         output: Option<(&ImageProxy, &Texture)>,
         label: &'static str,
     ) -> Result<()> {
+        self.drain_completed_submit(device)?;
+
         let mut graph = ComputeGraph::new();
-        let mut last_future: Option<goldy::GpuFuture> = None;
+        let mut last_future: Option<GpuFuture> = None;
         let mut pending_downloads: Vec<BufferProxy> = Vec::new();
         let mut deferred_free_buffers: Vec<ResourceId> = Vec::new();
         let mut deferred_free_images: Vec<ResourceId> = Vec::new();
         let mut dispatch_count: usize = 0;
 
-        // The output image is inserted with a fresh `ResourceId` per frame (see
-        // `render.rs::out_image()`), and is never matched by a `FreeImage` command
-        // in the recording. Track its id so we can evict it from `bind_map` after
-        // the flush below — otherwise `bind_map.image_map` grows unbounded,
-        // leaks borrowed swapchain textures, and eventually triggers OOM or the
-        // "image … exists but has no bindless index" error when stale entries
-        // reference unregistered surface drawables.
         let output_image_id = output.map(|(proxy, tex)| {
             self.bind_map.insert_image(proxy.id, tex.borrow(), "output");
             proxy.id
@@ -317,31 +406,30 @@ impl GoldyEngine {
         for command in &recording.commands {
             match command {
                 Command::Upload(buf_proxy, bytes) => {
-                    // Reuse the existing buffer bound to this ResourceId if its
-                    // size and access category still match. Allocating a fresh
-                    // Buffer on every Upload would burn a bindless slot per
-                    // call; in the chunked flatten path we Upload `vello.config`
-                    // ~90× per frame, which exhausts the 64-slot storage-buffer
-                    // argument buffer and aliases descriptors across in-flight
-                    // command buffers (observed as `config.lines_size=0` in
-                    // binning and a STAGE_FLATTEN retry cascade). `buf.write`
-                    // issues a queue-ordered blit under the hood so the bytes
-                    // become visible to subsequent dispatches even while prior
-                    // dispatches that still reference the buffer are in flight.
+                    let needs_flush_before_upload = matches!(
+                        self.bind_map.get_buf(buf_proxy.id),
+                        Some((GpuBuffer::Owned(b), _))
+                            if b.size() >= bytes.len() as u64
+                                && b.access() == DataAccess::Scattered
+                                && b.flags() == buf_proxy.buffer_flags,
+                    );
+                    if needs_flush_before_upload {
+                        self.submit_graph(
+                            &mut graph,
+                            device,
+                            &mut last_future,
+                        )?;
+                    }
                     if let Some((GpuBuffer::Owned(existing), _)) =
                         self.bind_map.get_buf(buf_proxy.id)
                         && existing.size() >= bytes.len() as u64
                         && existing.access() == DataAccess::Scattered
                         && existing.flags() == buf_proxy.buffer_flags
                     {
-                        // Buffer is being reused — flush pending dispatches that
-                        // may still read the old contents before overwriting.
-                        Self::submit_graph(&mut graph, device, &mut last_future)?;
                         existing
                             .write(0, bytes)
                             .map_err(|e| Error::Shader(e.to_string()))?;
                     } else {
-                        // Fresh buffer — no GPU work references it yet.
                         let stride = buf_proxy
                             .element_stride
                             .or_else(|| element_stride_for_buffer(buf_proxy.name));
@@ -363,16 +451,24 @@ impl GoldyEngine {
                     }
                 }
                 Command::UploadUniform(buf_proxy, bytes) => {
-                    // Same rationale as Command::Upload: reusing the existing
-                    // Broadcast buffer avoids churning the uniform-buffer
-                    // bindless slot pool on repeated uploads to the same
-                    // ResourceId.
+                    let needs_flush_before_uniform = matches!(
+                        self.bind_map.get_buf(buf_proxy.id),
+                        Some((GpuBuffer::Owned(b), _))
+                            if b.size() >= bytes.len() as u64
+                                && b.access() == DataAccess::Broadcast,
+                    );
+                    if needs_flush_before_uniform {
+                        self.submit_graph(
+                            &mut graph,
+                            device,
+                            &mut last_future,
+                        )?;
+                    }
                     if let Some((GpuBuffer::Owned(existing), _)) =
                         self.bind_map.get_buf(buf_proxy.id)
                         && existing.size() >= bytes.len() as u64
                         && existing.access() == DataAccess::Broadcast
                     {
-                        Self::submit_graph(&mut graph, device, &mut last_future)?;
                         existing
                             .write(0, bytes)
                             .map_err(|e| Error::Shader(e.to_string()))?;
@@ -408,7 +504,11 @@ impl GoldyEngine {
                         .insert_image(image_proxy.id, texture, "uploaded_image");
                 }
                 Command::WriteImage(image_proxy, [x, y], image_data) => {
-                    Self::flush_graph(&mut graph, device, &mut last_future)?;
+                    self.flush_graph(
+                        &mut graph,
+                        device,
+                        &mut last_future,
+                    )?;
                     if self.bind_map.get_image(image_proxy.id).is_none() {
                         let format = image_format_to_goldy(image_proxy.format);
                         let tex = Texture::new(
@@ -443,20 +543,31 @@ impl GoldyEngine {
                 Command::Download(buf_proxy) => {
                     pending_downloads.push(*buf_proxy);
                 }
-                Command::Clear(buf_proxy, offset, size) => {
-                    Self::flush_graph(&mut graph, device, &mut last_future)?;
+                Command::Clear(buf_proxy, off, sz) => {
+                    let off = *off;
+                    let sz = sz.as_ref().copied();
+                    self.flush_graph(
+                        &mut graph,
+                        device,
+                        &mut last_future,
+                    )?;
                     if let Some((gpu_buf, _)) = self.bind_map.get_buf(buf_proxy.id) {
-                        let clear_size = size.unwrap_or(gpu_buf.size() - offset);
+                        let clear_size = sz.unwrap_or_else(|| gpu_buf.size() - off);
                         match gpu_buf {
                             GpuBuffer::Owned(buf) => {
-                                buf.clear(device, *offset, clear_size)
-                                    .map_err(|e| Error::Shader(e.to_string()))?;
+                                graph.prelude.push(ComputeCommand::ClearBuffer {
+                                    buffer: buf.gpu_buffer_handle(),
+                                    offset: off,
+                                    size: clear_size,
+                                });
                             }
                             GpuBuffer::Pooled(view) => {
                                 if let Some(ref pool) = self.storage_pool {
-                                    pool.backing_buffer()
-                                        .clear(device, view.offset() + offset, clear_size)
-                                        .map_err(|e| Error::Shader(e.to_string()))?;
+                                    graph.prelude.push(ComputeCommand::ClearBuffer {
+                                        buffer: pool.backing_buffer().gpu_buffer_handle(),
+                                        offset: view.offset() + off,
+                                        size: clear_size,
+                                    });
                                 }
                             }
                         }
@@ -472,9 +583,12 @@ impl GoldyEngine {
                             stride,
                             buf_proxy.buffer_flags,
                         )?;
-                        let clear_size = size.unwrap_or(buf.size() - offset);
-                        buf.clear(device, *offset, clear_size)
-                            .map_err(|e| Error::Shader(e.to_string()))?;
+                        let clear_size = sz.unwrap_or_else(|| buf.size() - off);
+                        graph.prelude.push(ComputeCommand::ClearBuffer {
+                            buffer: buf.gpu_buffer_handle(),
+                            offset: off,
+                            size: clear_size,
+                        });
                         self.bind_map.insert_buf(
                             buf_proxy.id,
                             GpuBuffer::Owned(buf),
@@ -493,7 +607,7 @@ impl GoldyEngine {
                         continue;
                     }
                     let bind_types: Vec<_> = self.shaders[shader_id.0].bindings.clone();
-                    self.ensure_resources_materialized(device, bindings, &bind_types)?;
+                    self.ensure_resources_materialized(device, &mut graph, bindings, &bind_types)?;
                     let indices = collect_bindless_indices(
                         bindings,
                         &bind_types,
@@ -524,11 +638,12 @@ impl GoldyEngine {
                 Command::DispatchIndirect(shader_id, buf_proxy, offset, bindings) => {
                     self.ensure_resources_materialized(
                         device,
+                        &mut graph,
                         &[ResourceProxy::Buffer(*buf_proxy)],
                         &[BindType::Buffer],
                     )?;
                     let bind_types: Vec<_> = self.shaders[shader_id.0].bindings.clone();
-                    self.ensure_resources_materialized(device, bindings, &bind_types)?;
+                    self.ensure_resources_materialized(device, &mut graph, bindings, &bind_types)?;
                     let indices = collect_bindless_indices(
                         bindings,
                         &bind_types,
@@ -597,74 +712,50 @@ impl GoldyEngine {
             }
         }
 
-        Self::flush_graph(&mut graph, device, &mut last_future)?;
+        self.submit_graph(
+            &mut graph,
+            device,
+            &mut last_future,
+        )?;
 
-        // Downloads must happen before frees, since a recording may download
-        // and then free the same buffer.
-        for buf_proxy in pending_downloads {
-            if let Some((gpu_buf, _)) = self.bind_map.get_buf(buf_proxy.id)
-                && let GpuBuffer::Owned(buf) = gpu_buf
-            {
-                if buf.flags().contains(BufferFlags::CPU_COHERENT) {
-                    device
-                        .copy_to_coherent_readback(buf)
-                        .map_err(|e| Error::Shader(e.to_string()))?;
-                    let size = buf.size() as usize;
-                    let mut output = vec![0_u8; size];
-                    buf.read_coherent(0, &mut output)
-                        .map_err(|e| Error::Shader(e.to_string()))?;
-                    self.downloads.insert(buf_proxy.id, output);
-                    continue;
-                }
-                let size = buf.size() as usize;
-                let mut output = vec![0_u8; size];
-                buf.read_to_cpu(device, &mut output)
-                    .map_err(|e| Error::Shader(e.to_string()))?;
-                self.downloads.insert(buf_proxy.id, output);
-            }
-        }
+        self.prev_frame_future = last_future.take();
+        self.prev_pending_downloads = pending_downloads;
+        self.prev_deferred_free_buffers = deferred_free_buffers;
+        self.prev_deferred_free_images = deferred_free_images;
+        self.prev_output_image_id = output_image_id;
 
-        for id in deferred_free_buffers {
-            self.bind_map.remove_buf(id);
-        }
-        for id in deferred_free_images {
-            self.bind_map.remove_image(id);
-        }
-        if let Some(id) = output_image_id {
-            self.bind_map.remove_image(id);
-        }
-        // Leak canary: anything left in bind_map after a full recording finishes
-        // is a per-frame allocation that was never explicitly freed. Each
-        // surviving buffer consumes a bindless slot, so in a steady-state
-        // render loop even 1 leaked buffer per frame eats through Metal's
-        // 64-slot argument buffer in a couple of seconds.
-        if !self.bind_map.buf_map.is_empty() || !self.bind_map.image_map.is_empty() {
-            let leaked_bufs: Vec<_> = self.bind_map.buf_map.values().map(|(_, n)| *n).collect();
-            let leaked_images: Vec<_> = self.bind_map.image_map.values().map(|(_, n)| *n).collect();
-            log::warn!(
-                "bind_map not fully drained at end of run_recording ({}): \
-                 bufs={} images={} leaked_bufs={:?} leaked_images={:?}",
-                label,
-                leaked_bufs.len(),
-                leaked_images.len(),
-                leaked_bufs,
-                leaked_images,
-            );
-        }
+        log::trace!(
+            "run_recording end ({label}): queued GPU submission; frees deferred to next drain"
+        );
+
         Ok(())
     }
 
-    /// Submit the current graph non-blocking if it has pending nodes.
-    ///
-    /// Safe for Upload commands that allocate fresh GPU resources: the old
-    /// buffer's descriptor slot is never reused (monotonic index allocation)
-    /// and Metal's command buffer reference counting keeps the backing memory
-    /// alive until the GPU finishes.
+    fn prepend_pool_clear_if_needed(&mut self, graph: &mut ComputeGraph) {
+        if !self.pool_clear_in_next_submit {
+            return;
+        }
+        self.pool_clear_in_next_submit = false;
+        if let Some(pool) = &self.storage_pool {
+            let backing = pool.backing_buffer();
+            graph.prelude.insert(
+                0,
+                ComputeCommand::ClearBuffer {
+                    buffer: backing.gpu_buffer_handle(),
+                    offset: 0,
+                    size: pool.capacity(),
+                },
+            );
+        }
+    }
+
     fn submit_graph(
+        &mut self,
         graph: &mut ComputeGraph,
         device: &Device,
-        last_future: &mut Option<goldy::GpuFuture>,
+        last_future: &mut Option<GpuFuture>,
     ) -> Result<()> {
+        self.prepend_pool_clear_if_needed(graph);
         if graph.is_empty() {
             return Ok(());
         }
@@ -676,16 +767,13 @@ impl GoldyEngine {
         Ok(())
     }
 
-    /// Submit the current graph and block until all prior GPU work completes.
-    ///
-    /// Required before CPU-side mutations (Clear, `WriteImage`) that touch
-    /// memory that in-flight dispatches may still be reading.
     fn flush_graph(
+        &mut self,
         graph: &mut ComputeGraph,
         device: &Device,
-        last_future: &mut Option<goldy::GpuFuture>,
+        last_future: &mut Option<GpuFuture>,
     ) -> Result<()> {
-        Self::submit_graph(graph, device, last_future)?;
+        self.submit_graph(graph, device, last_future)?;
         if let Some(future) = last_future.take() {
             future.wait().map_err(|e| Error::Shader(e.to_string()))?;
         }
@@ -733,17 +821,14 @@ impl GoldyEngine {
         node
     }
 
-    /// Get downloaded buffer data, if the recording contained a Download command for it.
-    ///
-    /// For `CPU_COHERENT` buffers this is filled during `run_recording`'s download pass
-    /// (after `copy_to_coherent_readback` on Direct3D 12) so it is available after
-    /// resources are removed from the bind map.
+    /// Get downloaded buffer data (after GPU completion drained at the next
+    /// [`GoldyEngine::run_recording`] or via [`finish_frame_for_readback`]).
     pub fn get_download(&self, buf: BufferProxy) -> Option<&[u8]> {
         self.downloads.get(&buf.id).map(|v| v.as_slice())
     }
 
-    /// Read [`ekrano_encoding::BumpAllocators`] from a `vello.bump_buf` created with
-    /// [`BufferFlags::CPU_COHERENT`], after `run_recording`.
+    /// Reads [`BumpAllocators`] from `get_download`; call after [`finish_frame_for_readback`]
+    /// (or rely on draining at the start of the next [`run_recording`]).
     pub fn read_bump_allocators(
         &self,
         proxy: &BufferProxy,
@@ -752,6 +837,12 @@ impl GoldyEngine {
             .get_download(*proxy)
             .ok_or_else(|| Error::Shader("bump buffer download not available".into()))?;
         Ok(bytemuck::pod_read_unaligned(data))
+    }
+
+    /// Consume bump allocator values drained after GPU completion (`vello.bump_buf` download).
+    #[allow(dead_code)] // public API for pipelined bump consumers
+    pub fn take_last_drained_bump(&mut self) -> Option<ekrano_encoding::BumpAllocators> {
+        self.last_drained_bump.take()
     }
 
     /// Free a downloaded buffer from the engine's storage.
@@ -783,35 +874,37 @@ impl GoldyEngine {
             device.reset_buffer_heaps();
             let pool =
                 BufferPool::new(device, pool_size).map_err(|e| Error::Shader(e.to_string()))?;
-            pool.backing_buffer()
-                .clear(device, 0, pool_size)
-                .map_err(|e| Error::Shader(e.to_string()))?;
             self.storage_pool = Some(pool);
         } else {
             let pool = self.storage_pool.as_mut().unwrap();
             pool.reset();
-            pool.backing_buffer()
-                .clear(device, 0, pool.capacity())
-                .map_err(|e| Error::Shader(e.to_string()))?;
         }
+        self.pool_clear_in_next_submit = true;
         Ok(())
     }
 
     /// Clear all transient resources (buffers, images, downloads) between retry attempts.
     /// Drops the storage pool so the next `prepare_storage_pool` allocates fresh.
-    pub fn clear_transients(&mut self) {
+    pub fn clear_transients(&mut self, device: &Device) -> Result<()> {
+        self.wait_until_gpu_idle(device)?;
+        self.pool_clear_in_next_submit = false;
+        self.prev_output_image_id = None;
+        self.last_drained_bump = None;
         self.bind_map.buf_map.clear();
         self.bind_map.image_map.clear();
         self.downloads.clear();
         self.storage_pool = None;
+        Ok(())
     }
 
     /// Release the storage pool and transient buffers to free GPU memory.
     /// Keeps images intact (caller may still need textures for readback).
-    pub fn release_pool(&mut self) {
+    pub fn release_pool(&mut self, device: &Device) -> Result<()> {
+        self.wait_until_gpu_idle(device)?;
         self.bind_map.buf_map.clear();
         self.downloads.clear();
         self.storage_pool = None;
+        Ok(())
     }
 
     /// Dump all buffer bindings for a dispatch to `$EKRANO_DUMP_DIR/dispatch_N/`.

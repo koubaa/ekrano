@@ -179,6 +179,7 @@ impl GoldyRenderer {
                 Some((&out_image, texture)),
                 "coarse+fine",
             )?;
+            self.engine.finish_frame_for_readback(device)?;
             let t_gpu = t4.elapsed();
 
             let t5 = Instant::now();
@@ -269,7 +270,7 @@ impl GoldyRenderer {
             //       bump.ptcl,
             //   );
             retry_config = Some(config.with_bump_estimates(&sanitize_bump(&bump)));
-            self.engine.clear_transients();
+            self.engine.clear_transients(device)?;
         }
         unreachable!()
     }
@@ -298,7 +299,7 @@ impl GoldyRenderer {
 
         // Free pool and transient buffer memory before readback so the staging
         // buffer allocation doesn't fail on memory-constrained workloads.
-        self.engine.release_pool();
+        self.engine.release_pool(device)?;
 
         let mut output = vec![0_u8; texture.byte_size()];
         texture
