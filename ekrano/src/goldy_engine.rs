@@ -221,6 +221,7 @@ impl GoldyEngine {
                     if let Some(data) = self.downloads.get(&buf_proxy.id) {
                         self.last_drained_bump = Some(bytemuck::pod_read_unaligned(data));
                     }
+                    self.downloads.remove(&buf_proxy.id);
                 }
             }
         }
@@ -426,6 +427,11 @@ impl GoldyEngine {
                         && existing.access() == DataAccess::Scattered
                         && existing.flags() == buf_proxy.buffer_flags
                     {
+                        // Synchronous write for reused buffers.  The deferred
+                        // WriteBuffer path has a subtle interaction with
+                        // cross-submission staging buffer state on existing
+                        // buffers; buf.write() is safe and only hit for small
+                        // persistent buffers (e.g. vello.config at ~100 B).
                         existing
                             .write(0, bytes)
                             .map_err(|e| Error::Shader(e.to_string()))?;
@@ -441,8 +447,11 @@ impl GoldyEngine {
                             stride,
                             buf_proxy.buffer_flags,
                         )?;
-                        buf.write(0, bytes)
-                            .map_err(|e| Error::Shader(e.to_string()))?;
+                        graph.prelude.push(ComputeCommand::WriteBuffer {
+                            buffer: buf.gpu_buffer_handle(),
+                            offset: 0,
+                            data: bytes.to_vec(),
+                        });
                         self.bind_map.insert_buf(
                             buf_proxy.id,
                             GpuBuffer::Owned(buf),
@@ -504,11 +513,18 @@ impl GoldyEngine {
                         .insert_image(image_proxy.id, texture, "uploaded_image");
                 }
                 Command::WriteImage(image_proxy, [x, y], image_data) => {
-                    self.flush_graph(
-                        &mut graph,
-                        device,
-                        &mut last_future,
-                    )?;
+                    // Only submit if the graph has dispatch nodes.  Prelude-only
+                    // graphs (WriteBuffer/ClearBuffer with no dispatches) must NOT
+                    // be split into a separate submission — the dispatches that
+                    // consume the uploaded data would land in a later submission
+                    // without guaranteed cross-submission memory visibility.
+                    if graph.len() > 0 {
+                        self.submit_graph(
+                            &mut graph,
+                            device,
+                            &mut last_future,
+                        )?;
+                    }
                     if self.bind_map.get_image(image_proxy.id).is_none() {
                         let format = image_format_to_goldy(image_proxy.format);
                         let tex = Texture::new(
@@ -546,11 +562,16 @@ impl GoldyEngine {
                 Command::Clear(buf_proxy, off, sz) => {
                     let off = *off;
                     let sz = sz.as_ref().copied();
-                    self.flush_graph(
-                        &mut graph,
-                        device,
-                        &mut last_future,
-                    )?;
+                    // Only submit if the graph has dispatch nodes.  Prelude-only
+                    // graphs must stay combined so WriteBuffer data is visible to
+                    // later dispatches within the same command buffer.
+                    if graph.len() > 0 {
+                        self.submit_graph(
+                            &mut graph,
+                            device,
+                            &mut last_future,
+                        )?;
+                    }
                     if let Some((gpu_buf, _)) = self.bind_map.get_buf(buf_proxy.id) {
                         let clear_size = sz.unwrap_or_else(|| gpu_buf.size() - off);
                         match gpu_buf {
@@ -767,6 +788,7 @@ impl GoldyEngine {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn flush_graph(
         &mut self,
         graph: &mut ComputeGraph,
@@ -823,12 +845,14 @@ impl GoldyEngine {
 
     /// Get downloaded buffer data (after GPU completion drained at the next
     /// [`GoldyEngine::run_recording`] or via [`finish_frame_for_readback`]).
+    #[allow(dead_code)]
     pub fn get_download(&self, buf: BufferProxy) -> Option<&[u8]> {
         self.downloads.get(&buf.id).map(|v| v.as_slice())
     }
 
     /// Reads [`BumpAllocators`] from `get_download`; call after [`finish_frame_for_readback`]
     /// (or rely on draining at the start of the next [`run_recording`]).
+    #[allow(dead_code)]
     pub fn read_bump_allocators(
         &self,
         proxy: &BufferProxy,
@@ -839,13 +863,18 @@ impl GoldyEngine {
         Ok(bytemuck::pod_read_unaligned(data))
     }
 
+    /// Peek at bump allocator values drained after GPU completion, without consuming.
+    pub fn last_drained_bump(&self) -> Option<&ekrano_encoding::BumpAllocators> {
+        self.last_drained_bump.as_ref()
+    }
+
     /// Consume bump allocator values drained after GPU completion (`vello.bump_buf` download).
-    #[allow(dead_code)] // public API for pipelined bump consumers
     pub fn take_last_drained_bump(&mut self) -> Option<ekrano_encoding::BumpAllocators> {
         self.last_drained_bump.take()
     }
 
     /// Free a downloaded buffer from the engine's storage.
+    #[allow(dead_code)]
     pub fn free_download(&mut self, buf: BufferProxy) {
         self.downloads.remove(&buf.id);
     }
@@ -885,6 +914,7 @@ impl GoldyEngine {
 
     /// Clear all transient resources (buffers, images, downloads) between retry attempts.
     /// Drops the storage pool so the next `prepare_storage_pool` allocates fresh.
+    #[allow(dead_code)]
     pub fn clear_transients(&mut self, device: &Device) -> Result<()> {
         self.wait_until_gpu_idle(device)?;
         self.pool_clear_in_next_submit = false;

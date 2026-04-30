@@ -96,11 +96,12 @@ impl GoldyRenderer {
 
     /// Render a scene to the given texture.
     ///
-    /// Uses robust rendering with deferred bump validation: coarse and fine
-    /// passes execute back-to-back on the GPU in a single submission (no CPU
-    /// readback stall between them). The bump allocator is checked *after*
-    /// both passes complete; if any stage overflowed, the frame is re-rendered
-    /// with larger buffers.
+    /// **Pipelined:** drains the *previous* frame's GPU work at the start,
+    /// then submits the current frame and returns without waiting.  The bump
+    /// allocator check uses the previous frame's data — if it overflowed,
+    /// buffers are grown for the current frame.  This gives one frame of
+    /// CPU/GPU overlap and eliminates the per-frame synchronization stall
+    /// that previously bottlenecked throughput.
     ///
     /// Returns [`FrameStats`] on success. Check [`FrameStats::bump_retries`] to detect
     /// scenes that required buffer reallocation (e.g. to print a warning to stdout).
@@ -115,86 +116,24 @@ impl GoldyRenderer {
         let frame_start = Instant::now();
 
         let encoding = scene.encoding();
-        let mut retry_config: Option<ekrano_encoding::RenderConfig> = None;
         let mut stats = FrameStats::default();
 
-        for attempt in 0..=MAX_BUMP_RETRIES {
-            let t0 = Instant::now();
-            let config = retry_config.take().unwrap_or_else(|| {
-                let mut packed = vec![];
-                let (layout, _, _) = self.resolver.resolve(encoding, &mut packed);
-                ekrano_encoding::RenderConfig::new(
-                    &layout,
-                    params.width,
-                    params.height,
-                    &params.base_color,
-                )
-            });
-            let t_resolve = t0.elapsed();
+        // ---- Pipelined drain: wait for the PREVIOUS frame's GPU work ----
+        // By now the GPU has been executing the previous frame concurrently
+        // with CPU event-loop processing, so this wait is often near-zero.
+        let t_drain_start = Instant::now();
+        self.engine.finish_frame_for_readback(device)?;
+        let t_drain = t_drain_start.elapsed();
 
-            let base = BufferPool::padded_size(&config.buffer_sizes.pool_allocs());
-            let pool_size = base.saturating_add(262144);
+        // Check if the previous frame's bump allocators overflowed.
+        // If so, grow buffers for THIS frame.
+        let prev_bump = self.engine.take_last_drained_bump();
 
-            let t1 = Instant::now();
-            self.engine.prepare_storage_pool(device, pool_size)?;
-            let t_pool = t1.elapsed();
-
-            let t2 = Instant::now();
-            let mut render = Render::new();
-            let mut recording = render.render_encoding_coarse_with_config(
-                encoding,
-                &mut self.resolver,
-                &self.shaders,
-                params,
-                true,
-                &config,
-            );
-            let bump_buf = render.bump_buf();
-            let out_image = render.out_image();
-            let filter_layers = render.filter_layer_textures();
-            let t_coarse = t2.elapsed();
-
-            let t3 = Instant::now();
-            render.record_fine(encoding, &self.shaders, &mut recording);
-            render::record_filter_effects(
-                encoding,
-                &self.shaders,
-                &mut recording,
-                params.width,
-                params.height,
-                &filter_layers,
-                out_image,
-            );
-            let t_fine_record = t3.elapsed();
-
-            #[cfg(feature = "debug_layers")]
-            if let Some(captured) = render.take_captured_buffers() {
-                captured.release_buffers(&mut recording);
-            }
-
-            let t4 = Instant::now();
-            self.engine.run_recording(
-                device,
-                &recording,
-                Some((&out_image, texture)),
-                "coarse+fine",
-            )?;
-            self.engine.finish_frame_for_readback(device)?;
-            let t_gpu = t4.elapsed();
-
-            let t5 = Instant::now();
-            let bump = self.read_bump(&bump_buf)?;
-            self.engine.free_download(bump_buf);
-            let t_bump = t5.elapsed();
-
-            let frame_num = FRAME_COUNTER.fetch_add(1, Ordering::Relaxed);
+        if let Some(ref bump) = prev_bump {
+            let frame_num = FRAME_COUNTER.load(Ordering::Relaxed);
             let is_empty =
                 bump.lines == 0 && bump.segments == 0 && bump.seg_counts == 0 && bump.tile == 0;
             let was_empty = LAST_FRAME_EMPTY.swap(is_empty, Ordering::Relaxed);
-
-            // Loudly flag the transition so a black-screen event leaves a
-            // single grep-able line in the log instead of vanishing into
-            // thousands of identical per-frame entries.
             if is_empty != was_empty {
                 log::warn!(
                     "[SCENE] frame {} transitioned to {} (lines={}, seg_counts={}, segments={}, tile={})",
@@ -206,25 +145,6 @@ impl GoldyRenderer {
                     bump.tile,
                 );
             }
-
-            // [PERF]/[BUMP] lines are debug-only so default `ekrano=info`
-            // produces no per-frame stdout traffic — required for clean FPS
-            // comparisons, since even once-per-second writes through `tee`
-            // show up as jitter in the heartbeat. Opt in with
-            // `RUST_LOG=ekrano=debug` when you actually want the rhythm.
-            // Transition and overflow-retry events remain at warn/info so a
-            // real problem still surfaces.
-            log::debug!(
-                "[PERF] frame={} resolve={:.2}ms pool={:.2}ms coarse_record={:.2}ms fine_record={:.2}ms gpu={:.2}ms bump_read={:.2}ms total={:.2}ms",
-                frame_num,
-                t_resolve.as_secs_f64() * 1000.0,
-                t_pool.as_secs_f64() * 1000.0,
-                t_coarse.as_secs_f64() * 1000.0,
-                t_fine_record.as_secs_f64() * 1000.0,
-                t_gpu.as_secs_f64() * 1000.0,
-                t_bump.as_secs_f64() * 1000.0,
-                frame_start.elapsed().as_secs_f64() * 1000.0,
-            );
             log::debug!(
                 "[BUMP] frame={} lines={}, seg_counts={}, segments={}, tile={}, failed=0x{:x}",
                 frame_num,
@@ -232,50 +152,105 @@ impl GoldyRenderer {
                 bump.seg_counts,
                 bump.segments,
                 bump.tile,
-                bump.failed
-            );
-
-            if bump.failed == 0 || attempt == MAX_BUMP_RETRIES {
-                if bump.failed != 0 {
-                    log::warn!(
-                        "Bump allocator overflow after {} retries (failed stages: 0x{:x}). \
-                         Rendering may be incomplete.",
-                        MAX_BUMP_RETRIES,
-                        bump.failed,
-                    );
-                }
-                return Ok(stats);
-            }
-
-            stats.bump_retries += 1;
-            log::info!(
-                "Bump overflow on attempt {} (failed: 0x{:x}), retrying with larger buffers",
-                attempt + 1,
                 bump.failed,
             );
-            // Re-enable alongside the matching diagnostic in binning.slang's
-            // overflow path when chasing a STAGE_FLATTEN retry cascade. The
-            // shader stashes its observed `bump.lines` / `config.lines_size`
-            // into the unused `binning` / `ptcl` counters; if those differ
-            // from the CPU-side values below, the GPU is reading a stale
-            // config uniform rather than genuinely overflowing.
-            //   log::info!(
-            //       "  cpu(bump.lines={} config.lines_size={} bump.tile={} config.tiles={}) \
-            //        gpu(observed_lines={} observed_lines_size={})",
-            //       bump.lines,
-            //       config.buffer_sizes.lines.len(),
-            //       bump.tile,
-            //       config.buffer_sizes.tiles.len(),
-            //       bump.binning,
-            //       bump.ptcl,
-            //   );
-            retry_config = Some(config.with_bump_estimates(&sanitize_bump(&bump)));
-            self.engine.clear_transients(device)?;
         }
-        unreachable!()
+
+        let t0 = Instant::now();
+        let config = {
+            let mut packed = vec![];
+            let (layout, _, _) = self.resolver.resolve(encoding, &mut packed);
+            let base = ekrano_encoding::RenderConfig::new(
+                &layout,
+                params.width,
+                params.height,
+                &params.base_color,
+            );
+            if let Some(ref bump) = prev_bump
+                && bump.failed != 0
+            {
+                stats.bump_retries += 1;
+                log::info!(
+                    "Previous frame bump overflow (0x{:x}), growing buffers",
+                    bump.failed,
+                );
+                base.with_bump_estimates(&sanitize_bump(bump))
+            } else {
+                base
+            }
+        };
+        let t_resolve = t0.elapsed();
+
+        let base = BufferPool::padded_size(&config.buffer_sizes.pool_allocs());
+        let pool_size = base.saturating_add(262144);
+
+        let t1 = Instant::now();
+        self.engine.prepare_storage_pool(device, pool_size)?;
+        let t_pool = t1.elapsed();
+
+        let t2 = Instant::now();
+        let mut render = Render::new();
+        let mut recording = render.render_encoding_coarse_with_config(
+            encoding,
+            &mut self.resolver,
+            &self.shaders,
+            params,
+            true,
+            &config,
+        );
+        let out_image = render.out_image();
+        let filter_layers = render.filter_layer_textures();
+        let t_coarse = t2.elapsed();
+
+        let t3 = Instant::now();
+        render.record_fine(encoding, &self.shaders, &mut recording);
+        render::record_filter_effects(
+            encoding,
+            &self.shaders,
+            &mut recording,
+            params.width,
+            params.height,
+            &filter_layers,
+            out_image,
+        );
+        let t_fine_record = t3.elapsed();
+
+        #[cfg(feature = "debug_layers")]
+        if let Some(captured) = render.take_captured_buffers() {
+            captured.release_buffers(&mut recording);
+        }
+
+        let t4 = Instant::now();
+        self.engine.run_recording(
+            device,
+            &recording,
+            Some((&out_image, texture)),
+            "coarse+fine",
+        )?;
+        let t_submit = t4.elapsed();
+
+        let frame_num = FRAME_COUNTER.fetch_add(1, Ordering::Relaxed);
+        log::debug!(
+            "[PERF] frame={} drain={:.2}ms resolve={:.2}ms pool={:.2}ms coarse_record={:.2}ms fine_record={:.2}ms submit={:.2}ms total={:.2}ms",
+            frame_num,
+            t_drain.as_secs_f64() * 1000.0,
+            t_resolve.as_secs_f64() * 1000.0,
+            t_pool.as_secs_f64() * 1000.0,
+            t_coarse.as_secs_f64() * 1000.0,
+            t_fine_record.as_secs_f64() * 1000.0,
+            t_submit.as_secs_f64() * 1000.0,
+            frame_start.elapsed().as_secs_f64() * 1000.0,
+        );
+
+        Ok(stats)
     }
 
     /// Render a scene and return the pixel data as RGBA bytes.
+    ///
+    /// Unlike [`render_to_texture`](Self::render_to_texture), this path is
+    /// **synchronous**: it waits for GPU completion and retries on bump
+    /// overflow to guarantee correct output for screenshots / headless
+    /// rendering.
     pub fn render_to_buffer(
         &mut self,
         device: &Device,
@@ -294,8 +269,24 @@ impl GoldyRenderer {
         )
         .map_err(|e| Error::Shader(e.to_string()))?;
 
-        self.render_to_texture(device, scene, &texture, params)
-            .map(|_| ())?;
+        // render_to_texture is pipelined (returns before GPU finishes), so
+        // force a synchronous drain + bump check here with retries.
+        for _attempt in 0..=MAX_BUMP_RETRIES {
+            self.render_to_texture(device, scene, &texture, params)?;
+            self.engine.finish_frame_for_readback(device)?;
+
+            match self.engine.last_drained_bump() {
+                Some(bump) if bump.failed != 0 => {
+                    log::info!(
+                        "Bump overflow in render_to_buffer (0x{:x}), retrying",
+                        bump.failed,
+                    );
+                    // Next render_to_texture will see the overflow via
+                    // take_last_drained_bump and grow buffers automatically.
+                }
+                _ => break,
+            }
+        }
 
         // Free pool and transient buffer memory before readback so the staging
         // buffer allocation doesn't fail on memory-constrained workloads.
@@ -306,9 +297,5 @@ impl GoldyRenderer {
             .read_to_cpu(&mut output)
             .map_err(|e| Error::Shader(e.to_string()))?;
         Ok(output)
-    }
-
-    fn read_bump(&self, bump_buf: &crate::low_level::BufferProxy) -> Result<BumpAllocators> {
-        self.engine.read_bump_allocators(bump_buf)
     }
 }
