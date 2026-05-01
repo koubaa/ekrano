@@ -427,14 +427,11 @@ impl GoldyEngine {
                         && existing.access() == DataAccess::Scattered
                         && existing.flags() == buf_proxy.buffer_flags
                     {
-                        // Synchronous write for reused buffers.  The deferred
-                        // WriteBuffer path has a subtle interaction with
-                        // cross-submission staging buffer state on existing
-                        // buffers; buf.write() is safe and only hit for small
-                        // persistent buffers (e.g. vello.config at ~100 B).
-                        existing
-                            .write(0, bytes)
-                            .map_err(|e| Error::Shader(e.to_string()))?;
+                        graph.prelude.push(ComputeCommand::WriteBuffer {
+                            buffer: existing.gpu_buffer_handle(),
+                            offset: 0,
+                            data: bytes.to_vec(),
+                        });
                     } else {
                         let stride = buf_proxy
                             .element_stride
@@ -513,18 +510,11 @@ impl GoldyEngine {
                         .insert_image(image_proxy.id, texture, "uploaded_image");
                 }
                 Command::WriteImage(image_proxy, [x, y], image_data) => {
-                    // Only submit if the graph has dispatch nodes.  Prelude-only
-                    // graphs (WriteBuffer/ClearBuffer with no dispatches) must NOT
-                    // be split into a separate submission — the dispatches that
-                    // consume the uploaded data would land in a later submission
-                    // without guaranteed cross-submission memory visibility.
-                    if graph.len() > 0 {
-                        self.submit_graph(
-                            &mut graph,
-                            device,
-                            &mut last_future,
-                        )?;
-                    }
+                    self.submit_graph(
+                        &mut graph,
+                        device,
+                        &mut last_future,
+                    )?;
                     if self.bind_map.get_image(image_proxy.id).is_none() {
                         let format = image_format_to_goldy(image_proxy.format);
                         let tex = Texture::new(
@@ -562,16 +552,11 @@ impl GoldyEngine {
                 Command::Clear(buf_proxy, off, sz) => {
                     let off = *off;
                     let sz = sz.as_ref().copied();
-                    // Only submit if the graph has dispatch nodes.  Prelude-only
-                    // graphs must stay combined so WriteBuffer data is visible to
-                    // later dispatches within the same command buffer.
-                    if graph.len() > 0 {
-                        self.submit_graph(
-                            &mut graph,
-                            device,
-                            &mut last_future,
-                        )?;
-                    }
+                    self.submit_graph(
+                        &mut graph,
+                        device,
+                        &mut last_future,
+                    )?;
                     if let Some((gpu_buf, _)) = self.bind_map.get_buf(buf_proxy.id) {
                         let clear_size = sz.unwrap_or_else(|| gpu_buf.size() - off);
                         match gpu_buf {
