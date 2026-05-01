@@ -235,6 +235,7 @@ impl GoldyEngine {
         if let Some(id) = self.prev_output_image_id.take() {
             self.bind_map.remove_image(id);
         }
+
         Ok(())
     }
 
@@ -510,11 +511,13 @@ impl GoldyEngine {
                         .insert_image(image_proxy.id, texture, "uploaded_image");
                 }
                 Command::WriteImage(image_proxy, [x, y], image_data) => {
-                    self.submit_graph(
-                        &mut graph,
-                        device,
-                        &mut last_future,
-                    )?;
+                    if graph.len() > 0 {
+                        self.submit_graph(
+                            &mut graph,
+                            device,
+                            &mut last_future,
+                        )?;
+                    }
                     if self.bind_map.get_image(image_proxy.id).is_none() {
                         let format = image_format_to_goldy(image_proxy.format);
                         let tex = Texture::new(
@@ -552,11 +555,13 @@ impl GoldyEngine {
                 Command::Clear(buf_proxy, off, sz) => {
                     let off = *off;
                     let sz = sz.as_ref().copied();
-                    self.submit_graph(
-                        &mut graph,
-                        device,
-                        &mut last_future,
-                    )?;
+                    if graph.len() > 0 {
+                        self.submit_graph(
+                            &mut graph,
+                            device,
+                            &mut last_future,
+                        )?;
+                    }
                     if let Some((gpu_buf, _)) = self.bind_map.get_buf(buf_proxy.id) {
                         let clear_size = sz.unwrap_or_else(|| gpu_buf.size() - off);
                         match gpu_buf {
