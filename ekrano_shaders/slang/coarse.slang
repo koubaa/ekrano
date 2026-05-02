@@ -136,16 +136,20 @@ void write_set_blend_mode(uint blend_packed, inout uint cmd_offset, inout uint c
 
 [shader("compute")]
 [numthreads(256, 1, 1)]
-void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
-    Config config = goldy_dyn_buf_ro<Config>(0)[0];
-    ReadOnlyBuffer<uint> scene = goldy_dyn_buf_ro<uint>(1);
-    ReadOnlyBuffer<DrawMonoid> draw_monoids = goldy_dyn_buf_ro<DrawMonoid>(2);
-    ReadOnlyBuffer<BinHeader> bin_headers = goldy_dyn_buf_ro<BinHeader>(3);
-    ReadOnlyBuffer<uint> info_bin_data = goldy_dyn_buf_ro<uint>(4);
-    ReadOnlyBuffer<Path> paths = goldy_dyn_buf_ro<Path>(5);
-    StorageBuffer<Tile> tiles = goldy_dyn_scattered<Tile>(6);
-    StorageBuffer<BumpAllocators> bump = goldy_dyn_scattered<BumpAllocators>(7);
-    StorageBuffer<uint> ptcl = goldy_dyn_scattered<uint>(8);
+void cs_main(uniform uint config_slot, uniform uint scene_slot,
+             uniform uint draw_monoids_slot, uniform uint bin_headers_slot,
+             uniform uint info_bin_data_slot, uniform uint paths_slot,
+             uniform uint tiles_slot, uniform uint bump_slot, uniform uint ptcl_slot,
+             uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
+    Config config = goldy_buf_ro<Config>(config_slot)[0];
+    ReadOnlyBuffer<uint> scene = goldy_buf_ro<uint>(scene_slot);
+    ReadOnlyBuffer<DrawMonoid> draw_monoids = goldy_buf_ro<DrawMonoid>(draw_monoids_slot);
+    ReadOnlyBuffer<BinHeader> bin_headers = goldy_buf_ro<BinHeader>(bin_headers_slot);
+    ReadOnlyBuffer<uint> info_bin_data = goldy_buf_ro<uint>(info_bin_data_slot);
+    ReadOnlyBuffer<Path> paths = goldy_buf_ro<Path>(paths_slot);
+    StorageBuffer<Tile> tiles = goldy_scattered<Tile>(tiles_slot);
+    StorageBuffer<BumpAllocators> bump = goldy_scattered<BumpAllocators>(bump_slot);
+    StorageBuffer<uint> ptcl = goldy_scattered<uint>(ptcl_slot);
 
     if (local_id.x == 0) {
         uint failed = bump[0].failed & (STAGE_BINNING | STAGE_TILE_ALLOC | STAGE_FLATTEN);

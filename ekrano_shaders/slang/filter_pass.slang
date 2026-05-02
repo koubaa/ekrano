@@ -73,16 +73,17 @@ float gaussian_weight(int i, float std_dev) {
 
 [shader("compute")]
 [numthreads(16, 16, 1)]
-void cs_main(uint3 gid : SV_DispatchThreadID) {
-    FilterUniform u = goldy_dyn_buf_ro<FilterUniform>(0)[0];
+void cs_main(uniform uint uniforms_slot, uniform uint src_slot, uniform uint dst_slot,
+             uint3 gid : SV_DispatchThreadID) {
+    FilterUniform u = goldy_buf_ro<FilterUniform>(uniforms_slot)[0];
     // `src` is a UAV (RWTexture2D) rather than a sampled texture so it can
     // alias the same storage-image (`Direct`) that fine writes into. Goldy
     // materializes a texture as EITHER SRV or UAV — never both — so sampling
     // a fine-written filter layer would require a separate copy. The shader
     // only uses integer `.Load()` / `src[p]` access here, so a UAV read is
     // equivalent.
-    RWTexture2D<float4> src = goldy_dyn_direct_spatial<float4>(1);
-    RWTexture2D<float4> dst = goldy_dyn_direct_spatial<float4>(2);
+    RWTexture2D<float4> src = goldy_direct_spatial<float4>(src_slot);
+    RWTexture2D<float4> dst = goldy_direct_spatial<float4>(dst_slot);
 
     uint2 dim = uint2(u.width, u.height);
     if (gid.x >= u.width || gid.y >= u.height)

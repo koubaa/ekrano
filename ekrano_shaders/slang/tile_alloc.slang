@@ -19,13 +19,15 @@ groupshared uint sh_previous_failed;
 
 [shader("compute")]
 [numthreads(256, 1, 1)]
-void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID) {
-    Config config = goldy_dyn_buf_ro<Config>(0)[0];
-    ReadOnlyBuffer<uint> scene = goldy_dyn_buf_ro<uint>(1);
-    ReadOnlyBuffer<float4> draw_bboxes = goldy_dyn_buf_ro<float4>(2);
-    StorageBuffer<BumpAllocators> bump = goldy_dyn_scattered<BumpAllocators>(3);
-    StorageBuffer<Path> paths = goldy_dyn_scattered<Path>(4);
-    StorageBuffer<Tile> tiles = goldy_dyn_scattered<Tile>(5);
+void cs_main(uniform uint config_slot, uniform uint scene_slot, uniform uint draw_bboxes_slot,
+             uniform uint bump_slot, uniform uint paths_slot, uniform uint tiles_slot,
+             uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID) {
+    Config config = goldy_buf_ro<Config>(config_slot)[0];
+    ReadOnlyBuffer<uint> scene = goldy_buf_ro<uint>(scene_slot);
+    ReadOnlyBuffer<float4> draw_bboxes = goldy_buf_ro<float4>(draw_bboxes_slot);
+    StorageBuffer<BumpAllocators> bump = goldy_scattered<BumpAllocators>(bump_slot);
+    StorageBuffer<Path> paths = goldy_scattered<Path>(paths_slot);
+    StorageBuffer<Tile> tiles = goldy_scattered<Tile>(tiles_slot);
 
     if (local_id.x == 0) {
         uint failed_val = bump[0].failed & (STAGE_BINNING | STAGE_FLATTEN);

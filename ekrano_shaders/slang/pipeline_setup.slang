@@ -13,9 +13,9 @@ import ekrano_shared;
 
 [shader("compute")]
 [numthreads(1, 1, 1)]
-void cs_main() {
-    ReadOnlyBuffer<WorkgroupCountsGpu> wg = goldy_dyn_buf_ro<WorkgroupCountsGpu>(0);
-    StorageBuffer<IndirectCount> indirect = goldy_dyn_scattered<IndirectCount>(1);
+void cs_main(uniform uint wg_slot, uniform uint indirect_slot) {
+    ReadOnlyBuffer<WorkgroupCountsGpu> wg = goldy_buf_ro<WorkgroupCountsGpu>(wg_slot);
+    StorageBuffer<IndirectCount> indirect = goldy_scattered<IndirectCount>(indirect_slot);
 
     WorkgroupCountsGpu counts = wg[0];
 

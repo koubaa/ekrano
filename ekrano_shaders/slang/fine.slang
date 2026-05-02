@@ -600,27 +600,36 @@ float hypot_fine(float a, float b) {
 
 [shader("compute")]
 [numthreads(4, 16, 1)]
-void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
-    Config config = goldy_dyn_buf_ro<Config>(0)[0];
-    ReadOnlyBuffer<Segment> segments = goldy_dyn_buf_ro<Segment>(1);
-    ReadOnlyBuffer<uint> ptcl = goldy_dyn_buf_ro<uint>(2);
-    ReadOnlyBuffer<uint> info = goldy_dyn_buf_ro<uint>(3);
-    StorageBuffer<uint> blend_spill = goldy_dyn_scattered<uint>(4);
-    RWTexture2D<float4> output = goldy_dyn_direct_spatial<float4>(5);
-    Texture2D<float4> gradients = goldy_dyn_interpolated<float4>(6);
-    Texture2D<float4> image_atlas = goldy_dyn_interpolated<float4>(7);
-    Texture2D<float4> mask_atlas = goldy_dyn_interpolated<float4>(8);
+void cs_main(uniform uint config_slot, uniform uint segments_slot,
+             uniform uint ptcl_slot, uniform uint info_slot,
+             uniform uint blend_spill_slot, uniform uint output_slot,
+             uniform uint gradients_slot, uniform uint image_atlas_slot,
+             uniform uint mask_atlas_slot,
+             // Slots 9-13: in non-msaa: filter_tex0-3 at 9-12 (slot_13 unused)
+             //             in msaa:     mask_lut at 9, filter_tex0-3 at 10-13
+             uniform uint slot_9, uniform uint slot_10, uniform uint slot_11,
+             uniform uint slot_12, uniform uint slot_13,
+             uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
+    Config config = goldy_buf_ro<Config>(config_slot)[0];
+    ReadOnlyBuffer<Segment> segments = goldy_buf_ro<Segment>(segments_slot);
+    ReadOnlyBuffer<uint> ptcl = goldy_buf_ro<uint>(ptcl_slot);
+    ReadOnlyBuffer<uint> info = goldy_buf_ro<uint>(info_slot);
+    StorageBuffer<uint> blend_spill = goldy_scattered<uint>(blend_spill_slot);
+    RWTexture2D<float4> output = goldy_direct_spatial<float4>(output_slot);
+    Texture2D<float4> gradients = goldy_interpolated<float4>(gradients_slot);
+    Texture2D<float4> image_atlas = goldy_interpolated<float4>(image_atlas_slot);
+    Texture2D<float4> mask_atlas = goldy_interpolated<float4>(mask_atlas_slot);
 #ifdef msaa
-    ReadOnlyBuffer<uint> mask_lut = goldy_dyn_buf_ro<uint>(9);
-    RWTexture2D<float4> filter_tex0 = goldy_dyn_direct_spatial<float4>(10);
-    RWTexture2D<float4> filter_tex1 = goldy_dyn_direct_spatial<float4>(11);
-    RWTexture2D<float4> filter_tex2 = goldy_dyn_direct_spatial<float4>(12);
-    RWTexture2D<float4> filter_tex3 = goldy_dyn_direct_spatial<float4>(13);
+    ReadOnlyBuffer<uint> mask_lut = goldy_buf_ro<uint>(slot_9);
+    RWTexture2D<float4> filter_tex0 = goldy_direct_spatial<float4>(slot_10);
+    RWTexture2D<float4> filter_tex1 = goldy_direct_spatial<float4>(slot_11);
+    RWTexture2D<float4> filter_tex2 = goldy_direct_spatial<float4>(slot_12);
+    RWTexture2D<float4> filter_tex3 = goldy_direct_spatial<float4>(slot_13);
 #else
-    RWTexture2D<float4> filter_tex0 = goldy_dyn_direct_spatial<float4>(9);
-    RWTexture2D<float4> filter_tex1 = goldy_dyn_direct_spatial<float4>(10);
-    RWTexture2D<float4> filter_tex2 = goldy_dyn_direct_spatial<float4>(11);
-    RWTexture2D<float4> filter_tex3 = goldy_dyn_direct_spatial<float4>(12);
+    RWTexture2D<float4> filter_tex0 = goldy_direct_spatial<float4>(slot_9);
+    RWTexture2D<float4> filter_tex1 = goldy_direct_spatial<float4>(slot_10);
+    RWTexture2D<float4> filter_tex2 = goldy_direct_spatial<float4>(slot_11);
+    RWTexture2D<float4> filter_tex3 = goldy_direct_spatial<float4>(slot_12);
 #endif
 
     uint actual_y = wg_id.y + config.tile_y_offset;

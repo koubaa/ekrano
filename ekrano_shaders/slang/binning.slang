@@ -23,16 +23,20 @@ groupshared uint sh_previous_failed;
 
 [shader("compute")]
 [numthreads(256, 1, 1)]
-void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID) {
-    Config config = goldy_dyn_buf_ro<Config>(0)[0];
-    ReadOnlyBuffer<uint> scene = goldy_dyn_buf_ro<uint>(1);
-    ReadOnlyBuffer<DrawMonoid> draw_monoids = goldy_dyn_buf_ro<DrawMonoid>(2);
-    ReadOnlyBuffer<PathBbox> path_bbox_buf = goldy_dyn_buf_ro<PathBbox>(3);
-    ReadOnlyBuffer<float4> clip_bbox_buf = goldy_dyn_buf_ro<float4>(4);
-    StorageBuffer<float4> intersected_bbox = goldy_dyn_scattered<float4>(5);
-    StorageBuffer<BumpAllocators> bump = goldy_dyn_scattered<BumpAllocators>(6);
-    StorageBuffer<uint> bin_data = goldy_dyn_scattered<uint>(7);
-    StorageBuffer<BinHeader> bin_header = goldy_dyn_scattered<BinHeader>(8);
+void cs_main(uniform uint config_slot, uniform uint scene_slot,
+             uniform uint draw_monoids_slot, uniform uint path_bbox_buf_slot,
+             uniform uint clip_bbox_buf_slot, uniform uint intersected_bbox_slot,
+             uniform uint bump_slot, uniform uint bin_data_slot, uniform uint bin_header_slot,
+             uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID) {
+    Config config = goldy_buf_ro<Config>(config_slot)[0];
+    ReadOnlyBuffer<uint> scene = goldy_buf_ro<uint>(scene_slot);
+    ReadOnlyBuffer<DrawMonoid> draw_monoids = goldy_buf_ro<DrawMonoid>(draw_monoids_slot);
+    ReadOnlyBuffer<PathBbox> path_bbox_buf = goldy_buf_ro<PathBbox>(path_bbox_buf_slot);
+    ReadOnlyBuffer<float4> clip_bbox_buf = goldy_buf_ro<float4>(clip_bbox_buf_slot);
+    StorageBuffer<float4> intersected_bbox = goldy_scattered<float4>(intersected_bbox_slot);
+    StorageBuffer<BumpAllocators> bump = goldy_scattered<BumpAllocators>(bump_slot);
+    StorageBuffer<uint> bin_data = goldy_scattered<uint>(bin_data_slot);
+    StorageBuffer<BinHeader> bin_header = goldy_scattered<BinHeader>(bin_header_slot);
 
     for (uint i = 0; i < N_SLICE; i++) {
         sh_bitmaps[i][local_id.x] = 0;

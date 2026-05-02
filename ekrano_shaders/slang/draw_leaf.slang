@@ -16,14 +16,17 @@ groupshared DrawMonoid sh_scratch[256];
 
 [shader("compute")]
 [numthreads(256, 1, 1)]
-void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
-    Config config = goldy_dyn_buf_ro<Config>(0)[0];
-    ReadOnlyBuffer<uint> scene = goldy_dyn_buf_ro<uint>(1);
-    ReadOnlyBuffer<DrawMonoid> reduced = goldy_dyn_buf_ro<DrawMonoid>(2);
-    ReadOnlyBuffer<PathBbox> path_bbox = goldy_dyn_buf_ro<PathBbox>(3);
-    StorageBuffer<DrawMonoid> draw_monoid = goldy_dyn_scattered<DrawMonoid>(4);
-    StorageBuffer<uint> info = goldy_dyn_scattered<uint>(5);
-    StorageBuffer<ClipInp> clip_inp = goldy_dyn_scattered<ClipInp>(6);
+void cs_main(uniform uint config_slot, uniform uint scene_slot,
+             uniform uint reduced_slot, uniform uint path_bbox_slot,
+             uniform uint draw_monoid_slot, uniform uint info_slot, uniform uint clip_inp_slot,
+             uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
+    Config config = goldy_buf_ro<Config>(config_slot)[0];
+    ReadOnlyBuffer<uint> scene = goldy_buf_ro<uint>(scene_slot);
+    ReadOnlyBuffer<DrawMonoid> reduced = goldy_buf_ro<DrawMonoid>(reduced_slot);
+    ReadOnlyBuffer<PathBbox> path_bbox = goldy_buf_ro<PathBbox>(path_bbox_slot);
+    StorageBuffer<DrawMonoid> draw_monoid = goldy_scattered<DrawMonoid>(draw_monoid_slot);
+    StorageBuffer<uint> info = goldy_scattered<uint>(info_slot);
+    StorageBuffer<ClipInp> clip_inp = goldy_scattered<ClipInp>(clip_inp_slot);
 
     DrawMonoid agg = DrawMonoid.identity();
     if (local_id.x < wg_id.x) {

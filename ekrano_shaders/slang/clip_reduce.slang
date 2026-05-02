@@ -16,11 +16,13 @@ groupshared uint sh_path_ix[256];
 
 [shader("compute")]
 [numthreads(256, 1, 1)]
-void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
-    ReadOnlyBuffer<ClipInp> clip_inp = goldy_dyn_buf_ro<ClipInp>(0);
-    ReadOnlyBuffer<PathBbox> path_bboxes = goldy_dyn_buf_ro<PathBbox>(1);
-    StorageBuffer<Bic> reduced = goldy_dyn_scattered<Bic>(2);
-    StorageBuffer<ClipEl> clip_out = goldy_dyn_scattered<ClipEl>(3);
+void cs_main(uniform uint clip_inp_slot, uniform uint path_bboxes_slot,
+             uniform uint reduced_slot, uniform uint clip_out_slot,
+             uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
+    ReadOnlyBuffer<ClipInp> clip_inp = goldy_buf_ro<ClipInp>(clip_inp_slot);
+    ReadOnlyBuffer<PathBbox> path_bboxes = goldy_buf_ro<PathBbox>(path_bboxes_slot);
+    StorageBuffer<Bic> reduced = goldy_scattered<Bic>(reduced_slot);
+    StorageBuffer<ClipEl> clip_out = goldy_scattered<ClipEl>(clip_out_slot);
 
     int inp = clip_inp[global_id.x].path_ix;
     bool is_push = inp >= 0;

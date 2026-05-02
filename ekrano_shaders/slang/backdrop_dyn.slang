@@ -18,11 +18,13 @@ groupshared uint sh_offset[256];
 
 [shader("compute")]
 [numthreads(256, 1, 1)]
-void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID) {
-    Config config = goldy_dyn_buf_ro<Config>(0)[0];
-    StorageBuffer<BumpAllocators> bump = goldy_dyn_scattered<BumpAllocators>(1);
-    ReadOnlyBuffer<Path> paths = goldy_dyn_buf_ro<Path>(2);
-    StorageBuffer<Tile> tiles = goldy_dyn_scattered<Tile>(3);
+void cs_main(uniform uint config_slot, uniform uint bump_slot,
+             uniform uint paths_slot, uniform uint tiles_slot,
+             uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID) {
+    Config config = goldy_buf_ro<Config>(config_slot)[0];
+    StorageBuffer<BumpAllocators> bump = goldy_scattered<BumpAllocators>(bump_slot);
+    ReadOnlyBuffer<Path> paths = goldy_buf_ro<Path>(paths_slot);
+    StorageBuffer<Tile> tiles = goldy_scattered<Tile>(tiles_slot);
 
     if (local_id.x == 0) {
         sh_row_count[0] = bump[0].failed;

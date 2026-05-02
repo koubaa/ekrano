@@ -13,9 +13,9 @@ static const uint WG_SIZE = 256;
 
 [shader("compute")]
 [numthreads(1, 1, 1)]
-void cs_main() {
-    StorageBuffer<BumpAllocators> bump = goldy_dyn_scattered<BumpAllocators>(0);
-    StorageBuffer<IndirectCount> indirect = goldy_dyn_scattered<IndirectCount>(1);
+void cs_main(uniform uint bump_slot, uniform uint indirect_slot) {
+    StorageBuffer<BumpAllocators> bump = goldy_scattered<BumpAllocators>(bump_slot);
+    StorageBuffer<IndirectCount> indirect = goldy_scattered<IndirectCount>(indirect_slot);
 
     if (bump[0].failed != 0) {
         indirect[INDIRECT_STAGE_PATH_COUNT].count_x = 0;

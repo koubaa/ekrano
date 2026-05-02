@@ -11,10 +11,11 @@
 //!
 //! We use Goldy's bindless descriptor indexing (global arrays of up to 16K
 //! descriptors per type) rather than actual buffer device addresses (BDA).
-//! Push constants carry up to 16 bindless indices per dispatch (`GoldyDynamicSlots`).
-//! This is simpler than wgpu's per-pipeline bind group layouts and satisfies
-//! the "simplify the binding model" goal. BDA would only be needed for GPU-side
-//! pointer chasing (e.g. buffer pools); we defer that unless required.
+//! Push constants carry bindless indices per dispatch via Slang `uniform`
+//! entry-point parameters. This is simpler than wgpu's per-pipeline bind group
+//! layouts and satisfies the "simplify the binding model" goal. BDA would only
+//! be needed for GPU-side pointer chasing (e.g. buffer pools); we defer that
+//! unless required.
 pub const MAX_BINDLESS_SLOTS: usize = 16;
 
 use std::collections::HashMap;
@@ -280,11 +281,7 @@ impl GoldyEngine {
                                 stride,
                                 proxy.buffer_flags,
                             )?;
-                            graph.prelude.push(ComputeCommand::ClearBuffer {
-                                buffer: buf.gpu_buffer_handle(),
-                                offset: 0,
-                                size: proxy.size,
-                            });
+                            graph.clear_buffer(&buf, 0, proxy.size);
                             GpuBuffer::Owned(buf)
                         };
                         self.bind_map.insert_buf(proxy.id, gpu_buf, proxy.name);
@@ -566,20 +563,10 @@ impl GoldyEngine {
                         let clear_size = sz.unwrap_or_else(|| gpu_buf.size() - off);
                         match gpu_buf {
                             GpuBuffer::Owned(buf) => {
-                                graph.prelude.push(ComputeCommand::ClearBuffer {
-                                    buffer: buf.gpu_buffer_handle(),
-                                    offset: off,
-                                    size: clear_size,
-                                });
+                                graph.clear_buffer(buf, off, clear_size);
                             }
                             GpuBuffer::Pooled(view) => {
-                                if let Some(ref pool) = self.storage_pool {
-                                    graph.prelude.push(ComputeCommand::ClearBuffer {
-                                        buffer: pool.backing_buffer().gpu_buffer_handle(),
-                                        offset: view.offset() + off,
-                                        size: clear_size,
-                                    });
-                                }
+                                graph.clear_buffer_view(view, off, clear_size);
                             }
                         }
                     } else {
@@ -595,11 +582,7 @@ impl GoldyEngine {
                             buf_proxy.buffer_flags,
                         )?;
                         let clear_size = sz.unwrap_or_else(|| buf.size() - off);
-                        graph.prelude.push(ComputeCommand::ClearBuffer {
-                            buffer: buf.gpu_buffer_handle(),
-                            offset: off,
-                            size: clear_size,
-                        });
+                        graph.clear_buffer(&buf, off, clear_size);
                         self.bind_map.insert_buf(
                             buf_proxy.id,
                             GpuBuffer::Owned(buf),
@@ -613,18 +596,19 @@ impl GoldyEngine {
                 Command::FreeImage(image_proxy) => {
                     deferred_free_images.push(image_proxy.id);
                 }
-                Command::Dispatch(shader_id, (x, y, z), bindings) => {
+                Command::Dispatch(shader_id, (x, y, z), bindings, push_tail) => {
                     if *x == 0 || *y == 0 || *z == 0 {
                         continue;
                     }
                     let bind_types: Vec<_> = self.shaders[shader_id.0].bindings.clone();
                     self.ensure_resources_materialized(device, &mut graph, bindings, &bind_types)?;
-                    let indices = collect_bindless_indices(
+                    let mut indices = collect_bindless_indices(
                         bindings,
                         &bind_types,
                         &self.bind_map,
                         force_uav(device),
                     )?;
+                    indices.extend_from_slice(push_tail);
 
                     if let Some(ref dir) = *DUMP_DIR {
                         self.dump_dispatch(
@@ -968,20 +952,7 @@ impl GoldyEngine {
                         let ok = match gpu_buf {
                             GpuBuffer::Owned(buf) => buf.read_to_cpu(device, &mut data).is_ok(),
                             GpuBuffer::Pooled(view) => {
-                                if let Some(ref pool) = self.storage_pool {
-                                    let full_size = pool.backing_buffer().size() as usize;
-                                    let mut full = vec![0_u8; full_size];
-                                    if pool.backing_buffer().read_to_cpu(device, &mut full).is_ok()
-                                    {
-                                        let off = view.offset() as usize;
-                                        data.copy_from_slice(&full[off..off + size]);
-                                        true
-                                    } else {
-                                        false
-                                    }
-                                } else {
-                                    false
-                                }
+                                view.read_to_cpu(device, &mut data).is_ok()
                             }
                         };
                         if ok {

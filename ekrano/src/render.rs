@@ -3,7 +3,7 @@
 
 //! Take an encoded scene and create a graph to render it
 
-use crate::recording::{BufferProxy, Command, ImageFormat, ImageProxy, Recording, ResourceProxy};
+use crate::recording::{BufferProxy, ImageFormat, ImageProxy, Recording, ResourceProxy};
 use crate::shaders::FullShaders;
 use crate::{AaConfig, RenderParams};
 
@@ -425,32 +425,35 @@ impl Render {
         ];
         let flat_wg_x = wg_counts.flatten.0;
         if flat_wg_x > MAX_FLATTEN_WG_PER_SUBMIT {
-            let mut gpu_cfg = cpu_config.gpu;
             let mut base_wg = 0_u32;
             while base_wg < flat_wg_x {
                 let chunk = (flat_wg_x - base_wg).min(MAX_FLATTEN_WG_PER_SUBMIT);
-                gpu_cfg.flatten_thread_base = base_wg * FLATTEN_THREADS_PER_GROUP;
-                recording.push(Command::Upload(
-                    config_buf_proxy,
-                    bytemuck::bytes_of(&gpu_cfg).to_vec(),
-                ));
-                recording.dispatch(shaders.flatten, (chunk, 1, 1), flatten_bindings);
+                let thread_base = base_wg * FLATTEN_THREADS_PER_GROUP;
+                recording.dispatch_with_push_tail(
+                    shaders.flatten,
+                    (chunk, 1, 1),
+                    flatten_bindings,
+                    &[thread_base],
+                );
                 base_wg += chunk;
             }
-            recording.push(Command::Upload(
-                config_buf_proxy,
-                bytemuck::bytes_of(&cpu_config.gpu).to_vec(),
-            ));
-        } else {
+        } else if use_indirect {
             dispatch_stage(
                 &mut recording,
-                use_indirect,
+                true,
                 indirect_buf,
                 shaders.flatten,
                 STAGE_FLATTEN,
                 wg_counts.flatten,
                 INDIRECT_STRIDE,
                 flatten_bindings,
+            );
+        } else {
+            recording.dispatch_with_push_tail(
+                shaders.flatten,
+                wg_counts.flatten,
+                flatten_bindings,
+                &[0],
             );
         }
         let draw_reduced_buf = ResourceProxy::new_buf(

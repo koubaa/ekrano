@@ -50,14 +50,17 @@ int search_link(inout Bic bic, uint ix_in) {
 
 [shader("compute")]
 [numthreads(256, 1, 1)]
-void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
-    Config config = goldy_dyn_buf_ro<Config>(0)[0];
-    ReadOnlyBuffer<ClipInp> clip_inp = goldy_dyn_buf_ro<ClipInp>(1);
-    ReadOnlyBuffer<PathBbox> path_bboxes = goldy_dyn_buf_ro<PathBbox>(2);
-    ReadOnlyBuffer<Bic> reduced = goldy_dyn_buf_ro<Bic>(3);
-    ReadOnlyBuffer<ClipEl> clip_els = goldy_dyn_buf_ro<ClipEl>(4);
-    StorageBuffer<DrawMonoid> draw_monoids = goldy_dyn_scattered<DrawMonoid>(5);
-    StorageBuffer<float4> clip_bboxes = goldy_dyn_scattered<float4>(6);
+void cs_main(uniform uint config_slot, uniform uint clip_inp_slot,
+             uniform uint path_bboxes_slot, uniform uint reduced_slot, uniform uint clip_els_slot,
+             uniform uint draw_monoids_slot, uniform uint clip_bboxes_slot,
+             uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
+    Config config = goldy_buf_ro<Config>(config_slot)[0];
+    ReadOnlyBuffer<ClipInp> clip_inp = goldy_buf_ro<ClipInp>(clip_inp_slot);
+    ReadOnlyBuffer<PathBbox> path_bboxes = goldy_buf_ro<PathBbox>(path_bboxes_slot);
+    ReadOnlyBuffer<Bic> reduced = goldy_buf_ro<Bic>(reduced_slot);
+    ReadOnlyBuffer<ClipEl> clip_els = goldy_buf_ro<ClipEl>(clip_els_slot);
+    StorageBuffer<DrawMonoid> draw_monoids = goldy_scattered<DrawMonoid>(draw_monoids_slot);
+    StorageBuffer<float4> clip_bboxes = goldy_scattered<float4>(clip_bboxes_slot);
 
     int load_path_ix = (global_id.x < config.n_clip) ? clip_inp[global_id.x].path_ix : -2147483648;
 

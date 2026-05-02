@@ -16,10 +16,11 @@ groupshared TagMonoid sh_scratch[WG_SIZE];
 
 [shader("compute")]
 [numthreads(256, 1, 1)]
-void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID) {
-    Config config = goldy_dyn_buf_ro<Config>(0)[0];
-    ReadOnlyBuffer<uint> scene = goldy_dyn_buf_ro<uint>(1);
-    StorageBuffer<TagMonoid> reduced = goldy_dyn_scattered<TagMonoid>(2);
+void cs_main(uniform uint config_slot, uniform uint scene_slot, uniform uint reduced_slot,
+             uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID) {
+    Config config = goldy_buf_ro<Config>(config_slot)[0];
+    ReadOnlyBuffer<uint> scene = goldy_buf_ro<uint>(scene_slot);
+    StorageBuffer<TagMonoid> reduced = goldy_scattered<TagMonoid>(reduced_slot);
 
     uint ix = global_id.x;
     uint tag_word = scene[config.pathtag_base + ix];
