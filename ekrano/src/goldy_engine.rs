@@ -625,7 +625,7 @@ impl GoldyEngine {
                     let mut node = graph.node("dispatch", &self.shaders[shader_id.0].pipeline);
                     node = self.bind_graph_resources(node, bindings, &bind_types);
                     if !indices.is_empty() {
-                        node = node.push_constants_raw(&indices);
+                        node = node.bind_resources_raw(&indices);
                     }
                     node.dispatch(*x, *y, *z);
                     dispatch_count += 1;
@@ -696,7 +696,7 @@ impl GoldyEngine {
                         node = self.bind_graph_resources(node, bindings, &bind_types);
                         node = node.bind_buffer(indirect_buf, NodeAccess::Read);
                         if !indices.is_empty() {
-                            node = node.push_constants_raw(&indices);
+                            node = node.bind_resources_raw(&indices);
                         }
                         node.dispatch_indirect(indirect_buf, *offset);
                         dispatch_count += 1;
@@ -934,7 +934,7 @@ impl GoldyEngine {
         writeln!(manifest, "shader_id: {}", shader_id.0).unwrap();
         writeln!(manifest, "dispatch: ({}, {}, {})", dims.0, dims.1, dims.2).unwrap();
         writeln!(manifest, "num_bindings: {}", bindings.len()).unwrap();
-        writeln!(manifest, "push_constants: {:?}", indices).unwrap();
+        writeln!(manifest, "resource_slots: {:?}", indices).unwrap();
 
         for (i, res) in bindings.iter().enumerate() {
             match res {
