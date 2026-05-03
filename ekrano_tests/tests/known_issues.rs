@@ -23,15 +23,40 @@ use scenes::ImageCache;
 /// A reproduction of <https://github.com/linebender/vello/issues/680>
 ///
 /// # Test status:
-/// This test seems to be flaky on the Vulkan backend specifically. Some fixes were
-/// applied, and are noted here to help with debugging flakiness later. Possible
-/// synchronization or memory-visibility issue beyond the prefix-sum barrier.
+/// Flaky on DX12 (intermittent 16,384-pixel / 64-tile deficit). The Vulkan backend
+/// seems stable after fixes 1–3 below.
+///
+/// ## DX12 flakiness analysis
+///
+/// The likely root cause is a missing UAV barrier between the prelude
+/// `ClearBuffer` (pool zero-fill via `ClearUnorderedAccessViewUint`) and the
+/// first wave of compute dispatches.
+///
+/// On Vulkan this is masked because the Vulkan backend inserts a global
+/// `COMPUTE_SHADER write → COMPUTE_SHADER read|write` memory barrier before
+/// **every** dispatch (so `Barrier` / `ResourceBarrier` commands are no-ops).
+///
+/// On DX12 there is no per-dispatch barrier — the backend relies on
+/// `ResourceBarrier` commands emitted by the graph scheduler at wave
+/// boundaries. But `ClearBuffer` lives in the `ComputeGraph::prelude`, which
+/// is outside the graph's dependency analysis, and wave 0 has no barrier
+/// before it. The GPU can therefore start executing wave-0 shaders before the
+/// `ClearUnorderedAccessViewUint` has finished zeroing the pool buffer.
+///
+/// The fix is either:
+///   (a) emit a UAV barrier after the ClearBuffer in the DX12 command loop
+///       (`ClearUnorderedAccessViewUint` syncs under
+///       `D3D12_BARRIER_SYNC_CLEAR_UNORDERED_ACCESS_VIEW`, which is distinct
+///       from `D3D12_BARRIER_SYNC_COMPUTE_SHADING`), or
+///   (b) have `ComputeGraph::compile_commands` inject a `Barrier` /
+///       `ResourceBarrier` between the prelude and the first wave when the
+///       prelude contains a `ClearBuffer`.
 ///
 /// # Test design:
 /// Draws a large red rectangle across a 4352x4352 viewport (17x17 bins, 272x272 tiles).
 /// The coarse shader caps `bin_ix` at 256, so 256 of the 289 bins should render red.
 ///
-/// # Fixes applied:
+/// # Fixes applied (Vulkan):
 ///
 /// 1. **binning.slang**: Added bounds checks (`bin_ix < N_TILE`) on `sh_bitmaps` writes
 ///    to prevent out-of-bounds shared memory access when `bin_ix >= 256`.
@@ -62,6 +87,7 @@ fn many_bins() {
     assert_eq!(image.format, ImageFormat::Rgba8);
     let mut red_count = 0;
     let mut black_count = 0;
+
     for pixel in image.data.data().chunks_exact(4) {
         let &[r, g, b, a] = pixel else { unreachable!() };
         let is_red = r == 255 && g == 0 && b == 0 && a == 255;
@@ -80,8 +106,6 @@ fn many_bins() {
     // When #680 is fully fixed, this will become:
     // let drawn_bins = 17 /* x bins */ * 17 /* y bins*/;
 
-    // The coarse shader caps bin_ix at 256 (see vello #680), so at most 256 of the
-    // 289 bins render.  With the binning OOB fix all 256 should be correct.
     // The coarse shader caps bin_ix at 256 (see vello #680), so at most 256 of the
     // 289 bins render.  With the binning OOB fix all 256 should be correct.
     const MIN_RED_COUNT: u32 = 256 * 256 * 256;

@@ -201,7 +201,7 @@ impl GoldyEngine {
     }
 
     fn drain_completed_submit(&mut self, device: &Device) -> Result<()> {
-        let Some(fut) = self.prev_frame_future.take() else {
+        let Some(mut fut) = self.prev_frame_future.take() else {
             return Ok(());
         };
         fut.wait().map_err(|e| Error::Shader(e.to_string()))?;
@@ -770,7 +770,7 @@ impl GoldyEngine {
         last_future: &mut Option<GpuFuture>,
     ) -> Result<()> {
         self.submit_graph(graph, device, last_future)?;
-        if let Some(future) = last_future.take() {
+        if let Some(mut future) = last_future.take() {
             future.wait().map_err(|e| Error::Shader(e.to_string()))?;
         }
         Ok(())
