@@ -204,29 +204,49 @@ impl GoldyEngine {
         let Some(mut fut) = self.prev_frame_future.take() else {
             return Ok(());
         };
-        fut.wait().map_err(|e| Error::Shader(e.to_string()))?;
+        // Wait for GPU work to complete.  `wait()` may return `Err` when a
+        // command buffer terminates with a GPU fault
+        // (kIOGPUCommandBufferCallbackErrorPageFault or similar).
+        //
+        // We intentionally do NOT early-return on that error: a faulted command
+        // buffer has *terminated* — its argument-buffer descriptors are no longer
+        // live — so it is safe to recycle every bindless slot and remove every
+        // bind-map entry.  Bailing out early instead causes `prev_deferred_free_buffers`
+        // to accumulate across faulted frames; the next successful `run_recording`
+        // then replaces the list without freeing it, permanently leaking those
+        // entries and exhausting the 64-slot storage-buffer window within 2–3 frames
+        // (observed panic: "storage-buffer bindless slots exhausted (64 max)").
+        let wait_result = fut.wait().map_err(|e| Error::Shader(e.to_string()));
 
-        let pending = mem::take(&mut self.prev_pending_downloads);
-        let bump_name = Self::bumps_buf_static_name();
+        // Downloads are only valid when GPU work completed successfully.
+        if wait_result.is_ok() {
+            let pending = mem::take(&mut self.prev_pending_downloads);
+            let bump_name = Self::bumps_buf_static_name();
 
-        for buf_proxy in pending {
-            if let Some((gpu_buf, _)) = self.bind_map.get_buf(buf_proxy.id)
-                && let GpuBuffer::Owned(buf) = gpu_buf
-            {
-                let size = buf.size() as usize;
-                let mut output = vec![0_u8; size];
-                buf.read_to_cpu(device, &mut output)
-                    .map_err(|e| Error::Shader(e.to_string()))?;
-                self.downloads.insert(buf_proxy.id, output);
-                if buf_proxy.name == bump_name {
-                    if let Some(data) = self.downloads.get(&buf_proxy.id) {
-                        self.last_drained_bump = Some(bytemuck::pod_read_unaligned(data));
+            for buf_proxy in pending {
+                if let Some((gpu_buf, _)) = self.bind_map.get_buf(buf_proxy.id)
+                    && let GpuBuffer::Owned(buf) = gpu_buf
+                {
+                    let size = buf.size() as usize;
+                    let mut output = vec![0_u8; size];
+                    buf.read_to_cpu(device, &mut output)
+                        .map_err(|e| Error::Shader(e.to_string()))?;
+                    self.downloads.insert(buf_proxy.id, output);
+                    if buf_proxy.name == bump_name {
+                        if let Some(data) = self.downloads.get(&buf_proxy.id) {
+                            self.last_drained_bump = Some(bytemuck::pod_read_unaligned(data));
+                        }
+                        self.downloads.remove(&buf_proxy.id);
                     }
-                    self.downloads.remove(&buf_proxy.id);
                 }
             }
+        } else {
+            // Discard pending downloads — their GPU data is corrupt after a fault.
+            self.prev_pending_downloads.clear();
         }
 
+        // Always free bind-map resources regardless of success/error so that
+        // bindless slots are recycled and GPU memory is not leaked.
         for id in self.prev_deferred_free_buffers.drain(..) {
             self.bind_map.remove_buf(id);
         }
@@ -237,7 +257,7 @@ impl GoldyEngine {
             self.bind_map.remove_image(id);
         }
 
-        Ok(())
+        wait_result
     }
 
     fn bumps_buf_static_name() -> &'static str {
