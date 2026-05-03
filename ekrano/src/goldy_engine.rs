@@ -433,11 +433,7 @@ impl GoldyEngine {
                                 && b.flags() == buf_proxy.buffer_flags,
                     );
                     if needs_flush_before_upload {
-                        self.submit_graph(
-                            &mut graph,
-                            device,
-                            &mut last_future,
-                        )?;
+                        self.submit_graph(&mut graph, device, &mut last_future)?;
                     }
                     if let Some((GpuBuffer::Owned(existing), _)) =
                         self.bind_map.get_buf(buf_proxy.id)
@@ -482,11 +478,7 @@ impl GoldyEngine {
                                 && b.access() == DataAccess::Broadcast,
                     );
                     if needs_flush_before_uniform {
-                        self.submit_graph(
-                            &mut graph,
-                            device,
-                            &mut last_future,
-                        )?;
+                        self.submit_graph(&mut graph, device, &mut last_future)?;
                     }
                     if let Some((GpuBuffer::Owned(existing), _)) =
                         self.bind_map.get_buf(buf_proxy.id)
@@ -529,11 +521,7 @@ impl GoldyEngine {
                 }
                 Command::WriteImage(image_proxy, [x, y], image_data) => {
                     if graph.len() > 0 {
-                        self.submit_graph(
-                            &mut graph,
-                            device,
-                            &mut last_future,
-                        )?;
+                        self.submit_graph(&mut graph, device, &mut last_future)?;
                     }
                     if self.bind_map.get_image(image_proxy.id).is_none() {
                         let format = image_format_to_goldy(image_proxy.format);
@@ -573,11 +561,7 @@ impl GoldyEngine {
                     let off = *off;
                     let sz = sz.as_ref().copied();
                     if graph.len() > 0 {
-                        self.submit_graph(
-                            &mut graph,
-                            device,
-                            &mut last_future,
-                        )?;
+                        self.submit_graph(&mut graph, device, &mut last_future)?;
                     }
                     if let Some((gpu_buf, _)) = self.bind_map.get_buf(buf_proxy.id) {
                         let clear_size = sz.unwrap_or_else(|| gpu_buf.size() - off);
@@ -622,30 +606,31 @@ impl GoldyEngine {
                     }
                     let bind_types: Vec<_> = self.shaders[shader_id.0].bindings.clone();
                     self.ensure_resources_materialized(device, &mut graph, bindings, &bind_types)?;
-                    let mut indices = collect_bindless_indices(
+                    let indices = collect_bindless_indices(
                         bindings,
                         &bind_types,
                         &self.bind_map,
                         force_uav(device),
                     )?;
-                    indices.extend_from_slice(push_tail);
 
                     if let Some(ref dir) = *DUMP_DIR {
+                        let mut debug_indices = indices.clone();
+                        debug_indices.extend_from_slice(push_tail);
                         self.dump_dispatch(
                             device,
                             dispatch_count,
                             *shader_id,
                             (*x, *y, *z),
                             bindings,
-                            &indices,
+                            &debug_indices,
                             dir,
                         );
                     }
 
                     let mut node = graph.node("dispatch", &self.shaders[shader_id.0].pipeline);
                     node = self.bind_graph_resources(node, bindings, &bind_types);
-                    if !indices.is_empty() {
-                        node = node.bind_resources_raw(&indices);
+                    if !indices.is_empty() || !push_tail.is_empty() {
+                        node = node.bind_resources_raw_with_user(&indices, push_tail);
                     }
                     node.dispatch(*x, *y, *z);
                     dispatch_count += 1;
@@ -727,11 +712,7 @@ impl GoldyEngine {
             }
         }
 
-        self.submit_graph(
-            &mut graph,
-            device,
-            &mut last_future,
-        )?;
+        self.submit_graph(&mut graph, device, &mut last_future)?;
 
         self.prev_frame_future = last_future.take();
         self.prev_pending_downloads = pending_downloads;
@@ -971,9 +952,7 @@ impl GoldyEngine {
                         let mut data = vec![0_u8; size];
                         let ok = match gpu_buf {
                             GpuBuffer::Owned(buf) => buf.read_to_cpu(device, &mut data).is_ok(),
-                            GpuBuffer::Pooled(view) => {
-                                view.read_to_cpu(device, &mut data).is_ok()
-                            }
+                            GpuBuffer::Pooled(view) => view.read_to_cpu(device, &mut data).is_ok(),
                         };
                         if ok {
                             std::fs::write(format!("{dir}/buf_{i}.bin"), &data).ok();

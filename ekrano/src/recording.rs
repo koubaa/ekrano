@@ -197,12 +197,7 @@ impl Recording {
         R::Item: Into<ResourceProxy>,
     {
         let r = resources.into_iter().map(|r| r.into()).collect();
-        self.push(Command::Dispatch(
-            shader,
-            wg_size,
-            r,
-            push_tail.to_vec(),
-        ));
+        self.push(Command::Dispatch(shader, wg_size, r, push_tail.to_vec()));
     }
 
     /// Do an indirect dispatch.
