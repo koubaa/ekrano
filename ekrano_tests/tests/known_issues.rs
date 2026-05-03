@@ -23,34 +23,34 @@ use scenes::ImageCache;
 /// A reproduction of <https://github.com/linebender/vello/issues/680>
 ///
 /// # Test status:
-/// Flaky on DX12 (intermittent 16,384-pixel / 64-tile deficit). The Vulkan backend
-/// seems stable after fixes 1–3 below.
+/// Previously flaky on DX12 (intermittent 16,384-pixel / 64-tile deficit).
+/// Fixed by the `TaskGraph` refactor — see below. The Vulkan backend was
+/// already stable after fixes 1–3 below.
 ///
-/// ## DX12 flakiness analysis
+/// ## Root cause (fixed)
 ///
-/// The likely root cause is a missing UAV barrier between the prelude
-/// `ClearBuffer` (pool zero-fill via `ClearUnorderedAccessViewUint`) and the
-/// first wave of compute dispatches.
+/// The DX12 flake was a missing UAV barrier between the pool `ClearBuffer`
+/// and the first wave of compute dispatches.
 ///
-/// On Vulkan this is masked because the Vulkan backend inserts a global
+/// On Vulkan it was masked because the Vulkan backend inserts a global
 /// `COMPUTE_SHADER write → COMPUTE_SHADER read|write` memory barrier before
-/// **every** dispatch (so `Barrier` / `ResourceBarrier` commands are no-ops).
+/// **every** dispatch (so `Barrier` / `ResourceBarrier` commands are no-ops
+/// for correctness purposes).
 ///
 /// On DX12 there is no per-dispatch barrier — the backend relies on
 /// `ResourceBarrier` commands emitted by the graph scheduler at wave
-/// boundaries. But `ClearBuffer` lives in the `ComputeGraph::prelude`, which
-/// is outside the graph's dependency analysis, and wave 0 has no barrier
-/// before it. The GPU can therefore start executing wave-0 shaders before the
-/// `ClearUnorderedAccessViewUint` has finished zeroing the pool buffer.
+/// boundaries. Previously, `ClearBuffer` lived in `ComputeGraph::prelude`,
+/// which bypassed dependency analysis. Wave 0 had no barrier before it, so
+/// the GPU could start executing wave-0 shaders before
+/// `ClearUnorderedAccessViewUint` finished zeroing the pool buffer.
 ///
-/// The fix is either:
-///   (a) emit a UAV barrier after the ClearBuffer in the DX12 command loop
-///       (`ClearUnorderedAccessViewUint` syncs under
-///       `D3D12_BARRIER_SYNC_CLEAR_UNORDERED_ACCESS_VIEW`, which is distinct
-///       from `D3D12_BARRIER_SYNC_COMPUTE_SHADING`), or
-///   (b) have `ComputeGraph::compile_commands` inject a `Barrier` /
-///       `ResourceBarrier` between the prelude and the first wave when the
-///       prelude contains a `ClearBuffer`.
+/// ## Fix (TaskGraph refactor)
+///
+/// `ComputeGraph` has been renamed to `TaskGraph` and the `pub prelude`
+/// escape hatch removed. Pool clears and buffer writes are now first-class
+/// graph nodes with `NodeAccess::Write`. The dependency analyzer sees them
+/// and inserts the required `ResourceBarrier` before any downstream reader,
+/// including the DX12 `ClearUnorderedAccessViewUint → compute` boundary.
 ///
 /// # Test design:
 /// Draws a large red rectangle across a 4352x4352 viewport (17x17 bins, 272x272 tiles).
