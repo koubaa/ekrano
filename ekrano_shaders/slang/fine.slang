@@ -598,39 +598,24 @@ float hypot_fine(float a, float b) {
     return sqrt(a * a + b * b);
 }
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(4, 16, 1)]
-void cs_main(uniform uint config_slot, uniform uint segments_slot,
-             uniform uint ptcl_slot, uniform uint info_slot,
-             uniform uint blend_spill_slot, uniform uint output_slot,
-             uniform uint gradients_slot, uniform uint image_atlas_slot,
-             uniform uint mask_atlas_slot,
+void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
+             BufRO<uint> ptcl, BufRO<uint> info,
+             Scattered<uint> blend_spill, DirectSpatial<float4> output,
+             Interpolated<float4> gradients, Interpolated<float4> image_atlas,
+             Interpolated<float4> mask_atlas,
              // Slots 9-13: in non-msaa: filter_tex0-3 at 9-12 (slot_13 unused)
              //             in msaa:     mask_lut at 9, filter_tex0-3 at 10-13
-             uniform uint slot_9, uniform uint slot_10, uniform uint slot_11,
-             uniform uint slot_12, uniform uint slot_13,
-             uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
-    Config config = goldy_buf_ro<Config>(config_slot)[0];
-    ReadOnlyBuffer<Segment> segments = goldy_buf_ro<Segment>(segments_slot);
-    ReadOnlyBuffer<uint> ptcl = goldy_buf_ro<uint>(ptcl_slot);
-    ReadOnlyBuffer<uint> info = goldy_buf_ro<uint>(info_slot);
-    StorageBuffer<uint> blend_spill = goldy_scattered<uint>(blend_spill_slot);
-    RWTexture2D<float4> output = goldy_direct_spatial<float4>(output_slot);
-    Texture2D<float4> gradients = goldy_interpolated<float4>(gradients_slot);
-    Texture2D<float4> image_atlas = goldy_interpolated<float4>(image_atlas_slot);
-    Texture2D<float4> mask_atlas = goldy_interpolated<float4>(mask_atlas_slot);
 #ifdef msaa
-    ReadOnlyBuffer<uint> mask_lut = goldy_buf_ro<uint>(slot_9);
-    RWTexture2D<float4> filter_tex0 = goldy_direct_spatial<float4>(slot_10);
-    RWTexture2D<float4> filter_tex1 = goldy_direct_spatial<float4>(slot_11);
-    RWTexture2D<float4> filter_tex2 = goldy_direct_spatial<float4>(slot_12);
-    RWTexture2D<float4> filter_tex3 = goldy_direct_spatial<float4>(slot_13);
+             BufRO<uint> mask_lut, DirectSpatial<float4> filter_tex0, DirectSpatial<float4> filter_tex1,
+             DirectSpatial<float4> filter_tex2, DirectSpatial<float4> filter_tex3,
 #else
-    RWTexture2D<float4> filter_tex0 = goldy_direct_spatial<float4>(slot_9);
-    RWTexture2D<float4> filter_tex1 = goldy_direct_spatial<float4>(slot_10);
-    RWTexture2D<float4> filter_tex2 = goldy_direct_spatial<float4>(slot_11);
-    RWTexture2D<float4> filter_tex3 = goldy_direct_spatial<float4>(slot_12);
+             DirectSpatial<float4> filter_tex0, DirectSpatial<float4> filter_tex1,
+             DirectSpatial<float4> filter_tex2, DirectSpatial<float4> filter_tex3,
 #endif
+             ThreadId global_id, GroupThreadId local_id, GroupId wg_id) {
+    Config config = config_buf[0];
 
     uint actual_y = wg_id.y + config.tile_y_offset;
     uint tile_ix = actual_y * config.width_in_tiles + wg_id.x;
@@ -666,7 +651,7 @@ void cs_main(uniform uint config_slot, uniform uint segments_slot,
         if (tag == CMD_FILL) {
             CmdFill fill = read_fill(ptcl, cmd_ix);
 #ifdef msaa
-            fill_path_ms(fill, local_id.xy, segments, mask_lut, area);
+            fill_path_ms(fill, uint2(local_id.x, local_id.y), segments, mask_lut, area);
 #else
             fill_path(fill, local_xy, segments, area);
 #endif

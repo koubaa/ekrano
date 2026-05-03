@@ -11,13 +11,11 @@ static const uint WG_SIZE = 256;
 // Slots: 0 = config, 1 = scene, 2 = reduced
 groupshared DrawMonoid sh_scratch[256];
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(256, 1, 1)]
-void cs_main(uniform uint config_slot, uniform uint scene_slot, uniform uint reduced_slot,
-             uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
-    Config config = goldy_buf_ro<Config>(config_slot)[0];
-    ReadOnlyBuffer<uint> scene = goldy_buf_ro<uint>(scene_slot);
-    StorageBuffer<DrawMonoid> reduced = goldy_scattered<DrawMonoid>(reduced_slot);
+void cs_main(BufRO<Config> config_buf, BufRO<uint> scene, Scattered<DrawMonoid> reduced,
+             GroupThreadId local_id, GroupId wg_id) {
+    Config config = config_buf[0];
 
     uint num_blocks_total = (config.n_drawobj + (WG_SIZE - 1)) / WG_SIZE;
     uint n_blocks_base = num_blocks_total / WG_SIZE;

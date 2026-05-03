@@ -16,13 +16,12 @@ groupshared int sh_backdrop[512];
 // Slots: 0=config, 1=bump (unused), 2=paths (unused), 3=tiles
 // Must match the dispatch binding order in render.rs: [config, bump, paths, tiles]
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(512, 1, 1)]
-void cs_main(uniform uint config_slot, uniform uint bump_slot, uniform uint paths_slot,
-             uniform uint tiles_slot,
-             uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
-    Config config = goldy_buf_ro<Config>(config_slot)[0];
-    StorageBuffer<Tile> tiles = goldy_scattered<Tile>(tiles_slot);
+void cs_main(BufRO<Config> config_buf, Scattered<BumpAllocators> bump, BufRO<Path> paths,
+             Scattered<Tile> tiles,
+             GroupThreadId local_id, GroupId wg_id) {
+    Config config = config_buf[0];
 
     uint width_in_tiles = config.width_in_tiles;
     uint ix = wg_id.x * width_in_tiles + local_id.x;

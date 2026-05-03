@@ -9,17 +9,12 @@ import ekrano_shared;
 
 // Slots: 0=config, 1=bump, 2=lines, 3=paths, 4=tile, 5=seg_counts
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(256, 1, 1)]
-void cs_main(uniform uint config_slot, uniform uint bump_slot, uniform uint lines_slot,
-             uniform uint paths_slot, uniform uint tile_slot, uniform uint seg_counts_slot,
-             uint3 global_id : SV_DispatchThreadID) {
-    Config config = goldy_buf_ro<Config>(config_slot)[0];
-    StorageBuffer<BumpAllocators> bump = goldy_scattered<BumpAllocators>(bump_slot);
-    ReadOnlyBuffer<LineSoup> lines = goldy_buf_ro<LineSoup>(lines_slot);
-    ReadOnlyBuffer<Path> paths = goldy_buf_ro<Path>(paths_slot);
-    StorageBuffer<Tile> tile = goldy_scattered<Tile>(tile_slot);
-    StorageBuffer<SegmentCount> seg_counts = goldy_scattered<SegmentCount>(seg_counts_slot);
+void cs_main(BufRO<Config> config_buf, Scattered<BumpAllocators> bump, BufRO<LineSoup> lines,
+             BufRO<Path> paths, Scattered<Tile> tile, Scattered<SegmentCount> seg_counts,
+             ThreadId global_id) {
+    Config config = config_buf[0];
 
     uint n_lines = bump[0].lines;
 

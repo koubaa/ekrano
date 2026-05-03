@@ -16,15 +16,12 @@ groupshared uint sh_offset[256];
 
 // Slots: 0=config, 1=bump, 2=paths, 3=tiles
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(256, 1, 1)]
-void cs_main(uniform uint config_slot, uniform uint bump_slot,
-             uniform uint paths_slot, uniform uint tiles_slot,
-             uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID) {
-    Config config = goldy_buf_ro<Config>(config_slot)[0];
-    StorageBuffer<BumpAllocators> bump = goldy_scattered<BumpAllocators>(bump_slot);
-    ReadOnlyBuffer<Path> paths = goldy_buf_ro<Path>(paths_slot);
-    StorageBuffer<Tile> tiles = goldy_scattered<Tile>(tiles_slot);
+void cs_main(BufRO<Config> config_buf, Scattered<BumpAllocators> bump,
+             BufRO<Path> paths, Scattered<Tile> tiles,
+             ThreadId global_id, GroupThreadId local_id) {
+    Config config = config_buf[0];
 
     if (local_id.x == 0) {
         sh_row_count[0] = bump[0].failed;

@@ -134,22 +134,14 @@ void write_set_blend_mode(uint blend_packed, inout uint cmd_offset, inout uint c
 
 // Slots: 0=config, 1=scene, 2=draw_monoids, 3=bin_headers, 4=info_bin_data, 5=paths, 6=tiles, 7=bump, 8=ptcl
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(256, 1, 1)]
-void cs_main(uniform uint config_slot, uniform uint scene_slot,
-             uniform uint draw_monoids_slot, uniform uint bin_headers_slot,
-             uniform uint info_bin_data_slot, uniform uint paths_slot,
-             uniform uint tiles_slot, uniform uint bump_slot, uniform uint ptcl_slot,
-             uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
-    Config config = goldy_buf_ro<Config>(config_slot)[0];
-    ReadOnlyBuffer<uint> scene = goldy_buf_ro<uint>(scene_slot);
-    ReadOnlyBuffer<DrawMonoid> draw_monoids = goldy_buf_ro<DrawMonoid>(draw_monoids_slot);
-    ReadOnlyBuffer<BinHeader> bin_headers = goldy_buf_ro<BinHeader>(bin_headers_slot);
-    ReadOnlyBuffer<uint> info_bin_data = goldy_buf_ro<uint>(info_bin_data_slot);
-    ReadOnlyBuffer<Path> paths = goldy_buf_ro<Path>(paths_slot);
-    StorageBuffer<Tile> tiles = goldy_scattered<Tile>(tiles_slot);
-    StorageBuffer<BumpAllocators> bump = goldy_scattered<BumpAllocators>(bump_slot);
-    StorageBuffer<uint> ptcl = goldy_scattered<uint>(ptcl_slot);
+void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
+             BufRO<DrawMonoid> draw_monoids, BufRO<BinHeader> bin_headers,
+             BufRO<uint> info_bin_data, BufRO<Path> paths,
+             Scattered<Tile> tiles, Scattered<BumpAllocators> bump, Scattered<uint> ptcl,
+             GroupThreadId local_id, GroupId wg_id) {
+    Config config = config_buf[0];
 
     if (local_id.x == 0) {
         uint failed = bump[0].failed & (STAGE_BINNING | STAGE_TILE_ALLOC | STAGE_FLATTEN);

@@ -14,15 +14,12 @@ static const uint WG_SIZE = 256;
 groupshared TagMonoid sh_parent[256];
 groupshared TagMonoid sh_monoid[256];
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(256, 1, 1)]
-void cs_main(uniform uint config_slot, uniform uint scene_slot,
-             uniform uint reduced_slot, uniform uint tag_monoids_slot,
-             uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
-    Config config = goldy_buf_ro<Config>(config_slot)[0];
-    ReadOnlyBuffer<uint> scene = goldy_buf_ro<uint>(scene_slot);
-    ReadOnlyBuffer<TagMonoid> reduced = goldy_buf_ro<TagMonoid>(reduced_slot);
-    StorageBuffer<TagMonoid> tag_monoids = goldy_scattered<TagMonoid>(tag_monoids_slot);
+void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
+             BufRO<TagMonoid> reduced, Scattered<TagMonoid> tag_monoids,
+             ThreadId global_id, GroupThreadId local_id, GroupId wg_id) {
+    Config config = config_buf[0];
 
     TagMonoid agg = tag_monoid_identity();
     if (local_id.x < wg_id.x) {
