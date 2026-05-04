@@ -25,7 +25,7 @@ use std::sync::LazyLock;
 use goldy::types::{BufferFlags, SpatialAccess, TextureFlags, TextureFormat};
 use goldy::{
     Buffer, BufferPool, BufferView, ComputePipeline, DataAccess, Device, DeviceType, GpuFuture,
-    NodeAccess, ShaderModule, TaskGraph, Texture,
+    NodeAccess, ShaderModule, TaskGraph, Texture, TexturePool,
 };
 
 static DUMP_DIR: LazyLock<Option<String>> = LazyLock::new(|| std::env::var("EKRANO_DUMP_DIR").ok());
@@ -106,6 +106,8 @@ pub struct GoldyEngine {
     prev_output_image_id: Option<ResourceId>,
     /// Bump allocator values read after the **previous** submit's GPU work completed.
     last_drained_bump: Option<ekrano_encoding::BumpAllocators>,
+    /// Reuses transient textures across frames (important on DX12).
+    tex_pool: TexturePool,
 }
 
 impl Default for GoldyEngine {
@@ -123,6 +125,7 @@ impl Default for GoldyEngine {
             prev_deferred_free_images: Vec::new(),
             prev_output_image_id: None,
             last_drained_bump: None,
+            tex_pool: TexturePool::default(),
         }
     }
 }
@@ -250,9 +253,12 @@ impl GoldyEngine {
             self.bind_map.remove_buf(id);
         }
         for id in self.prev_deferred_free_images.drain(..) {
-            self.bind_map.remove_image(id);
+            if let Some((tex, _)) = self.bind_map.take_image(id) {
+                self.tex_pool.release(tex);
+            }
         }
         if let Some(id) = self.prev_output_image_id.take() {
+            // Output texture is a borrow (`owned=false`); remove drops the borrow only.
             self.bind_map.remove_image(id);
         }
 
@@ -313,15 +319,17 @@ impl GoldyEngine {
                             Some(BindType::Image(_)) => SpatialAccess::Direct,
                             _ => SpatialAccess::Interpolated,
                         };
-                        let tex = Texture::new(
-                            device,
-                            proxy.width,
-                            proxy.height,
-                            format,
-                            access,
-                            TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
-                        )
-                        .map_err(|e| Error::Shader(e.to_string()))?;
+                        let tex = self
+                            .tex_pool
+                            .acquire(
+                                device,
+                                proxy.width,
+                                proxy.height,
+                                format,
+                                access,
+                                TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
+                            )
+                            .map_err(|e| Error::Shader(e.to_string()))?;
                         self.bind_map
                             .insert_image(proxy.id, tex, "placeholder_image");
                     }
@@ -499,15 +507,17 @@ impl GoldyEngine {
                 }
                 Command::UploadImage(image_proxy, bytes) => {
                     let format = image_format_to_goldy(image_proxy.format);
-                    let texture = Texture::new(
-                        device,
-                        image_proxy.width,
-                        image_proxy.height,
-                        format,
-                        SpatialAccess::Interpolated,
-                        TextureFlags::COPY_DST,
-                    )
-                    .map_err(|e| Error::Shader(e.to_string()))?;
+                    let texture = self
+                        .tex_pool
+                        .acquire(
+                            device,
+                            image_proxy.width,
+                            image_proxy.height,
+                            format,
+                            SpatialAccess::Interpolated,
+                            TextureFlags::COPY_DST,
+                        )
+                        .map_err(|e| Error::Shader(e.to_string()))?;
                     graph
                         .write_texture(&texture, bytes.to_vec())
                         .map_err(|e| Error::Shader(e.to_string()))?;
@@ -517,15 +527,17 @@ impl GoldyEngine {
                 Command::WriteImage(image_proxy, [x, y], image_data) => {
                     if self.bind_map.get_image(image_proxy.id).is_none() {
                         let format = image_format_to_goldy(image_proxy.format);
-                        let tex = Texture::new(
-                            device,
-                            image_proxy.width,
-                            image_proxy.height,
-                            format,
-                            SpatialAccess::Interpolated,
-                            TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
-                        )
-                        .map_err(|e| Error::Shader(e.to_string()))?;
+                        let tex = self
+                            .tex_pool
+                            .acquire(
+                                device,
+                                image_proxy.width,
+                                image_proxy.height,
+                                format,
+                                SpatialAccess::Interpolated,
+                                TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
+                            )
+                            .map_err(|e| Error::Shader(e.to_string()))?;
                         self.bind_map
                             .insert_image(image_proxy.id, tex, "write_image_target");
                     }
@@ -994,6 +1006,10 @@ impl BindMap {
 
     fn remove_image(&mut self, id: ResourceId) {
         self.image_map.remove(&id);
+    }
+
+    fn take_image(&mut self, id: ResourceId) -> Option<(Texture, &'static str)> {
+        self.image_map.remove(&id)
     }
 }
 
