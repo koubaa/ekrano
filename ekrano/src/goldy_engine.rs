@@ -499,9 +499,8 @@ impl GoldyEngine {
                 }
                 Command::UploadImage(image_proxy, bytes) => {
                     let format = image_format_to_goldy(image_proxy.format);
-                    let texture = Texture::with_data(
+                    let texture = Texture::new(
                         device,
-                        bytes,
                         image_proxy.width,
                         image_proxy.height,
                         format,
@@ -509,13 +508,13 @@ impl GoldyEngine {
                         TextureFlags::COPY_DST,
                     )
                     .map_err(|e| Error::Shader(e.to_string()))?;
+                    graph
+                        .write_texture(&texture, bytes.to_vec())
+                        .map_err(|e| Error::Shader(e.to_string()))?;
                     self.bind_map
                         .insert_image(image_proxy.id, texture, "uploaded_image");
                 }
                 Command::WriteImage(image_proxy, [x, y], image_data) => {
-                    if graph.len() > 0 {
-                        self.submit_graph(&mut graph, device, &mut last_future)?;
-                    }
                     if self.bind_map.get_image(image_proxy.id).is_none() {
                         let format = image_format_to_goldy(image_proxy.format);
                         let tex = Texture::new(
@@ -543,7 +542,15 @@ impl GoldyEngine {
                             );
                         }
                         let bytes = image_data.data.data();
-                        tex.write_region(*x, *y, image_data.width, image_data.height, bytes)
+                        graph
+                            .write_texture_region(
+                                tex,
+                                *x,
+                                *y,
+                                image_data.width,
+                                image_data.height,
+                                bytes.to_vec(),
+                            )
                             .map_err(|e| Error::Shader(e.to_string()))?;
                     }
                 }
