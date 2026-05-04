@@ -37,7 +37,7 @@ pub struct BufferProxy {
     /// When set, the GPU backend uses this for `StructureByteStride` in SRV/UAV descriptors.
     /// When `None`, the engine falls back to a name-based lookup.
     pub element_stride: Option<u32>,
-    /// Goldy buffer creation flags (e.g. [`BufferFlags::CPU_COHERENT`] for host-readable bump data).
+    /// Goldy buffer creation flags (e.g. [`BufferFlags::CPU_READABLE`] for host-readable bump data).
     pub buffer_flags: BufferFlags,
 }
 

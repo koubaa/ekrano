@@ -409,7 +409,7 @@ impl Render {
             buffer_sizes.bump_alloc.size_in_bytes().into(),
             "vello.bump_buf",
             size_of::<BumpAllocators>() as u32,
-            BufferFlags::CPU_COHERENT,
+            BufferFlags::CPU_READABLE,
         );
         recording.clear_all(bump_buf);
         let bump_buf = ResourceProxy::Buffer(bump_buf);
