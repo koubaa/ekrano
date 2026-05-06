@@ -16,7 +16,7 @@ use crate::{
     shaders::{self, FullShaders},
 };
 use ekrano_encoding::{BumpAllocators, Resolver};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const MAX_BUMP_RETRIES: usize = 2;
 
@@ -68,10 +68,6 @@ fn sanitize_bump(bump: &BumpAllocators) -> BumpAllocators {
 /// across all `GoldyRenderer` instances in the process; that's fine because
 /// in practice there's only one.
 static FRAME_COUNTER: AtomicU64 = AtomicU64::new(0);
-/// Tracks whether the previous frame produced zero geometry so we can log a
-/// single, loud line the moment the scene transitions between empty and
-/// non-empty (the interesting event) rather than per-frame spam.
-static LAST_FRAME_EMPTY: AtomicBool = AtomicBool::new(false);
 
 /// Goldy-based 2D renderer.
 ///
@@ -131,20 +127,6 @@ impl GoldyRenderer {
 
         if let Some(ref bump) = prev_bump {
             let frame_num = FRAME_COUNTER.load(Ordering::Relaxed);
-            let is_empty =
-                bump.lines == 0 && bump.segments == 0 && bump.seg_counts == 0 && bump.tile == 0;
-            let was_empty = LAST_FRAME_EMPTY.swap(is_empty, Ordering::Relaxed);
-            if is_empty != was_empty {
-                log::warn!(
-                    "[SCENE] frame {} transitioned to {} (lines={}, seg_counts={}, segments={}, tile={})",
-                    frame_num,
-                    if is_empty { "EMPTY" } else { "NON-EMPTY" },
-                    bump.lines,
-                    bump.seg_counts,
-                    bump.segments,
-                    bump.tile,
-                );
-            }
             log::debug!(
                 "[BUMP] frame={} lines={}, seg_counts={}, segments={}, tile={}, failed=0x{:x}",
                 frame_num,

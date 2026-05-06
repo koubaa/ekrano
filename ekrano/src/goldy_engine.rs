@@ -747,9 +747,8 @@ impl GoldyEngine {
         if graph.is_empty() {
             return Ok(());
         }
-        let future = graph
-            .submit(device)
-            .map_err(|e| Error::Shader(e.to_string()))?;
+        let submit_result = graph.submit(device).map_err(|e| Error::Shader(e.to_string()));
+        let future = submit_result?;
         *last_future = Some(future);
         *graph = TaskGraph::new();
         Ok(())
