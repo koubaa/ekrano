@@ -61,3 +61,35 @@ EKRANO_TEST_CREATE=all cargo test -p ekrano_tests     # create new snapshots
 ## Linting (do at the end of each agent interaction after code changes)
 
 `cargo fmt`
+
+## Cursor Cloud specific instructions
+
+### Environment prerequisites
+
+The following are installed by the update script on every session start:
+- Rust stable (≥1.88 MSRV; CI uses 1.93+)
+- `goldy` GPU abstraction cloned at `/goldy` (path deps resolve from subcrate dirs via `../../goldy`)
+- Slang compiler binaries in `/goldy/slang/bin/`
+- Vulkan/lavapipe (Mesa 25.x software Vulkan), `libstdc++-14-dev`
+
+### Running services
+
+Before running any GPU-related command, source the Vulkan environment:
+```bash
+source /tmp/ekrano-ci.env
+```
+This sets `VK_ICD_FILENAMES` to the lavapipe ICD and `GOLDY_BACKEND=vulkan`.
+
+### Known lavapipe limitation
+
+The full GPU compute pipeline (Slang shaders → SPIR-V → lavapipe) executes without errors but produces **visually empty frames** on lavapipe. The coarse/fine rasterization stages run (bump counts are non-zero in debug logs) but the fine rasterizer outputs blank pixels. Snapshot tests (`ekrano_tests`) will fail on pixel comparison. This is acceptable for development — the pipeline structure, encoding, and shader compilation are still fully testable. Use `EKRANO_SKIP_LFS_SNAPSHOTS=all` to skip snapshot comparisons if LFS files are unavailable.
+
+### Quick reference
+
+| Task | Command |
+|------|---------|
+| Build | `cargo build --workspace --all-features` |
+| Lint | `cargo fmt` |
+| Test (non-snapshot) | `cargo test --workspace --all-features --exclude ekrano_tests` |
+| Test (all, expect snapshot failures) | `EKRANO_CI_GPU_SUPPORT=yes cargo test --workspace --all-features` |
+| Headless render | `source /tmp/ekrano-ci.env && cargo run -p headless -- -x 800 -y 600 -s 0` |
