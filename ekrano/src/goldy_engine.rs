@@ -76,7 +76,6 @@ impl GpuBuffer {
             Self::Pooled(_) => None,
         }
     }
-
 }
 
 /// Goldy-based recording executor.
@@ -772,14 +771,20 @@ impl GoldyEngine {
 
     /// Get downloaded buffer data (after GPU completion drained at the next
     /// [`GoldyEngine::run_recording`] or via [`GoldyEngine::finish_frame_for_readback`]).
-    #[allow(dead_code, reason = "public readback API; not used by current goldy integration path")]
+    #[allow(
+        dead_code,
+        reason = "public readback API; not used by current goldy integration path"
+    )]
     pub fn get_download(&self, buf: BufferProxy) -> Option<&[u8]> {
         self.downloads.get(&buf.id).map(|v| v.as_slice())
     }
 
     /// Reads [`ekrano_encoding::BumpAllocators`] from [`GoldyEngine::get_download`]; call after [`GoldyEngine::finish_frame_for_readback`]
     /// (or rely on draining at the start of the next [`GoldyEngine::run_recording`]).
-    #[allow(dead_code, reason = "public readback API; not used by current goldy integration path")]
+    #[allow(
+        dead_code,
+        reason = "public readback API; not used by current goldy integration path"
+    )]
     pub fn read_bump_allocators(
         &self,
         proxy: &BufferProxy,
@@ -835,7 +840,10 @@ impl GoldyEngine {
 
     /// Clear all transient resources (buffers, images, downloads) between retry attempts.
     /// Drops the storage pool so the next `prepare_storage_pool` allocates fresh.
-    #[allow(dead_code, reason = "full reset between retries; integration uses release_pool / wait paths")]
+    #[allow(
+        dead_code,
+        reason = "full reset between retries; integration uses release_pool / wait paths"
+    )]
     pub fn clear_transients(&mut self, device: &Device) -> Result<()> {
         self.wait_until_gpu_idle(device)?;
         self.pool_clear_in_next_submit = false;
