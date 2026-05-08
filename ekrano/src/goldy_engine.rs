@@ -22,8 +22,8 @@ use std::collections::HashMap;
 use std::mem;
 use std::sync::LazyLock;
 
-use goldy::types::{BufferFlags, SpatialAccess, TextureFlags, TextureFormat};
 use goldy::task_graph::{NodeAccess, NodeBuilder};
+use goldy::types::{BufferFlags, SpatialAccess, TextureFlags, TextureFormat};
 use goldy::{
     Buffer, BufferPool, BufferView, ComputePipeline, DataAccess, Device, DeviceType, Frame,
     ShaderModule, TaskGraph, Texture, TexturePool, TimelineValue,

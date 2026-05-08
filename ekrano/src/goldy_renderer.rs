@@ -329,13 +329,8 @@ impl GoldyRenderer {
         }
 
         let t4 = Instant::now();
-        self.engine.run_recording_to_frame(
-            device,
-            &recording,
-            &out_image,
-            frame,
-            "coarse+fine",
-        )?;
+        self.engine
+            .run_recording_to_frame(device, &recording, &out_image, frame, "coarse+fine")?;
         let t_submit = t4.elapsed();
 
         let frame_num = FRAME_COUNTER.fetch_add(1, Ordering::Relaxed);
