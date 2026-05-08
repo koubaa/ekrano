@@ -44,7 +44,7 @@ use scenes::ImageCache;
 /// the GPU could start executing wave-0 shaders before
 /// `ClearUnorderedAccessViewUint` finished zeroing the pool buffer.
 ///
-/// ## Fix (TaskGraph refactor)
+/// ## Fix (`TaskGraph` refactor)
 ///
 /// `ComputeGraph` has been renamed to `TaskGraph` and the `pub prelude`
 /// escape hatch removed. Pool clears and buffer writes are now first-class
