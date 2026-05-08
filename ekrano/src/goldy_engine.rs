@@ -23,9 +23,10 @@ use std::mem;
 use std::sync::LazyLock;
 
 use goldy::types::{BufferFlags, SpatialAccess, TextureFlags, TextureFormat};
+use goldy::task_graph::{NodeAccess, NodeBuilder};
 use goldy::{
-    Buffer, BufferPool, BufferView, ComputePipeline, DataAccess, Device, DeviceType, GpuFuture,
-    NodeAccess, ShaderModule, TaskGraph, Texture, TexturePool,
+    Buffer, BufferPool, BufferView, ComputePipeline, DataAccess, Device, DeviceType, Frame,
+    ShaderModule, TaskGraph, Texture, TexturePool, TimelineValue,
 };
 
 static DUMP_DIR: LazyLock<Option<String>> = LazyLock::new(|| std::env::var("EKRANO_DUMP_DIR").ok());
@@ -88,10 +89,12 @@ pub struct GoldyEngine {
     downloads: HashMap<ResourceId, Vec<u8>>,
     /// Single large buffer pool for storage buffers (Phase 3c). None until `prepare_storage_pool`.
     storage_pool: Option<BufferPool>,
-    /// When set, the next non-empty `submit_graph` prepends a full clear of the pool backing buffer.
+    /// When set, the next non-empty graph flush prepends a full clear of the pool backing buffer.
     pool_clear_in_next_submit: bool,
-    /// GPU work from the previous `run_recording` (submitted, not yet waited).
-    prev_frame_future: Option<GpuFuture>,
+    /// GPU timeline from the previous `run_recording` / `after_surface_present` (not yet drained).
+    prev_frame_timeline: Option<TimelineValue>,
+    /// Set after [`GoldyEngine::run_recording_to_frame`] until [`GoldyEngine::after_surface_present`].
+    surface_frame_in_flight: bool,
     prev_pending_downloads: Vec<BufferProxy>,
     prev_deferred_free_buffers: Vec<ResourceId>,
     prev_deferred_free_images: Vec<ResourceId>,
@@ -163,22 +166,24 @@ impl GoldyEngine {
     /// (e.g. same-frame bump overflow checks). Omit between application frames so the next
     /// `run_recording` drains completed work at the start (**pipelined** steady state).
     pub fn finish_frame_for_readback(&mut self, device: &Device) -> Result<()> {
+        self.assert_no_surface_frame_in_flight()?;
         self.drain_completed_submit(device)?;
         Ok(())
     }
 
-    /// Wait for any in-flight queued submission (`prev_frame_future`).
+    /// Wait for any in-flight queued submission (`prev_frame_timeline`).
     ///
     /// Use before `clear_transients`, screenshot readback paths, etc.
     pub fn wait_until_gpu_idle(&mut self, device: &Device) -> Result<()> {
+        self.assert_no_surface_frame_in_flight()?;
         self.drain_completed_submit(device)
     }
 
     fn drain_completed_submit(&mut self, device: &Device) -> Result<()> {
-        let Some(mut fut) = self.prev_frame_future.take() else {
+        let Some(tv) = self.prev_frame_timeline.take() else {
             return Ok(());
         };
-        // Wait for GPU work to complete.  `wait()` may return `Err` when a
+        // Wait for GPU work to complete. `wait_until` may return `Err` when a
         // command buffer terminates with a GPU fault
         // (kIOGPUCommandBufferCallbackErrorPageFault or similar).
         //
@@ -190,7 +195,9 @@ impl GoldyEngine {
         // then replaces the list without freeing it, permanently leaking those
         // entries and exhausting the 64-slot storage-buffer window within 2–3 frames
         // (observed panic: "storage-buffer bindless slots exhausted (64 max)").
-        let wait_result = fut.wait().map_err(|e| Error::Shader(e.to_string()));
+        let wait_result = device
+            .wait_until(tv)
+            .map_err(|e| Error::Shader(e.to_string()));
 
         // Downloads are only valid when GPU work completed successfully.
         if wait_result.is_ok() {
@@ -235,6 +242,29 @@ impl GoldyEngine {
         }
 
         wait_result
+    }
+
+    fn assert_no_surface_frame_in_flight(&self) -> Result<()> {
+        if self.surface_frame_in_flight {
+            return Err(Error::Shader(
+                "GoldyEngine: swapchain frame still open — call frame.present() then GoldyEngine::after_surface_present(tv) before more GPU work."
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// After [`GoldyEngine::run_recording_to_frame`], call [`goldy::Frame::present`] then pass the
+    /// returned [`TimelineValue`] here before the next recording or acquiring another frame.
+    pub fn after_surface_present(&mut self, tv: TimelineValue) -> Result<()> {
+        if !self.surface_frame_in_flight {
+            return Err(Error::Shader(
+                "GoldyEngine::after_surface_present: no surface frame in flight (forgot run_recording_to_frame, or called twice)".into(),
+            ));
+        }
+        self.surface_frame_in_flight = false;
+        self.prev_frame_timeline = Some(tv);
+        Ok(())
     }
 
     fn bumps_buf_static_name() -> &'static str {
@@ -386,6 +416,34 @@ impl GoldyEngine {
         output: Option<(&ImageProxy, &Texture)>,
         label: &'static str,
     ) -> Result<()> {
+        self.run_recording_impl(device, recording, output, label, None)
+    }
+
+    /// Record to a swapchain [`Frame`] using [`Frame::submit_compute`] (not standalone [`Device::submit`]).
+    ///
+    /// After this returns, call [`goldy::Frame::present`] on the frame, then [`GoldyEngine::after_surface_present`]
+    /// with the returned timeline value before acquiring another frame or calling [`GoldyEngine::run_recording`].
+    pub fn run_recording_to_frame(
+        &mut self,
+        device: &Device,
+        recording: &Recording,
+        output_image: &ImageProxy,
+        frame: &Frame,
+        label: &'static str,
+    ) -> Result<()> {
+        let output = Some((output_image, frame.texture()));
+        self.run_recording_impl(device, recording, output, label, Some(frame))
+    }
+
+    fn run_recording_impl(
+        &mut self,
+        device: &Device,
+        recording: &Recording,
+        output: Option<(&ImageProxy, &Texture)>,
+        label: &'static str,
+        surface_frame: Option<&Frame>,
+    ) -> Result<()> {
+        self.assert_no_surface_frame_in_flight()?;
         self.drain_completed_submit(device)?;
 
         let mut graph = TaskGraph::new();
@@ -399,7 +457,7 @@ impl GoldyEngine {
             }
         }
 
-        let mut last_future: Option<GpuFuture> = None;
+        let mut last_timeline: Option<TimelineValue> = None;
         let mut pending_downloads: Vec<BufferProxy> = Vec::new();
         let mut deferred_free_buffers: Vec<ResourceId> = Vec::new();
         let mut deferred_free_images: Vec<ResourceId> = Vec::new();
@@ -451,7 +509,7 @@ impl GoldyEngine {
                                 && b.access() == DataAccess::Broadcast,
                     );
                     if needs_flush_before_uniform {
-                        self.submit_graph(&mut graph, device, &mut last_future)?;
+                        self.flush_graph(&mut graph, device, &mut last_timeline, surface_frame)?;
                     }
                     if let Some((GpuBuffer::Owned(existing), _)) =
                         self.bind_map.get_buf(buf_proxy.id)
@@ -695,9 +753,18 @@ impl GoldyEngine {
             }
         }
 
-        self.submit_graph(&mut graph, device, &mut last_future)?;
+        self.flush_graph(&mut graph, device, &mut last_timeline, surface_frame)?;
 
-        self.prev_frame_future = last_future.take();
+        match surface_frame {
+            None => {
+                self.prev_frame_timeline = last_timeline.take();
+                self.surface_frame_in_flight = false;
+            }
+            Some(_) => {
+                self.surface_frame_in_flight = true;
+            }
+        }
+
         self.prev_pending_downloads = pending_downloads;
         self.prev_deferred_free_buffers = deferred_free_buffers;
         self.prev_deferred_free_images = deferred_free_images;
@@ -710,20 +777,29 @@ impl GoldyEngine {
         Ok(())
     }
 
-    fn submit_graph(
+    fn flush_graph(
         &mut self,
         graph: &mut TaskGraph,
         device: &Device,
-        last_future: &mut Option<GpuFuture>,
+        last_timeline: &mut Option<TimelineValue>,
+        surface_frame: Option<&Frame>,
     ) -> Result<()> {
         if graph.is_empty() {
             return Ok(());
         }
-        let submit_result = graph
-            .submit(device)
-            .map_err(|e| Error::Shader(e.to_string()));
-        let future = submit_result?;
-        *last_future = Some(future);
+        match surface_frame {
+            None => {
+                let tv = device
+                    .submit(graph)
+                    .map_err(|e| Error::Shader(e.to_string()))?;
+                *last_timeline = Some(tv);
+            }
+            Some(frame) => {
+                frame
+                    .submit_compute(graph)
+                    .map_err(|e| Error::Shader(e.to_string()))?;
+            }
+        }
         *graph = TaskGraph::new();
         Ok(())
     }
@@ -735,10 +811,10 @@ impl GoldyEngine {
     /// node with the appropriate [`NodeAccess`] derived from `bind_types`.
     fn bind_graph_resources<'a>(
         &self,
-        mut node: goldy::NodeBuilder<'a>,
+        mut node: NodeBuilder<'a>,
         bindings: &[ResourceProxy],
         bind_types: &[BindType],
-    ) -> goldy::NodeBuilder<'a> {
+    ) -> NodeBuilder<'a> {
         for (i, res) in bindings.iter().enumerate() {
             let access = bind_types
                 .get(i)
