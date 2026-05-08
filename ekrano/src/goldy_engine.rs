@@ -405,8 +405,8 @@ impl GoldyEngine {
     ///
     /// Graph submission is deferred until a flush-triggering operation (e.g.
     /// WriteImage) or the end of the recording. Completed GPU work may be drained
-    /// at the **start** of the next [`run_recording`] (pipelining) unless the caller
-    /// uses [`finish_frame_for_readback`].
+    /// at the **start** of the next [`GoldyEngine::run_recording`] (pipelining) unless the caller
+    /// uses [`GoldyEngine::finish_frame_for_readback`].
     pub fn run_recording(
         &mut self,
         device: &Device,
@@ -812,14 +812,14 @@ impl GoldyEngine {
     }
 
     /// Get downloaded buffer data (after GPU completion drained at the next
-    /// [`GoldyEngine::run_recording`] or via [`finish_frame_for_readback`]).
+    /// [`GoldyEngine::run_recording`] or via [`GoldyEngine::finish_frame_for_readback`]).
     #[allow(dead_code)]
     pub fn get_download(&self, buf: BufferProxy) -> Option<&[u8]> {
         self.downloads.get(&buf.id).map(|v| v.as_slice())
     }
 
-    /// Reads [`BumpAllocators`] from `get_download`; call after [`finish_frame_for_readback`]
-    /// (or rely on draining at the start of the next [`run_recording`]).
+    /// Reads [`ekrano_encoding::BumpAllocators`] from [`GoldyEngine::get_download`]; call after [`GoldyEngine::finish_frame_for_readback`]
+    /// (or rely on draining at the start of the next [`GoldyEngine::run_recording`]).
     #[allow(dead_code)]
     pub fn read_bump_allocators(
         &self,
