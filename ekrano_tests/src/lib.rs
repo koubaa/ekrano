@@ -34,7 +34,7 @@
 use std::env;
 use std::io::ErrorKind;
 use std::path::Path;
-use std::sync::{Arc, Once};
+use std::sync::{Arc, Mutex, Once, OnceLock};
 
 use log as _;
 
@@ -42,9 +42,39 @@ use anyhow::{Result, anyhow, bail};
 use ekrano::kurbo::{Affine, Vec2};
 use ekrano::peniko::{Blob, Color, ImageFormat, color::palette};
 use ekrano::peniko::{ImageAlphaType, ImageData};
-use ekrano::{AaConfig, Scene};
+use ekrano::{AaConfig, GoldyRenderer, Scene};
+use goldy::{Device, DeviceType, Instance};
 use image::RgbImage;
 use scenes::{ExampleScene, ImageCache, SceneParams, SimpleText};
+
+/// Per-process GPU context shared across all tests in this binary.
+///
+/// Creating a `Device` and compiling all shaders into a `GoldyRenderer` takes
+/// on the order of a second. With many snapshot tests this dominates total
+/// wall-clock test time. Using a process-wide `OnceLock` initialises once and
+/// re-uses the same renderer for every subsequent test, serialising GPU renders
+/// under a `Mutex` (which is fine — the tests were already sequential).
+struct SharedTestContext {
+    device: Device,
+    renderer: Mutex<GoldyRenderer>,
+}
+
+fn shared_context() -> &'static SharedTestContext {
+    static CTX: OnceLock<SharedTestContext> = OnceLock::new();
+    CTX.get_or_init(|| {
+        let instance = Instance::new().expect("Instance::new failed");
+        let device = instance
+            .create_device(DeviceType::DiscreteGpu)
+            .or_else(|_| instance.create_device(DeviceType::IntegratedGpu))
+            .or_else(|_| instance.create_device(DeviceType::Other))
+            .expect("No Goldy device available");
+        let renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new failed");
+        SharedTestContext {
+            device,
+            renderer: Mutex::new(renderer),
+        }
+    })
+}
 
 mod snapshot;
 
@@ -156,18 +186,14 @@ pub fn get_scene_image(params: &TestParams, scene: &Scene) -> Result<ImageData, 
         env_logger::init();
     });
 
-    use ekrano::{GoldyRenderer, RenderParams};
-    use goldy::{DeviceType, Instance};
+    use ekrano::RenderParams;
 
-    let instance = Instance::new()?;
+    let ctx = shared_context();
+    let mut renderer = ctx
+        .renderer
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-    let device = instance
-        .create_device(DeviceType::DiscreteGpu)
-        .or_else(|_| instance.create_device(DeviceType::IntegratedGpu))
-        .or_else(|_| instance.create_device(DeviceType::Other))
-        .map_err(|e| anyhow!("No Goldy device: {e}"))?;
-
-    let mut renderer = GoldyRenderer::new(&device)?;
     let width = params.width;
     let height = params.height;
     let render_params = RenderParams {
@@ -180,7 +206,7 @@ pub fn get_scene_image(params: &TestParams, scene: &Scene) -> Result<ImageData, 
         antialiasing_method: params.anti_aliasing,
     };
 
-    let pixels = renderer.render_to_buffer(&device, scene, &render_params)?;
+    let pixels = renderer.render_to_buffer(&ctx.device, scene, &render_params)?;
     let data = Blob::new(Arc::new(pixels));
     Ok(ImageData {
         data,
