@@ -7,7 +7,7 @@
 //! Use this when building with `--no-default-features --features goldy`.
 
 use goldy::types::{SpatialAccess, TextureFlags, TextureFormat};
-use goldy::{BufferPool, Device, Texture};
+use goldy::{BufferPool, Device, Frame, Texture, TimelineValue};
 
 use crate::{
     Error, RenderParams, Result, Scene,
@@ -225,6 +225,133 @@ impl GoldyRenderer {
         );
 
         Ok(stats)
+    }
+
+    /// Like [`Self::render_to_texture`], but records compute into a swapchain [`Frame`] via
+    /// [`Frame::submit_compute`] instead of standalone [`Device::submit`].
+    ///
+    /// After this returns, call [`goldy::Frame::present`] and then [`Self::note_frame_presented`]
+    /// with the returned [`TimelineValue`] before the next `begin` / render call.
+    pub fn render_to_frame(
+        &mut self,
+        device: &Device,
+        scene: &Scene,
+        frame: &Frame,
+        params: &RenderParams,
+    ) -> Result<FrameStats> {
+        use std::time::Instant;
+        let frame_start = Instant::now();
+
+        let encoding = scene.encoding();
+        let mut stats = FrameStats::default();
+
+        let t_drain_start = Instant::now();
+        self.engine.finish_frame_for_readback(device)?;
+        let t_drain = t_drain_start.elapsed();
+
+        let prev_bump = self.engine.take_last_drained_bump();
+
+        if let Some(ref bump) = prev_bump {
+            let frame_num = FRAME_COUNTER.load(Ordering::Relaxed);
+            log::debug!(
+                "[BUMP] frame={} lines={}, seg_counts={}, segments={}, tile={}, failed=0x{:x}",
+                frame_num,
+                bump.lines,
+                bump.seg_counts,
+                bump.segments,
+                bump.tile,
+                bump.failed,
+            );
+        }
+
+        let t0 = Instant::now();
+        let config = {
+            let mut packed = vec![];
+            let (layout, _, _) = self.resolver.resolve(encoding, &mut packed);
+            let base = ekrano_encoding::RenderConfig::new(
+                &layout,
+                params.width,
+                params.height,
+                &params.base_color,
+            );
+            if let Some(ref bump) = prev_bump
+                && bump.failed != 0
+            {
+                stats.bump_retries += 1;
+                log::info!(
+                    "Previous frame bump overflow (0x{:x}), growing buffers",
+                    bump.failed,
+                );
+                base.with_bump_estimates(&sanitize_bump(bump))
+            } else {
+                base
+            }
+        };
+        let t_resolve = t0.elapsed();
+
+        let base = BufferPool::padded_size(&config.buffer_sizes.pool_allocs());
+        let pool_size = base.saturating_add(262144);
+
+        let t1 = Instant::now();
+        self.engine.prepare_storage_pool(device, pool_size)?;
+        let t_pool = t1.elapsed();
+
+        let t2 = Instant::now();
+        let mut render = Render::new();
+        let mut recording = render.render_encoding_coarse_with_config(
+            encoding,
+            &mut self.resolver,
+            &self.shaders,
+            params,
+            true,
+            &config,
+        );
+        let out_image = render.out_image();
+        let filter_layers = render.filter_layer_textures();
+        let t_coarse = t2.elapsed();
+
+        let t3 = Instant::now();
+        render.record_fine(encoding, &self.shaders, &mut recording);
+        render::record_filter_effects(
+            encoding,
+            &self.shaders,
+            &mut recording,
+            params.width,
+            params.height,
+            &filter_layers,
+            out_image,
+        );
+        let t_fine_record = t3.elapsed();
+
+        #[cfg(feature = "debug_layers")]
+        if let Some(captured) = render.take_captured_buffers() {
+            captured.release_buffers(&mut recording);
+        }
+
+        let t4 = Instant::now();
+        self.engine
+            .run_recording_to_frame(device, &recording, &out_image, frame, "coarse+fine")?;
+        let t_submit = t4.elapsed();
+
+        let frame_num = FRAME_COUNTER.fetch_add(1, Ordering::Relaxed);
+        log::debug!(
+            "[PERF] frame={} drain={:.2}ms resolve={:.2}ms pool={:.2}ms coarse_record={:.2}ms fine_record={:.2}ms submit={:.2}ms total={:.2}ms (surface)",
+            frame_num,
+            t_drain.as_secs_f64() * 1000.0,
+            t_resolve.as_secs_f64() * 1000.0,
+            t_pool.as_secs_f64() * 1000.0,
+            t_coarse.as_secs_f64() * 1000.0,
+            t_fine_record.as_secs_f64() * 1000.0,
+            t_submit.as_secs_f64() * 1000.0,
+            frame_start.elapsed().as_secs_f64() * 1000.0,
+        );
+
+        Ok(stats)
+    }
+
+    /// Acknowledge a swapchain frame after [`goldy::Frame::present`]; required after [`Self::render_to_frame`].
+    pub fn note_frame_presented(&mut self, tv: TimelineValue) -> Result<()> {
+        self.engine.after_surface_present(tv)
     }
 
     /// Render a scene and return the pixel data as RGBA bytes.
