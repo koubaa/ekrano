@@ -14,16 +14,13 @@ groupshared DrawMonoid sh_scratch[256];
 
 // Slots: 0=config, 1=scene, 2=reduced, 3=path_bbox, 4=draw_monoid, 5=info, 6=clip_inp
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(256, 1, 1)]
-void cs_main(uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
-    Config config = goldy_dyn_buf_ro<Config>(0)[0];
-    ReadOnlyBuffer<uint> scene = goldy_dyn_buf_ro<uint>(1);
-    ReadOnlyBuffer<DrawMonoid> reduced = goldy_dyn_buf_ro<DrawMonoid>(2);
-    ReadOnlyBuffer<PathBbox> path_bbox = goldy_dyn_buf_ro<PathBbox>(3);
-    StorageBuffer<DrawMonoid> draw_monoid = goldy_dyn_scattered<DrawMonoid>(4);
-    StorageBuffer<uint> info = goldy_dyn_scattered<uint>(5);
-    StorageBuffer<ClipInp> clip_inp = goldy_dyn_scattered<ClipInp>(6);
+void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
+             BufRO<DrawMonoid> reduced, BufRO<PathBbox> path_bbox,
+             Scattered<DrawMonoid> draw_monoid, Scattered<uint> info, Scattered<ClipInp> clip_inp,
+             GroupThreadId local_id, GroupId wg_id) {
+    Config config = config_buf[0];
 
     DrawMonoid agg = DrawMonoid.identity();
     if (local_id.x < wg_id.x) {

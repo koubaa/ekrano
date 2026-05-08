@@ -626,7 +626,7 @@ public struct DrawTagScanner : IScannable<DrawMonoid> {
     static DrawMonoid map(uint raw_input) { return map_draw_tag(raw_input); }
 }
 
-// Read-only scene: use ReadOnlyBuffer when bound via goldy_dyn_buf_ro; StorageBuffer when RW binding (e.g. draw_reduce).
+// Read-only scene: use ReadOnlyBuffer when bound via goldy_buf_ro; StorageBuffer when RW binding (e.g. draw_reduce).
 public uint read_draw_tag_from_scene(ReadOnlyBuffer<uint> scene, Config config, uint ix) {
     if (ix < config.n_drawobj) {
         return scene[config.drawtag_base + ix];

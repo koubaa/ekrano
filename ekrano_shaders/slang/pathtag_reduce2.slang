@@ -13,11 +13,10 @@ static const uint WG_SIZE = 256;
 groupshared TagMonoid sh_scratch[WG_SIZE];
 
 // Slots: 0 = reduced_in, 1 = reduced
-[shader("compute")]
+[goldy_compute]
 [numthreads(256, 1, 1)]
-void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID) {
-    ReadOnlyBuffer<TagMonoid> reduced_in = goldy_dyn_buf_ro<TagMonoid>(0);
-    StorageBuffer<TagMonoid> reduced = goldy_dyn_scattered<TagMonoid>(1);
+void cs_main(BufRO<TagMonoid> reduced_in, Scattered<TagMonoid> reduced,
+             ThreadId global_id, GroupThreadId local_id) {
 
     uint ix = global_id.x;
     TagMonoid agg = reduced_in[ix];

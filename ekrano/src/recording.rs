@@ -37,7 +37,7 @@ pub struct BufferProxy {
     /// When set, the GPU backend uses this for `StructureByteStride` in SRV/UAV descriptors.
     /// When `None`, the engine falls back to a name-based lookup.
     pub element_stride: Option<u32>,
-    /// Goldy buffer creation flags (e.g. [`BufferFlags::CPU_COHERENT`] for host-readable bump data).
+    /// Goldy buffer creation flags (e.g. [`BufferFlags::CPU_READABLE`] for host-readable bump data).
     pub buffer_flags: BufferFlags,
 }
 
@@ -87,7 +87,8 @@ pub enum Command {
     // Discussion question: third argument is vec of resources?
     // Maybe use tricks to make more ergonomic?
     // Alternative: provide bufs & images as separate sequences
-    Dispatch(ShaderId, (u32, u32, u32), Vec<ResourceProxy>),
+    /// Trailing raw `u32`s appended after bindless indices (e.g. flatten thread base).
+    Dispatch(ShaderId, (u32, u32, u32), Vec<ResourceProxy>, Vec<u32>),
     DispatchIndirect(ShaderId, BufferProxy, u64, Vec<ResourceProxy>),
     #[cfg(feature = "debug_layers")]
     Draw(DrawParams),
@@ -181,7 +182,22 @@ impl Recording {
         R::Item: Into<ResourceProxy>,
     {
         let r = resources.into_iter().map(|r| r.into()).collect();
-        self.push(Command::Dispatch(shader, wg_size, r));
+        self.push(Command::Dispatch(shader, wg_size, r, Vec::new()));
+    }
+
+    /// Like [`Self::dispatch`], appends raw `u32`s after bindless heap indices in push constants.
+    pub fn dispatch_with_push_tail<R>(
+        &mut self,
+        shader: ShaderId,
+        wg_size: (u32, u32, u32),
+        resources: R,
+        push_tail: &[u32],
+    ) where
+        R: IntoIterator,
+        R::Item: Into<ResourceProxy>,
+    {
+        let r = resources.into_iter().map(|r| r.into()).collect();
+        self.push(Command::Dispatch(shader, wg_size, r, push_tail.to_vec()));
     }
 
     /// Do an indirect dispatch.

@@ -48,16 +48,13 @@ int search_link(inout Bic bic, uint ix_in) {
 
 // Slots: 0=config, 1=clip_inp, 2=path_bboxes, 3=reduced, 4=clip_els, 5=draw_monoids, 6=clip_bboxes
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(256, 1, 1)]
-void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID, uint3 wg_id : SV_GroupID) {
-    Config config = goldy_dyn_buf_ro<Config>(0)[0];
-    ReadOnlyBuffer<ClipInp> clip_inp = goldy_dyn_buf_ro<ClipInp>(1);
-    ReadOnlyBuffer<PathBbox> path_bboxes = goldy_dyn_buf_ro<PathBbox>(2);
-    ReadOnlyBuffer<Bic> reduced = goldy_dyn_buf_ro<Bic>(3);
-    ReadOnlyBuffer<ClipEl> clip_els = goldy_dyn_buf_ro<ClipEl>(4);
-    StorageBuffer<DrawMonoid> draw_monoids = goldy_dyn_scattered<DrawMonoid>(5);
-    StorageBuffer<float4> clip_bboxes = goldy_dyn_scattered<float4>(6);
+void cs_main(BufRO<Config> config_buf, BufRO<ClipInp> clip_inp,
+             BufRO<PathBbox> path_bboxes, BufRO<Bic> reduced, BufRO<ClipEl> clip_els,
+             Scattered<DrawMonoid> draw_monoids, Scattered<float4> clip_bboxes,
+             ThreadId global_id, GroupThreadId local_id, GroupId wg_id) {
+    Config config = config_buf[0];
 
     int load_path_ix = (global_id.x < config.n_clip) ? clip_inp[global_id.x].path_ix : -2147483648;
 
@@ -166,9 +163,10 @@ void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThr
         int path_ix = parent_clip.path_ix;
         uint parent_ix = parent_clip.ix;
         uint endclip_ix = ~uint(inp);
+        DrawMonoid parent_dm = draw_monoids[parent_ix];
         draw_monoids[endclip_ix].path_ix = uint(path_ix);
-        draw_monoids[endclip_ix].scene_offset = draw_monoids[parent_ix].scene_offset;
-        draw_monoids[endclip_ix].info_offset = draw_monoids[parent_ix].info_offset;
+        draw_monoids[endclip_ix].scene_offset = parent_dm.scene_offset;
+        draw_monoids[endclip_ix].info_offset = parent_dm.info_offset;
         if (grandparent >= 0) {
             bbox = sh_bbox[grandparent];
         } else if (grandparent + int(stack_size) >= 0) {

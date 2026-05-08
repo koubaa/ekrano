@@ -11,13 +11,9 @@ static const uint WG_SIZE = 256;
 
 // Slots: 0 = bump (BumpAllocators), 1 = indirect (IndirectCount[N_INDIRECT_STAGES]), 2 = ptcl (uint array)
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(1, 1, 1)]
-void cs_main() {
-    StorageBuffer<BumpAllocators> bump = goldy_dyn_scattered<BumpAllocators>(0);
-    StorageBuffer<IndirectCount> indirect = goldy_dyn_scattered<IndirectCount>(1);
-    StorageBuffer<uint> ptcl = goldy_dyn_scattered<uint>(2);
-
+void cs_main(Scattered<BumpAllocators> bump, Scattered<IndirectCount> indirect, Scattered<uint> ptcl) {
     if (bump[0].failed != 0) {
         indirect[INDIRECT_STAGE_PATH_TILING].count_x = 0;
         ptcl[0] = 0xFFFFFFFF;  // signal fine rasterizer that failure happened

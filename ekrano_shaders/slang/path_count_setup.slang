@@ -11,12 +11,9 @@ static const uint WG_SIZE = 256;
 
 // Slots: 0 = bump (BumpAllocators), 1 = indirect (IndirectCount[N_INDIRECT_STAGES])
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(1, 1, 1)]
-void cs_main() {
-    StorageBuffer<BumpAllocators> bump = goldy_dyn_scattered<BumpAllocators>(0);
-    StorageBuffer<IndirectCount> indirect = goldy_dyn_scattered<IndirectCount>(1);
-
+void cs_main(Scattered<BumpAllocators> bump, Scattered<IndirectCount> indirect) {
     if (bump[0].failed != 0) {
         indirect[INDIRECT_STAGE_PATH_COUNT].count_x = 0;
     } else {

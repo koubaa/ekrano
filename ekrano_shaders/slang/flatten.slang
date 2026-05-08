@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT OR Unlicense
 //
 // Flatten curves to lines. Ported from original Vello flatten shader.
-// Uses goldy_dyn_byte_address for path_bboxes (InterlockedMin/Max require RWByteAddressBuffer).
+// Uses ByteAddress for path_bboxes (InterlockedMin/Max require RWByteAddressBuffer).
 
 import goldy_exp;
 import ekrano_shared;
@@ -837,15 +837,14 @@ void process_dashed_segment(
     }
 }
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(256, 1, 1)]
-void cs_main(uint3 global_id : SV_DispatchThreadID) {
-    Config config = goldy_dyn_buf_ro<Config>(0)[0];
-    ReadOnlyBuffer<uint> scene = goldy_dyn_buf_ro<uint>(1);
-    ReadOnlyBuffer<TagMonoid> tag_monoids = goldy_dyn_buf_ro<TagMonoid>(2);
-    ByteAddressView path_bboxes = goldy_dyn_byte_address(3);
-    StorageBuffer<BumpAllocators> bump = goldy_dyn_scattered<BumpAllocators>(4);
-    StorageBuffer<LineSoup> lines = goldy_dyn_scattered<LineSoup>(5);
+void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
+             BufRO<TagMonoid> tag_monoids, ByteAddress path_bboxes,
+             Scattered<BumpAllocators> bump, Scattered<LineSoup> lines,
+             uint thread_base,
+             ThreadId global_id) {
+    Config config = config_buf[0];
 
     FlattenCtx ctx;
     ctx.config = config;
@@ -856,7 +855,7 @@ void cs_main(uint3 global_id : SV_DispatchThreadID) {
     ctx.lines = lines;
     ctx.pathdata_base = config.pathdata_base;
 
-    uint ix = global_id.x + config.flatten_thread_base;
+    uint ix = global_id.x + thread_base;
     float4 bbox = Bbox2D.empty().v;
 
     PathTagData tag = compute_tag_monoid(ctx, ix);

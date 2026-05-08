@@ -17,15 +17,12 @@ groupshared uint sh_previous_failed;
 
 // Slots: 0=config, 1=scene, 2=draw_bboxes, 3=bump, 4=paths, 5=tiles
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(256, 1, 1)]
-void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID) {
-    Config config = goldy_dyn_buf_ro<Config>(0)[0];
-    ReadOnlyBuffer<uint> scene = goldy_dyn_buf_ro<uint>(1);
-    ReadOnlyBuffer<float4> draw_bboxes = goldy_dyn_buf_ro<float4>(2);
-    StorageBuffer<BumpAllocators> bump = goldy_dyn_scattered<BumpAllocators>(3);
-    StorageBuffer<Path> paths = goldy_dyn_scattered<Path>(4);
-    StorageBuffer<Tile> tiles = goldy_dyn_scattered<Tile>(5);
+void cs_main(BufRO<Config> config_buf, BufRO<uint> scene, BufRO<float4> draw_bboxes,
+             Scattered<BumpAllocators> bump, Scattered<Path> paths, Scattered<Tile> tiles,
+             ThreadId global_id, GroupThreadId local_id) {
+    Config config = config_buf[0];
 
     if (local_id.x == 0) {
         uint failed_val = bump[0].failed & (STAGE_BINNING | STAGE_FLATTEN);

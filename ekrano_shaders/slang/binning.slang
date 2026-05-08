@@ -21,18 +21,14 @@ groupshared uint sh_previous_failed;
 // Slots: 0=config, 1=scene, 2=draw_monoids, 3=path_bbox_buf, 4=clip_bbox_buf, 5=intersected_bbox,
 //       6=bump, 7=bin_data, 8=bin_header
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(256, 1, 1)]
-void cs_main(uint3 global_id : SV_DispatchThreadID, uint3 local_id : SV_GroupThreadID) {
-    Config config = goldy_dyn_buf_ro<Config>(0)[0];
-    ReadOnlyBuffer<uint> scene = goldy_dyn_buf_ro<uint>(1);
-    ReadOnlyBuffer<DrawMonoid> draw_monoids = goldy_dyn_buf_ro<DrawMonoid>(2);
-    ReadOnlyBuffer<PathBbox> path_bbox_buf = goldy_dyn_buf_ro<PathBbox>(3);
-    ReadOnlyBuffer<float4> clip_bbox_buf = goldy_dyn_buf_ro<float4>(4);
-    StorageBuffer<float4> intersected_bbox = goldy_dyn_scattered<float4>(5);
-    StorageBuffer<BumpAllocators> bump = goldy_dyn_scattered<BumpAllocators>(6);
-    StorageBuffer<uint> bin_data = goldy_dyn_scattered<uint>(7);
-    StorageBuffer<BinHeader> bin_header = goldy_dyn_scattered<BinHeader>(8);
+void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
+             BufRO<DrawMonoid> draw_monoids, BufRO<PathBbox> path_bbox_buf,
+             BufRO<float4> clip_bbox_buf, Scattered<float4> intersected_bbox,
+             Scattered<BumpAllocators> bump, Scattered<uint> bin_data, Scattered<BinHeader> bin_header,
+             ThreadId global_id, GroupThreadId local_id) {
+    Config config = config_buf[0];
 
     for (uint i = 0; i < N_SLICE; i++) {
         sh_bitmaps[i][local_id.x] = 0;

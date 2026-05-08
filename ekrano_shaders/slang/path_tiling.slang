@@ -11,15 +11,11 @@ static const float EPSILON = 1e-6;
 
 // Slots: 0=bump, 1=seg_counts, 2=lines, 3=paths, 4=tiles, 5=segments
 
-[shader("compute")]
+[goldy_compute]
 [numthreads(256, 1, 1)]
-void cs_main(uint3 global_id : SV_DispatchThreadID) {
-    StorageBuffer<BumpAllocators> bump = goldy_dyn_scattered<BumpAllocators>(0);
-    ReadOnlyBuffer<SegmentCount> seg_counts = goldy_dyn_buf_ro<SegmentCount>(1);
-    ReadOnlyBuffer<LineSoup> lines = goldy_dyn_buf_ro<LineSoup>(2);
-    ReadOnlyBuffer<Path> paths = goldy_dyn_buf_ro<Path>(3);
-    ReadOnlyBuffer<Tile> tiles = goldy_dyn_buf_ro<Tile>(4);
-    StorageBuffer<Segment> segments = goldy_dyn_scattered<Segment>(5);
+void cs_main(Scattered<BumpAllocators> bump, BufRO<SegmentCount> seg_counts, BufRO<LineSoup> lines,
+             BufRO<Path> paths, BufRO<Tile> tiles, Scattered<Segment> segments,
+             ThreadId global_id) {
 
     uint n_segments = bump[0].seg_counts;
     if (global_id.x >= n_segments)
