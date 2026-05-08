@@ -55,7 +55,6 @@ impl GpuBuffer {
         }
     }
 
-    #[allow(dead_code, reason = "reserved for future SRV binding path")]
     fn bindless_srv_index(&self) -> Option<u32> {
         match self {
             Self::Owned(b) => b.bindless_srv_index(),
@@ -78,16 +77,10 @@ impl GpuBuffer {
         }
     }
 
-    #[allow(dead_code, reason = "symmetric with as_owned; used in tests")]
-    fn as_view(&self) -> Option<&BufferView> {
-        match self {
-            Self::Owned(_) => None,
-            Self::Pooled(v) => Some(v),
-        }
-    }
 }
 
 /// Goldy-based recording executor.
+#[derive(Default)]
 pub struct GoldyEngine {
     shaders: Vec<GoldyShader>,
     pool: ResourcePool,
@@ -108,26 +101,6 @@ pub struct GoldyEngine {
     last_drained_bump: Option<ekrano_encoding::BumpAllocators>,
     /// Reuses transient textures across frames (important on DX12).
     tex_pool: TexturePool,
-}
-
-impl Default for GoldyEngine {
-    fn default() -> Self {
-        Self {
-            shaders: Vec::new(),
-            pool: ResourcePool::default(),
-            bind_map: BindMap::default(),
-            downloads: HashMap::new(),
-            storage_pool: None,
-            pool_clear_in_next_submit: false,
-            prev_frame_future: None,
-            prev_pending_downloads: Vec::new(),
-            prev_deferred_free_buffers: Vec::new(),
-            prev_deferred_free_images: Vec::new(),
-            prev_output_image_id: None,
-            last_drained_bump: None,
-            tex_pool: TexturePool::default(),
-        }
-    }
 }
 
 struct GoldyShader {
@@ -404,7 +377,7 @@ impl GoldyEngine {
     /// barriers, replacing the previous per-dispatch command buffer submission pattern.
     ///
     /// Graph submission is deferred until a flush-triggering operation (e.g.
-    /// WriteImage) or the end of the recording. Completed GPU work may be drained
+    /// `WriteImage`) or the end of the recording. Completed GPU work may be drained
     /// at the **start** of the next [`GoldyEngine::run_recording`] (pipelining) unless the caller
     /// uses [`GoldyEngine::finish_frame_for_readback`].
     pub fn run_recording(
@@ -756,20 +729,6 @@ impl GoldyEngine {
         Ok(())
     }
 
-    #[allow(dead_code)]
-    fn flush_graph(
-        &mut self,
-        graph: &mut TaskGraph,
-        device: &Device,
-        last_future: &mut Option<GpuFuture>,
-    ) -> Result<()> {
-        self.submit_graph(graph, device, last_future)?;
-        if let Some(mut future) = last_future.take() {
-            future.wait().map_err(|e| Error::Shader(e.to_string()))?;
-        }
-        Ok(())
-    }
-
     /// Bind a dispatch's resources to a graph node for dependency tracking.
     ///
     /// For each `ResourceProxy` in `bindings`, looks up the corresponding
@@ -813,14 +772,14 @@ impl GoldyEngine {
 
     /// Get downloaded buffer data (after GPU completion drained at the next
     /// [`GoldyEngine::run_recording`] or via [`GoldyEngine::finish_frame_for_readback`]).
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "public readback API; not used by current goldy integration path")]
     pub fn get_download(&self, buf: BufferProxy) -> Option<&[u8]> {
         self.downloads.get(&buf.id).map(|v| v.as_slice())
     }
 
     /// Reads [`ekrano_encoding::BumpAllocators`] from [`GoldyEngine::get_download`]; call after [`GoldyEngine::finish_frame_for_readback`]
     /// (or rely on draining at the start of the next [`GoldyEngine::run_recording`]).
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "public readback API; not used by current goldy integration path")]
     pub fn read_bump_allocators(
         &self,
         proxy: &BufferProxy,
@@ -839,12 +798,6 @@ impl GoldyEngine {
     /// Consume bump allocator values drained after GPU completion (`vello.bump_buf` download).
     pub fn take_last_drained_bump(&mut self) -> Option<ekrano_encoding::BumpAllocators> {
         self.last_drained_bump.take()
-    }
-
-    /// Free a downloaded buffer from the engine's storage.
-    #[allow(dead_code)]
-    pub fn free_download(&mut self, buf: BufferProxy) {
-        self.downloads.remove(&buf.id);
     }
 
     /// Prepare the storage pool for a recording. Creates or resets the pool with the given size.
@@ -882,7 +835,7 @@ impl GoldyEngine {
 
     /// Clear all transient resources (buffers, images, downloads) between retry attempts.
     /// Drops the storage pool so the next `prepare_storage_pool` allocates fresh.
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "full reset between retries; integration uses release_pool / wait paths")]
     pub fn clear_transients(&mut self, device: &Device) -> Result<()> {
         self.wait_until_gpu_idle(device)?;
         self.pool_clear_in_next_submit = false;
