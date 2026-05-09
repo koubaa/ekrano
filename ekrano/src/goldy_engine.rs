@@ -586,12 +586,12 @@ impl GoldyEngine {
                             && image_data.width != 0
                             && image_data.height != 0
                         {
-                            panic!(
-                                "Tried to draw an invalid empty image (id: {}). \
-                                Maybe it was registered to a different renderer, or \
-                                unregistered before this render was submitted.",
-                                image_data.data.id()
-                            );
+                            return Err(Error::InvalidImage {
+                                id: image_data.data.id(),
+                                reason: "image has non-zero dimensions but no pixel data; \
+                                         it may have been registered to a different renderer \
+                                         or unregistered before this render was submitted",
+                            });
                         }
                         let bytes = image_data.data.data();
                         graph
@@ -653,6 +653,11 @@ impl GoldyEngine {
                 }
                 Command::Dispatch(shader_id, (x, y, z), bindings, push_tail) => {
                     if *x == 0 || *y == 0 || *z == 0 {
+                        log::warn!(
+                            "Skipping Dispatch for shader {} with zero grid dimension ({x}, {y}, {z}); \
+                             this may indicate a bug in the recording generator",
+                            shader_id.0
+                        );
                         continue;
                     }
                     let bind_types: Vec<_> = self.shaders[shader_id.0].bindings.clone();
@@ -756,6 +761,12 @@ impl GoldyEngine {
                         }
                         node.dispatch_indirect(indirect_buf, *offset);
                         dispatch_count += 1;
+                    } else {
+                        log::error!(
+                            "DispatchIndirect for shader {} skipped: buffer proxy (id={}) is \
+                             either unregistered or pooled (must be an owned buffer)",
+                            shader_id.0, buf_proxy.id.0
+                        );
                     }
                 }
                 #[cfg(feature = "debug_layers")]
@@ -830,7 +841,14 @@ impl GoldyEngine {
                 .get(i)
                 .copied()
                 .map(bind_type_to_node_access)
-                .unwrap_or(NodeAccess::ReadWrite);
+                .unwrap_or_else(|| {
+                    log::warn!(
+                        "bind_types list is shorter than bindings (index {i}); \
+                         defaulting to ReadWrite access — check that shader bindings \
+                         and BindType list are in sync",
+                    );
+                    NodeAccess::ReadWrite
+                });
 
             match res {
                 ResourceProxy::Buffer(proxy) | ResourceProxy::BufferRange { proxy, .. } => {
@@ -857,20 +875,19 @@ impl GoldyEngine {
 
     /// Get downloaded buffer data (after GPU completion drained at the next
     /// [`GoldyEngine::run_recording`] or via [`GoldyEngine::finish_frame_for_readback`]).
-    #[allow(
-        dead_code,
-        reason = "public readback API; not used by current goldy integration path"
-    )]
+    ///
+    /// Currently unused by the main render path (which uses `last_drained_bump` instead).
+    /// Retained as a public API for future headless-render / debug tooling integration.
+    #[allow(dead_code, reason = "public readback API; not used by current goldy integration path")]
     pub fn get_download(&self, buf: BufferProxy) -> Option<&[u8]> {
         self.downloads.get(&buf.id).map(|v| v.as_slice())
     }
 
     /// Reads [`ekrano_encoding::BumpAllocators`] from [`GoldyEngine::get_download`]; call after [`GoldyEngine::finish_frame_for_readback`]
     /// (or rely on draining at the start of the next [`GoldyEngine::run_recording`]).
-    #[allow(
-        dead_code,
-        reason = "public readback API; not used by current goldy integration path"
-    )]
+    ///
+    /// Currently unused by the main render path; retained for headless / debug tooling.
+    #[allow(dead_code, reason = "public readback API; not used by current goldy integration path")]
     pub fn read_bump_allocators(
         &self,
         proxy: &BufferProxy,
@@ -917,7 +934,10 @@ impl GoldyEngine {
                 BufferPool::new(device, pool_size).map_err(|e| Error::Shader(e.to_string()))?;
             self.storage_pool = Some(pool);
         } else {
-            let pool = self.storage_pool.as_mut().unwrap();
+            let pool = self
+                .storage_pool
+                .as_mut()
+                .expect("storage pool must be initialised before reset");
             pool.reset();
         }
         self.pool_clear_in_next_submit = true;
@@ -926,10 +946,10 @@ impl GoldyEngine {
 
     /// Clear all transient resources (buffers, images, downloads) between retry attempts.
     /// Drops the storage pool so the next `prepare_storage_pool` allocates fresh.
-    #[allow(
-        dead_code,
-        reason = "full reset between retries; integration uses release_pool / wait paths"
-    )]
+    ///
+    /// Currently unused by the main render path (which uses `release_pool` and pipelined
+    /// waits instead). Retained for future full-reset / debug scenarios.
+    #[allow(dead_code, reason = "full reset between retries; integration uses release_pool / wait paths")]
     pub fn clear_transients(&mut self, device: &Device) -> Result<()> {
         self.wait_until_gpu_idle(device)?;
         self.pool_clear_in_next_submit = false;
@@ -969,25 +989,43 @@ impl GoldyEngine {
     ) {
         use std::io::Write;
         let dir = format!("{dump_dir}/dispatch_{dispatch_idx}");
-        std::fs::create_dir_all(&dir).ok();
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            log::error!("[dump] failed to create dump directory {dir}: {e}");
+            return;
+        }
 
-        let mut manifest = std::fs::File::create(format!("{dir}/manifest.txt")).unwrap();
-        writeln!(manifest, "shader_id: {}", shader_id.0).unwrap();
-        writeln!(manifest, "dispatch: ({}, {}, {})", dims.0, dims.1, dims.2).unwrap();
-        writeln!(manifest, "num_bindings: {}", bindings.len()).unwrap();
-        writeln!(manifest, "resource_slots: {:?}", indices).unwrap();
+        let manifest_path = format!("{dir}/manifest.txt");
+        let mut manifest = match std::fs::File::create(&manifest_path) {
+            Ok(f) => f,
+            Err(e) => {
+                log::error!("[dump] failed to create manifest {manifest_path}: {e}");
+                return;
+            }
+        };
+
+        macro_rules! wln {
+            ($($arg:tt)*) => {
+                if let Err(e) = writeln!(manifest, $($arg)*) {
+                    log::error!("[dump] manifest write failed: {e}");
+                    return;
+                }
+            };
+        }
+
+        wln!("shader_id: {}", shader_id.0);
+        wln!("dispatch: ({}, {}, {})", dims.0, dims.1, dims.2);
+        wln!("num_bindings: {}", bindings.len());
+        wln!("resource_slots: {:?}", indices);
 
         for (i, res) in bindings.iter().enumerate() {
             match res {
                 ResourceProxy::Buffer(proxy) | ResourceProxy::BufferRange { proxy, .. } => {
                     if let Some((gpu_buf, name)) = self.bind_map.get_buf(proxy.id) {
                         let size = gpu_buf.size() as usize;
-                        writeln!(
-                            manifest,
+                        wln!(
                             "binding[{i}]: buf name={name} size={size} bindless={}",
                             gpu_buf.bindless_index().unwrap_or(u32::MAX)
-                        )
-                        .unwrap();
+                        );
 
                         let mut data = vec![0_u8; size];
                         let ok = match gpu_buf {
@@ -997,17 +1035,15 @@ impl GoldyEngine {
                         if ok {
                             std::fs::write(format!("{dir}/buf_{i}.bin"), &data).ok();
                         } else {
-                            writeln!(manifest, "  (read failed)").unwrap();
+                            wln!("  (read failed)");
                         }
                     }
                 }
                 ResourceProxy::Image(proxy) => {
-                    writeln!(
-                        manifest,
+                    wln!(
                         "binding[{i}]: image {}x{} id={}",
                         proxy.width, proxy.height, proxy.id.0
-                    )
-                    .unwrap();
+                    );
                 }
             }
         }
@@ -1020,8 +1056,11 @@ impl GoldyEngine {
     }
 }
 
-fn image_format_to_goldy(_format: crate::recording::ImageFormat) -> TextureFormat {
-    TextureFormat::Rgba8Unorm
+fn image_format_to_goldy(format: crate::recording::ImageFormat) -> TextureFormat {
+    match format {
+        crate::recording::ImageFormat::Rgba8 => TextureFormat::Rgba8Unorm,
+        crate::recording::ImageFormat::Bgra8 => TextureFormat::Bgra8Unorm,
+    }
 }
 
 fn bind_type_to_node_access(bt: BindType) -> NodeAccess {
@@ -1130,18 +1169,13 @@ fn element_stride_for_buffer(name: &str) -> Option<u32> {
         "vello.wg_counts" => Some(320),
         "vello.scene" | "vello.blend_spill" | "vello.mask_lut" => Some(4),
         _ => {
-            debug_assert!(
-                false,
+            log::error!(
                 "unknown buffer stride for '{name}' — add entry to element_stride_for_buffer \
-                 or set BufferProxy::element_stride at the creation site"
+                 or set BufferProxy::element_stride at the creation site; \
+                 buffer will be created without stride metadata"
             );
-            log::warn!(
-                "unknown buffer stride for '{name}', defaulting to 4 — add entry to \
-                 element_stride_for_buffer or set BufferProxy::element_stride"
-            );
-            Some(4)
-        }
-    }
+            None
+        }    }
 }
 
 /// Build the push-constant index list for a dispatch.
