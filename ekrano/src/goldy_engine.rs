@@ -183,21 +183,31 @@ impl GoldyEngine {
         let Some(tv) = self.prev_frame_timeline.take() else {
             return Ok(());
         };
-        // Wait for GPU work to complete. `wait_until` may return `Err` when a
-        // command buffer terminates with a GPU fault
-        // (kIOGPUCommandBufferCallbackErrorPageFault or similar).
-        //
-        // We intentionally do NOT early-return on that error: a faulted command
-        // buffer has *terminated* — its argument-buffer descriptors are no longer
-        // live — so it is safe to recycle every bindless slot and remove every
-        // bind-map entry.  Bailing out early instead causes `prev_deferred_free_buffers`
-        // to accumulate across faulted frames; the next successful `run_recording`
-        // then replaces the list without freeing it, permanently leaking those
-        // entries and exhausting the 64-slot storage-buffer window within 2–3 frames
-        // (observed panic: "storage-buffer bindless slots exhausted (64 max)").
-        let wait_result = device
-            .wait_until(tv)
-            .map_err(|e| Error::Shader(e.to_string()));
+
+        // Fast path: if the GPU has already completed past our timeline value,
+        // skip the blocking wait_until entirely. On Metal (unified memory) this
+        // turns the common pipelined case into a single atomic read + memcpy.
+        let already_done = device.gpu_progress() >= tv;
+
+        let wait_result = if already_done {
+            Ok(())
+        } else {
+            // Wait for GPU work to complete. `wait_until` may return `Err` when a
+            // command buffer terminates with a GPU fault
+            // (kIOGPUCommandBufferCallbackErrorPageFault or similar).
+            //
+            // We intentionally do NOT early-return on that error: a faulted command
+            // buffer has *terminated* — its argument-buffer descriptors are no longer
+            // live — so it is safe to recycle every bindless slot and remove every
+            // bind-map entry.  Bailing out early instead causes `prev_deferred_free_buffers`
+            // to accumulate across faulted frames; the next successful `run_recording`
+            // then replaces the list without freeing it, permanently leaking those
+            // entries and exhausting the 64-slot storage-buffer window within 2–3 frames
+            // (observed panic: "storage-buffer bindless slots exhausted (64 max)").
+            device
+                .wait_until(tv)
+                .map_err(|e| Error::Shader(e.to_string()))
+        };
 
         // Downloads are only valid when GPU work completed successfully.
         if wait_result.is_ok() {
