@@ -18,13 +18,8 @@ struct FilterUniform {
     uint _pad;
 };
 
-float4 unpack4x8unorm(uint c) {
-    float r = float(c & 0xffu) / 255.0;
-    float g = float((c >> 8) & 0xffu) / 255.0;
-    float b = float((c >> 16) & 0xffu) / 255.0;
-    float a = float((c >> 24) & 0xffu) / 255.0;
-    return float4(r, g, b, a);
-}
+
+
 
 float2 edge_coord(int2 p, uint2 dim, uint edge_mode) {
     int w = int(dim.x);
@@ -107,7 +102,7 @@ void cs_main(BufRO<FilterUniform> uniforms_buf, DirectSpatial<float4> src, Direc
         float4 s = src[uint2(p)];
         bool in_clip = gid.x >= cx0 && gid.x < cx1 && gid.y >= cy0 && gid.y < cy1;
         if (in_clip) {
-            float4 flood = unpack4x8unorm(u.color);
+            float4 flood = unpackUnorm4x8ToFloat(u.color);
             dst[gxy] = float4(flood.rgb, s.a * flood.a);
         } else {
             dst[gxy] = s;
@@ -171,7 +166,7 @@ void cs_main(BufRO<FilterUniform> uniforms_buf, DirectSpatial<float4> src, Direc
             }
         }
         float blur_a = wsum > 0.0 ? a_acc / wsum : 0.0;
-        float4 sh = unpack4x8unorm(u.color);
+        float4 sh = unpackUnorm4x8ToFloat(u.color);
         sh *= blur_a;
         float4 fg = src[uint2(p)];
         // premul over: shadow under fg: out = fg + (1-fg.a)*shadow
@@ -216,7 +211,7 @@ void cs_main(BufRO<FilterUniform> uniforms_buf, DirectSpatial<float4> src, Direc
             }
         }
         float blur_a = wsum > 0.0 ? a_acc / wsum : 0.0;
-        float4 sh = unpack4x8unorm(u.color);
+        float4 sh = unpackUnorm4x8ToFloat(u.color);
         sh *= blur_a;
         dst[gxy] = sh;
         return;

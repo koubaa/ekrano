@@ -3,7 +3,8 @@
 
 //! Take an encoded scene and create a graph to render it
 
-use crate::recording::{BufferProxy, ImageFormat, ImageProxy, Recording, ResourceProxy};
+use crate::goldy_renderer::FrameRecorder;
+use crate::resource_proxy::{BufferProxy, ImageFormat, ImageProxy, ResourceProxy};
 use crate::shaders::FullShaders;
 use crate::{AaConfig, RenderParams};
 
@@ -83,9 +84,9 @@ pub struct CapturedBuffers {
 
 #[cfg(feature = "debug_layers")]
 impl CapturedBuffers {
-    pub fn release_buffers(self, recording: &mut Recording) {
-        recording.free_buffer(self.path_bboxes);
-        recording.free_buffer(self.lines);
+    pub(crate) fn release_buffers(self, recorder: &mut FrameRecorder<'_>) {
+        recorder.free_buffer(self.path_bboxes);
+        recorder.free_buffer(self.lines);
     }
 }
 
@@ -96,7 +97,7 @@ const MAX_FLATTEN_WG_PER_SUBMIT: u32 = 8;
 const FLATTEN_THREADS_PER_GROUP: u32 = 256;
 
 fn dispatch_stage(
-    recording: &mut Recording,
+    recorder: &mut FrameRecorder<'_>,
     use_indirect: bool,
     indirect_buf: Option<BufferProxy>,
     shader: crate::ShaderId,
@@ -107,9 +108,9 @@ fn dispatch_stage(
 ) {
     let r: Vec<_> = resources.into_iter().map(|x| x.into()).collect();
     if use_indirect {
-        recording.dispatch_indirect(shader, indirect_buf.unwrap(), stage as u64 * stride, r);
+        recorder.dispatch_indirect(shader, indirect_buf.unwrap(), stage as u64 * stride, r);
     } else {
-        recording.dispatch(shader, wg, r);
+        recorder.dispatch(shader, wg, r);
     }
 }
 
@@ -130,7 +131,7 @@ impl Render {
         }
     }
 
-    /// Prepare a recording for the coarse rasterization phase.
+    /// Record the coarse rasterization phase into a [`FrameRecorder`].
     ///
     /// The `robust` parameter controls whether we're preparing for readback
     /// of the atomic bump buffer, for robust dynamic memory.
@@ -138,19 +139,26 @@ impl Render {
     /// If `config_override` is provided, its buffer sizes and GPU config are used
     /// instead of the defaults. This supports retry with larger buffers after
     /// bump overflow.
-    pub fn render_encoding_coarse(
+    #[allow(
+        dead_code,
+        reason = "mirrors coarse API surface; callers use render_encoding_coarse_with_config"
+    )]
+    pub(crate) fn render_encoding_coarse(
         &mut self,
         encoding: &Encoding,
         resolver: &mut Resolver,
         shaders: &FullShaders,
         params: &RenderParams,
         robust: bool,
-    ) -> Recording {
-        self.render_encoding_coarse_inner(encoding, resolver, shaders, params, robust, None)
+        recorder: &mut FrameRecorder<'_>,
+    ) {
+        self.render_encoding_coarse_inner(
+            encoding, resolver, shaders, params, robust, None, recorder,
+        );
     }
 
     /// Like [`Self::render_encoding_coarse`] but with a custom config for retry.
-    pub fn render_encoding_coarse_with_config(
+    pub(crate) fn render_encoding_coarse_with_config(
         &mut self,
         encoding: &Encoding,
         resolver: &mut Resolver,
@@ -158,8 +166,17 @@ impl Render {
         params: &RenderParams,
         robust: bool,
         config: &ekrano_encoding::RenderConfig,
-    ) -> Recording {
-        self.render_encoding_coarse_inner(encoding, resolver, shaders, params, robust, Some(config))
+        recorder: &mut FrameRecorder<'_>,
+    ) {
+        self.render_encoding_coarse_inner(
+            encoding,
+            resolver,
+            shaders,
+            params,
+            robust,
+            Some(config),
+            recorder,
+        );
     }
 
     fn render_encoding_coarse_inner(
@@ -170,9 +187,9 @@ impl Render {
         params: &RenderParams,
         robust: bool,
         config_override: Option<&ekrano_encoding::RenderConfig>,
-    ) -> Recording {
+        recorder: &mut FrameRecorder<'_>,
+    ) {
         use ekrano_encoding::RenderConfig;
-        let mut recording = Recording::default();
         let mut packed = vec![];
 
         let (layout, ramps, images) = resolver.resolve(encoding, &mut packed);
@@ -180,7 +197,7 @@ impl Render {
             ResourceProxy::new_image(1, 1, ImageFormat::Rgba8)
         } else {
             let data: &[u8] = bytemuck::cast_slice(ramps.data);
-            ResourceProxy::Image(recording.upload_image(
+            ResourceProxy::Image(recorder.upload_image(
                 ramps.width,
                 ramps.height,
                 ImageFormat::Rgba8,
@@ -193,7 +210,7 @@ impl Render {
             ImageProxy::new(images.width, images.height, ImageFormat::Rgba8)
         };
         for image in images.images {
-            recording.write_image(image_atlas, image.1, image.2, image.0.clone());
+            recorder.write_image(image_atlas, image.1, image.2, image.0.clone());
         }
         let mask_atlas = ResourceProxy::Image(match &encoding.coverage_mask {
             Some(m) => {
@@ -201,9 +218,9 @@ impl Render {
                 for &b in m.data.iter() {
                     rgba.extend_from_slice(&[b, b, b, 255]);
                 }
-                recording.upload_image(m.width, m.height, ImageFormat::Rgba8, rgba)
+                recorder.upload_image(m.width, m.height, ImageFormat::Rgba8, rgba)
             }
-            None => recording.upload_image(1, 1, ImageFormat::Rgba8, vec![255, 255, 255, 255]),
+            None => recorder.upload_image(1, 1, ImageFormat::Rgba8, vec![255, 255, 255, 255]),
         });
         let mut cpu_config_owned = match config_override {
             Some(c) => *c,
@@ -240,40 +257,29 @@ impl Render {
         let wg_counts = &cpu_config.workgroup_counts;
 
         if packed.is_empty() {
-            // HACK: wgpu doesn't allow empty buffers, so we make sure that the scene buffer we upload
-            // can contain at least one array item.
-            // The values passed here should never be read, because the scene size in config
-            // is zero.
             packed.resize(size_of::<u32>(), u8::MAX);
         }
-        let scene_buf = ResourceProxy::Buffer(recording.upload("vello.scene", packed));
-        let config_buf_proxy = recording.upload_typed("vello.config", &cpu_config.gpu);
+        let scene_buf = ResourceProxy::Buffer(recorder.upload("vello.scene", packed));
+        let config_buf_proxy = recorder.upload_typed("vello.config", &cpu_config.gpu);
         let config_buf = ResourceProxy::Buffer(config_buf_proxy);
         const INDIRECT_STRIDE: u64 = size_of::<IndirectCount>() as u64;
 
         let use_indirect = shaders.pipeline_setup.is_some();
         let indirect_buf = if use_indirect {
             let wg_counts_gpu = WorkgroupCountsGpu::from(wg_counts);
-            let wg_counts_buf_proxy = recording.upload_typed("vello.wg_counts", &wg_counts_gpu);
+            let wg_counts_buf_proxy = recorder.upload_typed("vello.wg_counts", &wg_counts_gpu);
             let wg_counts_buf = ResourceProxy::Buffer(wg_counts_buf_proxy);
             let indirect_buf = BufferProxy::with_stride(
                 buffer_sizes.indirect_count.size_in_bytes().into(),
                 "vello.indirect_dispatch",
                 size_of::<IndirectCount>() as u32,
             );
-            recording.dispatch(
+            recorder.dispatch(
                 shaders.pipeline_setup.unwrap(),
                 (1, 1, 1),
                 [wg_counts_buf, indirect_buf.into()],
             );
-            // wg_counts is only read by the one pipeline_setup dispatch that
-            // translates it into `vello.indirect_dispatch`; nothing else
-            // needs it, so free the upload to reclaim its bindless slot this
-            // frame. Without this, the buffer leaks ~1 slot/frame and
-            // exhausts Metal's 64-slot storage-buffer argument buffer after
-            // a few seconds of rendering (observed panic:
-            // "storage-buffer bindless slots exhausted (64 max)").
-            recording.free_buffer(wg_counts_buf_proxy);
+            recorder.free_buffer(wg_counts_buf_proxy);
             Some(indirect_buf)
         } else {
             None
@@ -310,7 +316,7 @@ impl Render {
 
         // TODO: really only need pathtag_wgs - 1
         dispatch_stage(
-            &mut recording,
+            recorder,
             use_indirect,
             indirect_buf,
             shaders.pathtag_reduce,
@@ -322,7 +328,7 @@ impl Render {
         let mut pathtag_parent = reduced_buf;
         if use_indirect {
             dispatch_stage(
-                &mut recording,
+                recorder,
                 use_indirect,
                 indirect_buf,
                 shaders.pathtag_reduce2,
@@ -332,7 +338,7 @@ impl Render {
                 [reduced_buf, reduced2_buf],
             );
             dispatch_stage(
-                &mut recording,
+                recorder,
                 use_indirect,
                 indirect_buf,
                 shaders.pathtag_scan1,
@@ -341,10 +347,8 @@ impl Render {
                 INDIRECT_STRIDE,
                 [reduced_buf, reduced2_buf, reduced_scan_buf],
             );
-            // Small variant reads from reduced_buf; large variant from reduced_scan_buf.
-            // Only one has non-zero workgroups; the other is a no-op.
             dispatch_stage(
-                &mut recording,
+                recorder,
                 use_indirect,
                 indirect_buf,
                 shaders.pathtag_scan,
@@ -354,7 +358,7 @@ impl Render {
                 [config_buf, scene_buf, reduced_buf, tagmonoid_buf],
             );
             dispatch_stage(
-                &mut recording,
+                recorder,
                 use_indirect,
                 indirect_buf,
                 shaders.pathtag_scan_large,
@@ -364,39 +368,39 @@ impl Render {
                 [config_buf, scene_buf, reduced_scan_buf, tagmonoid_buf],
             );
         } else if use_large_path_scan {
-            recording.dispatch(
+            recorder.dispatch(
                 shaders.pathtag_reduce2,
                 wg_counts.path_reduce2,
                 [reduced_buf, reduced2_buf],
             );
-            recording.dispatch(
+            recorder.dispatch(
                 shaders.pathtag_scan1,
                 wg_counts.path_scan1,
                 [reduced_buf, reduced2_buf, reduced_scan_buf],
             );
             pathtag_parent = reduced_scan_buf;
-            recording.dispatch(
+            recorder.dispatch(
                 shaders.pathtag_scan_large,
                 wg_counts.path_scan,
                 [config_buf, scene_buf, pathtag_parent, tagmonoid_buf],
             );
         } else {
-            recording.dispatch(
+            recorder.dispatch(
                 shaders.pathtag_scan,
                 wg_counts.path_scan,
                 [config_buf, scene_buf, pathtag_parent, tagmonoid_buf],
             );
         }
-        recording.free_resource(reduced_buf);
-        recording.free_resource(reduced2_buf);
-        recording.free_resource(reduced_scan_buf);
+        recorder.free_resource(reduced_buf);
+        recorder.free_resource(reduced2_buf);
+        recorder.free_resource(reduced_scan_buf);
 
         let path_bbox_buf = ResourceProxy::new_buf(
             buffer_sizes.path_bboxes.size_in_bytes().into(),
             "vello.path_bbox_buf",
         );
         dispatch_stage(
-            &mut recording,
+            recorder,
             use_indirect,
             indirect_buf,
             shaders.bbox_clear,
@@ -411,7 +415,7 @@ impl Render {
             size_of::<BumpAllocators>() as u32,
             BufferFlags::CPU_READABLE,
         );
-        recording.clear_all(bump_buf);
+        recorder.clear_all(bump_buf);
         let bump_buf = ResourceProxy::Buffer(bump_buf);
         let lines_buf =
             ResourceProxy::new_buf(buffer_sizes.lines.size_in_bytes().into(), "vello.lines_buf");
@@ -429,7 +433,7 @@ impl Render {
             while base_wg < flat_wg_x {
                 let chunk = (flat_wg_x - base_wg).min(MAX_FLATTEN_WG_PER_SUBMIT);
                 let thread_base = base_wg * FLATTEN_THREADS_PER_GROUP;
-                recording.dispatch_with_push_tail(
+                recorder.dispatch_with_push_tail(
                     shaders.flatten,
                     (chunk, 1, 1),
                     flatten_bindings,
@@ -439,7 +443,7 @@ impl Render {
             }
         } else if use_indirect {
             dispatch_stage(
-                &mut recording,
+                recorder,
                 true,
                 indirect_buf,
                 shaders.flatten,
@@ -449,7 +453,7 @@ impl Render {
                 flatten_bindings,
             );
         } else {
-            recording.dispatch_with_push_tail(
+            recorder.dispatch_with_push_tail(
                 shaders.flatten,
                 wg_counts.flatten,
                 flatten_bindings,
@@ -461,7 +465,7 @@ impl Render {
             "vello.draw_reduced_buf",
         );
         dispatch_stage(
-            &mut recording,
+            recorder,
             use_indirect,
             indirect_buf,
             shaders.draw_reduce,
@@ -479,7 +483,7 @@ impl Render {
             "vello.clip_inp_buf",
         );
         dispatch_stage(
-            &mut recording,
+            recorder,
             use_indirect,
             indirect_buf,
             shaders.draw_leaf,
@@ -496,7 +500,7 @@ impl Render {
                 clip_inp_buf,
             ],
         );
-        recording.free_resource(draw_reduced_buf);
+        recorder.free_resource(draw_reduced_buf);
         let clip_el_buf = ResourceProxy::new_buf(
             buffer_sizes.clip_els.size_in_bytes().into(),
             "vello.clip_el_buf",
@@ -507,7 +511,7 @@ impl Render {
         );
         if use_indirect || wg_counts.clip_reduce.0 > 0 {
             dispatch_stage(
-                &mut recording,
+                recorder,
                 use_indirect,
                 indirect_buf,
                 shaders.clip_reduce,
@@ -523,7 +527,7 @@ impl Render {
         );
         if use_indirect || wg_counts.clip_leaf.0 > 0 {
             dispatch_stage(
-                &mut recording,
+                recorder,
                 use_indirect,
                 indirect_buf,
                 shaders.clip_leaf,
@@ -541,9 +545,9 @@ impl Render {
                 ],
             );
         }
-        recording.free_resource(clip_inp_buf);
-        recording.free_resource(clip_bic_buf);
-        recording.free_resource(clip_el_buf);
+        recorder.free_resource(clip_inp_buf);
+        recorder.free_resource(clip_bic_buf);
+        recorder.free_resource(clip_el_buf);
         let draw_bbox_buf = ResourceProxy::new_buf(
             buffer_sizes.draw_bboxes.size_in_bytes().into(),
             "vello.draw_bbox_buf",
@@ -553,7 +557,7 @@ impl Render {
             "vello.bin_header_buf",
         );
         dispatch_stage(
-            &mut recording,
+            recorder,
             use_indirect,
             indirect_buf,
             shaders.binning,
@@ -572,14 +576,12 @@ impl Render {
                 bin_header_buf,
             ],
         );
-        recording.free_resource(draw_monoid_buf);
-        recording.free_resource(clip_bbox_buf);
-        // Note: this only needs to be rounded up because of the workaround to store the tile_offset
-        // in storage rather than workgroup memory.
+        recorder.free_resource(draw_monoid_buf);
+        recorder.free_resource(clip_bbox_buf);
         let path_buf =
             ResourceProxy::new_buf(buffer_sizes.paths.size_in_bytes().into(), "vello.path_buf");
         dispatch_stage(
-            &mut recording,
+            recorder,
             use_indirect,
             indirect_buf,
             shaders.tile_alloc,
@@ -595,11 +597,9 @@ impl Render {
                 tile_buf,
             ],
         );
-        recording.free_resource(draw_bbox_buf);
-        recording.free_resource(tagmonoid_buf);
+        recorder.free_resource(draw_bbox_buf);
+        recorder.free_resource(tagmonoid_buf);
 
-        // Buffer for path_count/path_tiling: multi-entry when use_indirect (shared with other stages),
-        // otherwise dedicated buffer for just those two stages (single IndirectCount; both write to offset 0).
         let path_indirect_buf = indirect_buf.unwrap_or_else(|| {
             BufferProxy::with_stride(
                 size_of::<IndirectCount>() as u64,
@@ -607,7 +607,7 @@ impl Render {
                 size_of::<IndirectCount>() as u32,
             )
         });
-        recording.dispatch(
+        recorder.dispatch(
             shaders.path_count_setup,
             wg_counts.path_count_setup,
             [bump_buf, path_indirect_buf.into()],
@@ -621,7 +621,7 @@ impl Render {
         } else {
             0
         };
-        recording.dispatch_indirect(
+        recorder.dispatch_indirect(
             shaders.path_count,
             path_indirect_buf,
             path_count_offset,
@@ -635,7 +635,7 @@ impl Render {
             ],
         );
         dispatch_stage(
-            &mut recording,
+            recorder,
             use_indirect,
             indirect_buf,
             shaders.backdrop,
@@ -645,7 +645,7 @@ impl Render {
             [config_buf, bump_buf, path_buf, tile_buf],
         );
         dispatch_stage(
-            &mut recording,
+            recorder,
             use_indirect,
             indirect_buf,
             shaders.coarse,
@@ -664,7 +664,7 @@ impl Render {
                 ptcl_buf,
             ],
         );
-        recording.dispatch(
+        recorder.dispatch(
             shaders.path_tiling_setup,
             wg_counts.path_tiling_setup,
             [bump_buf, path_indirect_buf.into(), ptcl_buf],
@@ -674,7 +674,7 @@ impl Render {
         } else {
             0
         };
-        recording.dispatch_indirect(
+        recorder.dispatch_indirect(
             shaders.path_tiling,
             path_indirect_buf,
             path_tiling_offset,
@@ -687,16 +687,14 @@ impl Render {
                 segments_buf,
             ],
         );
-        // When !use_indirect (wgpu), path_indirect_buf is dedicated and we free it here.
-        // When use_indirect (Goldy), keep it for the fine stage and pass via FineResources.
         if !use_indirect {
-            recording.free_buffer(path_indirect_buf);
+            recorder.free_buffer(path_indirect_buf);
         }
-        recording.free_resource(seg_counts_buf);
-        recording.free_resource(scene_buf);
-        recording.free_resource(draw_monoid_buf);
-        recording.free_resource(bin_header_buf);
-        recording.free_resource(path_buf);
+        recorder.free_resource(seg_counts_buf);
+        recorder.free_resource(scene_buf);
+        recorder.free_resource(draw_monoid_buf);
+        recorder.free_resource(bin_header_buf);
+        recorder.free_resource(path_buf);
         let out_image = ImageProxy::new(params.width, params.height, ImageFormat::Rgba8);
         let filter_layers = [
             ImageProxy::new(params.width, params.height, ImageFormat::Rgba8),
@@ -731,16 +729,16 @@ impl Render {
             filter_layers,
         });
         if robust {
-            recording.download(*bump_buf.as_buf().unwrap());
+            recorder.download(*bump_buf.as_buf().unwrap());
         }
-        recording.free_resource(bump_buf);
+        recorder.free_resource(bump_buf);
 
         #[cfg(feature = "debug_layers")]
         {
             if robust {
                 let path_bboxes = *path_bbox_buf.as_buf().unwrap();
                 let lines = *lines_buf.as_buf().unwrap();
-                recording.download(lines);
+                recorder.download(lines);
 
                 self.captured_buffers = Some(CapturedBuffers {
                     sizes: cpu_config.buffer_sizes,
@@ -748,17 +746,15 @@ impl Render {
                     lines,
                 });
             } else {
-                recording.free_resource(path_bbox_buf);
-                recording.free_resource(lines_buf);
+                recorder.free_resource(path_bbox_buf);
+                recorder.free_resource(lines_buf);
             }
         }
         #[cfg(not(feature = "debug_layers"))]
         {
-            recording.free_resource(path_bbox_buf);
-            recording.free_resource(lines_buf);
+            recorder.free_resource(path_bbox_buf);
+            recorder.free_resource(lines_buf);
         }
-
-        recording
     }
 
     /// Run fine rasterization assuming the coarse phase succeeded.
@@ -768,11 +764,11 @@ impl Render {
     /// separate config buffer with `tile_y_offset` set, so the fine shader
     /// knows which tile row to process.
     /// `encoding` is used to clear per-layer filter textures before fine when filters are present.
-    pub fn record_fine(
+    pub(crate) fn record_fine(
         &mut self,
         encoding: &Encoding,
         shaders: &FullShaders,
-        recording: &mut Recording,
+        recorder: &mut FrameRecorder<'_>,
     ) {
         let fine_wg_count = self.fine_wg_count.take().unwrap();
         let mut fine = self.fine_resources.take().unwrap();
@@ -780,7 +776,7 @@ impl Render {
         let height_in_tiles = fine_wg_count.1;
 
         if let Some(indirect_buf) = fine.indirect_buf.take() {
-            recording.free_buffer(indirect_buf);
+            recorder.free_buffer(indirect_buf);
         }
 
         let base_resources = [
@@ -815,7 +811,7 @@ impl Render {
                         AaConfig::Msaa8 => make_mask_lut(),
                         _ => unreachable!(),
                     };
-                    let buf = recording.upload("vello.mask_lut", mask_lut);
+                    let buf = recorder.upload("vello.mask_lut", mask_lut);
                     self.mask_buf = Some(buf.into());
                 }
                 self.mask_buf
@@ -837,37 +833,31 @@ impl Render {
             if let Some(fs) = shaders.filter_pass {
                 let wg = (width_px.div_ceil(16), height_px.div_ceil(16), 1);
                 let u_clear = FilterUniform::clear_transparent(width_px, height_px);
-                // `pass_kind == 7` ignores `src`, but we still have to bind
-                // SOMETHING to slot 1 and it must not alias `dst` (DX12 can't
-                // transition the same resource to two states in one
-                // dispatch). `out_image` is a `Direct` (UAV) texture like
-                // the filter_layers, so the bindless category matches the
-                // `Image` slot declaration.
                 for fl in &fine.filter_layers {
-                    filter_dispatch(recording, fs, &u_clear, wg, fine.out_image, *fl);
+                    filter_dispatch(recorder, fs, &u_clear, wg, fine.out_image, *fl);
                 }
             } else {
                 log::warn!("filter_pass shader unavailable; cannot clear filter layer textures");
             }
         }
 
-        recording.dispatch(
+        recorder.dispatch(
             shader,
             (width_in_tiles, height_in_tiles, 1),
             fine_resources.iter().cloned(),
         );
 
-        recording.free_resource(fine.config_buf);
-        recording.free_resource(fine.tile_buf);
-        recording.free_resource(fine.segments_buf);
-        recording.free_resource(fine.ptcl_buf);
-        recording.free_resource(fine.gradient_image);
-        recording.free_resource(fine.image_atlas);
-        recording.free_resource(fine.mask_atlas);
-        recording.free_resource(fine.info_bin_data_buf);
-        recording.free_resource(fine.blend_spill_buf);
+        recorder.free_resource(fine.config_buf);
+        recorder.free_resource(fine.tile_buf);
+        recorder.free_resource(fine.segments_buf);
+        recorder.free_resource(fine.ptcl_buf);
+        recorder.free_resource(fine.gradient_image);
+        recorder.free_resource(fine.image_atlas);
+        recorder.free_resource(fine.mask_atlas);
+        recorder.free_resource(fine.info_bin_data_buf);
+        recorder.free_resource(fine.blend_spill_buf);
         if let Some(mask_buf) = self.mask_buf.take() {
-            recording.free_resource(mask_buf);
+            recorder.free_resource(mask_buf);
         }
     }
 
@@ -881,7 +871,8 @@ impl Render {
 
     /// Per-layer filter snapshot textures (same size as [`Self::out_image`]).
     ///
-    /// Call before [`Self::record_fine`] consumes fine resources.
+    /// Only meaningful after coarse rasterization and before fine rasterization completes;
+    /// the pipeline clears these proxies once the fine pass runs.
     pub fn filter_layer_textures(&self) -> [ImageProxy; 4] {
         self.fine_resources.as_ref().unwrap().filter_layers
     }
@@ -917,15 +908,15 @@ fn premul_srgb_u32(c: PremulColor<Srgb>) -> u32 {
 }
 
 fn filter_dispatch(
-    recording: &mut Recording,
+    recorder: &mut FrameRecorder<'_>,
     shader: crate::ShaderId,
     uniform: &FilterUniform,
     wg: (u32, u32, u32),
     src: ImageProxy,
     dst: ImageProxy,
 ) {
-    let buf = recording.upload_typed("vello.filter_uniform", uniform);
-    recording.dispatch(
+    let buf = recorder.upload_typed("vello.filter_uniform", uniform);
+    recorder.dispatch(
         shader,
         wg,
         [
@@ -934,7 +925,7 @@ fn filter_dispatch(
             ResourceProxy::Image(dst),
         ],
     );
-    recording.free_buffer(buf);
+    recorder.free_buffer(buf);
 }
 
 /// Per-layer filter chain for [`Encoding::layer_filter_effects`] after fine rasterization.
@@ -942,18 +933,18 @@ fn filter_dispatch(
 /// Each [`ekrano_encoding::LayerFilterEffect`] runs its [`FilterPrimitive`] on the corresponding
 /// entry in `filter_layers` (premultiplied snapshot written during fine), then composites onto
 /// `out_image` using the layer blend mode. Uses a scratch buffer the size of the target.
-pub fn record_filter_effects(
+pub(crate) fn record_filter_effects(
     encoding: &Encoding,
     shaders: &FullShaders,
-    recording: &mut Recording,
+    recorder: &mut FrameRecorder<'_>,
     width: u32,
     height: u32,
     filter_layers: &[ImageProxy; 4],
     out_image: ImageProxy,
 ) {
-    let free_filter_images = |recording: &mut Recording| {
+    let free_filter_images = |recorder: &mut FrameRecorder<'_>| {
         for fl in filter_layers {
-            recording.free_image(*fl);
+            recorder.free_image(*fl);
         }
     };
 
@@ -961,40 +952,39 @@ pub fn record_filter_effects(
         return;
     }
     if encoding.layer_filter_effects.is_empty() {
-        free_filter_images(recording);
+        free_filter_images(recorder);
         return;
     }
     let Some(shader) = shaders.filter_pass else {
         log::warn!("filter_pass shader unavailable; skipping layer_filter_effects");
-        free_filter_images(recording);
+        free_filter_images(recorder);
         return;
     };
     let wg = (width.div_ceil(16), height.div_ceil(16), 1);
     let scratch = ImageProxy::new(width, height, ImageFormat::Rgba8);
 
-    // Phase 1 (inner → outer): run each filter, leaving the result in `ft = filter_layers[idx]`.
     for effect in &encoding.layer_filter_effects {
         let idx = (effect.layer_index as usize).min(3);
         let ft = filter_layers[idx];
         match &effect.primitive {
             FilterPrimitive::GaussianBlur { std_dev, edge_mode } => {
                 let u_h = FilterUniform::gaussian_blur(width, height, true, *std_dev, *edge_mode);
-                filter_dispatch(recording, shader, &u_h, wg, ft, scratch);
+                filter_dispatch(recorder, shader, &u_h, wg, ft, scratch);
                 let u_v = FilterUniform::gaussian_blur(width, height, false, *std_dev, *edge_mode);
-                filter_dispatch(recording, shader, &u_v, wg, scratch, ft);
+                filter_dispatch(recorder, shader, &u_v, wg, scratch, ft);
             }
             FilterPrimitive::Offset { dx, dy } => {
                 let edge = ekrano_encoding::FilterEdgeMode::Duplicate;
                 let u = FilterUniform::offset(width, height, *dx, *dy, edge);
-                filter_dispatch(recording, shader, &u, wg, ft, scratch);
+                filter_dispatch(recorder, shader, &u, wg, ft, scratch);
                 let u_copy = FilterUniform::copy(width, height);
-                filter_dispatch(recording, shader, &u_copy, wg, scratch, ft);
+                filter_dispatch(recorder, shader, &u_copy, wg, scratch, ft);
             }
             FilterPrimitive::Flood { color, clip_rect } => {
                 let u = FilterUniform::flood(width, height, premul_srgb_u32(*color), *clip_rect);
-                filter_dispatch(recording, shader, &u, wg, ft, scratch);
+                filter_dispatch(recorder, shader, &u, wg, ft, scratch);
                 let u_copy = FilterUniform::copy(width, height);
-                filter_dispatch(recording, shader, &u_copy, wg, scratch, ft);
+                filter_dispatch(recorder, shader, &u_copy, wg, scratch, ft);
             }
             FilterPrimitive::DropShadow {
                 dx,
@@ -1004,11 +994,6 @@ pub fn record_filter_effects(
                 edge_mode,
             } => {
                 let u = if effect.is_nested {
-                    // For nested drop-shadow layers, compute the shadow from the inner layer's
-                    // *filtered* (e.g. blurred) result rather than from the raw fine capture.
-                    // This matches vello-sparse, which derives the shadow alpha from the blurred
-                    // content; it also prevents the outer composite from overwriting soft edges
-                    // produced by the inner filter. The inner layer lives at index `idx - 1`.
                     let inner_idx = (effect.layer_index as usize).saturating_sub(1).min(3);
                     let inner_ft = filter_layers[inner_idx];
                     let u = FilterUniform::drop_shadow_nested(
@@ -1020,10 +1005,9 @@ pub fn record_filter_effects(
                         premul_srgb_u32(*color),
                         *edge_mode,
                     );
-                    filter_dispatch(recording, shader, &u, wg, inner_ft, scratch);
+                    filter_dispatch(recorder, shader, &u, wg, inner_ft, scratch);
                     let u_copy = FilterUniform::copy(width, height);
-                    filter_dispatch(recording, shader, &u_copy, wg, scratch, ft);
-                    // Shadow is already in `ft`; skip the redundant dispatch below.
+                    filter_dispatch(recorder, shader, &u_copy, wg, scratch, ft);
                     continue;
                 } else {
                     FilterUniform::drop_shadow(
@@ -1036,26 +1020,18 @@ pub fn record_filter_effects(
                         *edge_mode,
                     )
                 };
-                filter_dispatch(recording, shader, &u, wg, ft, scratch);
+                filter_dispatch(recorder, shader, &u, wg, ft, scratch);
                 let u_copy = FilterUniform::copy(width, height);
-                filter_dispatch(recording, shader, &u_copy, wg, scratch, ft);
+                filter_dispatch(recorder, shader, &u_copy, wg, scratch, ft);
             }
         }
     }
 
-    // Phase 2: composite each filtered layer onto out_image in two rounds.
-    //
-    // Round A — `is_nested=true` (outer wrappers): these layers *enclose* inner filter layers and
-    // their results must land **underneath** the inner content. Composited first.
-    //
-    // Round B — `is_nested=false` (inner / standalone): composited afterwards, on top.
-    // Sequential (non-nested) peer layers fall here and keep their natural forward order so that
-    // the later-encoded layer composites on top of the earlier one, as authored.
     for effect in encoding.layer_filter_effects.iter().filter(|e| e.is_nested) {
         let idx = (effect.layer_index as usize).min(3);
         let ft = filter_layers[idx];
         let u_comp = FilterUniform::composite_filtered_layer(width, height, effect.layer_blend);
-        filter_dispatch(recording, shader, &u_comp, wg, ft, out_image);
+        filter_dispatch(recorder, shader, &u_comp, wg, ft, out_image);
     }
     for effect in encoding
         .layer_filter_effects
@@ -1065,9 +1041,9 @@ pub fn record_filter_effects(
         let idx = (effect.layer_index as usize).min(3);
         let ft = filter_layers[idx];
         let u_comp = FilterUniform::composite_filtered_layer(width, height, effect.layer_blend);
-        filter_dispatch(recording, shader, &u_comp, wg, ft, out_image);
+        filter_dispatch(recorder, shader, &u_comp, wg, ft, out_image);
     }
 
-    recording.free_image(scratch);
-    free_filter_images(recording);
+    recorder.free_image(scratch);
+    free_filter_images(recorder);
 }

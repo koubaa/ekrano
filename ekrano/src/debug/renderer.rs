@@ -5,19 +5,17 @@
 //! Debug visualization renderer (Goldy port stub).
 //!
 //! The original wgpu-based render pipelines have been removed as part of the
-//! wgpu → Goldy migration. `GoldyEngine` records `Command::Draw` but does not
-//! yet execute them, so all draw calls emitted here are currently no-ops.
+//! wgpu -> Goldy migration. The `FrameRecorder::draw` method is currently a
+//! no-op, so all draw calls emitted here are silently dropped.
 //! The CPU-side validation logic (`validate_line_soup`) remains functional.
-//!
-//! To complete the port: implement render-pipeline support in `GoldyEngine`
-//! and replace the placeholder `ShaderId` values with real pipeline handles.
 
 use super::DebugLayers;
 use crate::{
     RenderParams,
     debug::validate::{LineEndpoint, validate_line_soup},
-    recording::{DrawParams, ImageProxy, Recording, ResourceProxy, ShaderId},
+    goldy_renderer::FrameRecorder,
     render::CapturedBuffers,
+    resource_proxy::{DrawParams, ImageProxy, ResourceProxy, ShaderId},
 };
 
 use bytemuck::{Pod, Zeroable};
@@ -44,10 +42,8 @@ pub(crate) struct DebugRenderer {
 impl DebugRenderer {
     /// Create a new debug renderer.
     ///
-    /// Currently a no-op stub: `GoldyEngine` does not yet execute
-    /// `Command::Draw`, so shader IDs are sentinels and no GPU resources are
-    /// created here. Calling `render` will record draw commands that are
-    /// silently skipped at execution time.
+    /// Currently a no-op stub: `FrameRecorder::draw` is a no-op, so shader
+    /// IDs are sentinels and no GPU resources are created here.
     pub fn new() -> Self {
         Self {
             clear_tint: ShaderId(usize::MAX),
@@ -60,7 +56,7 @@ impl DebugRenderer {
 
     pub fn render(
         &self,
-        recording: &mut Recording,
+        recorder: &mut FrameRecorder<'_>,
         target: ImageProxy,
         captured: &CapturedBuffers,
         bump: &BumpAllocators,
@@ -80,7 +76,7 @@ impl DebugRenderer {
             } else {
                 (
                     unpaired_pts.len(),
-                    Some(recording.upload(
+                    Some(recorder.upload(
                         "vello.debug.unpaired_points",
                         bytemuck::cast_slice(&unpaired_pts[..]),
                     )),
@@ -95,19 +91,19 @@ impl DebugRenderer {
             height: params.height,
         };
         let uniforms_buf = ResourceProxy::Buffer(
-            recording.upload_uniform("vello.debug_uniforms", bytemuck::bytes_of(&uniforms)),
+            recorder.upload_uniform("vello.debug_uniforms", bytemuck::bytes_of(&uniforms)),
         );
 
         let linepoints_uniforms = [
             LinepointsUniforms::new(palette::css::DARK_CYAN.discard_alpha(), 10.),
             LinepointsUniforms::new(palette::css::RED.discard_alpha(), 80.),
         ];
-        let linepoints_uniforms_buf = recording.upload_uniform(
+        let linepoints_uniforms_buf = recorder.upload_uniform(
             "vello.debug.linepoints_uniforms",
             bytemuck::bytes_of(&linepoints_uniforms),
         );
 
-        recording.draw(DrawParams {
+        recorder.draw(DrawParams {
             shader_id: self.clear_tint,
             instance_count: 1,
             vertex_count: 4,
@@ -117,7 +113,7 @@ impl DebugRenderer {
             clear_color: None,
         });
         if layers.contains(DebugLayers::BOUNDING_BOXES) {
-            recording.draw(DrawParams {
+            recorder.draw(DrawParams {
                 shader_id: self.bboxes,
                 instance_count: captured.sizes.path_bboxes.len(),
                 vertex_count: 5,
@@ -128,7 +124,7 @@ impl DebugRenderer {
             });
         }
         if layers.contains(DebugLayers::LINESOUP_SEGMENTS) {
-            recording.draw(DrawParams {
+            recorder.draw(DrawParams {
                 shader_id: self.linesoup,
                 instance_count: bump.lines,
                 vertex_count: 4,
@@ -139,7 +135,7 @@ impl DebugRenderer {
             });
         }
         if layers.contains(DebugLayers::LINESOUP_POINTS) {
-            recording.draw(DrawParams {
+            recorder.draw(DrawParams {
                 shader_id: self.linesoup_points,
                 instance_count: bump.lines,
                 vertex_count: 4,
@@ -157,7 +153,7 @@ impl DebugRenderer {
             });
         }
         if let Some(unpaired_pts_buf) = unpaired_pts_buf {
-            recording.draw(DrawParams {
+            recorder.draw(DrawParams {
                 shader_id: self.unpaired_points,
                 instance_count: unpaired_pts_len.try_into().unwrap(),
                 vertex_count: 4,
@@ -173,11 +169,11 @@ impl DebugRenderer {
                 target,
                 clear_color: None,
             });
-            recording.free_buffer(unpaired_pts_buf);
+            recorder.free_buffer(unpaired_pts_buf);
         }
 
-        recording.free_resource(uniforms_buf);
-        recording.free_buffer(linepoints_uniforms_buf);
+        recorder.free_resource(uniforms_buf);
+        recorder.free_buffer(linepoints_uniforms_buf);
     }
 }
 

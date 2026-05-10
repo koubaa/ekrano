@@ -622,7 +622,7 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
     float2 xy = float2(float(global_id.x * PIXELS_PER_THREAD), float(local_id.y + actual_y * TILE_HEIGHT));
     float2 local_xy = float2(float(local_id.x * PIXELS_PER_THREAD), float(local_id.y));
 
-    float4 base_color = unpack4x8unorm(config.base_color);
+    float4 base_color = unpackUnorm4x8ToFloat(config.base_color);
     float4 rgba[4];
     for (uint i = 0; i < 4; i++) rgba[i] = base_color;
 
@@ -664,13 +664,13 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
             cmd_ix += 2;
         } else if (tag == CMD_COLOR) {
             CmdColor color = read_color(ptcl, cmd_ix);
-            float4 fg = unpack4x8unorm(color.rgba_color);
+            float4 fg = unpackUnorm4x8ToFloat(color.rgba_color);
             composite_draw(rgba, fg, area, draw_blend, mask_w);
             cmd_ix += 2;
         } else if (tag == CMD_BEGIN_CLIP) {
             if (clip_depth < BLEND_STACK_SPLIT) {
                 for (uint i = 0; i < 4; i++) {
-                    blend_stack[clip_depth][i] = pack4x8unorm(rgba[i]);
+                    blend_stack[clip_depth][i] = packUnorm4x8(rgba[i]);
                     rgba[i] = float4(0, 0, 0, 0);
                 }
             } else {
@@ -678,7 +678,7 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
                 uint local_tile_ix = local_id.x * PIXELS_PER_THREAD + local_id.y * TILE_WIDTH;
                 uint local_blend_start = blend_offset + blend_in_scratch * TILE_WIDTH * TILE_HEIGHT + local_tile_ix;
                 for (uint i = 0; i < 4; i++) {
-                    blend_spill[local_blend_start + i] = pack4x8unorm(rgba[i]);
+                    blend_spill[local_blend_start + i] = packUnorm4x8(rgba[i]);
                     rgba[i] = float4(0, 0, 0, 0);
                 }
             }
@@ -696,7 +696,7 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
                     uint local_tile_ix = local_id.x * PIXELS_PER_THREAD + local_id.y * TILE_WIDTH;
                     bg_rgba = blend_spill[blend_offset + blend_in_scratch * TILE_WIDTH * TILE_HEIGHT + local_tile_ix + i];
                 }
-                float4 bg = unpack4x8unorm(bg_rgba);
+                float4 bg = unpackUnorm4x8ToFloat(bg_rgba);
                 // Pixel is outside the layer path — background passes through regardless
                 // of blend mode. This is required for Compose::Clear and other "source-only"
                 // modes that would otherwise overwrite the background even with zero coverage.
@@ -732,7 +732,7 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
                     uint local_tile_ix = local_id.x * PIXELS_PER_THREAD + local_id.y * TILE_WIDTH;
                     bg_rgba = blend_spill[blend_offset + blend_in_scratch * TILE_WIDTH * TILE_HEIGHT + local_tile_ix + i];
                 }
-                float4 bg = unpack4x8unorm(bg_rgba);
+                float4 bg = unpackUnorm4x8ToFloat(bg_rgba);
                 if (area[i] < (1.0 / 510.0)) { rgba[i] = bg; continue; }
                 float4 fg = rgba[i] * area[i] * mask_w[i] * end_clip.alpha;
                 uint2 coords = uint2(uint(xy.x) + i, uint(xy.y));
@@ -771,7 +771,7 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
             float width = blur.width + min(delta, 0.0);
             float height = blur.height - max(delta, 0.0);
             float scale = 0.5 * erf7(inv_std_dev * 0.5 * (max(width, height) - 0.5 * blur.radius));
-            float4 blur_rgba = unpack4x8unorm(blur.rgba_color);
+            float4 blur_rgba = unpackUnorm4x8ToFloat(blur.rgba_color);
 
             for (uint i = 0; i < 4; i++) {
                 float2 my_xy = float2(xy.x + float(i), xy.y);
