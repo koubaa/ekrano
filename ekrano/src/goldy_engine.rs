@@ -714,7 +714,14 @@ impl GoldyEngine {
             }
             let bytes = image_data.data.data();
             graph
-                .write_texture_region(tex, x, y, image_data.width, image_data.height, bytes.to_vec())
+                .write_texture_region(
+                    tex,
+                    x,
+                    y,
+                    image_data.width,
+                    image_data.height,
+                    bytes.to_vec(),
+                )
                 .map_err(|e| Error::Shader(e.to_string()))?;
         }
         Ok(())
@@ -786,7 +793,15 @@ impl GoldyEngine {
         if let Some(ref dir) = *DUMP_DIR {
             let mut debug_indices = indices.clone();
             debug_indices.extend_from_slice(push_tail);
-            self.dump_dispatch(device, *dispatch_count, shader_id, (x, y, z), bindings, &debug_indices, dir);
+            self.dump_dispatch(
+                device,
+                *dispatch_count,
+                shader_id,
+                (x, y, z),
+                bindings,
+                &debug_indices,
+                dir,
+            );
         }
 
         let mut node = graph.node("dispatch", &self.shaders[shader_id.0].pipeline);
@@ -827,7 +842,8 @@ impl GoldyEngine {
             log::error!(
                 "DispatchIndirect for shader {} skipped: buffer proxy (id={}) is \
                  either unregistered or pooled (must be an owned buffer)",
-                shader_id.0, buf_proxy.id.0
+                shader_id.0,
+                buf_proxy.id.0
             );
             return Ok(());
         };
@@ -835,14 +851,23 @@ impl GoldyEngine {
             log::error!(
                 "DispatchIndirect for shader {} skipped: buffer proxy (id={}) is pooled \
                  (must be an owned buffer)",
-                shader_id.0, buf_proxy.id.0
+                shader_id.0,
+                buf_proxy.id.0
             );
             return Ok(());
         };
 
         if let Some(ref dir) = *DUMP_DIR {
             let indirect_dims = Self::read_indirect_dims(device, indirect_buf, offset);
-            self.dump_dispatch(device, *dispatch_count, shader_id, indirect_dims, bindings, &indices, dir);
+            self.dump_dispatch(
+                device,
+                *dispatch_count,
+                shader_id,
+                indirect_dims,
+                bindings,
+                &indices,
+                dir,
+            );
         }
 
         let mut node = graph.node("dispatch_indirect", &self.shaders[shader_id.0].pipeline);
@@ -965,7 +990,10 @@ impl GoldyEngine {
     ///
     /// Currently unused by the main render path (which uses `last_drained_bump` instead).
     /// Retained as a public API for future headless-render / debug tooling integration.
-    #[allow(dead_code, reason = "public readback API; not used by current goldy integration path")]
+    #[allow(
+        dead_code,
+        reason = "public readback API; not used by current goldy integration path"
+    )]
     pub fn get_download(&self, buf: BufferProxy) -> Option<&[u8]> {
         self.downloads.get(&buf.id).map(|v| v.as_slice())
     }
@@ -974,7 +1002,10 @@ impl GoldyEngine {
     /// (or rely on draining at the start of the next [`GoldyEngine::run_recording`]).
     ///
     /// Currently unused by the main render path; retained for headless / debug tooling.
-    #[allow(dead_code, reason = "public readback API; not used by current goldy integration path")]
+    #[allow(
+        dead_code,
+        reason = "public readback API; not used by current goldy integration path"
+    )]
     pub fn read_bump_allocators(
         &self,
         proxy: &BufferProxy,
@@ -1036,7 +1067,10 @@ impl GoldyEngine {
     ///
     /// Currently unused by the main render path (which uses `release_pool` and pipelined
     /// waits instead). Retained for future full-reset / debug scenarios.
-    #[allow(dead_code, reason = "full reset between retries; integration uses release_pool / wait paths")]
+    #[allow(
+        dead_code,
+        reason = "full reset between retries; integration uses release_pool / wait paths"
+    )]
     pub fn clear_transients(&mut self, device: &Device) -> Result<()> {
         self.wait_until_gpu_idle(device)?;
         self.pool_clear_in_next_submit = false;
@@ -1129,7 +1163,9 @@ impl GoldyEngine {
                 ResourceProxy::Image(proxy) => {
                     wln!(
                         "binding[{i}]: image {}x{} id={}",
-                        proxy.width, proxy.height, proxy.id.0
+                        proxy.width,
+                        proxy.height,
+                        proxy.id.0
                     );
                 }
             }
@@ -1262,7 +1298,8 @@ fn element_stride_for_buffer(name: &str) -> Option<u32> {
                  buffer will be created without stride metadata"
             );
             None
-        }    }
+        }
+    }
 }
 
 /// Build the push-constant index list for a dispatch.

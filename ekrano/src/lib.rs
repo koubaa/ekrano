@@ -241,10 +241,7 @@ pub enum Error {
     /// dimensions. This typically means the image was registered with a different renderer
     /// instance or was unregistered before the render was submitted.
     #[error("Invalid empty image (id: {id}): {reason}")]
-    InvalidImage {
-        id: u64,
-        reason: &'static str,
-    },
+    InvalidImage { id: u64, reason: &'static str },
     /// A GPU resource (texture, buffer) could not be created or configured.
     #[error("GPU resource error: {0}")]
     Gpu(String),
