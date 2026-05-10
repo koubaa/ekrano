@@ -675,21 +675,9 @@ public static const uint COMPOSE_XOR = 11;
 public static const uint COMPOSE_PLUS = 12;
 public static const uint COMPOSE_PLUS_LIGHTER = 13;
 
-// unpack4x8unorm / pack4x8unorm (portable helpers)
-public float4 unpack4x8unorm(uint x) {
-    return float4(
-        float((x >> 0) & 0xFF) / 255.0,
-        float((x >> 8) & 0xFF) / 255.0,
-        float((x >> 16) & 0xFF) / 255.0,
-        float((x >> 24) & 0xFF) / 255.0
-    );
-}
-public uint pack4x8unorm(float4 v) {
-    return (uint(saturate(v.x) * 255.0 + 0.5) << 0) |
-           (uint(saturate(v.y) * 255.0 + 0.5) << 8) |
-           (uint(saturate(v.z) * 255.0 + 0.5) << 16) |
-           (uint(saturate(v.w) * 255.0 + 0.5) << 24);
-}
+// Use Slang's cross-platform built-ins that map to a single hardware instruction
+// on every target (unpack_unorm4x8_to_float on Metal, OpExtInst on SPIR-V, etc.).
+// unpackUnorm4x8ToFloat / packUnorm4x8 are available since Slang 2025-03.
 
 // === PTCL structs ===
 public struct CmdBlurRect {

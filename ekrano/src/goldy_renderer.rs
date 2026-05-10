@@ -111,6 +111,19 @@ impl GoldyRenderer {
         })
     }
 
+    /// Drain the previous frame's GPU work and bump readback without submitting new work.
+    ///
+    /// Call this **before** [`goldy::Surface::acquire`] / [`goldy::Surface::begin`]
+    /// so that the previous frame's drawable is recycled before `nextDrawable`
+    /// blocks waiting for one. In the pipelined steady state (GPU already done)
+    /// this is near-free; when it does wait, the wait happens here rather than
+    /// inside `nextDrawable`, keeping the pipeline moving.
+    ///
+    /// Safe to call even when there is no previous frame in flight (no-op).
+    pub fn drain_previous_frame(&mut self, device: &Device) -> Result<()> {
+        self.engine.finish_frame_for_readback(device)
+    }
+
     /// Render a scene to the given texture.
     ///
     /// **Pipelined:** drains the *previous* frame's GPU work at the start,
@@ -366,7 +379,7 @@ impl GoldyRenderer {
             &mut self.resolver,
             &self.shaders,
             params,
-            true,
+            params.robust,
             &config,
         );
         let out_image = render.out_image();

@@ -139,6 +139,7 @@ fn render(mut scenes: SceneSet, index: usize, args: &Args) -> Result<()> {
         width,
         height,
         antialiasing_method: ekrano::AaConfig::Area,
+        robust: true,
     };
     let mut scene = Scene::new();
     scene.append(&fragment, Some(transform));

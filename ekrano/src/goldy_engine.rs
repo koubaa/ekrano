@@ -1051,14 +1051,20 @@ impl GoldyEngine {
             let pool =
                 BufferPool::new(device, pool_size).map_err(|e| Error::Shader(e.to_string()))?;
             self.storage_pool = Some(pool);
+            // New backing buffer may contain uninitialized memory; clear it.
+            self.pool_clear_in_next_submit = true;
         } else {
             let pool = self
                 .storage_pool
                 .as_mut()
                 .expect("storage pool must be initialised before reset");
             pool.reset();
+            // Reused pool: the same shaders wrote this memory last frame and
+            // will fully overwrite every region they read this frame, so
+            // clearing is unnecessary. Buffers that genuinely need zeroing
+            // (bump_buf, etc.) are pool-exempt and cleared individually.
+            self.pool_clear_in_next_submit = false;
         }
-        self.pool_clear_in_next_submit = true;
         Ok(())
     }
 
