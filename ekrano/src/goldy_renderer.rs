@@ -264,7 +264,9 @@ impl GoldyRenderer {
         }
 
         // Warn if bump overflows persisted through all retries — the output may be incomplete.
-        if let Some(bump) = self.engine.last_drained_bump() && bump.failed != 0 {
+        if let Some(bump) = self.engine.last_drained_bump()
+            && bump.failed != 0
+        {
                 log::warn!(
                     "render_to_buffer: bump overflow (0x{:x}) persisted after {} retries; \
                      output may be incomplete",
