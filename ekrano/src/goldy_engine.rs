@@ -481,169 +481,29 @@ impl GoldyEngine {
         for command in &recording.commands {
             match command {
                 Command::Upload(buf_proxy, bytes) => {
-                    // Reuse an existing buffer if it is large enough and has the same type.
-                    // The write_buffer node carries NodeAccess::Write, so the analyzer inserts
-                    // the necessary barrier between any prior reader (WAR) and this write.
-                    if let Some((GpuBuffer::Owned(existing), _)) =
-                        self.bind_map.get_buf(buf_proxy.id)
-                        && existing.size() >= bytes.len() as u64
-                        && existing.access() == DataAccess::Scattered
-                        && existing.flags() == buf_proxy.buffer_flags
-                    {
-                        graph.write_buffer(existing, 0, bytes.to_vec());
-                    } else {
-                        let stride = buf_proxy
-                            .element_stride
-                            .or_else(|| element_stride_for_buffer(buf_proxy.name));
-                        let buf = self.pool.get_buf_with_stride(
-                            device,
-                            buf_proxy.size,
-                            buf_proxy.name,
-                            DataAccess::Scattered,
-                            stride,
-                            buf_proxy.buffer_flags,
-                        )?;
-                        graph.write_buffer(&buf, 0, bytes.to_vec());
-                        self.bind_map.insert_buf(
-                            buf_proxy.id,
-                            GpuBuffer::Owned(buf),
-                            buf_proxy.name,
-                        );
-                    }
+                    self.record_upload_buffer(device, &mut graph, buf_proxy, bytes)?;
                 }
                 Command::UploadUniform(buf_proxy, bytes) => {
-                    let needs_flush_before_uniform = matches!(
-                        self.bind_map.get_buf(buf_proxy.id),
-                        Some((GpuBuffer::Owned(b), _))
-                            if b.size() >= bytes.len() as u64
-                                && b.access() == DataAccess::Broadcast,
-                    );
-                    if needs_flush_before_uniform {
-                        self.flush_graph(&mut graph, device, &mut last_timeline, surface_frame)?;
-                    }
-                    if let Some((GpuBuffer::Owned(existing), _)) =
-                        self.bind_map.get_buf(buf_proxy.id)
-                        && existing.size() >= bytes.len() as u64
-                        && existing.access() == DataAccess::Broadcast
-                    {
-                        existing
-                            .write(0, bytes)
-                            .map_err(|e| Error::Shader(e.to_string()))?;
-                    } else {
-                        let buf = self.pool.get_buf(
-                            device,
-                            buf_proxy.size,
-                            buf_proxy.name,
-                            DataAccess::Broadcast,
-                        )?;
-                        buf.write(0, bytes)
-                            .map_err(|e| Error::Shader(e.to_string()))?;
-                        self.bind_map.insert_buf(
-                            buf_proxy.id,
-                            GpuBuffer::Owned(buf),
-                            buf_proxy.name,
-                        );
-                    }
+                    self.record_upload_uniform(
+                        device,
+                        &mut graph,
+                        buf_proxy,
+                        bytes,
+                        &mut last_timeline,
+                        surface_frame,
+                    )?;
                 }
                 Command::UploadImage(image_proxy, bytes) => {
-                    let format = image_format_to_goldy(image_proxy.format);
-                    let texture = self
-                        .tex_pool
-                        .acquire(
-                            device,
-                            image_proxy.width,
-                            image_proxy.height,
-                            format,
-                            SpatialAccess::Interpolated,
-                            TextureFlags::COPY_DST,
-                        )
-                        .map_err(|e| Error::Shader(e.to_string()))?;
-                    graph
-                        .write_texture(&texture, bytes.to_vec())
-                        .map_err(|e| Error::Shader(e.to_string()))?;
-                    self.bind_map
-                        .insert_image(image_proxy.id, texture, "uploaded_image");
+                    self.record_upload_image(device, &mut graph, image_proxy, bytes)?;
                 }
                 Command::WriteImage(image_proxy, [x, y], image_data) => {
-                    if self.bind_map.get_image(image_proxy.id).is_none() {
-                        let format = image_format_to_goldy(image_proxy.format);
-                        let tex = self
-                            .tex_pool
-                            .acquire(
-                                device,
-                                image_proxy.width,
-                                image_proxy.height,
-                                format,
-                                SpatialAccess::Interpolated,
-                                TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
-                            )
-                            .map_err(|e| Error::Shader(e.to_string()))?;
-                        self.bind_map
-                            .insert_image(image_proxy.id, tex, "write_image_target");
-                    }
-                    if let Some((tex, _)) = self.bind_map.get_image(image_proxy.id) {
-                        if image_data.data.is_empty()
-                            && image_data.width != 0
-                            && image_data.height != 0
-                        {
-                            return Err(Error::InvalidImage {
-                                id: image_data.data.id(),
-                                reason: "image has non-zero dimensions but no pixel data; \
-                                         it may have been registered to a different renderer \
-                                         or unregistered before this render was submitted",
-                            });
-                        }
-                        let bytes = image_data.data.data();
-                        graph
-                            .write_texture_region(
-                                tex,
-                                *x,
-                                *y,
-                                image_data.width,
-                                image_data.height,
-                                bytes.to_vec(),
-                            )
-                            .map_err(|e| Error::Shader(e.to_string()))?;
-                    }
+                    self.record_write_image(device, &mut graph, image_proxy, *x, *y, image_data)?;
                 }
                 Command::Download(buf_proxy) => {
                     pending_downloads.push(*buf_proxy);
                 }
                 Command::Clear(buf_proxy, off, sz) => {
-                    let off = *off;
-                    let sz = sz.as_ref().copied();
-                    // No flush needed — clear is a proper graph node; the analyzer inserts
-                    // barriers relative to any prior or subsequent accesses on the same buffer.
-                    if let Some((gpu_buf, _)) = self.bind_map.get_buf(buf_proxy.id) {
-                        let clear_size = sz.unwrap_or_else(|| gpu_buf.size() - off);
-                        match gpu_buf {
-                            GpuBuffer::Owned(buf) => {
-                                graph.clear_buffer(buf, off, clear_size);
-                            }
-                            GpuBuffer::Pooled(view) => {
-                                graph.clear_buffer_view(view, off, clear_size);
-                            }
-                        }
-                    } else {
-                        let stride = buf_proxy
-                            .element_stride
-                            .or_else(|| element_stride_for_buffer(buf_proxy.name));
-                        let buf = self.pool.get_buf_with_stride(
-                            device,
-                            buf_proxy.size,
-                            buf_proxy.name,
-                            DataAccess::Scattered,
-                            stride,
-                            buf_proxy.buffer_flags,
-                        )?;
-                        let clear_size = sz.unwrap_or_else(|| buf.size() - off);
-                        graph.clear_buffer(&buf, off, clear_size);
-                        self.bind_map.insert_buf(
-                            buf_proxy.id,
-                            GpuBuffer::Owned(buf),
-                            buf_proxy.name,
-                        );
-                    }
+                    self.record_clear(device, &mut graph, buf_proxy, *off, sz.as_ref().copied())?;
                 }
                 Command::FreeBuffer(buf_proxy) => {
                     deferred_free_buffers.push(buf_proxy.id);
@@ -652,122 +512,26 @@ impl GoldyEngine {
                     deferred_free_images.push(image_proxy.id);
                 }
                 Command::Dispatch(shader_id, (x, y, z), bindings, push_tail) => {
-                    if *x == 0 || *y == 0 || *z == 0 {
-                        log::warn!(
-                            "Skipping Dispatch for shader {} with zero grid dimension ({x}, {y}, {z}); \
-                             this may indicate a bug in the recording generator",
-                            shader_id.0
-                        );
-                        continue;
-                    }
-                    let bind_types: Vec<_> = self.shaders[shader_id.0].bindings.clone();
-                    self.ensure_resources_materialized(device, &mut graph, bindings, &bind_types)?;
-                    let indices = collect_bindless_indices(
-                        bindings,
-                        &bind_types,
-                        &self.bind_map,
-                        force_uav(device),
-                    )?;
-
-                    if let Some(ref dir) = *DUMP_DIR {
-                        let mut debug_indices = indices.clone();
-                        debug_indices.extend_from_slice(push_tail);
-                        self.dump_dispatch(
-                            device,
-                            dispatch_count,
-                            *shader_id,
-                            (*x, *y, *z),
-                            bindings,
-                            &debug_indices,
-                            dir,
-                        );
-                    }
-
-                    let mut node = graph.node("dispatch", &self.shaders[shader_id.0].pipeline);
-                    node = self.bind_graph_resources(node, bindings, &bind_types);
-                    if !indices.is_empty() || !push_tail.is_empty() {
-                        node = node.bind_resources_raw_with_user(&indices, push_tail);
-                    }
-                    node.dispatch(*x, *y, *z);
-                    dispatch_count += 1;
-                }
-                Command::DispatchIndirect(shader_id, buf_proxy, offset, bindings) => {
-                    self.ensure_resources_materialized(
+                    self.record_dispatch(
                         device,
                         &mut graph,
-                        &[ResourceProxy::Buffer(*buf_proxy)],
-                        &[BindType::Buffer],
-                    )?;
-                    let bind_types: Vec<_> = self.shaders[shader_id.0].bindings.clone();
-                    self.ensure_resources_materialized(device, &mut graph, bindings, &bind_types)?;
-                    let indices = collect_bindless_indices(
+                        *shader_id,
+                        (*x, *y, *z),
                         bindings,
-                        &bind_types,
-                        &self.bind_map,
-                        force_uav(device),
+                        push_tail,
+                        &mut dispatch_count,
                     )?;
-                    if let Some((gpu_buf, _)) = self.bind_map.get_buf(buf_proxy.id)
-                        && let Some(indirect_buf) = gpu_buf.as_owned()
-                    {
-                        if let Some(ref dir) = *DUMP_DIR {
-                            let mut indirect_dims = [0_u32; 3];
-                            let mut raw = [0_u8; 12];
-                            if indirect_buf.read_to_cpu(device, &mut raw).is_ok() {
-                                let off = *offset as usize;
-                                if off + 12 <= raw.len() {
-                                    for i in 0..3 {
-                                        indirect_dims[i] = u32::from_le_bytes([
-                                            raw[off + i * 4],
-                                            raw[off + i * 4 + 1],
-                                            raw[off + i * 4 + 2],
-                                            raw[off + i * 4 + 3],
-                                        ]);
-                                    }
-                                }
-                            } else {
-                                let full_size = indirect_buf.size() as usize;
-                                let mut full = vec![0_u8; full_size];
-                                if indirect_buf.read_to_cpu(device, &mut full).is_ok() {
-                                    let off = *offset as usize;
-                                    if off + 12 <= full.len() {
-                                        for i in 0..3 {
-                                            indirect_dims[i] = u32::from_le_bytes([
-                                                full[off + i * 4],
-                                                full[off + i * 4 + 1],
-                                                full[off + i * 4 + 2],
-                                                full[off + i * 4 + 3],
-                                            ]);
-                                        }
-                                    }
-                                }
-                            }
-                            self.dump_dispatch(
-                                device,
-                                dispatch_count,
-                                *shader_id,
-                                (indirect_dims[0], indirect_dims[1], indirect_dims[2]),
-                                bindings,
-                                &indices,
-                                dir,
-                            );
-                        }
-
-                        let mut node =
-                            graph.node("dispatch_indirect", &self.shaders[shader_id.0].pipeline);
-                        node = self.bind_graph_resources(node, bindings, &bind_types);
-                        node = node.bind_buffer(indirect_buf, NodeAccess::Read);
-                        if !indices.is_empty() {
-                            node = node.bind_resources_raw(&indices);
-                        }
-                        node.dispatch_indirect(indirect_buf, *offset);
-                        dispatch_count += 1;
-                    } else {
-                        log::error!(
-                            "DispatchIndirect for shader {} skipped: buffer proxy (id={}) is \
-                             either unregistered or pooled (must be an owned buffer)",
-                            shader_id.0, buf_proxy.id.0
-                        );
-                    }
+                }
+                Command::DispatchIndirect(shader_id, buf_proxy, offset, bindings) => {
+                    self.record_dispatch_indirect(
+                        device,
+                        &mut graph,
+                        *shader_id,
+                        buf_proxy,
+                        *offset,
+                        bindings,
+                        &mut dispatch_count,
+                    )?;
                 }
                 #[cfg(feature = "debug_layers")]
                 Command::Draw(_) => {}
@@ -796,6 +560,329 @@ impl GoldyEngine {
         );
 
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Command sub-handlers (called from `run_recording_impl`)
+    // Each handler is responsible for exactly one `Command` variant.
+    // -----------------------------------------------------------------------
+
+    /// Handles `Command::Upload` — writes a byte slice into a scatter-mode buffer,
+    /// reusing an existing pool buffer if it is large enough and has the same type.
+    fn record_upload_buffer(
+        &mut self,
+        device: &Device,
+        graph: &mut TaskGraph,
+        buf_proxy: &BufferProxy,
+        bytes: &[u8],
+    ) -> Result<()> {
+        // Reuse an existing buffer if it is large enough and has the same type.
+        // The write_buffer node carries NodeAccess::Write, so the analyzer inserts
+        // the necessary barrier between any prior reader (WAR) and this write.
+        if let Some((GpuBuffer::Owned(existing), _)) = self.bind_map.get_buf(buf_proxy.id)
+            && existing.size() >= bytes.len() as u64
+            && existing.access() == DataAccess::Scattered
+            && existing.flags() == buf_proxy.buffer_flags
+        {
+            graph.write_buffer(existing, 0, bytes.to_vec());
+        } else {
+            let stride = buf_proxy
+                .element_stride
+                .or_else(|| element_stride_for_buffer(buf_proxy.name));
+            let buf = self.pool.get_buf_with_stride(
+                device,
+                buf_proxy.size,
+                buf_proxy.name,
+                DataAccess::Scattered,
+                stride,
+                buf_proxy.buffer_flags,
+            )?;
+            graph.write_buffer(&buf, 0, bytes.to_vec());
+            self.bind_map
+                .insert_buf(buf_proxy.id, GpuBuffer::Owned(buf), buf_proxy.name);
+        }
+        Ok(())
+    }
+
+    /// Handles `Command::UploadUniform` — writes a byte slice into a broadcast-mode
+    /// buffer. Flushes the current graph first if the buffer is already mapped
+    /// (CPU writes are not queue-ordered; we need a fence before overwriting).
+    fn record_upload_uniform(
+        &mut self,
+        device: &Device,
+        graph: &mut TaskGraph,
+        buf_proxy: &BufferProxy,
+        bytes: &[u8],
+        last_timeline: &mut Option<TimelineValue>,
+        surface_frame: Option<&Frame>,
+    ) -> Result<()> {
+        let needs_flush_before_uniform = matches!(
+            self.bind_map.get_buf(buf_proxy.id),
+            Some((GpuBuffer::Owned(b), _))
+                if b.size() >= bytes.len() as u64
+                    && b.access() == DataAccess::Broadcast,
+        );
+        if needs_flush_before_uniform {
+            self.flush_graph(graph, device, last_timeline, surface_frame)?;
+        }
+        if let Some((GpuBuffer::Owned(existing), _)) = self.bind_map.get_buf(buf_proxy.id)
+            && existing.size() >= bytes.len() as u64
+            && existing.access() == DataAccess::Broadcast
+        {
+            existing
+                .write(0, bytes)
+                .map_err(|e| Error::Shader(e.to_string()))?;
+        } else {
+            let buf = self.pool.get_buf(
+                device,
+                buf_proxy.size,
+                buf_proxy.name,
+                DataAccess::Broadcast,
+            )?;
+            buf.write(0, bytes)
+                .map_err(|e| Error::Shader(e.to_string()))?;
+            self.bind_map
+                .insert_buf(buf_proxy.id, GpuBuffer::Owned(buf), buf_proxy.name);
+        }
+        Ok(())
+    }
+
+    /// Handles `Command::UploadImage` — acquires a texture from the pool and
+    /// schedules a full upload via a `write_texture` graph node.
+    fn record_upload_image(
+        &mut self,
+        device: &Device,
+        graph: &mut TaskGraph,
+        image_proxy: &ImageProxy,
+        bytes: &[u8],
+    ) -> Result<()> {
+        let format = image_format_to_goldy(image_proxy.format);
+        let texture = self
+            .tex_pool
+            .acquire(
+                device,
+                image_proxy.width,
+                image_proxy.height,
+                format,
+                SpatialAccess::Interpolated,
+                TextureFlags::COPY_DST,
+            )
+            .map_err(|e| Error::Shader(e.to_string()))?;
+        graph
+            .write_texture(&texture, bytes.to_vec())
+            .map_err(|e| Error::Shader(e.to_string()))?;
+        self.bind_map
+            .insert_image(image_proxy.id, texture, "uploaded_image");
+        Ok(())
+    }
+
+    /// Handles `Command::WriteImage` — lazily allocates a texture on first write
+    /// then schedules a partial region update via `write_texture_region`.
+    fn record_write_image(
+        &mut self,
+        device: &Device,
+        graph: &mut TaskGraph,
+        image_proxy: &ImageProxy,
+        x: u32,
+        y: u32,
+        image_data: &peniko::ImageData,
+    ) -> Result<()> {
+        if self.bind_map.get_image(image_proxy.id).is_none() {
+            let format = image_format_to_goldy(image_proxy.format);
+            let tex = self
+                .tex_pool
+                .acquire(
+                    device,
+                    image_proxy.width,
+                    image_proxy.height,
+                    format,
+                    SpatialAccess::Interpolated,
+                    TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
+                )
+                .map_err(|e| Error::Shader(e.to_string()))?;
+            self.bind_map
+                .insert_image(image_proxy.id, tex, "write_image_target");
+        }
+        if let Some((tex, _)) = self.bind_map.get_image(image_proxy.id) {
+            if image_data.data.is_empty() && image_data.width != 0 && image_data.height != 0 {
+                return Err(Error::InvalidImage {
+                    id: image_data.data.id(),
+                    reason: "image has non-zero dimensions but no pixel data; \
+                             it may have been registered to a different renderer \
+                             or unregistered before this render was submitted",
+                });
+            }
+            let bytes = image_data.data.data();
+            graph
+                .write_texture_region(tex, x, y, image_data.width, image_data.height, bytes.to_vec())
+                .map_err(|e| Error::Shader(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Handles `Command::Clear` — emits a `clear_buffer` / `clear_buffer_view`
+    /// graph node. No pre-flush required; the task-graph analyzer inserts
+    /// barriers for any prior or subsequent accesses on the same buffer.
+    fn record_clear(
+        &mut self,
+        device: &Device,
+        graph: &mut TaskGraph,
+        buf_proxy: &BufferProxy,
+        off: u64,
+        sz: Option<u64>,
+    ) -> Result<()> {
+        if let Some((gpu_buf, _)) = self.bind_map.get_buf(buf_proxy.id) {
+            let clear_size = sz.unwrap_or_else(|| gpu_buf.size() - off);
+            match gpu_buf {
+                GpuBuffer::Owned(buf) => graph.clear_buffer(buf, off, clear_size),
+                GpuBuffer::Pooled(view) => graph.clear_buffer_view(view, off, clear_size),
+            }
+        } else {
+            let stride = buf_proxy
+                .element_stride
+                .or_else(|| element_stride_for_buffer(buf_proxy.name));
+            let buf = self.pool.get_buf_with_stride(
+                device,
+                buf_proxy.size,
+                buf_proxy.name,
+                DataAccess::Scattered,
+                stride,
+                buf_proxy.buffer_flags,
+            )?;
+            let clear_size = sz.unwrap_or_else(|| buf.size() - off);
+            graph.clear_buffer(&buf, off, clear_size);
+            self.bind_map
+                .insert_buf(buf_proxy.id, GpuBuffer::Owned(buf), buf_proxy.name);
+        }
+        Ok(())
+    }
+
+    /// Handles `Command::Dispatch` — validates the grid, materialises all bound
+    /// resources, optionally dumps the dispatch for offline debugging, then
+    /// enqueues a compute dispatch node in the task graph.
+    fn record_dispatch(
+        &mut self,
+        device: &Device,
+        graph: &mut TaskGraph,
+        shader_id: ShaderId,
+        (x, y, z): (u32, u32, u32),
+        bindings: &[ResourceProxy],
+        push_tail: &[u32],
+        dispatch_count: &mut usize,
+    ) -> Result<()> {
+        if x == 0 || y == 0 || z == 0 {
+            log::warn!(
+                "Skipping Dispatch for shader {} with zero grid dimension ({x}, {y}, {z}); \
+                 this may indicate a bug in the recording generator",
+                shader_id.0
+            );
+            return Ok(());
+        }
+        let bind_types: Vec<_> = self.shaders[shader_id.0].bindings.clone();
+        self.ensure_resources_materialized(device, graph, bindings, &bind_types)?;
+        let indices =
+            collect_bindless_indices(bindings, &bind_types, &self.bind_map, force_uav(device))?;
+
+        if let Some(ref dir) = *DUMP_DIR {
+            let mut debug_indices = indices.clone();
+            debug_indices.extend_from_slice(push_tail);
+            self.dump_dispatch(device, *dispatch_count, shader_id, (x, y, z), bindings, &debug_indices, dir);
+        }
+
+        let mut node = graph.node("dispatch", &self.shaders[shader_id.0].pipeline);
+        node = self.bind_graph_resources(node, bindings, &bind_types);
+        if !indices.is_empty() || !push_tail.is_empty() {
+            node = node.bind_resources_raw_with_user(&indices, push_tail);
+        }
+        node.dispatch(x, y, z);
+        *dispatch_count += 1;
+        Ok(())
+    }
+
+    /// Handles `Command::DispatchIndirect` — materialises the indirect buffer and
+    /// all bound resources, reads the dispatch dims for optional debug dumps, then
+    /// enqueues an indirect compute dispatch node in the task graph.
+    fn record_dispatch_indirect(
+        &mut self,
+        device: &Device,
+        graph: &mut TaskGraph,
+        shader_id: ShaderId,
+        buf_proxy: &BufferProxy,
+        offset: u64,
+        bindings: &[ResourceProxy],
+        dispatch_count: &mut usize,
+    ) -> Result<()> {
+        self.ensure_resources_materialized(
+            device,
+            graph,
+            &[ResourceProxy::Buffer(*buf_proxy)],
+            &[BindType::Buffer],
+        )?;
+        let bind_types: Vec<_> = self.shaders[shader_id.0].bindings.clone();
+        self.ensure_resources_materialized(device, graph, bindings, &bind_types)?;
+        let indices =
+            collect_bindless_indices(bindings, &bind_types, &self.bind_map, force_uav(device))?;
+
+        let Some((gpu_buf, _)) = self.bind_map.get_buf(buf_proxy.id) else {
+            log::error!(
+                "DispatchIndirect for shader {} skipped: buffer proxy (id={}) is \
+                 either unregistered or pooled (must be an owned buffer)",
+                shader_id.0, buf_proxy.id.0
+            );
+            return Ok(());
+        };
+        let Some(indirect_buf) = gpu_buf.as_owned() else {
+            log::error!(
+                "DispatchIndirect for shader {} skipped: buffer proxy (id={}) is pooled \
+                 (must be an owned buffer)",
+                shader_id.0, buf_proxy.id.0
+            );
+            return Ok(());
+        };
+
+        if let Some(ref dir) = *DUMP_DIR {
+            let indirect_dims = Self::read_indirect_dims(device, indirect_buf, offset);
+            self.dump_dispatch(device, *dispatch_count, shader_id, indirect_dims, bindings, &indices, dir);
+        }
+
+        let mut node = graph.node("dispatch_indirect", &self.shaders[shader_id.0].pipeline);
+        node = self.bind_graph_resources(node, bindings, &bind_types);
+        node = node.bind_buffer(indirect_buf, NodeAccess::Read);
+        if !indices.is_empty() {
+            node = node.bind_resources_raw(&indices);
+        }
+        node.dispatch_indirect(indirect_buf, offset);
+        *dispatch_count += 1;
+        Ok(())
+    }
+
+    /// Reads a `(x, y, z)` dispatch grid from an indirect buffer for debug dumps.
+    /// Returns `(0, 0, 0)` if the buffer cannot be read or is too small.
+    fn read_indirect_dims(device: &Device, buf: &Buffer, offset: u64) -> (u32, u32, u32) {
+        let off = offset as usize;
+        let decode = |src: &[u8]| -> Option<(u32, u32, u32)> {
+            if off + 12 > src.len() {
+                return None;
+            }
+            let x = u32::from_le_bytes(src[off..off + 4].try_into().ok()?);
+            let y = u32::from_le_bytes(src[off + 4..off + 8].try_into().ok()?);
+            let z = u32::from_le_bytes(src[off + 8..off + 12].try_into().ok()?);
+            Some((x, y, z))
+        };
+
+        // Fast path: read only 12 bytes at the offset.
+        let mut raw = [0_u8; 12];
+        if buf.read_to_cpu(device, &mut raw).is_ok() {
+            return decode(&raw).unwrap_or((0, 0, 0));
+        }
+
+        // Slow path: read the whole buffer (some backends may not support partial reads).
+        let mut full = vec![0_u8; buf.size() as usize];
+        if buf.read_to_cpu(device, &mut full).is_ok() {
+            return decode(&full).unwrap_or((0, 0, 0));
+        }
+
+        (0, 0, 0)
     }
 
     fn flush_graph(
