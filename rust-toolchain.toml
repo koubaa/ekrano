@@ -1,0 +1,5 @@
+# Keep `channel` aligned with `RUST_STABLE_VER` in `.github/workflows/ci.yml` so local
+# rustfmt/clippy match GitHub Actions stable jobs.
+[toolchain]
+channel = "1.95"
+components = ["rustfmt", "clippy"]

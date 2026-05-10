@@ -41,4 +41,4 @@ The Dockerfile accepts a build arg:
 docker build --build-arg RUST_VERSION=1.94 -t ekrano-ci ci/
 ```
 
-Keep this in sync with `RUST_STABLE_VER` in `.github/workflows/ci.yml`.
+Keep this in sync with `RUST_STABLE_VER` in `.github/workflows/ci.yml` and with `channel` in `rust-toolchain.toml` at the repo root.
