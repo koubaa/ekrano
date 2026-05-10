@@ -237,6 +237,17 @@ pub enum Error {
     /// Goldy backend shader or GPU operation error.
     #[error("Shader/GPU error: {0}")]
     Shader(String),
+    /// An image was submitted for rendering but contained no pixel data despite having non-zero
+    /// dimensions. This typically means the image was registered with a different renderer
+    /// instance or was unregistered before the render was submitted.
+    #[error("Invalid empty image (id: {id}): {reason}")]
+    InvalidImage { id: u64, reason: &'static str },
+    /// A GPU resource (texture, buffer) could not be created or configured.
+    #[error("GPU resource error: {0}")]
+    Gpu(String),
+    /// Reading rendered pixel data back to the CPU failed.
+    #[error("CPU readback error: {0}")]
+    Readback(String),
 }
 
 pub(crate) type Result<T, E = Error> = std::result::Result<T, E>;

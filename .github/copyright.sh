@@ -1,5 +1,10 @@
 #!/bin/bash
 
+if ! command -v rg >/dev/null 2>&1; then
+	echo "error: ripgrep (rg) is required for copyright header checks (same as CI formatting job)." >&2
+	exit 1
+fi
+
 # If there are new files with headers that can't match the conditions here,
 # then the files can be ignored by an additional glob argument via the -g flag.
 # For example:
