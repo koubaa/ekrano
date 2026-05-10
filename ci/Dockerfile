@@ -24,7 +24,7 @@ RUN apt-get install -y git git-lfs curl ca-certificates build-essential pkg-conf
     rm -rf /var/lib/apt/lists/*
 
 # Rust (version kept in sync with RUST_STABLE_VER in .github/workflows/ci.yml)
-ARG RUST_VERSION=1.93
+ARG RUST_VERSION=1.95
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
     sh -s -- -y --default-toolchain "${RUST_VERSION}"
 ENV PATH="/root/.cargo/bin:${PATH}"
