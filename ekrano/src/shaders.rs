@@ -4,10 +4,10 @@
 //! Load rendering shaders.
 
 use crate::ShaderId;
-use crate::goldy_engine::GoldyEngine;
+use crate::goldy_renderer::GoldyRenderer;
 use crate::{
     Error,
-    recording::{BindType, ImageFormat},
+    resource_proxy::{BindType, ImageFormat},
 };
 
 // Shaders for the full pipeline
@@ -43,9 +43,43 @@ pub struct FullShaders {
     pub pathtag_is_cpu: bool,
 }
 
+impl FullShaders {
+    /// Create a placeholder with zeroed shader IDs; used during `GoldyRenderer` construction
+    /// before shaders are compiled.
+    pub(crate) fn empty() -> Self {
+        Self {
+            pipeline_setup: None,
+            pathtag_reduce: ShaderId(0),
+            pathtag_reduce2: ShaderId(0),
+            pathtag_scan1: ShaderId(0),
+            pathtag_scan: ShaderId(0),
+            pathtag_scan_large: ShaderId(0),
+            bbox_clear: ShaderId(0),
+            flatten: ShaderId(0),
+            draw_reduce: ShaderId(0),
+            draw_leaf: ShaderId(0),
+            clip_reduce: ShaderId(0),
+            clip_leaf: ShaderId(0),
+            binning: ShaderId(0),
+            tile_alloc: ShaderId(0),
+            backdrop: ShaderId(0),
+            path_count_setup: ShaderId(0),
+            path_count: ShaderId(0),
+            coarse: ShaderId(0),
+            path_tiling_setup: ShaderId(0),
+            path_tiling: ShaderId(0),
+            fine_area: None,
+            fine_msaa8: None,
+            fine_msaa16: None,
+            filter_pass: None,
+            pathtag_is_cpu: false,
+        }
+    }
+}
+
 pub(crate) fn goldy_full_shaders(
     device: &goldy::Device,
-    engine: &mut GoldyEngine,
+    renderer: &mut GoldyRenderer,
 ) -> Result<FullShaders, Error> {
     use BindType::*;
 
@@ -53,12 +87,9 @@ pub(crate) fn goldy_full_shaders(
     let search_path_str = search_path.to_string_lossy();
     let search_paths = [search_path_str.as_ref()];
 
-    // Software renderers (e.g. lavapipe) have a bug where SSA values degrade
-    // across barrier instructions. Disabling Slang optimizations prevents
-    // the CSE that triggers this.
     let sw_opt = goldy::OptimizationLevel::Default;
 
-    let pipeline_setup = engine.add_compute_shader(
+    let pipeline_setup = renderer.add_compute_shader(
         device,
         "pipeline_setup",
         ekrano_shaders::slang::PIPELINE_SETUP,
@@ -66,7 +97,7 @@ pub(crate) fn goldy_full_shaders(
         &search_paths,
         &[],
     )?;
-    let pathtag_reduce = engine.add_compute_shader(
+    let pathtag_reduce = renderer.add_compute_shader(
         device,
         "pathtag_reduce",
         ekrano_shaders::slang::PATHTAG_REDUCE,
@@ -74,7 +105,7 @@ pub(crate) fn goldy_full_shaders(
         &search_paths,
         &[],
     )?;
-    let pathtag_reduce2 = engine.add_compute_shader(
+    let pathtag_reduce2 = renderer.add_compute_shader(
         device,
         "pathtag_reduce2",
         ekrano_shaders::slang::PATHTAG_REDUCE2,
@@ -82,7 +113,7 @@ pub(crate) fn goldy_full_shaders(
         &search_paths,
         &[],
     )?;
-    let pathtag_scan1 = engine.add_compute_shader(
+    let pathtag_scan1 = renderer.add_compute_shader(
         device,
         "pathtag_scan1",
         ekrano_shaders::slang::PATHTAG_SCAN1,
@@ -90,7 +121,7 @@ pub(crate) fn goldy_full_shaders(
         &search_paths,
         &[],
     )?;
-    let pathtag_scan = engine.add_compute_shader(
+    let pathtag_scan = renderer.add_compute_shader(
         device,
         "pathtag_scan_small",
         ekrano_shaders::slang::PATHTAG_SCAN_SMALL,
@@ -98,7 +129,7 @@ pub(crate) fn goldy_full_shaders(
         &search_paths,
         &[],
     )?;
-    let pathtag_scan_large = engine.add_compute_shader(
+    let pathtag_scan_large = renderer.add_compute_shader(
         device,
         "pathtag_scan_large",
         ekrano_shaders::slang::PATHTAG_SCAN_SMALL,
@@ -106,7 +137,7 @@ pub(crate) fn goldy_full_shaders(
         &search_paths,
         &[],
     )?;
-    let bbox_clear = engine.add_compute_shader(
+    let bbox_clear = renderer.add_compute_shader(
         device,
         "bbox_clear",
         ekrano_shaders::slang::BBOX_CLEAR,
@@ -114,7 +145,7 @@ pub(crate) fn goldy_full_shaders(
         &search_paths,
         &[],
     )?;
-    let flatten = engine.add_compute_shader(
+    let flatten = renderer.add_compute_shader(
         device,
         "flatten",
         ekrano_shaders::slang::FLATTEN,
@@ -129,7 +160,7 @@ pub(crate) fn goldy_full_shaders(
         &search_paths,
         &[],
     )?;
-    let draw_reduce = engine.add_compute_shader(
+    let draw_reduce = renderer.add_compute_shader(
         device,
         "draw_reduce",
         ekrano_shaders::slang::DRAW_REDUCE,
@@ -137,7 +168,7 @@ pub(crate) fn goldy_full_shaders(
         &search_paths,
         &[],
     )?;
-    let draw_leaf = engine.add_compute_shader(
+    let draw_leaf = renderer.add_compute_shader(
         device,
         "draw_leaf",
         ekrano_shaders::slang::DRAW_LEAF,
@@ -153,7 +184,7 @@ pub(crate) fn goldy_full_shaders(
         &search_paths,
         &[],
     )?;
-    let clip_reduce = engine.add_compute_shader(
+    let clip_reduce = renderer.add_compute_shader(
         device,
         "clip_reduce",
         ekrano_shaders::slang::CLIP_REDUCE,
@@ -161,7 +192,7 @@ pub(crate) fn goldy_full_shaders(
         &search_paths,
         &[],
     )?;
-    let clip_leaf = engine.add_compute_shader(
+    let clip_leaf = renderer.add_compute_shader(
         device,
         "clip_leaf",
         ekrano_shaders::slang::CLIP_LEAF,
@@ -177,14 +208,11 @@ pub(crate) fn goldy_full_shaders(
         &search_paths,
         &[],
     )?;
-    let binning = engine.add_compute_shader(
+    let binning = renderer.add_compute_shader(
         device,
         "binning",
         ekrano_shaders::slang::BINNING,
         &[
-            // Slots match `binning.slang`:
-            // 0=config, 1=scene, 2=draw_monoids, 3=path_bbox_buf, 4=clip_bbox_buf (all SRV),
-            // 5=intersected_bbox, 6=bump, 7=bin_data, 8=bin_header (all UAV).
             BufReadOnly,
             BufReadOnly,
             BufReadOnly,
@@ -198,7 +226,7 @@ pub(crate) fn goldy_full_shaders(
         &search_paths,
         &[],
     )?;
-    let tile_alloc = engine.add_compute_shader(
+    let tile_alloc = renderer.add_compute_shader(
         device,
         "tile_alloc",
         ekrano_shaders::slang::TILE_ALLOC,
@@ -213,7 +241,7 @@ pub(crate) fn goldy_full_shaders(
         &search_paths,
         &[],
     )?;
-    let path_count_setup = engine.add_compute_shader(
+    let path_count_setup = renderer.add_compute_shader(
         device,
         "path_count_setup",
         ekrano_shaders::slang::PATH_COUNT_SETUP,
@@ -221,7 +249,7 @@ pub(crate) fn goldy_full_shaders(
         &search_paths,
         &[],
     )?;
-    let path_count = engine.add_compute_shader(
+    let path_count = renderer.add_compute_shader(
         device,
         "path_count",
         ekrano_shaders::slang::PATH_COUNT,
@@ -236,7 +264,7 @@ pub(crate) fn goldy_full_shaders(
         &search_paths,
         &[],
     )?;
-    let backdrop = engine.add_compute_shader(
+    let backdrop = renderer.add_compute_shader(
         device,
         "backdrop_dyn",
         ekrano_shaders::slang::BACKDROP_DYN,
@@ -244,7 +272,7 @@ pub(crate) fn goldy_full_shaders(
         &search_paths,
         &[],
     )?;
-    let coarse = engine.add_compute_shader_with_options(
+    let coarse = renderer.add_compute_shader_with_options(
         device,
         "coarse",
         ekrano_shaders::slang::COARSE,
@@ -263,7 +291,7 @@ pub(crate) fn goldy_full_shaders(
         &[],
         sw_opt,
     )?;
-    let path_tiling_setup = engine.add_compute_shader(
+    let path_tiling_setup = renderer.add_compute_shader(
         device,
         "path_tiling_setup",
         ekrano_shaders::slang::PATH_TILING_SETUP,
@@ -271,7 +299,7 @@ pub(crate) fn goldy_full_shaders(
         &search_paths,
         &[],
     )?;
-    let path_tiling = engine.add_compute_shader(
+    let path_tiling = renderer.add_compute_shader(
         device,
         "path_tiling",
         ekrano_shaders::slang::PATH_TILING,
@@ -286,8 +314,6 @@ pub(crate) fn goldy_full_shaders(
         &search_paths,
         &[],
     )?;
-    // Must match `fine.slang`: slots 6/7 = gradients/image_atlas, 8 = mask_atlas,
-    // non-MSAA filter snapshots 9–12; MSAA mask_lut 9, filter snapshots 10–13.
     let fine_resources = [
         BufReadOnly,
         BufReadOnly,
@@ -319,7 +345,7 @@ pub(crate) fn goldy_full_shaders(
         Image(ImageFormat::Rgba8),
         Image(ImageFormat::Rgba8),
     ];
-    let fine_area = Some(engine.add_compute_shader_with_options(
+    let fine_area = Some(renderer.add_compute_shader_with_options(
         device,
         "fine_area",
         ekrano_shaders::slang::FINE,
@@ -328,7 +354,7 @@ pub(crate) fn goldy_full_shaders(
         &[],
         sw_opt,
     )?);
-    let fine_msaa8 = engine
+    let fine_msaa8 = renderer
         .add_compute_shader_with_options(
             device,
             "fine_msaa8",
@@ -339,7 +365,7 @@ pub(crate) fn goldy_full_shaders(
             sw_opt,
         )
         .ok();
-    let fine_msaa16 = engine
+    let fine_msaa16 = renderer
         .add_compute_shader_with_options(
             device,
             "fine_msaa16",
@@ -351,18 +377,13 @@ pub(crate) fn goldy_full_shaders(
         )
         .ok();
 
-    let filter_pass = engine
+    let filter_pass = renderer
         .add_compute_shader(
             device,
             "filter_pass",
             ekrano_shaders::slang::FILTER_PASS,
             &[
                 BufReadOnly,
-                // `src` is bound as a UAV (storage image) rather than SRV so
-                // it can share the same texture storage that fine writes
-                // (Goldy textures are materialized as either UAV or SRV; a
-                // fine-written filter layer has no SRV descriptor). The
-                // filter_pass shader only integer-loads from `src`.
                 Image(ImageFormat::Rgba8),
                 Image(ImageFormat::Rgba8),
             ],

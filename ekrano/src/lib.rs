@@ -108,12 +108,11 @@
 )]
 
 mod debug;
-mod recording;
 mod render;
+mod resource_proxy;
 mod scene;
 mod shaders;
 
-mod goldy_engine;
 mod goldy_renderer;
 
 pub mod low_level {
@@ -122,11 +121,10 @@ pub mod low_level {
     //! These APIs have not been carefully designed, and might not be powerful enough for this use case.
 
     pub use crate::debug::DebugLayers;
-    pub use crate::recording::{
-        BindType, BufferProxy, Command, ImageFormat, ImageProxy, Recording, ResourceId,
-        ResourceProxy, ShaderId,
+    pub use crate::render::Render;
+    pub use crate::resource_proxy::{
+        BindType, BufferProxy, ImageFormat, ImageProxy, ResourceId, ResourceProxy, ShaderId,
     };
-    pub use crate::render::{Render, record_filter_effects};
     pub use crate::shaders::FullShaders;
     /// Temporary export, used in `with_winit` for stats
     pub use ekrano_encoding::BumpAllocators;
