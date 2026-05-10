@@ -69,6 +69,7 @@
 //!          width,
 //!          height,
 //!          antialiasing_method: AaConfig::Msaa16,
+//!          robust: true,
 //!       },
 //!    )
 //!    .expect("Failed to render to a texture");
@@ -267,4 +268,15 @@ pub struct RenderParams {
     /// The anti-aliasing algorithm. The selected algorithm must have been initialized while
     /// constructing the `Renderer`.
     pub antialiasing_method: AaConfig,
+
+    /// Enable robust dynamic memory: download the bump allocator after each
+    /// frame so overflows can be detected and buffers grown automatically.
+    ///
+    /// Turning this off eliminates the per-frame GPU→CPU readback and the
+    /// pipelining sync point it imposes, which can significantly improve
+    /// throughput at the cost of silently producing incomplete output if the
+    /// bump allocator overflows.
+    ///
+    /// Defaults to `true`.
+    pub robust: bool,
 }

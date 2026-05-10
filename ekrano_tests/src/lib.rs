@@ -204,6 +204,7 @@ pub fn get_scene_image(params: &TestParams, scene: &Scene) -> Result<ImageData, 
         width,
         height,
         antialiasing_method: params.anti_aliasing,
+        robust: true,
     };
 
     let pixels = renderer.render_to_buffer(&ctx.device, scene, &render_params)?;
