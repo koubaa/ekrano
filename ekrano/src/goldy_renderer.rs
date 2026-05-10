@@ -267,12 +267,12 @@ impl GoldyRenderer {
         if let Some(bump) = self.engine.last_drained_bump()
             && bump.failed != 0
         {
-                log::warn!(
-                    "render_to_buffer: bump overflow (0x{:x}) persisted after {} retries; \
-                     output may be incomplete",
-                    bump.failed,
-                    MAX_BUMP_RETRIES
-                );
+            log::warn!(
+                "render_to_buffer: bump overflow (0x{:x}) persisted after {} retries; \
+                 output may be incomplete",
+                bump.failed,
+                MAX_BUMP_RETRIES
+            );
         }
 
         // Free pool and transient buffer memory before readback so the staging
