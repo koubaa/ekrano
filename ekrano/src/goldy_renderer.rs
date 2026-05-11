@@ -18,7 +18,7 @@
 
 pub const MAX_BINDLESS_SLOTS: usize = 16;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::mem;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -26,8 +26,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use goldy::task_graph::{NodeAccess, NodeBuilder};
 use goldy::types::{BufferFlags, SpatialAccess, TextureFlags, TextureFormat};
 use goldy::{
-    Buffer, BufferPool, BufferView, ComputePipeline, DataAccess, Device, DeviceType, Frame,
-    ShaderModule, TaskGraph, Texture, TexturePool, TimelineValue,
+    Buffer, BufferPool, BufferPoolRing, BufferView, ComputePipeline, DataAccess, Device,
+    DeviceType, Frame, ShaderModule, TaskGraph, Texture, TexturePool, TimelineValue,
 };
 
 use mem::size_of;
@@ -194,27 +194,44 @@ struct ResourcePool {
 }
 
 // -----------------------------------------------------------------------
+// FrameCleanup — deferred per-frame work processed after GPU completion
+// -----------------------------------------------------------------------
+
+struct FrameCleanup {
+    timeline: Option<TimelineValue>,
+    pending_downloads: Vec<BufferProxy>,
+    deferred_free_buffers: Vec<ResourceId>,
+    deferred_free_images: Vec<ResourceId>,
+    output_image_id: Option<ResourceId>,
+}
+
+/// Maximum number of unprocessed `FrameCleanup` entries before we force a
+/// synchronous wait to prevent unbounded growth.
+const MAX_CLEANUP_DEPTH: usize = 2;
+
+// -----------------------------------------------------------------------
 // FrameState — mutable per-frame state split out for borrow-checker compat
 // -----------------------------------------------------------------------
 
 struct FrameState {
     bind_map: BindMap,
     pool: ResourcePool,
-    storage_pool: Option<BufferPool>,
-    pool_clear_in_next_submit: bool,
+    storage_ring: BufferPoolRing,
     tex_pool: TexturePool,
     downloads: HashMap<ResourceId, Vec<u8>>,
-    prev_frame_timeline: Option<TimelineValue>,
-    prev_pending_downloads: Vec<BufferProxy>,
-    prev_deferred_free_buffers: Vec<ResourceId>,
-    prev_deferred_free_images: Vec<ResourceId>,
-    prev_output_image_id: Option<ResourceId>,
+    cleanup_ring: VecDeque<FrameCleanup>,
     last_drained_bump: Option<BumpAllocators>,
 }
 
 // -----------------------------------------------------------------------
 // GoldyRenderer — the merged struct
 // -----------------------------------------------------------------------
+
+/// Number of frames over which pool-size history is tracked for shrink hysteresis.
+const POOL_SHRINK_WINDOW: usize = 60;
+
+/// Only shrink if the current pool is at least this factor larger than the rolling max.
+const POOL_SHRINK_THRESHOLD: f64 = 2.0;
 
 /// Goldy-based 2D renderer.
 ///
@@ -226,6 +243,11 @@ pub struct GoldyRenderer {
     resolver: Resolver,
     engine_shaders: Vec<GoldyShader>,
     frame: FrameState,
+    /// Rolling history of requested pool sizes for shrink hysteresis.
+    pool_size_history: VecDeque<u64>,
+    /// Persistent bump estimates: running max across frames. Used to pre-size
+    /// buffers even when no overflow occurs, avoiding the cold-start ramp-up.
+    persistent_bump: Option<BumpAllocators>,
 }
 
 // -----------------------------------------------------------------------
@@ -233,68 +255,106 @@ pub struct GoldyRenderer {
 // -----------------------------------------------------------------------
 
 impl FrameState {
+    /// Non-blocking drain: process any completed cleanup entries from the
+    /// front of the ring. If the ring has grown beyond `MAX_CLEANUP_DEPTH`,
+    /// force a synchronous wait on the oldest entry to prevent unbounded growth.
+    fn try_drain_completed_frames(&mut self, device: &Device) -> Result<()> {
+        let progress = device.gpu_progress();
+
+        while let Some(front) = self.cleanup_ring.front() {
+            let done = match front.timeline {
+                Some(tv) => progress >= tv,
+                None => false,
+            };
+            let must_wait = !done && self.cleanup_ring.len() >= MAX_CLEANUP_DEPTH;
+            if done || must_wait {
+                let entry = self.cleanup_ring.pop_front().unwrap();
+                self.process_cleanup(device, entry, must_wait)?;
+            } else {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Synchronous drain: wait for ALL pending cleanup entries. Used by
+    /// `render_to_buffer` and `wait_until_gpu_idle`.
     fn finish_frame_for_readback(&mut self, device: &Device) -> Result<()> {
-        self.drain_completed_submit(device)?;
+        while let Some(entry) = self.cleanup_ring.pop_front() {
+            self.process_cleanup(device, entry, true)?;
+        }
         Ok(())
     }
 
     fn wait_until_gpu_idle(&mut self, device: &Device) -> Result<()> {
-        self.drain_completed_submit(device)
+        self.finish_frame_for_readback(device)
     }
 
-    fn drain_completed_submit(&mut self, device: &Device) -> Result<()> {
-        let Some(tv) = self.prev_frame_timeline.take() else {
-            return Ok(());
-        };
-
-        let already_done = device.gpu_progress() >= tv;
-
-        let wait_result = if already_done {
-            Ok(())
-        } else {
-            device
-                .wait_until(tv)
-                .map_err(|e| Error::Shader(e.to_string()))
-        };
-
-        if wait_result.is_ok() {
-            let pending = mem::take(&mut self.prev_pending_downloads);
-            let bump_name = bumps_buf_static_name();
-
-            for buf_proxy in pending {
-                if let Some((gpu_buf, _)) = self.bind_map.get_buf(buf_proxy.id)
-                    && let GpuBuffer::Owned(buf) = gpu_buf
-                {
-                    let size = buf.size() as usize;
-                    let mut output = vec![0_u8; size];
-                    buf.read_to_cpu(device, &mut output)
+    fn process_cleanup(
+        &mut self,
+        device: &Device,
+        entry: FrameCleanup,
+        force_wait: bool,
+    ) -> Result<()> {
+        if let Some(tv) = entry.timeline {
+            let already_done = device.gpu_progress() >= tv;
+            if !already_done {
+                if force_wait {
+                    device
+                        .wait_until(tv)
                         .map_err(|e| Error::Shader(e.to_string()))?;
-                    self.downloads.insert(buf_proxy.id, output);
-                    if buf_proxy.name == bump_name {
-                        if let Some(data) = self.downloads.get(&buf_proxy.id) {
-                            self.last_drained_bump = Some(bytemuck::pod_read_unaligned(data));
-                        }
-                        self.downloads.remove(&buf_proxy.id);
-                    }
+                } else {
+                    return Ok(());
                 }
             }
-        } else {
-            self.prev_pending_downloads.clear();
         }
 
-        for id in self.prev_deferred_free_buffers.drain(..) {
-            self.bind_map.remove_buf(id);
+        let bump_name = bumps_buf_static_name();
+        for buf_proxy in &entry.pending_downloads {
+            if let Some((gpu_buf, _)) = self.bind_map.get_buf(buf_proxy.id)
+                && let GpuBuffer::Owned(buf) = gpu_buf
+            {
+                let size = buf.size() as usize;
+                let mut output = vec![0_u8; size];
+                buf.read_to_cpu(device, &mut output)
+                    .map_err(|e| Error::Shader(e.to_string()))?;
+                self.downloads.insert(buf_proxy.id, output);
+                if buf_proxy.name == bump_name {
+                    if let Some(data) = self.downloads.get(&buf_proxy.id) {
+                        self.last_drained_bump = Some(bytemuck::pod_read_unaligned(data));
+                    }
+                    self.downloads.remove(&buf_proxy.id);
+                }
+            }
         }
-        for id in self.prev_deferred_free_images.drain(..) {
-            if let Some((tex, _)) = self.bind_map.take_image(id) {
+
+        for id in &entry.deferred_free_buffers {
+            self.bind_map.remove_buf(*id);
+        }
+        for id in &entry.deferred_free_images {
+            if let Some((tex, _)) = self.bind_map.take_image(*id) {
                 self.tex_pool.release(tex);
             }
         }
-        if let Some(id) = self.prev_output_image_id.take() {
+        if let Some(id) = entry.output_image_id {
             self.bind_map.remove_image(id);
         }
 
-        wait_result
+        device.flush_deferred_deletions();
+
+        Ok(())
+    }
+
+    /// Remove all `Pooled` entries from `bind_map` so they get rematerialized
+    /// into the current frame's storage pool.
+    fn evict_pooled_entries(&mut self) {
+        self.bind_map
+            .buf_map
+            .retain(|_, (buf, _)| !matches!(buf, GpuBuffer::Pooled(_)));
+    }
+
+    fn storage_pool_mut(&mut self) -> Option<&mut BufferPool> {
+        self.storage_ring.current_mut()
     }
 
     fn ensure_resources_materialized(
@@ -312,7 +372,7 @@ impl FrameState {
                             .element_stride
                             .or_else(|| element_stride_for_buffer(proxy.name));
                         let gpu_buf = if !is_pool_exempt(proxy.name)
-                            && let Some(pool) = self.storage_pool.as_mut()
+                            && let Some(pool) = self.storage_pool_mut()
                         {
                             let view = pool
                                 .alloc_bytes(proxy.size, stride)
@@ -616,30 +676,18 @@ impl FrameState {
         self.last_drained_bump.take()
     }
 
-    fn prepare_storage_pool(&mut self, device: &Device, pool_size: u64) -> Result<()> {
+    fn prepare_storage_pool(
+        &mut self,
+        device: &Device,
+        pool_size: u64,
+        max_size: Option<u64>,
+    ) -> Result<()> {
         if !use_pool(device) {
             return Ok(());
         }
-        let need_new = match &self.storage_pool {
-            Some(pool) => pool.capacity() < pool_size,
-            None => true,
-        };
-        if need_new {
-            self.storage_pool = None;
-            device.reset_buffer_heaps();
-            let pool =
-                BufferPool::new(device, pool_size).map_err(|e| Error::Shader(e.to_string()))?;
-            self.storage_pool = Some(pool);
-            self.pool_clear_in_next_submit = true;
-        } else {
-            let pool = self
-                .storage_pool
-                .as_mut()
-                .expect("storage pool must be initialised before reset");
-            pool.reset();
-            self.pool_clear_in_next_submit = false;
-        }
-        Ok(())
+        self.storage_ring
+            .prepare_bounded(device, pool_size, max_size)
+            .map_err(|e| Error::Shader(e.to_string()))
     }
 
     #[allow(
@@ -648,13 +696,11 @@ impl FrameState {
     )]
     fn clear_transients(&mut self, device: &Device) -> Result<()> {
         self.wait_until_gpu_idle(device)?;
-        self.pool_clear_in_next_submit = false;
-        self.prev_output_image_id = None;
+        self.storage_ring.clear();
         self.last_drained_bump = None;
         self.bind_map.buf_map.clear();
         self.bind_map.image_map.clear();
         self.downloads.clear();
-        self.storage_pool = None;
         Ok(())
     }
 
@@ -662,7 +708,7 @@ impl FrameState {
         self.wait_until_gpu_idle(device)?;
         self.bind_map.buf_map.clear();
         self.downloads.clear();
-        self.storage_pool = None;
+        self.storage_ring.clear();
         Ok(())
     }
 
@@ -779,11 +825,10 @@ impl<'a> FrameRecorder<'a> {
         let fuav = force_uav(device);
         let mut graph = TaskGraph::new();
 
-        if state.pool_clear_in_next_submit {
-            state.pool_clear_in_next_submit = false;
-            if let Some(pool) = &state.storage_pool {
-                graph.clear_buffer(pool.backing_buffer(), 0, pool.capacity());
-            }
+        if state.storage_ring.take_clear_flag()
+            && let Some(pool) = state.storage_ring.current()
+        {
+            graph.clear_buffer(pool.backing_buffer(), 0, pool.capacity());
         }
 
         Self {
@@ -1055,8 +1100,8 @@ impl<'a> FrameRecorder<'a> {
             .insert_image(proxy.id, texture.borrow(), "output");
     }
 
-    /// Finish recording: flush the final graph and transfer ownership of
-    /// per-frame bookkeeping back to `FrameState`.
+    /// Finish recording: flush the final graph and push a `FrameCleanup`
+    /// entry onto the deque for deferred processing after GPU completion.
     fn finish(mut self, output_image_id: Option<ResourceId>) -> Result<()> {
         flush_graph(
             &mut self.graph,
@@ -1065,20 +1110,18 @@ impl<'a> FrameRecorder<'a> {
             self.surface_frame,
         )?;
 
-        match self.surface_frame {
-            None => {
-                self.state.prev_frame_timeline = self.last_timeline.take();
-            }
-            Some(_) => {
-                // Surface path: timeline comes later from note_frame_presented
-            }
-        }
+        let timeline = match self.surface_frame {
+            None => self.last_timeline.take(),
+            Some(_) => None, // surface path: filled by note_frame_presented
+        };
 
-        self.state.prev_pending_downloads = self.pending_downloads;
-        self.state.prev_deferred_free_buffers = self.deferred_free_buffers;
-        self.state.prev_deferred_free_images =
-            self.deferred_free_images.iter().map(|ip| ip.id).collect();
-        self.state.prev_output_image_id = output_image_id;
+        self.state.cleanup_ring.push_back(FrameCleanup {
+            timeline,
+            pending_downloads: self.pending_downloads,
+            deferred_free_buffers: self.deferred_free_buffers,
+            deferred_free_images: self.deferred_free_images.iter().map(|ip| ip.id).collect(),
+            output_image_id,
+        });
 
         Ok(())
     }
@@ -1099,21 +1142,70 @@ impl GoldyRenderer {
             frame: FrameState {
                 bind_map: BindMap::default(),
                 pool: ResourcePool::default(),
-                storage_pool: None,
-                pool_clear_in_next_submit: false,
+                storage_ring: BufferPoolRing::new(),
                 tex_pool: TexturePool::default(),
                 downloads: HashMap::new(),
-                prev_frame_timeline: None,
-                prev_pending_downloads: Vec::new(),
-                prev_deferred_free_buffers: Vec::new(),
-                prev_deferred_free_images: Vec::new(),
-                prev_output_image_id: None,
+                cleanup_ring: VecDeque::new(),
                 last_drained_bump: None,
             },
+            pool_size_history: VecDeque::with_capacity(POOL_SHRINK_WINDOW),
+            persistent_bump: None,
         };
         let shaders = shaders::goldy_full_shaders(device, &mut renderer)?;
         renderer.shaders = shaders;
         Ok(renderer)
+    }
+
+    // =======================================================================
+    // Internal helpers — pool sizing & bump persistence
+    // =======================================================================
+
+    /// Update persistent bump estimates with a running component-wise max.
+    fn update_persistent_bump(&mut self, bump: &BumpAllocators) {
+        let p = self.persistent_bump.get_or_insert(BumpAllocators {
+            failed: 0,
+            binning: 0,
+            ptcl: 0,
+            tile: 0,
+            seg_counts: 0,
+            segments: 0,
+            blend: 0,
+            lines: 0,
+        });
+        p.binning = p.binning.max(bump.binning);
+        p.ptcl = p.ptcl.max(bump.ptcl);
+        p.tile = p.tile.max(bump.tile);
+        p.seg_counts = p.seg_counts.max(bump.seg_counts);
+        p.segments = p.segments.max(bump.segments);
+        p.blend = p.blend.max(bump.blend);
+        p.lines = p.lines.max(bump.lines);
+    }
+
+    /// Compute the pool shrink max: if the current pool is significantly
+    /// oversized relative to recent demand, returns `Some(target)` to cap
+    /// the pool and trigger a reallocation. Returns `None` if no shrink needed.
+    fn pool_shrink_max(&self) -> Option<u64> {
+        let current_capacity = self.frame.storage_ring.current_capacity().unwrap_or(0);
+        if current_capacity == 0 {
+            return None;
+        }
+        if self.pool_size_history.len() < POOL_SHRINK_WINDOW {
+            return None;
+        }
+        let rolling_max = self.pool_size_history.iter().copied().max().unwrap_or(0);
+        let threshold = (rolling_max as f64 * POOL_SHRINK_THRESHOLD) as u64;
+        if current_capacity > threshold {
+            let target = rolling_max.saturating_mul(3) / 2;
+            log::info!(
+                "Pool shrink: current={}MB, rolling_max={}MB, target={}MB",
+                current_capacity / 1024 / 1024,
+                rolling_max / 1024 / 1024,
+                target / 1024 / 1024,
+            );
+            Some(target)
+        } else {
+            None
+        }
     }
 
     // =======================================================================
@@ -1122,10 +1214,15 @@ impl GoldyRenderer {
 
     /// Acknowledge a swapchain frame after [`goldy::Frame::present`].
     ///
-    /// Records the present timeline value so the next render call can drain
-    /// the previous frame's GPU work before reusing resources.
+    /// Fills in the timeline on the most recent `FrameCleanup` entry (the one
+    /// pushed by `FrameRecorder::finish` for the surface path where the
+    /// timeline isn't known until after present).
     pub fn note_frame_presented(&mut self, tv: TimelineValue) {
-        self.frame.prev_frame_timeline = Some(tv);
+        if let Some(back) = self.frame.cleanup_ring.back_mut()
+            && back.timeline.is_none()
+        {
+            back.timeline = Some(tv);
+        }
     }
 
     /// Render a scene to the given texture.
@@ -1246,11 +1343,34 @@ impl GoldyRenderer {
         let encoding = scene.encoding();
         let mut stats = FrameStats::default();
 
+        // --- Non-blocking drain of completed frames ---
         let t_drain_start = Instant::now();
-        self.frame.finish_frame_for_readback(device)?;
+        self.frame.try_drain_completed_frames(device)?;
         let t_drain = t_drain_start.elapsed();
 
+        // Flip storage pool index and evict stale pooled bind_map entries
+        self.frame.storage_ring.advance();
+        self.frame.evict_pooled_entries();
+
         let prev_bump = self.frame.take_last_drained_bump();
+
+        // Fix 5: Only trust bump readback when robust mode produced valid data.
+        // A bump with all-zero counters (no failed flag, no usage) is likely stale
+        // or from a frame where the buffer was never written.
+        let prev_bump = prev_bump.filter(|b| {
+            let any_nonzero = b.lines > 0
+                || b.seg_counts > 0
+                || b.segments > 0
+                || b.tile > 0
+                || b.binning > 0
+                || b.ptcl > 0
+                || b.blend > 0;
+            if !any_nonzero && b.failed == 0 {
+                log::debug!("Ignoring all-zero bump readback (likely stale)");
+                return false;
+            }
+            true
+        });
 
         if let Some(ref bump) = prev_bump {
             let frame_num = FRAME_COUNTER.load(Ordering::Relaxed);
@@ -1263,6 +1383,8 @@ impl GoldyRenderer {
                 bump.tile,
                 bump.failed,
             );
+            // Fix 3: Update persistent bump estimates (running max across frames).
+            self.update_persistent_bump(&sanitize_bump(bump));
         }
 
         let t0 = Instant::now();
@@ -1284,6 +1406,9 @@ impl GoldyRenderer {
                     bump.failed,
                 );
                 base.with_bump_estimates(&sanitize_bump(bump))
+            } else if let Some(ref persistent) = self.persistent_bump {
+                // Fix 3: Use accumulated knowledge to pre-size even without overflow.
+                base.with_bump_estimates(persistent)
             } else {
                 base
             }
@@ -1293,8 +1418,16 @@ impl GoldyRenderer {
         let base = BufferPool::padded_size(&config.buffer_sizes.pool_allocs());
         let pool_size = base.saturating_add(POOL_SIZE_SLACK);
 
+        // Fix 2: Track pool size history and allow shrinking with hysteresis.
+        self.pool_size_history.push_back(pool_size);
+        if self.pool_size_history.len() > POOL_SHRINK_WINDOW {
+            self.pool_size_history.pop_front();
+        }
+        let shrink_max = self.pool_shrink_max();
+
         let t1 = Instant::now();
-        self.frame.prepare_storage_pool(device, pool_size)?;
+        self.frame
+            .prepare_storage_pool(device, pool_size, shrink_max)?;
         let t_pool = t1.elapsed();
 
         let t2 = Instant::now();

@@ -578,12 +578,15 @@ impl BufferSizes {
     /// Create new buffer sizes with bump-allocated buffers scaled up to accommodate
     /// the actual usage reported by the GPU bump allocator.
     ///
-    /// Each overflowed buffer is rounded up to the next power of two of the actual
-    /// usage. Non-bump buffers are unchanged.
+    /// Each overflowed buffer is grown by 1.5x the actual usage (rounded up to a
+    /// 256-element alignment boundary). This is less wasteful than the previous
+    /// `next_power_of_two` which could double memory on every overflow.
     pub fn with_bump_estimates(&self, bump: &BumpAllocators) -> Self {
         fn grow(current: u32, needed: u32) -> u32 {
             if needed > current {
-                needed.next_power_of_two()
+                // 1.5x headroom, rounded up to 256-element alignment.
+                let grown = needed.saturating_add(needed / 2);
+                (grown + 255) & !255
             } else {
                 current
             }
