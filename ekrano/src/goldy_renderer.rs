@@ -825,10 +825,10 @@ impl<'a> FrameRecorder<'a> {
         let fuav = force_uav(device);
         let mut graph = TaskGraph::new();
 
-        if state.storage_ring.take_clear_flag() {
-            if let Some(pool) = state.storage_ring.current() {
-                graph.clear_buffer(pool.backing_buffer(), 0, pool.capacity());
-            }
+        if state.storage_ring.take_clear_flag()
+            && let Some(pool) = state.storage_ring.current()
+        {
+            graph.clear_buffer(pool.backing_buffer(), 0, pool.capacity());
         }
 
         Self {
@@ -1218,10 +1218,10 @@ impl GoldyRenderer {
     /// pushed by `FrameRecorder::finish` for the surface path where the
     /// timeline isn't known until after present).
     pub fn note_frame_presented(&mut self, tv: TimelineValue) {
-        if let Some(back) = self.frame.cleanup_ring.back_mut() {
-            if back.timeline.is_none() {
-                back.timeline = Some(tv);
-            }
+        if let Some(back) = self.frame.cleanup_ring.back_mut()
+            && back.timeline.is_none()
+        {
+            back.timeline = Some(tv);
         }
     }
 
