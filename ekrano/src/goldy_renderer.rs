@@ -1426,7 +1426,8 @@ impl GoldyRenderer {
         let shrink_max = self.pool_shrink_max();
 
         let t1 = Instant::now();
-        self.frame.prepare_storage_pool(device, pool_size, shrink_max)?;
+        self.frame
+            .prepare_storage_pool(device, pool_size, shrink_max)?;
         let t_pool = t1.elapsed();
 
         let t2 = Instant::now();
