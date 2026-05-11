@@ -67,7 +67,7 @@ pub struct FrameStats {
 /// Upper bound applied to observed bump counters before they're fed into
 /// `RenderConfig::with_bump_estimates`. Legitimate scenes need far less than
 /// this (the tiger hits ~13K segments, paris-30k a few hundred thousand),
-/// but a stale/corrupt read of `vello.bump_buf` — which we've observed
+/// but a stale/corrupt read of `ekrano.bump_buf` — which we've observed
 /// intermittently — can make a counter look like a billion, at which point
 /// `grow()` rounds it up to `next_power_of_two` and the pool allocation goes
 /// to multiple GB, exhausts Metal's heap, and puts the app in an infinite
@@ -158,13 +158,13 @@ struct BindMap {
 fn is_pool_exempt(name: &str) -> bool {
     matches!(
         name,
-        "vello.bump_buf"
-            | "vello.indirect_dispatch"
-            | "vello.tile_buf"
-            | "vello.lines_buf"
-            | "vello.seg_counts_buf"
-            | "vello.segments_buf"
-            | "vello.path_buf"
+        "ekrano.bump_buf"
+            | "ekrano.indirect_dispatch"
+            | "ekrano.tile_buf"
+            | "ekrano.lines_buf"
+            | "ekrano.seg_counts_buf"
+            | "ekrano.segments_buf"
+            | "ekrano.path_buf"
     )
 }
 
@@ -210,17 +210,66 @@ struct FrameCleanup {
 const MAX_CLEANUP_DEPTH: usize = 2;
 
 // -----------------------------------------------------------------------
-// FrameState — mutable per-frame state split out for borrow-checker compat
+// PersistentState — GPU resources that survive across frames
 // -----------------------------------------------------------------------
 
+/// GPU resources that live for the lifetime of the renderer and are reused
+/// across frames. Pool growth, texture reuse, and bump estimates all live here.
+struct PersistentState {
+    /// Owned buffer cache: recycles pool-exempt buffers (bump, indirect, etc.)
+    pool: ResourcePool,
+    /// Main storage pool: a ring-buffered large GPU allocation that pooled
+    /// compute buffers sub-allocate from each frame.
+    storage_ring: BufferPoolRing,
+    /// Texture pool for intermediate render targets (gradient, filter layers, etc.)
+    tex_pool: TexturePool,
+    /// Bump allocator counters from the most recently drained frame.
+    /// `None` until the first GPU readback completes.
+    last_drained_bump: Option<BumpAllocators>,
+}
+
+impl PersistentState {
+    fn prepare_storage_pool(
+        &mut self,
+        device: &Device,
+        pool_size: u64,
+        max_size: Option<u64>,
+    ) -> Result<()> {
+        if !use_pool(device) {
+            return Ok(());
+        }
+        self.storage_ring
+            .prepare_bounded(device, pool_size, max_size)
+            .map_err(|e| Error::Shader(e.to_string()))
+    }
+
+    fn storage_pool_mut(&mut self) -> Option<&mut BufferPool> {
+        self.storage_ring.current_mut()
+    }
+
+    fn last_drained_bump(&self) -> Option<&BumpAllocators> {
+        self.last_drained_bump.as_ref()
+    }
+
+    fn take_last_drained_bump(&mut self) -> Option<BumpAllocators> {
+        self.last_drained_bump.take()
+    }
+}
+
+// -----------------------------------------------------------------------
+// FrameState — per-frame bookkeeping (bind map, cleanup ring, downloads)
+// -----------------------------------------------------------------------
+
+/// Per-frame bookkeeping: the resource bind map, deferred cleanup ring,
+/// and in-flight download results.
+///
+/// The bind map is partly persistent (owned buffers survive until explicitly
+/// freed) and partly rebuilt each frame (pooled views are evicted at frame
+/// start via [`FrameState::evict_pooled_entries`]).
 struct FrameState {
     bind_map: BindMap,
-    pool: ResourcePool,
-    storage_ring: BufferPoolRing,
-    tex_pool: TexturePool,
     downloads: HashMap<ResourceId, Vec<u8>>,
     cleanup_ring: VecDeque<FrameCleanup>,
-    last_drained_bump: Option<BumpAllocators>,
 }
 
 // -----------------------------------------------------------------------
@@ -242,6 +291,9 @@ pub struct GoldyRenderer {
     shaders: FullShaders,
     resolver: Resolver,
     engine_shaders: Vec<GoldyShader>,
+    /// Cross-frame GPU resources: pools, texture cache, bump readback.
+    persistent: PersistentState,
+    /// Per-frame bookkeeping: bind map, cleanup ring, download results.
     frame: FrameState,
     /// Rolling history of requested pool sizes for shrink hysteresis.
     pool_size_history: VecDeque<u64>,
@@ -251,14 +303,18 @@ pub struct GoldyRenderer {
 }
 
 // -----------------------------------------------------------------------
-// impl FrameState — methods operating on per-frame mutable state
+// impl FrameState — bookkeeping methods (pool access via PersistentState)
 // -----------------------------------------------------------------------
 
 impl FrameState {
     /// Non-blocking drain: process any completed cleanup entries from the
     /// front of the ring. If the ring has grown beyond `MAX_CLEANUP_DEPTH`,
     /// force a synchronous wait on the oldest entry to prevent unbounded growth.
-    fn try_drain_completed_frames(&mut self, device: &Device) -> Result<()> {
+    fn try_drain_completed_frames(
+        &mut self,
+        device: &Device,
+        persistent: &mut PersistentState,
+    ) -> Result<()> {
         let progress = device.gpu_progress();
 
         while let Some(front) = self.cleanup_ring.front() {
@@ -269,7 +325,7 @@ impl FrameState {
             let must_wait = !done && self.cleanup_ring.len() >= MAX_CLEANUP_DEPTH;
             if done || must_wait {
                 let entry = self.cleanup_ring.pop_front().unwrap();
-                self.process_cleanup(device, entry, must_wait)?;
+                self.process_cleanup(device, entry, must_wait, persistent)?;
             } else {
                 break;
             }
@@ -277,17 +333,15 @@ impl FrameState {
         Ok(())
     }
 
-    /// Synchronous drain: wait for ALL pending cleanup entries. Used by
-    /// `render_to_buffer` and `wait_until_gpu_idle`.
-    fn finish_frame_for_readback(&mut self, device: &Device) -> Result<()> {
+    fn wait_until_gpu_idle(
+        &mut self,
+        device: &Device,
+        persistent: &mut PersistentState,
+    ) -> Result<()> {
         while let Some(entry) = self.cleanup_ring.pop_front() {
-            self.process_cleanup(device, entry, true)?;
+            self.process_cleanup(device, entry, true, persistent)?;
         }
         Ok(())
-    }
-
-    fn wait_until_gpu_idle(&mut self, device: &Device) -> Result<()> {
-        self.finish_frame_for_readback(device)
     }
 
     fn process_cleanup(
@@ -295,6 +349,7 @@ impl FrameState {
         device: &Device,
         entry: FrameCleanup,
         force_wait: bool,
+        persistent: &mut PersistentState,
     ) -> Result<()> {
         if let Some(tv) = entry.timeline {
             let already_done = device.gpu_progress() >= tv;
@@ -321,7 +376,8 @@ impl FrameState {
                 self.downloads.insert(buf_proxy.id, output);
                 if buf_proxy.name == bump_name {
                     if let Some(data) = self.downloads.get(&buf_proxy.id) {
-                        self.last_drained_bump = Some(bytemuck::pod_read_unaligned(data));
+                        persistent.last_drained_bump =
+                            Some(bytemuck::pod_read_unaligned(data));
                     }
                     self.downloads.remove(&buf_proxy.id);
                 }
@@ -333,7 +389,7 @@ impl FrameState {
         }
         for id in &entry.deferred_free_images {
             if let Some((tex, _)) = self.bind_map.take_image(*id) {
-                self.tex_pool.release(tex);
+                persistent.tex_pool.release(tex);
             }
         }
         if let Some(id) = entry.output_image_id {
@@ -353,33 +409,28 @@ impl FrameState {
             .retain(|_, (buf, _)| !matches!(buf, GpuBuffer::Pooled(_)));
     }
 
-    fn storage_pool_mut(&mut self) -> Option<&mut BufferPool> {
-        self.storage_ring.current_mut()
-    }
-
     fn ensure_resources_materialized(
         &mut self,
         device: &Device,
         graph: &mut TaskGraph,
         bindings: &[ResourceProxy],
         bind_types: &[BindType],
+        persistent: &mut PersistentState,
     ) -> Result<()> {
         for (i, res) in bindings.iter().enumerate() {
             match res {
                 ResourceProxy::Buffer(proxy) | ResourceProxy::BufferRange { proxy, .. } => {
                     if self.bind_map.get_buf(proxy.id).is_none() {
-                        let stride = proxy
-                            .element_stride
-                            .or_else(|| element_stride_for_buffer(proxy.name));
+                        let stride = proxy.element_stride;
                         let gpu_buf = if !is_pool_exempt(proxy.name)
-                            && let Some(pool) = self.storage_pool_mut()
+                            && let Some(pool) = persistent.storage_pool_mut()
                         {
                             let view = pool
                                 .alloc_bytes(proxy.size, stride)
                                 .map_err(|e| Error::Shader(e.to_string()))?;
                             GpuBuffer::Pooled(view)
                         } else {
-                            let buf = self.pool.get_buf_with_stride(
+                            let buf = persistent.pool.get_buf_with_stride(
                                 device,
                                 proxy.size,
                                 proxy.name,
@@ -400,7 +451,7 @@ impl FrameState {
                             Some(BindType::Image(_)) => SpatialAccess::Direct,
                             _ => SpatialAccess::Interpolated,
                         };
-                        let tex = self
+                        let tex = persistent
                             .tex_pool
                             .acquire(
                                 device,
@@ -426,6 +477,7 @@ impl FrameState {
         graph: &mut TaskGraph,
         buf_proxy: &BufferProxy,
         bytes: &[u8],
+        persistent: &mut PersistentState,
     ) -> Result<()> {
         if let Some((GpuBuffer::Owned(existing), _)) = self.bind_map.get_buf(buf_proxy.id)
             && existing.size() >= bytes.len() as u64
@@ -434,62 +486,15 @@ impl FrameState {
         {
             graph.write_buffer(existing, 0, bytes.to_vec());
         } else {
-            let stride = buf_proxy
-                .element_stride
-                .or_else(|| element_stride_for_buffer(buf_proxy.name));
-            let buf = self.pool.get_buf_with_stride(
+            let buf = persistent.pool.get_buf_with_stride(
                 device,
                 buf_proxy.size,
                 buf_proxy.name,
                 DataAccess::Scattered,
-                stride,
+                buf_proxy.element_stride,
                 buf_proxy.buffer_flags,
             )?;
             graph.write_buffer(&buf, 0, bytes.to_vec());
-            self.bind_map
-                .insert_buf(buf_proxy.id, GpuBuffer::Owned(buf), buf_proxy.name);
-        }
-        Ok(())
-    }
-
-    #[allow(
-        dead_code,
-        reason = "called by FrameRecorder::upload_uniform; both unused until debug overlay calls them"
-    )]
-    fn record_upload_uniform(
-        &mut self,
-        device: &Device,
-        graph: &mut TaskGraph,
-        buf_proxy: &BufferProxy,
-        bytes: &[u8],
-        last_timeline: &mut Option<TimelineValue>,
-        surface_frame: Option<&Frame>,
-    ) -> Result<()> {
-        let needs_flush_before_uniform = matches!(
-            self.bind_map.get_buf(buf_proxy.id),
-            Some((GpuBuffer::Owned(b), _))
-                if b.size() >= bytes.len() as u64
-                    && b.access() == DataAccess::Broadcast,
-        );
-        if needs_flush_before_uniform {
-            flush_graph(graph, device, last_timeline, surface_frame)?;
-        }
-        if let Some((GpuBuffer::Owned(existing), _)) = self.bind_map.get_buf(buf_proxy.id)
-            && existing.size() >= bytes.len() as u64
-            && existing.access() == DataAccess::Broadcast
-        {
-            existing
-                .write(0, bytes)
-                .map_err(|e| Error::Shader(e.to_string()))?;
-        } else {
-            let buf = self.pool.get_buf(
-                device,
-                buf_proxy.size,
-                buf_proxy.name,
-                DataAccess::Broadcast,
-            )?;
-            buf.write(0, bytes)
-                .map_err(|e| Error::Shader(e.to_string()))?;
             self.bind_map
                 .insert_buf(buf_proxy.id, GpuBuffer::Owned(buf), buf_proxy.name);
         }
@@ -502,9 +507,10 @@ impl FrameState {
         graph: &mut TaskGraph,
         image_proxy: &ImageProxy,
         bytes: &[u8],
+        persistent: &mut PersistentState,
     ) -> Result<()> {
         let format = image_format_to_goldy(image_proxy.format);
-        let texture = self
+        let texture = persistent
             .tex_pool
             .acquire(
                 device,
@@ -531,10 +537,11 @@ impl FrameState {
         x: u32,
         y: u32,
         image_data: &peniko::ImageData,
+        persistent: &mut PersistentState,
     ) -> Result<()> {
         if self.bind_map.get_image(image_proxy.id).is_none() {
             let format = image_format_to_goldy(image_proxy.format);
-            let tex = self
+            let tex = persistent
                 .tex_pool
                 .acquire(
                     device,
@@ -579,6 +586,7 @@ impl FrameState {
         buf_proxy: &BufferProxy,
         off: u64,
         sz: Option<u64>,
+        persistent: &mut PersistentState,
     ) -> Result<()> {
         if let Some((gpu_buf, _)) = self.bind_map.get_buf(buf_proxy.id) {
             let clear_size = sz.unwrap_or_else(|| gpu_buf.size() - off);
@@ -587,15 +595,12 @@ impl FrameState {
                 GpuBuffer::Pooled(view) => graph.clear_buffer_view(view, off, clear_size),
             }
         } else {
-            let stride = buf_proxy
-                .element_stride
-                .or_else(|| element_stride_for_buffer(buf_proxy.name));
-            let buf = self.pool.get_buf_with_stride(
+            let buf = persistent.pool.get_buf_with_stride(
                 device,
                 buf_proxy.size,
                 buf_proxy.name,
                 DataAccess::Scattered,
-                stride,
+                buf_proxy.element_stride,
                 buf_proxy.buffer_flags,
             )?;
             let clear_size = sz.unwrap_or_else(|| buf.size() - off);
@@ -649,66 +654,11 @@ impl FrameState {
         node
     }
 
-    #[allow(
-        dead_code,
-        reason = "public readback API; not used by current goldy integration path"
-    )]
-    fn get_download(&self, buf: BufferProxy) -> Option<&[u8]> {
-        self.downloads.get(&buf.id).map(|v| v.as_slice())
-    }
-
-    #[allow(
-        dead_code,
-        reason = "public readback API; not used by current goldy integration path"
-    )]
-    fn read_bump_allocators(&self, proxy: &BufferProxy) -> Result<BumpAllocators> {
-        let data = self
-            .get_download(*proxy)
-            .ok_or_else(|| Error::Shader("bump buffer download not available".into()))?;
-        Ok(bytemuck::pod_read_unaligned(data))
-    }
-
-    fn last_drained_bump(&self) -> Option<&BumpAllocators> {
-        self.last_drained_bump.as_ref()
-    }
-
-    fn take_last_drained_bump(&mut self) -> Option<BumpAllocators> {
-        self.last_drained_bump.take()
-    }
-
-    fn prepare_storage_pool(
-        &mut self,
-        device: &Device,
-        pool_size: u64,
-        max_size: Option<u64>,
-    ) -> Result<()> {
-        if !use_pool(device) {
-            return Ok(());
-        }
-        self.storage_ring
-            .prepare_bounded(device, pool_size, max_size)
-            .map_err(|e| Error::Shader(e.to_string()))
-    }
-
-    #[allow(
-        dead_code,
-        reason = "full reset between retries; integration uses release_pool / wait paths"
-    )]
-    fn clear_transients(&mut self, device: &Device) -> Result<()> {
-        self.wait_until_gpu_idle(device)?;
-        self.storage_ring.clear();
-        self.last_drained_bump = None;
-        self.bind_map.buf_map.clear();
-        self.bind_map.image_map.clear();
-        self.downloads.clear();
-        Ok(())
-    }
-
-    fn release_pool(&mut self, device: &Device) -> Result<()> {
-        self.wait_until_gpu_idle(device)?;
+    fn release_pool(&mut self, device: &Device, persistent: &mut PersistentState) -> Result<()> {
+        self.wait_until_gpu_idle(device, persistent)?;
         self.bind_map.buf_map.clear();
         self.downloads.clear();
-        self.storage_ring.clear();
+        persistent.storage_ring.clear();
         Ok(())
     }
 
@@ -804,7 +754,8 @@ impl FrameState {
 pub(crate) struct FrameRecorder<'a> {
     device: &'a Device,
     graph: TaskGraph,
-    state: &'a mut FrameState,
+    frame: &'a mut FrameState,
+    persistent: &'a mut PersistentState,
     shaders: &'a [GoldyShader],
     force_uav: bool,
     surface_frame: Option<&'a Frame>,
@@ -818,15 +769,16 @@ pub(crate) struct FrameRecorder<'a> {
 impl<'a> FrameRecorder<'a> {
     fn new(
         device: &'a Device,
-        state: &'a mut FrameState,
+        frame: &'a mut FrameState,
+        persistent: &'a mut PersistentState,
         shaders: &'a [GoldyShader],
         surface_frame: Option<&'a Frame>,
     ) -> Self {
         let fuav = force_uav(device);
         let mut graph = TaskGraph::new();
 
-        if state.storage_ring.take_clear_flag()
-            && let Some(pool) = state.storage_ring.current()
+        if persistent.storage_ring.take_clear_flag()
+            && let Some(pool) = persistent.storage_ring.current()
         {
             graph.clear_buffer(pool.backing_buffer(), 0, pool.capacity());
         }
@@ -834,7 +786,8 @@ impl<'a> FrameRecorder<'a> {
         Self {
             device,
             graph,
-            state,
+            frame,
+            persistent,
             shaders,
             force_uav: fuav,
             surface_frame,
@@ -846,41 +799,47 @@ impl<'a> FrameRecorder<'a> {
         }
     }
 
+    #[cfg_attr(not(feature = "debug_layers"), allow(dead_code))]
     pub fn upload(&mut self, name: &'static str, data: impl Into<Vec<u8>>) -> BufferProxy {
         let data = data.into();
         let buf_proxy = BufferProxy::new(data.len() as u64, name);
-        self.state
-            .record_upload_buffer(self.device, &mut self.graph, &buf_proxy, &data)
+        self.frame
+            .record_upload_buffer(self.device, &mut self.graph, &buf_proxy, &data, self.persistent)
             .expect("upload failed");
+        buf_proxy
+    }
+
+    /// Like [`Self::upload`] but sets an explicit structured buffer element stride.
+    ///
+    /// Use this for raw byte uploads (e.g. scene data, LUT tables) where the
+    /// GPU expects a specific `StructureByteStride`. The data length must be
+    /// divisible by `element_stride`.
+    pub fn upload_strided(
+        &mut self,
+        name: &'static str,
+        element_stride: u32,
+        data: impl Into<Vec<u8>>,
+    ) -> BufferProxy {
+        let data = data.into();
+        let buf_proxy = BufferProxy::with_stride(data.len() as u64, name, element_stride);
+        self.frame
+            .record_upload_buffer(self.device, &mut self.graph, &buf_proxy, &data, self.persistent)
+            .expect("upload_strided failed");
         buf_proxy
     }
 
     pub fn upload_typed<T: bytemuck::Pod>(&mut self, name: &'static str, data: &T) -> BufferProxy {
         let bytes = bytemuck::bytes_of(data).to_vec();
         let buf_proxy = BufferProxy::with_stride(bytes.len() as u64, name, size_of::<T>() as u32);
-        self.state
-            .record_upload_buffer(self.device, &mut self.graph, &buf_proxy, &bytes)
-            .expect("upload_typed failed");
-        buf_proxy
-    }
-
-    #[allow(
-        dead_code,
-        reason = "only referenced from debug_renderer; that module is stubbed and never called"
-    )]
-    pub fn upload_uniform(&mut self, name: &'static str, data: impl Into<Vec<u8>>) -> BufferProxy {
-        let data = data.into();
-        let buf_proxy = BufferProxy::new(data.len() as u64, name);
-        self.state
-            .record_upload_uniform(
+        self.frame
+            .record_upload_buffer(
                 self.device,
                 &mut self.graph,
                 &buf_proxy,
-                &data,
-                &mut self.last_timeline,
-                self.surface_frame,
+                &bytes,
+                self.persistent,
             )
-            .expect("upload_uniform failed");
+            .expect("upload_typed failed");
         buf_proxy
     }
 
@@ -893,15 +852,29 @@ impl<'a> FrameRecorder<'a> {
     ) -> ImageProxy {
         let data = data.into();
         let image_proxy = ImageProxy::new(width, height, format);
-        self.state
-            .record_upload_image(self.device, &mut self.graph, &image_proxy, &data)
+        self.frame
+            .record_upload_image(
+                self.device,
+                &mut self.graph,
+                &image_proxy,
+                &data,
+                self.persistent,
+            )
             .expect("upload_image failed");
         image_proxy
     }
 
     pub fn write_image(&mut self, proxy: ImageProxy, x: u32, y: u32, image: peniko::ImageData) {
-        self.state
-            .record_write_image(self.device, &mut self.graph, &proxy, x, y, &image)
+        self.frame
+            .record_write_image(
+                self.device,
+                &mut self.graph,
+                &proxy,
+                x,
+                y,
+                &image,
+                self.persistent,
+            )
             .expect("write_image failed");
     }
 
@@ -938,23 +911,29 @@ impl<'a> FrameRecorder<'a> {
         if x == 0 || y == 0 || z == 0 {
             log::warn!(
                 "Skipping Dispatch for shader {} with zero grid dimension ({x}, {y}, {z}); \
-                 this may indicate a bug in the recording generator",
+                 this may indicate a bug in the caller",
                 shader_id.0
             );
             return;
         }
         let bind_types: Vec<_> = self.shaders[shader_id.0].bindings.clone();
-        self.state
-            .ensure_resources_materialized(self.device, &mut self.graph, bindings, &bind_types)
+        self.frame
+            .ensure_resources_materialized(
+                self.device,
+                &mut self.graph,
+                bindings,
+                &bind_types,
+                self.persistent,
+            )
             .expect("ensure_resources_materialized failed in dispatch");
         let indices =
-            collect_bindless_indices(bindings, &bind_types, &self.state.bind_map, self.force_uav)
+            collect_bindless_indices(bindings, &bind_types, &self.frame.bind_map, self.force_uav)
                 .expect("collect_bindless_indices failed in dispatch");
 
         if let Some(ref dir) = *DUMP_DIR {
             let mut debug_indices = indices.clone();
             debug_indices.extend_from_slice(push_tail);
-            self.state.dump_dispatch(
+            self.frame.dump_dispatch(
                 self.device,
                 self.dispatch_count,
                 shader_id,
@@ -968,7 +947,7 @@ impl<'a> FrameRecorder<'a> {
         let mut node = self
             .graph
             .node("dispatch", &self.shaders[shader_id.0].pipeline);
-        node = self.state.bind_graph_resources(node, bindings, &bind_types);
+        node = self.frame.bind_graph_resources(node, bindings, &bind_types);
         if !indices.is_empty() || !push_tail.is_empty() {
             node = node.bind_resources_raw_with_user(&indices, push_tail);
         }
@@ -997,23 +976,30 @@ impl<'a> FrameRecorder<'a> {
         offset: u64,
         bindings: &[ResourceProxy],
     ) {
-        self.state
+        self.frame
             .ensure_resources_materialized(
                 self.device,
                 &mut self.graph,
                 &[ResourceProxy::Buffer(*buf_proxy)],
                 &[BindType::Buffer],
+                self.persistent,
             )
             .expect("ensure_resources_materialized failed in dispatch_indirect (indirect buf)");
         let bind_types: Vec<_> = self.shaders[shader_id.0].bindings.clone();
-        self.state
-            .ensure_resources_materialized(self.device, &mut self.graph, bindings, &bind_types)
+        self.frame
+            .ensure_resources_materialized(
+                self.device,
+                &mut self.graph,
+                bindings,
+                &bind_types,
+                self.persistent,
+            )
             .expect("ensure_resources_materialized failed in dispatch_indirect");
         let indices =
-            collect_bindless_indices(bindings, &bind_types, &self.state.bind_map, self.force_uav)
+            collect_bindless_indices(bindings, &bind_types, &self.frame.bind_map, self.force_uav)
                 .expect("collect_bindless_indices failed in dispatch_indirect");
 
-        let Some((gpu_buf, _)) = self.state.bind_map.get_buf(buf_proxy.id) else {
+        let Some((gpu_buf, _)) = self.frame.bind_map.get_buf(buf_proxy.id) else {
             log::error!(
                 "DispatchIndirect for shader {} skipped: buffer proxy (id={}) is \
                  either unregistered or pooled (must be an owned buffer)",
@@ -1035,7 +1021,7 @@ impl<'a> FrameRecorder<'a> {
         if let Some(ref dir) = *DUMP_DIR {
             let indirect_dims =
                 GoldyRenderer::read_indirect_dims(self.device, indirect_buf, offset);
-            self.state.dump_dispatch(
+            self.frame.dump_dispatch(
                 self.device,
                 self.dispatch_count,
                 shader_id,
@@ -1049,7 +1035,7 @@ impl<'a> FrameRecorder<'a> {
         let mut node = self
             .graph
             .node("dispatch_indirect", &self.shaders[shader_id.0].pipeline);
-        node = self.state.bind_graph_resources(node, bindings, &bind_types);
+        node = self.frame.bind_graph_resources(node, bindings, &bind_types);
         node = node.bind_buffer(indirect_buf, NodeAccess::Read);
         if !indices.is_empty() {
             node = node.bind_resources_raw(&indices);
@@ -1059,8 +1045,8 @@ impl<'a> FrameRecorder<'a> {
     }
 
     pub fn clear_all(&mut self, buf: BufferProxy) {
-        self.state
-            .record_clear(self.device, &mut self.graph, &buf, 0, None)
+        self.frame
+            .record_clear(self.device, &mut self.graph, &buf, 0, None, self.persistent)
             .expect("clear_all failed");
     }
 
@@ -1092,15 +1078,15 @@ impl<'a> FrameRecorder<'a> {
     #[cfg(feature = "debug_layers")]
     pub fn draw(&mut self, _params: crate::resource_proxy::DrawParams) {}
 
-    /// Register the output image proxy → GPU texture mapping before recording
+    /// Register the output image proxy → GPU texture mapping before dispatch
     /// begins. Used by the public render entry points.
     fn set_output_image(&mut self, proxy: &ImageProxy, texture: &Texture) {
-        self.state
+        self.frame
             .bind_map
             .insert_image(proxy.id, texture.borrow(), "output");
     }
 
-    /// Finish recording: flush the final graph and push a `FrameCleanup`
+    /// Finish dispatch: flush the final graph and push a `FrameCleanup`
     /// entry onto the deque for deferred processing after GPU completion.
     fn finish(mut self, output_image_id: Option<ResourceId>) -> Result<()> {
         flush_graph(
@@ -1115,7 +1101,7 @@ impl<'a> FrameRecorder<'a> {
             Some(_) => None, // surface path: filled by note_frame_presented
         };
 
-        self.state.cleanup_ring.push_back(FrameCleanup {
+        self.frame.cleanup_ring.push_back(FrameCleanup {
             timeline,
             pending_downloads: self.pending_downloads,
             deferred_free_buffers: self.deferred_free_buffers,
@@ -1139,14 +1125,16 @@ impl GoldyRenderer {
             shaders: FullShaders::empty(),
             resolver: Resolver::new(),
             engine_shaders: Vec::new(),
-            frame: FrameState {
-                bind_map: BindMap::default(),
+            persistent: PersistentState {
                 pool: ResourcePool::default(),
                 storage_ring: BufferPoolRing::new(),
                 tex_pool: TexturePool::default(),
+                last_drained_bump: None,
+            },
+            frame: FrameState {
+                bind_map: BindMap::default(),
                 downloads: HashMap::new(),
                 cleanup_ring: VecDeque::new(),
-                last_drained_bump: None,
             },
             pool_size_history: VecDeque::with_capacity(POOL_SHRINK_WINDOW),
             persistent_bump: None,
@@ -1184,30 +1172,6 @@ impl GoldyRenderer {
     /// Compute the pool shrink max: if the current pool is significantly
     /// oversized relative to recent demand, returns `Some(target)` to cap
     /// the pool and trigger a reallocation. Returns `None` if no shrink needed.
-    fn pool_shrink_max(&self) -> Option<u64> {
-        let current_capacity = self.frame.storage_ring.current_capacity().unwrap_or(0);
-        if current_capacity == 0 {
-            return None;
-        }
-        if self.pool_size_history.len() < POOL_SHRINK_WINDOW {
-            return None;
-        }
-        let rolling_max = self.pool_size_history.iter().copied().max().unwrap_or(0);
-        let threshold = (rolling_max as f64 * POOL_SHRINK_THRESHOLD) as u64;
-        if current_capacity > threshold {
-            let target = rolling_max.saturating_mul(3) / 2;
-            log::info!(
-                "Pool shrink: current={}MB, rolling_max={}MB, target={}MB",
-                current_capacity / 1024 / 1024,
-                rolling_max / 1024 / 1024,
-                target / 1024 / 1024,
-            );
-            Some(target)
-        } else {
-            None
-        }
-    }
-
     // =======================================================================
     // Public API (unchanged signatures)
     // =======================================================================
@@ -1287,9 +1251,11 @@ impl GoldyRenderer {
 
         for _attempt in 0..=MAX_BUMP_RETRIES {
             self.render_to_texture(device, scene, &texture, params)?;
-            self.frame.finish_frame_for_readback(device)?;
+            while let Some(entry) = self.frame.cleanup_ring.pop_front() {
+                self.frame.process_cleanup(device, entry, true, &mut self.persistent)?;
+            }
 
-            match self.frame.last_drained_bump() {
+            match self.persistent.last_drained_bump() {
                 Some(bump) if bump.failed != 0 => {
                     log::info!(
                         "Bump overflow in render_to_buffer (0x{:x}), retrying",
@@ -1300,7 +1266,7 @@ impl GoldyRenderer {
             }
         }
 
-        if let Some(bump) = self.frame.last_drained_bump()
+        if let Some(bump) = self.persistent.last_drained_bump()
             && bump.failed != 0
         {
             log::warn!(
@@ -1311,7 +1277,7 @@ impl GoldyRenderer {
             );
         }
 
-        self.frame.release_pool(device)?;
+        self.frame.release_pool(device, &mut self.persistent)?;
 
         let mut output = vec![0_u8; texture.byte_size()];
         texture
@@ -1345,14 +1311,15 @@ impl GoldyRenderer {
 
         // --- Non-blocking drain of completed frames ---
         let t_drain_start = Instant::now();
-        self.frame.try_drain_completed_frames(device)?;
+        self.frame
+            .try_drain_completed_frames(device, &mut self.persistent)?;
         let t_drain = t_drain_start.elapsed();
 
         // Flip storage pool index and evict stale pooled bind_map entries
-        self.frame.storage_ring.advance();
+        self.persistent.storage_ring.advance();
         self.frame.evict_pooled_entries();
 
-        let prev_bump = self.frame.take_last_drained_bump();
+        let prev_bump = self.persistent.take_last_drained_bump();
 
         // Fix 5: Only trust bump readback when robust mode produced valid data.
         // A bump with all-zero counters (no failed flag, no usage) is likely stale
@@ -1388,9 +1355,12 @@ impl GoldyRenderer {
         }
 
         let t0 = Instant::now();
+        // Resolve once: pack the scene and obtain ramp/image references.
+        // The packed data and resolve results are threaded directly into
+        // run_coarse so the scene is never packed a second time.
+        let mut packed = vec![];
+        let (layout, ramps, images) = self.resolver.resolve(encoding, &mut packed);
         let config = {
-            let mut packed = vec![];
-            let (layout, _, _) = self.resolver.resolve(encoding, &mut packed);
             let base = ekrano_encoding::RenderConfig::new(
                 &layout,
                 params.width,
@@ -1407,7 +1377,7 @@ impl GoldyRenderer {
                 );
                 base.with_bump_estimates(&sanitize_bump(bump))
             } else if let Some(ref persistent) = self.persistent_bump {
-                // Fix 3: Use accumulated knowledge to pre-size even without overflow.
+                // Use accumulated knowledge to pre-size even without overflow.
                 base.with_bump_estimates(persistent)
             } else {
                 base
@@ -1423,21 +1393,54 @@ impl GoldyRenderer {
         if self.pool_size_history.len() > POOL_SHRINK_WINDOW {
             self.pool_size_history.pop_front();
         }
-        let shrink_max = self.pool_shrink_max();
+        // Inline pool_shrink_max to avoid a &self borrow that conflicts with the
+        // self.resolver lifetime held by `ramps` and `images`.
+        let shrink_max = {
+            let current_capacity = self
+                .persistent
+                .storage_ring
+                .current_capacity()
+                .unwrap_or(0);
+            if current_capacity == 0 || self.pool_size_history.len() < POOL_SHRINK_WINDOW {
+                None
+            } else {
+                let rolling_max = self.pool_size_history.iter().copied().max().unwrap_or(0);
+                let threshold = (rolling_max as f64 * POOL_SHRINK_THRESHOLD) as u64;
+                if current_capacity > threshold {
+                    let target = rolling_max.saturating_mul(3) / 2;
+                    log::info!(
+                        "Pool shrink: current={}MB, rolling_max={}MB, target={}MB",
+                        current_capacity / 1024 / 1024,
+                        rolling_max / 1024 / 1024,
+                        target / 1024 / 1024,
+                    );
+                    Some(target)
+                } else {
+                    None
+                }
+            }
+        };
 
         let t1 = Instant::now();
-        self.frame
+        self.persistent
             .prepare_storage_pool(device, pool_size, shrink_max)?;
         let t_pool = t1.elapsed();
 
         let t2 = Instant::now();
-        let mut recorder =
-            FrameRecorder::new(device, &mut self.frame, &self.engine_shaders, surface_frame);
+        let mut recorder = FrameRecorder::new(
+            device,
+            &mut self.frame,
+            &mut self.persistent,
+            &self.engine_shaders,
+            surface_frame,
+        );
 
         let mut render = Render::new();
-        render.render_encoding_coarse_with_config(
+        render.run_coarse(
             encoding,
-            &mut self.resolver,
+            packed,
+            ramps,
+            images,
             &self.shaders,
             params,
             params.robust,
@@ -1582,7 +1585,7 @@ impl GoldyRenderer {
 // -----------------------------------------------------------------------
 
 fn bumps_buf_static_name() -> &'static str {
-    "vello.bump_buf"
+    "ekrano.bump_buf"
 }
 
 fn flush_graph(
@@ -1656,20 +1659,6 @@ impl BindMap {
 }
 
 impl ResourcePool {
-    #[allow(
-        dead_code,
-        reason = "convenience wrapper; only get_buf_with_stride is used"
-    )]
-    fn get_buf(
-        &mut self,
-        device: &Device,
-        size: u64,
-        name: &'static str,
-        access: DataAccess,
-    ) -> Result<Buffer> {
-        self.get_buf_with_stride(device, size, name, access, None, BufferFlags::empty())
-    }
-
     fn get_buf_with_stride(
         &mut self,
         device: &Device,
@@ -1689,48 +1678,8 @@ impl ResourcePool {
         if let Some(buf) = pool.pop() {
             return Ok(buf);
         }
-        let stride = stride.or_else(|| element_stride_for_buffer(name));
         Buffer::new_with_stride_and_flags(device, size, access, stride, buffer_flags)
             .map_err(|e| Error::Shader(e.to_string()))
-    }
-}
-
-fn element_stride_for_buffer(name: &str) -> Option<u32> {
-    match name {
-        "vello.path_buf" => Some(32),
-        "vello.tile_buf" => Some(8),
-        "vello.segments_buf" => Some(24),
-        "vello.seg_counts_buf" => Some(8),
-        "vello.lines_buf" => Some(24),
-        "vello.path_bbox_buf" => Some(24),
-        "vello.bump_buf" => Some(32),
-        "vello.ptcl_buf" => Some(4),
-        "vello.info_bin_data_buf" => Some(4),
-        "vello.tagmonoid_buf" => Some(20),
-        "vello.draw_monoid_buf" => Some(16),
-        "vello.draw_reduced_buf" => Some(16),
-        "vello.reduced_buf" => Some(20),
-        "vello.reduced2_buf" => Some(20),
-        "vello.reduced_scan_buf" => Some(20),
-        "vello.draw_bbox_buf" => Some(16),
-        "vello.bin_header_buf" => Some(8),
-        "vello.clip_inp_buf" => Some(8),
-        "vello.clip_el_buf" => Some(32),
-        "vello.clip_bic_buf" => Some(8),
-        "vello.clip_bbox_buf" => Some(16),
-        "vello.indirect_dispatch" => Some(16),
-        "vello.indirect_count" => Some(16),
-        "vello.config" => Some(size_of::<ekrano_encoding::ConfigUniform>() as u32),
-        "vello.wg_counts" => Some(320),
-        "vello.scene" | "vello.blend_spill" | "vello.mask_lut" => Some(4),
-        _ => {
-            log::error!(
-                "unknown buffer stride for '{name}' — add entry to element_stride_for_buffer \
-                 or set BufferProxy::element_stride at the creation site; \
-                 buffer will be created without stride metadata"
-            );
-            None
-        }
     }
 }
 

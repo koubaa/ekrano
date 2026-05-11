@@ -36,7 +36,7 @@ pub struct BufferProxy {
     pub name: &'static str,
     /// Structured buffer element stride in bytes.
     /// When set, the GPU backend uses this for `StructureByteStride` in SRV/UAV descriptors.
-    /// When `None`, the engine falls back to a name-based lookup.
+    /// When `None`, the buffer is created without stride metadata (ByteAddressBuffer on DX12).
     pub element_stride: Option<u32>,
     /// Goldy buffer creation flags (e.g. [`BufferFlags::CPU_READABLE`] for host-readable bump data).
     pub buffer_flags: BufferFlags,
@@ -155,6 +155,15 @@ impl ImageProxy {
 impl ResourceProxy {
     pub fn new_buf(size: u64, name: &'static str) -> Self {
         Self::Buffer(BufferProxy::new(size, name))
+    }
+
+    /// Like [`Self::new_buf`] but with an explicit structured buffer element stride.
+    ///
+    /// Prefer this over `new_buf` for all GPU-visible compute buffers so the
+    /// `StructureByteStride` is encoded at the creation site rather than looked
+    /// up by name at bind time.
+    pub fn new_buf_with_stride(size: u64, name: &'static str, element_stride: u32) -> Self {
+        Self::Buffer(BufferProxy::with_stride(size, name, element_stride))
     }
 
     pub fn new_image(width: u32, height: u32, format: ImageFormat) -> Self {

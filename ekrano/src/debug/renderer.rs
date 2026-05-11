@@ -77,7 +77,7 @@ impl DebugRenderer {
                 (
                     unpaired_pts.len(),
                     Some(recorder.upload(
-                        "vello.debug.unpaired_points",
+                        "ekrano.debug.unpaired_points",
                         bytemuck::cast_slice(&unpaired_pts[..]),
                     )),
                 )
@@ -91,7 +91,7 @@ impl DebugRenderer {
             height: params.height,
         };
         let uniforms_buf = ResourceProxy::Buffer(
-            recorder.upload_uniform("vello.debug_uniforms", bytemuck::bytes_of(&uniforms)),
+            recorder.upload_uniform("ekrano.debug_uniforms", bytemuck::bytes_of(&uniforms)),
         );
 
         let linepoints_uniforms = [
@@ -99,7 +99,7 @@ impl DebugRenderer {
             LinepointsUniforms::new(palette::css::RED.discard_alpha(), 80.),
         ];
         let linepoints_uniforms_buf = recorder.upload_uniform(
-            "vello.debug.linepoints_uniforms",
+            "ekrano.debug.linepoints_uniforms",
             bytemuck::bytes_of(&linepoints_uniforms),
         );
 

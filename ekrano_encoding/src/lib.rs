@@ -74,6 +74,7 @@ pub use path::{
     Cubic, LineSoup, Path, PathBbox, PathEncoder, PathMonoid, PathSegment, PathSegmentType,
     PathTag, SegmentCount, Style, Tile,
 };
+pub use image_cache::Images;
 pub use ramp_cache::Ramps;
 pub use resolve::{Layout, Patch, Resolver, resolve_solid_paths_only};
 

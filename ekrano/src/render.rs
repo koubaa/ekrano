@@ -11,7 +11,7 @@ use crate::{AaConfig, RenderParams};
 use std::mem::size_of;
 
 use ekrano_encoding::{
-    BumpAllocators, Encoding, FilterPrimitive, FilterUniform, IndirectCount, Resolver,
+    BumpAllocators, Encoding, FilterPrimitive, FilterUniform, Images, IndirectCount, Ramps,
     WorkgroupCountsGpu, WorkgroupSize, make_mask_lut, make_mask_lut_16,
 };
 use peniko::color::{PremulColor, Srgb};
@@ -131,68 +131,30 @@ impl Render {
         }
     }
 
-    /// Record the coarse rasterization phase into a [`FrameRecorder`].
+    /// Execute the coarse rasterization phase.
     ///
-    /// The `robust` parameter controls whether we're preparing for readback
-    /// of the atomic bump buffer, for robust dynamic memory.
+    /// `packed`, `ramps`, and `images` must come from a single
+    /// `Resolver::resolve` call on `encoding` (performed by the caller, in
+    /// [`GoldyRenderer::run_frame`]). Accepting pre-resolved data avoids a
+    /// second resolve that would duplicate scene packing work.
     ///
-    /// If `config_override` is provided, its buffer sizes and GPU config are used
-    /// instead of the defaults. This supports retry with larger buffers after
-    /// bump overflow.
-    #[allow(
-        dead_code,
-        reason = "mirrors coarse API surface; callers use render_encoding_coarse_with_config"
-    )]
-    pub(crate) fn render_encoding_coarse(
+    /// The `robust` flag enables GPU bump-allocator readback so the next frame
+    /// can grow buffers when an overflow is detected.
+    pub(crate) fn run_coarse(
         &mut self,
         encoding: &Encoding,
-        resolver: &mut Resolver,
-        shaders: &FullShaders,
-        params: &RenderParams,
-        robust: bool,
-        recorder: &mut FrameRecorder<'_>,
-    ) {
-        self.render_encoding_coarse_inner(
-            encoding, resolver, shaders, params, robust, None, recorder,
-        );
-    }
-
-    /// Like [`Self::render_encoding_coarse`] but with a custom config for retry.
-    pub(crate) fn render_encoding_coarse_with_config(
-        &mut self,
-        encoding: &Encoding,
-        resolver: &mut Resolver,
+        mut packed: Vec<u8>,
+        ramps: Ramps<'_>,
+        images: Images<'_>,
         shaders: &FullShaders,
         params: &RenderParams,
         robust: bool,
         config: &ekrano_encoding::RenderConfig,
         recorder: &mut FrameRecorder<'_>,
     ) {
-        self.render_encoding_coarse_inner(
-            encoding,
-            resolver,
-            shaders,
-            params,
-            robust,
-            Some(config),
-            recorder,
-        );
-    }
-
-    fn render_encoding_coarse_inner(
-        &mut self,
-        encoding: &Encoding,
-        resolver: &mut Resolver,
-        shaders: &FullShaders,
-        params: &RenderParams,
-        robust: bool,
-        config_override: Option<&ekrano_encoding::RenderConfig>,
-        recorder: &mut FrameRecorder<'_>,
-    ) {
-        use ekrano_encoding::RenderConfig;
-        let mut packed = vec![];
-
-        let (layout, ramps, images) = resolver.resolve(encoding, &mut packed);
+        if packed.is_empty() {
+            packed.resize(size_of::<u32>(), u8::MAX);
+        }
         let gradient_image = if ramps.height == 0 {
             ResourceProxy::new_image(1, 1, ImageFormat::Rgba8)
         } else {
@@ -222,10 +184,7 @@ impl Render {
             }
             None => recorder.upload_image(1, 1, ImageFormat::Rgba8, vec![255, 255, 255, 255]),
         });
-        let mut cpu_config_owned = match config_override {
-            Some(c) => *c,
-            None => RenderConfig::new(&layout, params.width, params.height, &params.base_color),
-        };
+        let mut cpu_config_owned = *config;
         if encoding.coverage_mask.is_some() {
             cpu_config_owned.gpu.mask_active = 1;
         }
@@ -256,22 +215,19 @@ impl Render {
         let buffer_sizes = &cpu_config.buffer_sizes;
         let wg_counts = &cpu_config.workgroup_counts;
 
-        if packed.is_empty() {
-            packed.resize(size_of::<u32>(), u8::MAX);
-        }
-        let scene_buf = ResourceProxy::Buffer(recorder.upload("vello.scene", packed));
-        let config_buf_proxy = recorder.upload_typed("vello.config", &cpu_config.gpu);
+        let scene_buf = ResourceProxy::Buffer(recorder.upload_strided("ekrano.scene", 4, packed));
+        let config_buf_proxy = recorder.upload_typed("ekrano.config", &cpu_config.gpu);
         let config_buf = ResourceProxy::Buffer(config_buf_proxy);
         const INDIRECT_STRIDE: u64 = size_of::<IndirectCount>() as u64;
 
         let use_indirect = shaders.pipeline_setup.is_some();
         let indirect_buf = if use_indirect {
             let wg_counts_gpu = WorkgroupCountsGpu::from(wg_counts);
-            let wg_counts_buf_proxy = recorder.upload_typed("vello.wg_counts", &wg_counts_gpu);
+            let wg_counts_buf_proxy = recorder.upload_typed("ekrano.wg_counts", &wg_counts_gpu);
             let wg_counts_buf = ResourceProxy::Buffer(wg_counts_buf_proxy);
             let indirect_buf = BufferProxy::with_stride(
                 buffer_sizes.indirect_count.size_in_bytes().into(),
-                "vello.indirect_dispatch",
+                "ekrano.indirect_dispatch",
                 size_of::<IndirectCount>() as u32,
             );
             recorder.dispatch(
@@ -284,33 +240,45 @@ impl Render {
         } else {
             None
         };
-        let info_bin_data_buf = ResourceProxy::new_buf(
+        let info_bin_data_buf = ResourceProxy::new_buf_with_stride(
             buffer_sizes.bin_data.size_in_bytes() as u64,
-            "vello.info_bin_data_buf",
+            "ekrano.info_bin_data_buf",
+            4,
         );
-        let tile_buf =
-            ResourceProxy::new_buf(buffer_sizes.tiles.size_in_bytes().into(), "vello.tile_buf");
-        let segments_buf = ResourceProxy::new_buf(
+        let tile_buf = ResourceProxy::new_buf_with_stride(
+            buffer_sizes.tiles.size_in_bytes().into(),
+            "ekrano.tile_buf",
+            8,
+        );
+        let segments_buf = ResourceProxy::new_buf_with_stride(
             buffer_sizes.segments.size_in_bytes().into(),
-            "vello.segments_buf",
+            "ekrano.segments_buf",
+            24,
         );
-        let ptcl_buf =
-            ResourceProxy::new_buf(buffer_sizes.ptcl.size_in_bytes().into(), "vello.ptcl_buf");
-        let reduced_buf = ResourceProxy::new_buf(
+        let ptcl_buf = ResourceProxy::new_buf_with_stride(
+            buffer_sizes.ptcl.size_in_bytes().into(),
+            "ekrano.ptcl_buf",
+            4,
+        );
+        let reduced_buf = ResourceProxy::new_buf_with_stride(
             buffer_sizes.path_reduced.size_in_bytes().into(),
-            "vello.reduced_buf",
+            "ekrano.reduced_buf",
+            20,
         );
-        let reduced2_buf = ResourceProxy::new_buf(
+        let reduced2_buf = ResourceProxy::new_buf_with_stride(
             buffer_sizes.path_reduced2.size_in_bytes().into(),
-            "vello.reduced2_buf",
+            "ekrano.reduced2_buf",
+            20,
         );
-        let reduced_scan_buf = ResourceProxy::new_buf(
+        let reduced_scan_buf = ResourceProxy::new_buf_with_stride(
             buffer_sizes.path_reduced_scan.size_in_bytes().into(),
-            "vello.reduced_scan_buf",
+            "ekrano.reduced_scan_buf",
+            20,
         );
-        let tagmonoid_buf = ResourceProxy::new_buf(
+        let tagmonoid_buf = ResourceProxy::new_buf_with_stride(
             buffer_sizes.path_monoids.size_in_bytes().into(),
-            "vello.tagmonoid_buf",
+            "ekrano.tagmonoid_buf",
+            20,
         );
         let use_large_path_scan = wg_counts.use_large_path_scan && !shaders.pathtag_is_cpu;
 
@@ -395,9 +363,10 @@ impl Render {
         recorder.free_resource(reduced2_buf);
         recorder.free_resource(reduced_scan_buf);
 
-        let path_bbox_buf = ResourceProxy::new_buf(
+        let path_bbox_buf = ResourceProxy::new_buf_with_stride(
             buffer_sizes.path_bboxes.size_in_bytes().into(),
-            "vello.path_bbox_buf",
+            "ekrano.path_bbox_buf",
+            24,
         );
         dispatch_stage(
             recorder,
@@ -411,14 +380,17 @@ impl Render {
         );
         let bump_buf = BufferProxy::with_stride_and_flags(
             buffer_sizes.bump_alloc.size_in_bytes().into(),
-            "vello.bump_buf",
+            "ekrano.bump_buf",
             size_of::<BumpAllocators>() as u32,
             BufferFlags::CPU_READABLE,
         );
         recorder.clear_all(bump_buf);
         let bump_buf = ResourceProxy::Buffer(bump_buf);
-        let lines_buf =
-            ResourceProxy::new_buf(buffer_sizes.lines.size_in_bytes().into(), "vello.lines_buf");
+        let lines_buf = ResourceProxy::new_buf_with_stride(
+            buffer_sizes.lines.size_in_bytes().into(),
+            "ekrano.lines_buf",
+            24,
+        );
         let flatten_bindings = [
             config_buf,
             scene_buf,
@@ -460,9 +432,10 @@ impl Render {
                 &[0],
             );
         }
-        let draw_reduced_buf = ResourceProxy::new_buf(
+        let draw_reduced_buf = ResourceProxy::new_buf_with_stride(
             buffer_sizes.draw_reduced.size_in_bytes().into(),
-            "vello.draw_reduced_buf",
+            "ekrano.draw_reduced_buf",
+            16,
         );
         dispatch_stage(
             recorder,
@@ -474,13 +447,15 @@ impl Render {
             INDIRECT_STRIDE,
             [config_buf, scene_buf, draw_reduced_buf],
         );
-        let draw_monoid_buf = ResourceProxy::new_buf(
+        let draw_monoid_buf = ResourceProxy::new_buf_with_stride(
             buffer_sizes.draw_monoids.size_in_bytes().into(),
-            "vello.draw_monoid_buf",
+            "ekrano.draw_monoid_buf",
+            16,
         );
-        let clip_inp_buf = ResourceProxy::new_buf(
+        let clip_inp_buf = ResourceProxy::new_buf_with_stride(
             buffer_sizes.clip_inps.size_in_bytes().into(),
-            "vello.clip_inp_buf",
+            "ekrano.clip_inp_buf",
+            8,
         );
         dispatch_stage(
             recorder,
@@ -501,13 +476,15 @@ impl Render {
             ],
         );
         recorder.free_resource(draw_reduced_buf);
-        let clip_el_buf = ResourceProxy::new_buf(
+        let clip_el_buf = ResourceProxy::new_buf_with_stride(
             buffer_sizes.clip_els.size_in_bytes().into(),
-            "vello.clip_el_buf",
+            "ekrano.clip_el_buf",
+            32,
         );
-        let clip_bic_buf = ResourceProxy::new_buf(
+        let clip_bic_buf = ResourceProxy::new_buf_with_stride(
             buffer_sizes.clip_bics.size_in_bytes().into(),
-            "vello.clip_bic_buf",
+            "ekrano.clip_bic_buf",
+            8,
         );
         if use_indirect || wg_counts.clip_reduce.0 > 0 {
             dispatch_stage(
@@ -521,9 +498,10 @@ impl Render {
                 [clip_inp_buf, path_bbox_buf, clip_bic_buf, clip_el_buf],
             );
         }
-        let clip_bbox_buf = ResourceProxy::new_buf(
+        let clip_bbox_buf = ResourceProxy::new_buf_with_stride(
             buffer_sizes.clip_bboxes.size_in_bytes().into(),
-            "vello.clip_bbox_buf",
+            "ekrano.clip_bbox_buf",
+            16,
         );
         if use_indirect || wg_counts.clip_leaf.0 > 0 {
             dispatch_stage(
@@ -548,13 +526,15 @@ impl Render {
         recorder.free_resource(clip_inp_buf);
         recorder.free_resource(clip_bic_buf);
         recorder.free_resource(clip_el_buf);
-        let draw_bbox_buf = ResourceProxy::new_buf(
+        let draw_bbox_buf = ResourceProxy::new_buf_with_stride(
             buffer_sizes.draw_bboxes.size_in_bytes().into(),
-            "vello.draw_bbox_buf",
+            "ekrano.draw_bbox_buf",
+            16,
         );
-        let bin_header_buf = ResourceProxy::new_buf(
+        let bin_header_buf = ResourceProxy::new_buf_with_stride(
             buffer_sizes.bin_headers.size_in_bytes().into(),
-            "vello.bin_header_buf",
+            "ekrano.bin_header_buf",
+            8,
         );
         dispatch_stage(
             recorder,
@@ -578,8 +558,11 @@ impl Render {
         );
         recorder.free_resource(draw_monoid_buf);
         recorder.free_resource(clip_bbox_buf);
-        let path_buf =
-            ResourceProxy::new_buf(buffer_sizes.paths.size_in_bytes().into(), "vello.path_buf");
+        let path_buf = ResourceProxy::new_buf_with_stride(
+            buffer_sizes.paths.size_in_bytes().into(),
+            "ekrano.path_buf",
+            32,
+        );
         dispatch_stage(
             recorder,
             use_indirect,
@@ -603,7 +586,7 @@ impl Render {
         let path_indirect_buf = indirect_buf.unwrap_or_else(|| {
             BufferProxy::with_stride(
                 size_of::<IndirectCount>() as u64,
-                "vello.indirect_count",
+                "ekrano.indirect_count",
                 size_of::<IndirectCount>() as u32,
             )
         });
@@ -612,9 +595,10 @@ impl Render {
             wg_counts.path_count_setup,
             [bump_buf, path_indirect_buf.into()],
         );
-        let seg_counts_buf = ResourceProxy::new_buf(
+        let seg_counts_buf = ResourceProxy::new_buf_with_stride(
             buffer_sizes.seg_counts.size_in_bytes().into(),
-            "vello.seg_counts_buf",
+            "ekrano.seg_counts_buf",
+            8,
         );
         let path_count_offset = if use_indirect {
             STAGE_PATH_COUNT as u64 * INDIRECT_STRIDE
@@ -704,7 +688,7 @@ impl Render {
         ];
         let blend_spill_buf = BufferProxy::with_stride(
             buffer_sizes.blend_spill.size_in_bytes().into(),
-            "vello.blend_spill",
+            "ekrano.blend_spill",
             size_of::<u32>() as u32,
         );
         self.fine_wg_count = Some(wg_counts.fine);
@@ -811,7 +795,7 @@ impl Render {
                         AaConfig::Msaa8 => make_mask_lut(),
                         _ => unreachable!(),
                     };
-                    let buf = recorder.upload("vello.mask_lut", mask_lut);
+                    let buf = recorder.upload_strided("ekrano.mask_lut", 4, mask_lut);
                     self.mask_buf = Some(buf.into());
                 }
                 self.mask_buf
@@ -915,7 +899,7 @@ fn filter_dispatch(
     src: ImageProxy,
     dst: ImageProxy,
 ) {
-    let buf = recorder.upload_typed("vello.filter_uniform", uniform);
+    let buf = recorder.upload_typed("ekrano.filter_uniform", uniform);
     recorder.dispatch(
         shader,
         wg,
