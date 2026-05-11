@@ -227,6 +227,12 @@ struct FrameState {
 // GoldyRenderer — the merged struct
 // -----------------------------------------------------------------------
 
+/// Number of frames over which pool-size history is tracked for shrink hysteresis.
+const POOL_SHRINK_WINDOW: usize = 60;
+
+/// Only shrink if the current pool is at least this factor larger than the rolling max.
+const POOL_SHRINK_THRESHOLD: f64 = 2.0;
+
 /// Goldy-based 2D renderer.
 ///
 /// Renders scenes to textures using the Goldy GPU backend with Slang shaders.
@@ -237,6 +243,11 @@ pub struct GoldyRenderer {
     resolver: Resolver,
     engine_shaders: Vec<GoldyShader>,
     frame: FrameState,
+    /// Rolling history of requested pool sizes for shrink hysteresis.
+    pool_size_history: VecDeque<u64>,
+    /// Persistent bump estimates: running max across frames. Used to pre-size
+    /// buffers even when no overflow occurs, avoiding the cold-start ramp-up.
+    persistent_bump: Option<BumpAllocators>,
 }
 
 // -----------------------------------------------------------------------
@@ -665,12 +676,17 @@ impl FrameState {
         self.last_drained_bump.take()
     }
 
-    fn prepare_storage_pool(&mut self, device: &Device, pool_size: u64) -> Result<()> {
+    fn prepare_storage_pool(
+        &mut self,
+        device: &Device,
+        pool_size: u64,
+        max_size: Option<u64>,
+    ) -> Result<()> {
         if !use_pool(device) {
             return Ok(());
         }
         self.storage_ring
-            .prepare(device, pool_size)
+            .prepare_bounded(device, pool_size, max_size)
             .map_err(|e| Error::Shader(e.to_string()))
     }
 
@@ -1132,10 +1148,64 @@ impl GoldyRenderer {
                 cleanup_ring: VecDeque::new(),
                 last_drained_bump: None,
             },
+            pool_size_history: VecDeque::with_capacity(POOL_SHRINK_WINDOW),
+            persistent_bump: None,
         };
         let shaders = shaders::goldy_full_shaders(device, &mut renderer)?;
         renderer.shaders = shaders;
         Ok(renderer)
+    }
+
+    // =======================================================================
+    // Internal helpers — pool sizing & bump persistence
+    // =======================================================================
+
+    /// Update persistent bump estimates with a running component-wise max.
+    fn update_persistent_bump(&mut self, bump: &BumpAllocators) {
+        let p = self.persistent_bump.get_or_insert(BumpAllocators {
+            failed: 0,
+            binning: 0,
+            ptcl: 0,
+            tile: 0,
+            seg_counts: 0,
+            segments: 0,
+            blend: 0,
+            lines: 0,
+        });
+        p.binning = p.binning.max(bump.binning);
+        p.ptcl = p.ptcl.max(bump.ptcl);
+        p.tile = p.tile.max(bump.tile);
+        p.seg_counts = p.seg_counts.max(bump.seg_counts);
+        p.segments = p.segments.max(bump.segments);
+        p.blend = p.blend.max(bump.blend);
+        p.lines = p.lines.max(bump.lines);
+    }
+
+    /// Compute the pool shrink max: if the current pool is significantly
+    /// oversized relative to recent demand, returns `Some(target)` to cap
+    /// the pool and trigger a reallocation. Returns `None` if no shrink needed.
+    fn pool_shrink_max(&self) -> Option<u64> {
+        let current_capacity = self.frame.storage_ring.current_capacity().unwrap_or(0);
+        if current_capacity == 0 {
+            return None;
+        }
+        if self.pool_size_history.len() < POOL_SHRINK_WINDOW {
+            return None;
+        }
+        let rolling_max = self.pool_size_history.iter().copied().max().unwrap_or(0);
+        let threshold = (rolling_max as f64 * POOL_SHRINK_THRESHOLD) as u64;
+        if current_capacity > threshold {
+            let target = rolling_max.saturating_mul(3) / 2;
+            log::info!(
+                "Pool shrink: current={}MB, rolling_max={}MB, target={}MB",
+                current_capacity / 1024 / 1024,
+                rolling_max / 1024 / 1024,
+                target / 1024 / 1024,
+            );
+            Some(target)
+        } else {
+            None
+        }
     }
 
     // =======================================================================
@@ -1284,6 +1354,24 @@ impl GoldyRenderer {
 
         let prev_bump = self.frame.take_last_drained_bump();
 
+        // Fix 5: Only trust bump readback when robust mode produced valid data.
+        // A bump with all-zero counters (no failed flag, no usage) is likely stale
+        // or from a frame where the buffer was never written.
+        let prev_bump = prev_bump.filter(|b| {
+            let any_nonzero = b.lines > 0
+                || b.seg_counts > 0
+                || b.segments > 0
+                || b.tile > 0
+                || b.binning > 0
+                || b.ptcl > 0
+                || b.blend > 0;
+            if !any_nonzero && b.failed == 0 {
+                log::debug!("Ignoring all-zero bump readback (likely stale)");
+                return false;
+            }
+            true
+        });
+
         if let Some(ref bump) = prev_bump {
             let frame_num = FRAME_COUNTER.load(Ordering::Relaxed);
             log::debug!(
@@ -1295,6 +1383,8 @@ impl GoldyRenderer {
                 bump.tile,
                 bump.failed,
             );
+            // Fix 3: Update persistent bump estimates (running max across frames).
+            self.update_persistent_bump(&sanitize_bump(bump));
         }
 
         let t0 = Instant::now();
@@ -1316,6 +1406,9 @@ impl GoldyRenderer {
                     bump.failed,
                 );
                 base.with_bump_estimates(&sanitize_bump(bump))
+            } else if let Some(ref persistent) = self.persistent_bump {
+                // Fix 3: Use accumulated knowledge to pre-size even without overflow.
+                base.with_bump_estimates(persistent)
             } else {
                 base
             }
@@ -1325,8 +1418,15 @@ impl GoldyRenderer {
         let base = BufferPool::padded_size(&config.buffer_sizes.pool_allocs());
         let pool_size = base.saturating_add(POOL_SIZE_SLACK);
 
+        // Fix 2: Track pool size history and allow shrinking with hysteresis.
+        self.pool_size_history.push_back(pool_size);
+        if self.pool_size_history.len() > POOL_SHRINK_WINDOW {
+            self.pool_size_history.pop_front();
+        }
+        let shrink_max = self.pool_shrink_max();
+
         let t1 = Instant::now();
-        self.frame.prepare_storage_pool(device, pool_size)?;
+        self.frame.prepare_storage_pool(device, pool_size, shrink_max)?;
         let t_pool = t1.elapsed();
 
         let t2 = Instant::now();
