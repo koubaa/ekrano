@@ -97,7 +97,6 @@
 #![expect(
     missing_debug_implementations,
     clippy::cast_possible_truncation,
-    clippy::missing_assert_message,
     reason = "Deferred"
 )]
 #![allow(
@@ -114,6 +113,7 @@ mod scene;
 mod shaders;
 
 mod goldy_renderer;
+mod gpu_resources;
 
 pub mod low_level {
     //! Utilities which can be used to create an alternative renderer to [`GoldyRenderer`][crate::GoldyRenderer].
@@ -122,9 +122,7 @@ pub mod low_level {
 
     pub use crate::debug::DebugLayers;
     pub use crate::render::Render;
-    pub use crate::resource_proxy::{
-        BindType, BufferProxy, ImageFormat, ImageProxy, ResourceId, ResourceProxy, ShaderId,
-    };
+    pub use crate::resource_proxy::{BindType, ImageFormat, ShaderId};
     pub use crate::shaders::FullShaders;
     /// Temporary export, used in `with_winit` for stats
     pub use ekrano_encoding::BumpAllocators;

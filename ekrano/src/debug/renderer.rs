@@ -15,8 +15,10 @@ use crate::{
     debug::validate::{LineEndpoint, validate_line_soup},
     goldy_renderer::FrameRecorder,
     render::CapturedBuffers,
-    resource_proxy::{DrawParams, ImageProxy, ResourceProxy, ShaderId},
+    resource_proxy::{DrawParams, ShaderId},
 };
+
+use std::mem::size_of;
 
 use bytemuck::{Pod, Zeroable};
 use ekrano_encoding::BumpAllocators;
@@ -57,8 +59,7 @@ impl DebugRenderer {
     pub fn render(
         &self,
         recorder: &mut FrameRecorder<'_>,
-        target: ImageProxy,
-        captured: &CapturedBuffers,
+        _captured: &CapturedBuffers,
         bump: &BumpAllocators,
         params: &RenderParams,
         downloads: &DebugDownloads<'_>,
@@ -90,17 +91,19 @@ impl DebugRenderer {
             width: params.width,
             height: params.height,
         };
-        let uniforms_buf = ResourceProxy::Buffer(
-            recorder.upload_uniform("ekrano.debug_uniforms", bytemuck::bytes_of(&uniforms)),
+        let uniforms_buf = recorder.upload(
+            "ekrano.debug_uniforms",
+            bytemuck::bytes_of(&uniforms).to_vec(),
         );
 
         let linepoints_uniforms = [
             LinepointsUniforms::new(palette::css::DARK_CYAN.discard_alpha(), 10.),
             LinepointsUniforms::new(palette::css::RED.discard_alpha(), 80.),
         ];
-        let linepoints_uniforms_buf = recorder.upload_uniform(
+        let linepoints_uniforms_buf = recorder.upload_strided(
             "ekrano.debug.linepoints_uniforms",
-            bytemuck::bytes_of(&linepoints_uniforms),
+            size_of::<LinepointsUniforms>() as u32,
+            bytemuck::bytes_of(&linepoints_uniforms).to_vec(),
         );
 
         recorder.draw(DrawParams {
@@ -109,17 +112,17 @@ impl DebugRenderer {
             vertex_count: 4,
             vertex_buffer: None,
             resources: vec![],
-            target,
+            target: None,
             clear_color: None,
         });
         if layers.contains(DebugLayers::BOUNDING_BOXES) {
             recorder.draw(DrawParams {
                 shader_id: self.bboxes,
-                instance_count: captured.sizes.path_bboxes.len(),
+                instance_count: _captured.sizes.path_bboxes.len(),
                 vertex_count: 5,
-                vertex_buffer: Some(captured.path_bboxes),
-                resources: vec![uniforms_buf],
-                target,
+                vertex_buffer: None,
+                resources: vec![],
+                target: None,
                 clear_color: None,
             });
         }
@@ -128,9 +131,9 @@ impl DebugRenderer {
                 shader_id: self.linesoup,
                 instance_count: bump.lines,
                 vertex_count: 4,
-                vertex_buffer: Some(captured.lines),
-                resources: vec![uniforms_buf],
-                target,
+                vertex_buffer: None,
+                resources: vec![],
+                target: None,
                 clear_color: None,
             });
         }
@@ -139,16 +142,9 @@ impl DebugRenderer {
                 shader_id: self.linesoup_points,
                 instance_count: bump.lines,
                 vertex_count: 4,
-                vertex_buffer: Some(captured.lines),
-                resources: vec![
-                    uniforms_buf,
-                    ResourceProxy::BufferRange {
-                        proxy: linepoints_uniforms_buf,
-                        offset: 0,
-                        size: size_of::<LinepointsUniforms>() as u64,
-                    },
-                ],
-                target,
+                vertex_buffer: None,
+                resources: vec![],
+                target: None,
                 clear_color: None,
             });
         }
@@ -158,22 +154,14 @@ impl DebugRenderer {
                 instance_count: unpaired_pts_len.try_into().unwrap(),
                 vertex_count: 4,
                 vertex_buffer: Some(unpaired_pts_buf),
-                resources: vec![
-                    uniforms_buf,
-                    ResourceProxy::BufferRange {
-                        proxy: linepoints_uniforms_buf,
-                        offset: size_of::<LinepointsUniforms>() as u64,
-                        size: size_of::<LinepointsUniforms>() as u64,
-                    },
-                ],
-                target,
+                resources: vec![],
+                target: None,
                 clear_color: None,
             });
-            recorder.free_buffer(unpaired_pts_buf);
         }
 
-        recorder.free_resource(uniforms_buf);
-        recorder.free_buffer(linepoints_uniforms_buf);
+        recorder.defer_owned_buffer(uniforms_buf);
+        recorder.defer_owned_buffer(linepoints_uniforms_buf);
     }
 }
 
