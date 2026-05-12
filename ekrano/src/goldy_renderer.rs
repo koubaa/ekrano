@@ -34,9 +34,12 @@ use mem::size_of;
 
 use crate::{
     Error, RenderParams, Result, Scene,
-    low_level::{BufferProxy, ImageProxy, ResourceId, ResourceProxy, ShaderId},
-    render::{self, Render},
-    resource_proxy::BindType,
+    gpu_resources::{
+        GpuBinding, GpuBuf, bind_type_to_node_access, collect_bindless_indices_direct,
+        record_upload_bytes,
+    },
+    render::Render,
+    resource_proxy::{BindType, ShaderId},
     shaders::{self, FullShaders},
 };
 use ekrano_encoding::{BumpAllocators, Resolver};
@@ -67,7 +70,7 @@ pub struct FrameStats {
 /// Upper bound applied to observed bump counters before they're fed into
 /// `RenderConfig::with_bump_estimates`. Legitimate scenes need far less than
 /// this (the tiger hits ~13K segments, paris-30k a few hundred thousand),
-/// but a stale/corrupt read of `vello.bump_buf` — which we've observed
+/// but a stale/corrupt read of `ekrano.bump_buf` — which we've observed
 /// intermittently — can make a counter look like a billion, at which point
 /// `grow()` rounds it up to `next_power_of_two` and the pool allocation goes
 /// to multiple GB, exhausts Metal's heap, and puts the app in an infinite
@@ -104,68 +107,22 @@ static FRAME_COUNTER: AtomicU64 = AtomicU64::new(0);
 // Helper types (formerly in goldy_engine.rs)
 // -----------------------------------------------------------------------
 
-/// Either an owned buffer (exempt from pooling) or a view from the storage pool.
-///
-/// Exempt buffers (bump, indirect) need `read_to_cpu`, `dispatch_indirect`, or clear;
-/// pooled buffers only need `bindless_index` for compute shader binding.
-enum GpuBuffer {
-    Owned(Buffer),
-    Pooled(BufferView),
-}
+// -----------------------------------------------------------------------
+// FrameCleanup — deferred per-frame work processed after GPU completion
+// -----------------------------------------------------------------------
 
-impl GpuBuffer {
-    fn bindless_index(&self) -> Option<u32> {
-        match self {
-            Self::Owned(b) => b.bindless_index(),
-            Self::Pooled(v) => v.bindless_index(),
-        }
-    }
-
-    fn bindless_srv_index(&self) -> Option<u32> {
-        match self {
-            Self::Owned(b) => b.bindless_srv_index(),
-            Self::Pooled(v) => v.bindless_srv_index(),
-        }
-    }
-
-    fn size(&self) -> u64 {
-        match self {
-            Self::Owned(b) => b.size(),
-            Self::Pooled(v) => v.size(),
-        }
-    }
-
-    /// For `dispatch_indirect`; only Owned buffers are used as indirect sources.
-    fn as_owned(&self) -> Option<&Buffer> {
-        match self {
-            Self::Owned(b) => Some(b),
-            Self::Pooled(_) => None,
-        }
-    }
+struct FrameCleanup {
+    timeline: Option<TimelineValue>,
+    /// Index into [`FrameCleanup::deferred_owned_buffers`] for bump readback (`ekrano.bump_buf`).
+    bump_readback_owned_index: Option<usize>,
+    deferred_owned_buffers: Vec<Buffer>,
+    deferred_buffer_views: Vec<BufferView>,
+    deferred_textures: Vec<Texture>,
 }
 
 struct GoldyShader {
     pipeline: ComputePipeline,
     bindings: Vec<BindType>,
-}
-
-#[derive(Default)]
-struct BindMap {
-    buf_map: HashMap<ResourceId, (GpuBuffer, &'static str)>,
-    image_map: HashMap<ResourceId, (Texture, &'static str)>,
-}
-
-fn is_pool_exempt(name: &str) -> bool {
-    matches!(
-        name,
-        "vello.bump_buf"
-            | "vello.indirect_dispatch"
-            | "vello.tile_buf"
-            | "vello.lines_buf"
-            | "vello.seg_counts_buf"
-            | "vello.segments_buf"
-            | "vello.path_buf"
-    )
 }
 
 /// WARP has a bug where SRV descriptors on structured buffers return incorrect
@@ -189,20 +146,33 @@ struct BufferKey {
 }
 
 #[derive(Default)]
-struct ResourcePool {
+pub(crate) struct ResourcePool {
     bufs: HashMap<BufferKey, Vec<Buffer>>,
 }
 
-// -----------------------------------------------------------------------
-// FrameCleanup — deferred per-frame work processed after GPU completion
-// -----------------------------------------------------------------------
-
-struct FrameCleanup {
-    timeline: Option<TimelineValue>,
-    pending_downloads: Vec<BufferProxy>,
-    deferred_free_buffers: Vec<ResourceId>,
-    deferred_free_images: Vec<ResourceId>,
-    output_image_id: Option<ResourceId>,
+impl ResourcePool {
+    pub(crate) fn get_buf_with_stride(
+        &mut self,
+        device: &Device,
+        size: u64,
+        name: &'static str,
+        access: DataAccess,
+        stride: Option<u32>,
+        buffer_flags: BufferFlags,
+    ) -> Result<Buffer> {
+        let key = BufferKey {
+            size,
+            access,
+            name,
+            buffer_flags,
+        };
+        let pool = self.bufs.entry(key).or_default();
+        if let Some(buf) = pool.pop() {
+            return Ok(buf);
+        }
+        Buffer::new_with_stride_and_flags(device, size, access, stride, buffer_flags)
+            .map_err(|e| Error::Shader(e.to_string()))
+    }
 }
 
 /// Maximum number of unprocessed `FrameCleanup` entries before we force a
@@ -210,17 +180,59 @@ struct FrameCleanup {
 const MAX_CLEANUP_DEPTH: usize = 2;
 
 // -----------------------------------------------------------------------
-// FrameState — mutable per-frame state split out for borrow-checker compat
+// PersistentState — GPU resources that survive across frames
 // -----------------------------------------------------------------------
 
-struct FrameState {
-    bind_map: BindMap,
-    pool: ResourcePool,
-    storage_ring: BufferPoolRing,
-    tex_pool: TexturePool,
-    downloads: HashMap<ResourceId, Vec<u8>>,
-    cleanup_ring: VecDeque<FrameCleanup>,
+/// GPU resources that live for the lifetime of the renderer and are reused
+/// across frames. Pool growth, texture reuse, and bump estimates all live here.
+pub(crate) struct PersistentState {
+    /// Owned buffer cache: recycles pool-exempt buffers (bump, indirect, etc.)
+    pub(crate) pool: ResourcePool,
+    /// Main storage pool: a ring-buffered large GPU allocation that pooled
+    /// compute buffers sub-allocate from each frame.
+    pub(crate) storage_ring: BufferPoolRing,
+    /// Texture pool for intermediate render targets (gradient, filter layers, etc.)
+    pub(crate) tex_pool: TexturePool,
+    /// Bump allocator counters from the most recently drained frame.
+    /// `None` until the first GPU readback completes.
     last_drained_bump: Option<BumpAllocators>,
+}
+
+impl PersistentState {
+    fn prepare_storage_pool(
+        &mut self,
+        device: &Device,
+        pool_size: u64,
+        max_size: Option<u64>,
+    ) -> Result<()> {
+        if !use_pool(device) {
+            return Ok(());
+        }
+        self.storage_ring
+            .prepare_bounded(device, pool_size, max_size)
+            .map_err(|e| Error::Shader(e.to_string()))
+    }
+
+    pub(crate) fn storage_pool_mut(&mut self) -> Option<&mut BufferPool> {
+        self.storage_ring.current_mut()
+    }
+
+    fn last_drained_bump(&self) -> Option<&BumpAllocators> {
+        self.last_drained_bump.as_ref()
+    }
+
+    fn take_last_drained_bump(&mut self) -> Option<BumpAllocators> {
+        self.last_drained_bump.take()
+    }
+}
+
+// -----------------------------------------------------------------------
+// FrameState — per-frame bookkeeping (bind map, cleanup ring, downloads)
+// -----------------------------------------------------------------------
+
+/// Per-frame bookkeeping: deferred cleanup ring (no bind map).
+struct FrameState {
+    cleanup_ring: VecDeque<FrameCleanup>,
 }
 
 // -----------------------------------------------------------------------
@@ -242,6 +254,9 @@ pub struct GoldyRenderer {
     shaders: FullShaders,
     resolver: Resolver,
     engine_shaders: Vec<GoldyShader>,
+    /// Cross-frame GPU resources: pools, texture cache, bump readback.
+    persistent: PersistentState,
+    /// Per-frame bookkeeping: bind map, cleanup ring, download results.
     frame: FrameState,
     /// Rolling history of requested pool sizes for shrink hysteresis.
     pool_size_history: VecDeque<u64>,
@@ -251,14 +266,18 @@ pub struct GoldyRenderer {
 }
 
 // -----------------------------------------------------------------------
-// impl FrameState — methods operating on per-frame mutable state
+// impl FrameState — bookkeeping methods (pool access via PersistentState)
 // -----------------------------------------------------------------------
 
 impl FrameState {
     /// Non-blocking drain: process any completed cleanup entries from the
     /// front of the ring. If the ring has grown beyond `MAX_CLEANUP_DEPTH`,
     /// force a synchronous wait on the oldest entry to prevent unbounded growth.
-    fn try_drain_completed_frames(&mut self, device: &Device) -> Result<()> {
+    fn try_drain_completed_frames(
+        &mut self,
+        device: &Device,
+        persistent: &mut PersistentState,
+    ) -> Result<()> {
         let progress = device.gpu_progress();
 
         while let Some(front) = self.cleanup_ring.front() {
@@ -269,7 +288,7 @@ impl FrameState {
             let must_wait = !done && self.cleanup_ring.len() >= MAX_CLEANUP_DEPTH;
             if done || must_wait {
                 let entry = self.cleanup_ring.pop_front().unwrap();
-                self.process_cleanup(device, entry, must_wait)?;
+                self.process_cleanup(device, entry, must_wait, persistent)?;
             } else {
                 break;
             }
@@ -277,17 +296,15 @@ impl FrameState {
         Ok(())
     }
 
-    /// Synchronous drain: wait for ALL pending cleanup entries. Used by
-    /// `render_to_buffer` and `wait_until_gpu_idle`.
-    fn finish_frame_for_readback(&mut self, device: &Device) -> Result<()> {
+    fn wait_until_gpu_idle(
+        &mut self,
+        device: &Device,
+        persistent: &mut PersistentState,
+    ) -> Result<()> {
         while let Some(entry) = self.cleanup_ring.pop_front() {
-            self.process_cleanup(device, entry, true)?;
+            self.process_cleanup(device, entry, true, persistent)?;
         }
         Ok(())
-    }
-
-    fn wait_until_gpu_idle(&mut self, device: &Device) -> Result<()> {
-        self.finish_frame_for_readback(device)
     }
 
     fn process_cleanup(
@@ -295,6 +312,7 @@ impl FrameState {
         device: &Device,
         entry: FrameCleanup,
         force_wait: bool,
+        persistent: &mut PersistentState,
     ) -> Result<()> {
         if let Some(tv) = entry.timeline {
             let already_done = device.gpu_progress() >= tv;
@@ -309,35 +327,21 @@ impl FrameState {
             }
         }
 
-        let bump_name = bumps_buf_static_name();
-        for buf_proxy in &entry.pending_downloads {
-            if let Some((gpu_buf, _)) = self.bind_map.get_buf(buf_proxy.id)
-                && let GpuBuffer::Owned(buf) = gpu_buf
-            {
-                let size = buf.size() as usize;
-                let mut output = vec![0_u8; size];
-                buf.read_to_cpu(device, &mut output)
-                    .map_err(|e| Error::Shader(e.to_string()))?;
-                self.downloads.insert(buf_proxy.id, output);
-                if buf_proxy.name == bump_name {
-                    if let Some(data) = self.downloads.get(&buf_proxy.id) {
-                        self.last_drained_bump = Some(bytemuck::pod_read_unaligned(data));
-                    }
-                    self.downloads.remove(&buf_proxy.id);
-                }
-            }
+        if let Some(idx) = entry.bump_readback_owned_index
+            && let Some(buf) = entry.deferred_owned_buffers.get(idx)
+        {
+            let size = buf.size() as usize;
+            let mut output = vec![0_u8; size];
+            buf.read_to_cpu(device, &mut output)
+                .map_err(|e| Error::Shader(e.to_string()))?;
+            persistent.last_drained_bump = Some(bytemuck::pod_read_unaligned(&output));
         }
 
-        for id in &entry.deferred_free_buffers {
-            self.bind_map.remove_buf(*id);
-        }
-        for id in &entry.deferred_free_images {
-            if let Some((tex, _)) = self.bind_map.take_image(*id) {
-                self.tex_pool.release(tex);
-            }
-        }
-        if let Some(id) = entry.output_image_id {
-            self.bind_map.remove_image(id);
+        // Owned buffers and pool views: drop (GPU idle).
+        drop(entry.deferred_owned_buffers);
+        drop(entry.deferred_buffer_views);
+        for tex in entry.deferred_textures {
+            persistent.tex_pool.release(tex);
         }
 
         device.flush_deferred_deletions();
@@ -345,455 +349,10 @@ impl FrameState {
         Ok(())
     }
 
-    /// Remove all `Pooled` entries from `bind_map` so they get rematerialized
-    /// into the current frame's storage pool.
-    fn evict_pooled_entries(&mut self) {
-        self.bind_map
-            .buf_map
-            .retain(|_, (buf, _)| !matches!(buf, GpuBuffer::Pooled(_)));
-    }
-
-    fn storage_pool_mut(&mut self) -> Option<&mut BufferPool> {
-        self.storage_ring.current_mut()
-    }
-
-    fn ensure_resources_materialized(
-        &mut self,
-        device: &Device,
-        graph: &mut TaskGraph,
-        bindings: &[ResourceProxy],
-        bind_types: &[BindType],
-    ) -> Result<()> {
-        for (i, res) in bindings.iter().enumerate() {
-            match res {
-                ResourceProxy::Buffer(proxy) | ResourceProxy::BufferRange { proxy, .. } => {
-                    if self.bind_map.get_buf(proxy.id).is_none() {
-                        let stride = proxy
-                            .element_stride
-                            .or_else(|| element_stride_for_buffer(proxy.name));
-                        let gpu_buf = if !is_pool_exempt(proxy.name)
-                            && let Some(pool) = self.storage_pool_mut()
-                        {
-                            let view = pool
-                                .alloc_bytes(proxy.size, stride)
-                                .map_err(|e| Error::Shader(e.to_string()))?;
-                            GpuBuffer::Pooled(view)
-                        } else {
-                            let buf = self.pool.get_buf_with_stride(
-                                device,
-                                proxy.size,
-                                proxy.name,
-                                DataAccess::Scattered,
-                                stride,
-                                proxy.buffer_flags,
-                            )?;
-                            graph.clear_buffer(&buf, 0, proxy.size);
-                            GpuBuffer::Owned(buf)
-                        };
-                        self.bind_map.insert_buf(proxy.id, gpu_buf, proxy.name);
-                    }
-                }
-                ResourceProxy::Image(proxy) => {
-                    if self.bind_map.get_image(proxy.id).is_none() {
-                        let format = image_format_to_goldy(proxy.format);
-                        let access = match bind_types.get(i) {
-                            Some(BindType::Image(_)) => SpatialAccess::Direct,
-                            _ => SpatialAccess::Interpolated,
-                        };
-                        let tex = self
-                            .tex_pool
-                            .acquire(
-                                device,
-                                proxy.width,
-                                proxy.height,
-                                format,
-                                access,
-                                TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
-                            )
-                            .map_err(|e| Error::Shader(e.to_string()))?;
-                        self.bind_map
-                            .insert_image(proxy.id, tex, "placeholder_image");
-                    }
-                }
-            }
-        }
+    fn release_pool(&mut self, device: &Device, persistent: &mut PersistentState) -> Result<()> {
+        self.wait_until_gpu_idle(device, persistent)?;
+        persistent.storage_ring.clear();
         Ok(())
-    }
-
-    fn record_upload_buffer(
-        &mut self,
-        device: &Device,
-        graph: &mut TaskGraph,
-        buf_proxy: &BufferProxy,
-        bytes: &[u8],
-    ) -> Result<()> {
-        if let Some((GpuBuffer::Owned(existing), _)) = self.bind_map.get_buf(buf_proxy.id)
-            && existing.size() >= bytes.len() as u64
-            && existing.access() == DataAccess::Scattered
-            && existing.flags() == buf_proxy.buffer_flags
-        {
-            graph.write_buffer(existing, 0, bytes.to_vec());
-        } else {
-            let stride = buf_proxy
-                .element_stride
-                .or_else(|| element_stride_for_buffer(buf_proxy.name));
-            let buf = self.pool.get_buf_with_stride(
-                device,
-                buf_proxy.size,
-                buf_proxy.name,
-                DataAccess::Scattered,
-                stride,
-                buf_proxy.buffer_flags,
-            )?;
-            graph.write_buffer(&buf, 0, bytes.to_vec());
-            self.bind_map
-                .insert_buf(buf_proxy.id, GpuBuffer::Owned(buf), buf_proxy.name);
-        }
-        Ok(())
-    }
-
-    #[allow(
-        dead_code,
-        reason = "called by FrameRecorder::upload_uniform; both unused until debug overlay calls them"
-    )]
-    fn record_upload_uniform(
-        &mut self,
-        device: &Device,
-        graph: &mut TaskGraph,
-        buf_proxy: &BufferProxy,
-        bytes: &[u8],
-        last_timeline: &mut Option<TimelineValue>,
-        surface_frame: Option<&Frame>,
-    ) -> Result<()> {
-        let needs_flush_before_uniform = matches!(
-            self.bind_map.get_buf(buf_proxy.id),
-            Some((GpuBuffer::Owned(b), _))
-                if b.size() >= bytes.len() as u64
-                    && b.access() == DataAccess::Broadcast,
-        );
-        if needs_flush_before_uniform {
-            flush_graph(graph, device, last_timeline, surface_frame)?;
-        }
-        if let Some((GpuBuffer::Owned(existing), _)) = self.bind_map.get_buf(buf_proxy.id)
-            && existing.size() >= bytes.len() as u64
-            && existing.access() == DataAccess::Broadcast
-        {
-            existing
-                .write(0, bytes)
-                .map_err(|e| Error::Shader(e.to_string()))?;
-        } else {
-            let buf = self.pool.get_buf(
-                device,
-                buf_proxy.size,
-                buf_proxy.name,
-                DataAccess::Broadcast,
-            )?;
-            buf.write(0, bytes)
-                .map_err(|e| Error::Shader(e.to_string()))?;
-            self.bind_map
-                .insert_buf(buf_proxy.id, GpuBuffer::Owned(buf), buf_proxy.name);
-        }
-        Ok(())
-    }
-
-    fn record_upload_image(
-        &mut self,
-        device: &Device,
-        graph: &mut TaskGraph,
-        image_proxy: &ImageProxy,
-        bytes: &[u8],
-    ) -> Result<()> {
-        let format = image_format_to_goldy(image_proxy.format);
-        let texture = self
-            .tex_pool
-            .acquire(
-                device,
-                image_proxy.width,
-                image_proxy.height,
-                format,
-                SpatialAccess::Interpolated,
-                TextureFlags::COPY_DST,
-            )
-            .map_err(|e| Error::Shader(e.to_string()))?;
-        graph
-            .write_texture(&texture, bytes.to_vec())
-            .map_err(|e| Error::Shader(e.to_string()))?;
-        self.bind_map
-            .insert_image(image_proxy.id, texture, "uploaded_image");
-        Ok(())
-    }
-
-    fn record_write_image(
-        &mut self,
-        device: &Device,
-        graph: &mut TaskGraph,
-        image_proxy: &ImageProxy,
-        x: u32,
-        y: u32,
-        image_data: &peniko::ImageData,
-    ) -> Result<()> {
-        if self.bind_map.get_image(image_proxy.id).is_none() {
-            let format = image_format_to_goldy(image_proxy.format);
-            let tex = self
-                .tex_pool
-                .acquire(
-                    device,
-                    image_proxy.width,
-                    image_proxy.height,
-                    format,
-                    SpatialAccess::Interpolated,
-                    TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
-                )
-                .map_err(|e| Error::Shader(e.to_string()))?;
-            self.bind_map
-                .insert_image(image_proxy.id, tex, "write_image_target");
-        }
-        if let Some((tex, _)) = self.bind_map.get_image(image_proxy.id) {
-            if image_data.data.is_empty() && image_data.width != 0 && image_data.height != 0 {
-                return Err(Error::InvalidImage {
-                    id: image_data.data.id(),
-                    reason: "image has non-zero dimensions but no pixel data; \
-                             it may have been registered to a different renderer \
-                             or unregistered before this render was submitted",
-                });
-            }
-            let bytes = image_data.data.data();
-            graph
-                .write_texture_region(
-                    tex,
-                    x,
-                    y,
-                    image_data.width,
-                    image_data.height,
-                    bytes.to_vec(),
-                )
-                .map_err(|e| Error::Shader(e.to_string()))?;
-        }
-        Ok(())
-    }
-
-    fn record_clear(
-        &mut self,
-        device: &Device,
-        graph: &mut TaskGraph,
-        buf_proxy: &BufferProxy,
-        off: u64,
-        sz: Option<u64>,
-    ) -> Result<()> {
-        if let Some((gpu_buf, _)) = self.bind_map.get_buf(buf_proxy.id) {
-            let clear_size = sz.unwrap_or_else(|| gpu_buf.size() - off);
-            match gpu_buf {
-                GpuBuffer::Owned(buf) => graph.clear_buffer(buf, off, clear_size),
-                GpuBuffer::Pooled(view) => graph.clear_buffer_view(view, off, clear_size),
-            }
-        } else {
-            let stride = buf_proxy
-                .element_stride
-                .or_else(|| element_stride_for_buffer(buf_proxy.name));
-            let buf = self.pool.get_buf_with_stride(
-                device,
-                buf_proxy.size,
-                buf_proxy.name,
-                DataAccess::Scattered,
-                stride,
-                buf_proxy.buffer_flags,
-            )?;
-            let clear_size = sz.unwrap_or_else(|| buf.size() - off);
-            graph.clear_buffer(&buf, off, clear_size);
-            self.bind_map
-                .insert_buf(buf_proxy.id, GpuBuffer::Owned(buf), buf_proxy.name);
-        }
-        Ok(())
-    }
-
-    fn bind_graph_resources<'a>(
-        &self,
-        mut node: NodeBuilder<'a>,
-        bindings: &[ResourceProxy],
-        bind_types: &[BindType],
-    ) -> NodeBuilder<'a> {
-        for (i, res) in bindings.iter().enumerate() {
-            let access = bind_types
-                .get(i)
-                .copied()
-                .map(bind_type_to_node_access)
-                .unwrap_or_else(|| {
-                    log::warn!(
-                        "bind_types list is shorter than bindings (index {i}); \
-                         defaulting to ReadWrite access — check that shader bindings \
-                         and BindType list are in sync",
-                    );
-                    NodeAccess::ReadWrite
-                });
-
-            match res {
-                ResourceProxy::Buffer(proxy) | ResourceProxy::BufferRange { proxy, .. } => {
-                    if let Some((gpu_buf, _)) = self.bind_map.get_buf(proxy.id) {
-                        match gpu_buf {
-                            GpuBuffer::Owned(buf) => {
-                                node = node.bind_buffer(buf, access);
-                            }
-                            GpuBuffer::Pooled(view) => {
-                                node = node.bind_buffer_view(view, access);
-                            }
-                        }
-                    }
-                }
-                ResourceProxy::Image(proxy) => {
-                    if let Some((tex, _)) = self.bind_map.get_image(proxy.id) {
-                        node = node.bind_texture(tex, access);
-                    }
-                }
-            }
-        }
-        node
-    }
-
-    #[allow(
-        dead_code,
-        reason = "public readback API; not used by current goldy integration path"
-    )]
-    fn get_download(&self, buf: BufferProxy) -> Option<&[u8]> {
-        self.downloads.get(&buf.id).map(|v| v.as_slice())
-    }
-
-    #[allow(
-        dead_code,
-        reason = "public readback API; not used by current goldy integration path"
-    )]
-    fn read_bump_allocators(&self, proxy: &BufferProxy) -> Result<BumpAllocators> {
-        let data = self
-            .get_download(*proxy)
-            .ok_or_else(|| Error::Shader("bump buffer download not available".into()))?;
-        Ok(bytemuck::pod_read_unaligned(data))
-    }
-
-    fn last_drained_bump(&self) -> Option<&BumpAllocators> {
-        self.last_drained_bump.as_ref()
-    }
-
-    fn take_last_drained_bump(&mut self) -> Option<BumpAllocators> {
-        self.last_drained_bump.take()
-    }
-
-    fn prepare_storage_pool(
-        &mut self,
-        device: &Device,
-        pool_size: u64,
-        max_size: Option<u64>,
-    ) -> Result<()> {
-        if !use_pool(device) {
-            return Ok(());
-        }
-        self.storage_ring
-            .prepare_bounded(device, pool_size, max_size)
-            .map_err(|e| Error::Shader(e.to_string()))
-    }
-
-    #[allow(
-        dead_code,
-        reason = "full reset between retries; integration uses release_pool / wait paths"
-    )]
-    fn clear_transients(&mut self, device: &Device) -> Result<()> {
-        self.wait_until_gpu_idle(device)?;
-        self.storage_ring.clear();
-        self.last_drained_bump = None;
-        self.bind_map.buf_map.clear();
-        self.bind_map.image_map.clear();
-        self.downloads.clear();
-        Ok(())
-    }
-
-    fn release_pool(&mut self, device: &Device) -> Result<()> {
-        self.wait_until_gpu_idle(device)?;
-        self.bind_map.buf_map.clear();
-        self.downloads.clear();
-        self.storage_ring.clear();
-        Ok(())
-    }
-
-    #[allow(
-        clippy::print_stdout,
-        reason = "dump_dispatch prints manifest paths to stdout for debugging when dump is enabled"
-    )]
-    fn dump_dispatch(
-        &self,
-        device: &Device,
-        dispatch_idx: usize,
-        shader_id: ShaderId,
-        dims: (u32, u32, u32),
-        bindings: &[ResourceProxy],
-        indices: &[u32],
-        dump_dir: &str,
-    ) {
-        use std::io::Write;
-        let dir = format!("{dump_dir}/dispatch_{dispatch_idx}");
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            log::error!("[dump] failed to create dump directory {dir}: {e}");
-            return;
-        }
-
-        let manifest_path = format!("{dir}/manifest.txt");
-        let mut manifest = match std::fs::File::create(&manifest_path) {
-            Ok(f) => f,
-            Err(e) => {
-                log::error!("[dump] failed to create manifest {manifest_path}: {e}");
-                return;
-            }
-        };
-
-        macro_rules! wln {
-            ($($arg:tt)*) => {
-                if let Err(e) = writeln!(manifest, $($arg)*) {
-                    log::error!("[dump] manifest write failed: {e}");
-                    return;
-                }
-            };
-        }
-
-        wln!("shader_id: {}", shader_id.0);
-        wln!("dispatch: ({}, {}, {})", dims.0, dims.1, dims.2);
-        wln!("num_bindings: {}", bindings.len());
-        wln!("resource_slots: {:?}", indices);
-
-        for (i, res) in bindings.iter().enumerate() {
-            match res {
-                ResourceProxy::Buffer(proxy) | ResourceProxy::BufferRange { proxy, .. } => {
-                    if let Some((gpu_buf, name)) = self.bind_map.get_buf(proxy.id) {
-                        let size = gpu_buf.size() as usize;
-                        wln!(
-                            "binding[{i}]: buf name={name} size={size} bindless={}",
-                            gpu_buf.bindless_index().unwrap_or(u32::MAX)
-                        );
-
-                        let mut data = vec![0_u8; size];
-                        let ok = match gpu_buf {
-                            GpuBuffer::Owned(buf) => buf.read_to_cpu(device, &mut data).is_ok(),
-                            GpuBuffer::Pooled(view) => view.read_to_cpu(device, &mut data).is_ok(),
-                        };
-                        if ok {
-                            std::fs::write(format!("{dir}/buf_{i}.bin"), &data).ok();
-                        } else {
-                            wln!("  (read failed)");
-                        }
-                    }
-                }
-                ResourceProxy::Image(proxy) => {
-                    wln!(
-                        "binding[{i}]: image {}x{} id={}",
-                        proxy.width,
-                        proxy.height,
-                        proxy.id.0
-                    );
-                }
-            }
-        }
-        println!(
-            "[dump] dispatch_{dispatch_idx}: shader={} dims={:?} bindings={}",
-            shader_id.0,
-            dims,
-            bindings.len()
-        );
     }
 }
 
@@ -802,31 +361,34 @@ impl FrameState {
 // -----------------------------------------------------------------------
 
 pub(crate) struct FrameRecorder<'a> {
-    device: &'a Device,
+    pub(crate) device: &'a Device,
     graph: TaskGraph,
-    state: &'a mut FrameState,
+    frame: &'a mut FrameState,
+    pub(crate) persistent: &'a mut PersistentState,
     shaders: &'a [GoldyShader],
     force_uav: bool,
     surface_frame: Option<&'a Frame>,
     last_timeline: Option<TimelineValue>,
-    pending_downloads: Vec<BufferProxy>,
-    deferred_free_buffers: Vec<ResourceId>,
-    deferred_free_images: Vec<ImageProxy>,
+    bump_readback_owned_index: Option<usize>,
+    deferred_owned_buffers: Vec<Buffer>,
+    deferred_buffer_views: Vec<BufferView>,
+    deferred_textures: Vec<Texture>,
     dispatch_count: usize,
 }
 
 impl<'a> FrameRecorder<'a> {
     fn new(
         device: &'a Device,
-        state: &'a mut FrameState,
+        frame: &'a mut FrameState,
+        persistent: &'a mut PersistentState,
         shaders: &'a [GoldyShader],
         surface_frame: Option<&'a Frame>,
     ) -> Self {
         let fuav = force_uav(device);
         let mut graph = TaskGraph::new();
 
-        if state.storage_ring.take_clear_flag()
-            && let Some(pool) = state.storage_ring.current()
+        if persistent.storage_ring.take_clear_flag()
+            && let Some(pool) = persistent.storage_ring.current()
         {
             graph.clear_buffer(pool.backing_buffer(), 0, pool.capacity());
         }
@@ -834,127 +396,234 @@ impl<'a> FrameRecorder<'a> {
         Self {
             device,
             graph,
-            state,
+            frame,
+            persistent,
             shaders,
             force_uav: fuav,
             surface_frame,
             last_timeline: None,
-            pending_downloads: Vec::new(),
-            deferred_free_buffers: Vec::new(),
-            deferred_free_images: Vec::new(),
+            bump_readback_owned_index: None,
+            deferred_owned_buffers: Vec::new(),
+            deferred_buffer_views: Vec::new(),
+            deferred_textures: Vec::new(),
             dispatch_count: 0,
         }
     }
 
-    pub fn upload(&mut self, name: &'static str, data: impl Into<Vec<u8>>) -> BufferProxy {
-        let data = data.into();
-        let buf_proxy = BufferProxy::new(data.len() as u64, name);
-        self.state
-            .record_upload_buffer(self.device, &mut self.graph, &buf_proxy, &data)
-            .expect("upload failed");
-        buf_proxy
+    pub(crate) fn graph_and_persistent(&mut self) -> (&mut TaskGraph, &mut PersistentState) {
+        (&mut self.graph, self.persistent)
     }
 
-    pub fn upload_typed<T: bytemuck::Pod>(&mut self, name: &'static str, data: &T) -> BufferProxy {
-        let bytes = bytemuck::bytes_of(data).to_vec();
-        let buf_proxy = BufferProxy::with_stride(bytes.len() as u64, name, size_of::<T>() as u32);
-        self.state
-            .record_upload_buffer(self.device, &mut self.graph, &buf_proxy, &bytes)
-            .expect("upload_typed failed");
-        buf_proxy
-    }
-
-    #[allow(
-        dead_code,
-        reason = "only referenced from debug_renderer; that module is stubbed and never called"
-    )]
-    pub fn upload_uniform(&mut self, name: &'static str, data: impl Into<Vec<u8>>) -> BufferProxy {
-        let data = data.into();
-        let buf_proxy = BufferProxy::new(data.len() as u64, name);
-        self.state
-            .record_upload_uniform(
-                self.device,
-                &mut self.graph,
-                &buf_proxy,
-                &data,
-                &mut self.last_timeline,
-                self.surface_frame,
-            )
-            .expect("upload_uniform failed");
-        buf_proxy
-    }
-
-    pub fn upload_image(
+    pub(crate) fn alloc_pipeline_buffer_named(
         &mut self,
-        width: u32,
-        height: u32,
-        format: crate::resource_proxy::ImageFormat,
-        data: impl Into<Vec<u8>>,
-    ) -> ImageProxy {
+        size: u64,
+        stride: u32,
+        name: &'static str,
+        flags: BufferFlags,
+    ) -> Result<GpuBuf, Error> {
+        crate::gpu_resources::alloc_pipeline_buffer(
+            self.device,
+            &mut self.graph,
+            self.persistent,
+            size,
+            stride,
+            name,
+            flags,
+        )
+    }
+
+    pub(crate) fn defer_gpu_buf(&mut self, buf: GpuBuf) {
+        match buf {
+            GpuBuf::Owned(b) => self.deferred_owned_buffers.push(b),
+            GpuBuf::Pooled(v) => self.deferred_buffer_views.push(v),
+        }
+    }
+
+    pub(crate) fn defer_texture(&mut self, tex: Texture) {
+        self.deferred_textures.push(tex);
+    }
+
+    pub(crate) fn schedule_pipeline_cleanup(
+        &mut self,
+        pipeline: crate::gpu_resources::PipelineResources,
+        bump_readback: bool,
+    ) {
+        let crate::gpu_resources::PipelineResources {
+            gradient,
+            image_atlas,
+            mask_atlas,
+            scene,
+            config,
+            wg_counts,
+            indirect,
+            fallback_indirect,
+            info_bin_data,
+            tile,
+            segments,
+            ptcl,
+            reduced,
+            reduced2,
+            reduced_scan,
+            tagmonoid,
+            path_bbox,
+            bump,
+            lines,
+            draw_reduced,
+            draw_monoid,
+            clip_inp,
+            clip_el,
+            clip_bic,
+            clip_bbox,
+            draw_bbox,
+            bin_header,
+            path,
+            seg_counts,
+            blend_spill,
+            out_image,
+            filter_layers,
+        } = pipeline;
+
+        self.defer_texture(gradient);
+        self.defer_texture(image_atlas);
+        self.defer_texture(mask_atlas);
+        self.defer_gpu_buf(scene);
+        self.defer_gpu_buf(config);
+        if let Some(b) = wg_counts {
+            self.defer_gpu_buf(b);
+        }
+        if let Some(b) = indirect {
+            self.defer_gpu_buf(b);
+        }
+        self.defer_gpu_buf(fallback_indirect);
+        self.defer_gpu_buf(info_bin_data);
+        self.defer_gpu_buf(tile);
+        self.defer_gpu_buf(segments);
+        self.defer_gpu_buf(ptcl);
+        self.defer_gpu_buf(reduced);
+        self.defer_gpu_buf(reduced2);
+        self.defer_gpu_buf(reduced_scan);
+        self.defer_gpu_buf(tagmonoid);
+        self.defer_gpu_buf(path_bbox);
+        let bump_idx = if bump_readback {
+            Some(self.deferred_owned_buffers.len())
+        } else {
+            None
+        };
+        self.defer_gpu_buf(bump);
+        self.bump_readback_owned_index = bump_idx;
+        self.defer_gpu_buf(lines);
+        self.defer_gpu_buf(draw_reduced);
+        self.defer_gpu_buf(draw_monoid);
+        self.defer_gpu_buf(clip_inp);
+        self.defer_gpu_buf(clip_el);
+        self.defer_gpu_buf(clip_bic);
+        self.defer_gpu_buf(clip_bbox);
+        self.defer_gpu_buf(draw_bbox);
+        self.defer_gpu_buf(bin_header);
+        self.defer_gpu_buf(path);
+        self.defer_gpu_buf(seg_counts);
+        self.defer_gpu_buf(blend_spill);
+        self.defer_texture(out_image);
+        for t in filter_layers {
+            self.defer_texture(t);
+        }
+    }
+
+    #[cfg_attr(
+        not(feature = "debug_layers"),
+        allow(dead_code, reason = "debug_layers only uses FrameRecorder::upload")
+    )]
+    pub fn upload(&mut self, name: &'static str, data: impl Into<Vec<u8>>) -> Buffer {
         let data = data.into();
-        let image_proxy = ImageProxy::new(width, height, format);
-        self.state
-            .record_upload_image(self.device, &mut self.graph, &image_proxy, &data)
-            .expect("upload_image failed");
-        image_proxy
+        match record_upload_bytes(
+            self.device,
+            &mut self.graph,
+            self.persistent,
+            name,
+            1,
+            &data,
+        )
+        .expect("upload failed")
+        {
+            GpuBuf::Owned(b) => b,
+            _ => panic!("upload must produce owned buffer"),
+        }
     }
 
-    pub fn write_image(&mut self, proxy: ImageProxy, x: u32, y: u32, image: peniko::ImageData) {
-        self.state
-            .record_write_image(self.device, &mut self.graph, &proxy, x, y, &image)
-            .expect("write_image failed");
+    pub fn upload_strided(
+        &mut self,
+        name: &'static str,
+        element_stride: u32,
+        data: impl Into<Vec<u8>>,
+    ) -> Buffer {
+        let data = data.into();
+        match record_upload_bytes(
+            self.device,
+            &mut self.graph,
+            self.persistent,
+            name,
+            element_stride,
+            &data,
+        )
+        .expect("upload_strided failed")
+        {
+            GpuBuf::Owned(b) => b,
+            _ => panic!("upload_strided must produce owned buffer"),
+        }
     }
 
-    pub fn dispatch<R>(&mut self, shader: ShaderId, wg_size: (u32, u32, u32), resources: R)
-    where
-        R: IntoIterator,
-        R::Item: Into<ResourceProxy>,
-    {
-        let r: Vec<_> = resources.into_iter().map(|x| x.into()).collect();
-        self.dispatch_inner(shader, wg_size, &r, &[]);
+    pub fn upload_typed<T: bytemuck::Pod>(&mut self, name: &'static str, data: &T) -> Buffer {
+        let bytes = bytemuck::bytes_of(data).to_vec();
+        self.upload_strided(name, size_of::<T>() as u32, bytes)
     }
 
-    pub fn dispatch_with_push_tail<R>(
+    pub fn dispatch(
         &mut self,
         shader: ShaderId,
         wg_size: (u32, u32, u32),
-        resources: R,
+        bindings: &[GpuBinding<'_>],
+    ) {
+        self.dispatch_inner(shader, wg_size, bindings, &[]);
+    }
+
+    pub fn dispatch_with_push_tail(
+        &mut self,
+        shader: ShaderId,
+        wg_size: (u32, u32, u32),
+        bindings: &[GpuBinding<'_>],
         push_tail: &[u32],
-    ) where
-        R: IntoIterator,
-        R::Item: Into<ResourceProxy>,
-    {
-        let r: Vec<_> = resources.into_iter().map(|x| x.into()).collect();
-        self.dispatch_inner(shader, wg_size, &r, push_tail);
+    ) {
+        self.dispatch_inner(shader, wg_size, bindings, push_tail);
     }
 
     fn dispatch_inner(
         &mut self,
         shader_id: ShaderId,
         (x, y, z): (u32, u32, u32),
-        bindings: &[ResourceProxy],
+        bindings: &[GpuBinding<'_>],
         push_tail: &[u32],
     ) {
         if x == 0 || y == 0 || z == 0 {
             log::warn!(
                 "Skipping Dispatch for shader {} with zero grid dimension ({x}, {y}, {z}); \
-                 this may indicate a bug in the recording generator",
+                 this may indicate a bug in the caller",
                 shader_id.0
             );
             return;
         }
         let bind_types: Vec<_> = self.shaders[shader_id.0].bindings.clone();
-        self.state
-            .ensure_resources_materialized(self.device, &mut self.graph, bindings, &bind_types)
-            .expect("ensure_resources_materialized failed in dispatch");
-        let indices =
-            collect_bindless_indices(bindings, &bind_types, &self.state.bind_map, self.force_uav)
-                .expect("collect_bindless_indices failed in dispatch");
+        let indices = collect_bindless_indices_direct(
+            bindings,
+            &bind_types,
+            self.force_uav,
+            MAX_BINDLESS_SLOTS,
+        )
+        .expect("collect_bindless_indices_direct failed in dispatch");
 
         if let Some(ref dir) = *DUMP_DIR {
             let mut debug_indices = indices.clone();
             debug_indices.extend_from_slice(push_tail);
-            self.state.dump_dispatch(
+            dump_dispatch_gpu(
                 self.device,
                 self.dispatch_count,
                 shader_id,
@@ -968,7 +637,7 @@ impl<'a> FrameRecorder<'a> {
         let mut node = self
             .graph
             .node("dispatch", &self.shaders[shader_id.0].pipeline);
-        node = self.state.bind_graph_resources(node, bindings, &bind_types);
+        node = bind_graph_direct(node, bindings, &bind_types);
         if !indices.is_empty() || !push_tail.is_empty() {
             node = node.bind_resources_raw_with_user(&indices, push_tail);
         }
@@ -976,66 +645,36 @@ impl<'a> FrameRecorder<'a> {
         self.dispatch_count += 1;
     }
 
-    pub fn dispatch_indirect<R>(
+    pub fn dispatch_indirect(
         &mut self,
         shader: ShaderId,
-        buf: BufferProxy,
+        indirect_buf: &Buffer,
         offset: u64,
-        resources: R,
-    ) where
-        R: IntoIterator,
-        R::Item: Into<ResourceProxy>,
-    {
-        let r: Vec<_> = resources.into_iter().map(|x| x.into()).collect();
-        self.dispatch_indirect_inner(shader, &buf, offset, &r);
+        bindings: &[GpuBinding<'_>],
+    ) {
+        self.dispatch_indirect_inner(shader, indirect_buf, offset, bindings);
     }
 
     fn dispatch_indirect_inner(
         &mut self,
         shader_id: ShaderId,
-        buf_proxy: &BufferProxy,
+        indirect_buf: &Buffer,
         offset: u64,
-        bindings: &[ResourceProxy],
+        bindings: &[GpuBinding<'_>],
     ) {
-        self.state
-            .ensure_resources_materialized(
-                self.device,
-                &mut self.graph,
-                &[ResourceProxy::Buffer(*buf_proxy)],
-                &[BindType::Buffer],
-            )
-            .expect("ensure_resources_materialized failed in dispatch_indirect (indirect buf)");
         let bind_types: Vec<_> = self.shaders[shader_id.0].bindings.clone();
-        self.state
-            .ensure_resources_materialized(self.device, &mut self.graph, bindings, &bind_types)
-            .expect("ensure_resources_materialized failed in dispatch_indirect");
-        let indices =
-            collect_bindless_indices(bindings, &bind_types, &self.state.bind_map, self.force_uav)
-                .expect("collect_bindless_indices failed in dispatch_indirect");
-
-        let Some((gpu_buf, _)) = self.state.bind_map.get_buf(buf_proxy.id) else {
-            log::error!(
-                "DispatchIndirect for shader {} skipped: buffer proxy (id={}) is \
-                 either unregistered or pooled (must be an owned buffer)",
-                shader_id.0,
-                buf_proxy.id.0
-            );
-            return;
-        };
-        let Some(indirect_buf) = gpu_buf.as_owned() else {
-            log::error!(
-                "DispatchIndirect for shader {} skipped: buffer proxy (id={}) is pooled \
-                 (must be an owned buffer)",
-                shader_id.0,
-                buf_proxy.id.0
-            );
-            return;
-        };
+        let indices = collect_bindless_indices_direct(
+            bindings,
+            &bind_types,
+            self.force_uav,
+            MAX_BINDLESS_SLOTS,
+        )
+        .expect("collect_bindless_indices_direct failed in dispatch_indirect");
 
         if let Some(ref dir) = *DUMP_DIR {
             let indirect_dims =
                 GoldyRenderer::read_indirect_dims(self.device, indirect_buf, offset);
-            self.state.dump_dispatch(
+            dump_dispatch_gpu(
                 self.device,
                 self.dispatch_count,
                 shader_id,
@@ -1049,7 +688,7 @@ impl<'a> FrameRecorder<'a> {
         let mut node = self
             .graph
             .node("dispatch_indirect", &self.shaders[shader_id.0].pipeline);
-        node = self.state.bind_graph_resources(node, bindings, &bind_types);
+        node = bind_graph_direct(node, bindings, &bind_types);
         node = node.bind_buffer(indirect_buf, NodeAccess::Read);
         if !indices.is_empty() {
             node = node.bind_resources_raw(&indices);
@@ -1058,51 +697,27 @@ impl<'a> FrameRecorder<'a> {
         self.dispatch_count += 1;
     }
 
-    pub fn clear_all(&mut self, buf: BufferProxy) {
-        self.state
-            .record_clear(self.device, &mut self.graph, &buf, 0, None)
-            .expect("clear_all failed");
-    }
-
-    pub fn download(&mut self, buf: BufferProxy) {
-        self.pending_downloads.push(buf);
-    }
-
-    pub fn free_buffer(&mut self, buf: BufferProxy) {
-        self.deferred_free_buffers.push(buf.id);
-    }
-
-    pub fn free_image(&mut self, image: ImageProxy) {
-        self.deferred_free_images.push(image);
-    }
-
-    pub fn free_resource(&mut self, resource: ResourceProxy) {
-        match resource {
-            ResourceProxy::Buffer(buf) => self.free_buffer(buf),
-            ResourceProxy::BufferRange {
-                proxy,
-                offset: _,
-                size: _,
-            } => self.free_buffer(proxy),
-            ResourceProxy::Image(image) => self.free_image(image),
+    /// Stub for debug-layer draw commands (not yet implemented in Goldy).
+    #[cfg(feature = "debug_layers")]
+    pub fn draw(&mut self, params: crate::resource_proxy::DrawParams) {
+        if let Some(vb) = params.vertex_buffer {
+            self.defer_owned_buffer(vb);
+        }
+        for b in params.resources {
+            self.defer_owned_buffer(b);
+        }
+        if let Some(tex) = params.target {
+            self.defer_texture(tex);
         }
     }
 
-    /// Stub for debug-layer draw commands (not yet implemented in Goldy).
-    #[cfg(feature = "debug_layers")]
-    pub fn draw(&mut self, _params: crate::resource_proxy::DrawParams) {}
-
-    /// Register the output image proxy → GPU texture mapping before recording
-    /// begins. Used by the public render entry points.
-    fn set_output_image(&mut self, proxy: &ImageProxy, texture: &Texture) {
-        self.state
-            .bind_map
-            .insert_image(proxy.id, texture.borrow(), "output");
+    pub(crate) fn defer_owned_buffer(&mut self, buf: Buffer) {
+        self.deferred_owned_buffers.push(buf);
     }
 
-    /// Finish recording: flush the final graph and push a `FrameCleanup`
+    /// Finish dispatch: flush the final graph and push a `FrameCleanup`
     /// entry onto the deque for deferred processing after GPU completion.
-    fn finish(mut self, output_image_id: Option<ResourceId>) -> Result<()> {
+    fn finish(mut self) -> Result<()> {
         flush_graph(
             &mut self.graph,
             self.device,
@@ -1112,19 +727,132 @@ impl<'a> FrameRecorder<'a> {
 
         let timeline = match self.surface_frame {
             None => self.last_timeline.take(),
-            Some(_) => None, // surface path: filled by note_frame_presented
+            Some(_) => None,
         };
 
-        self.state.cleanup_ring.push_back(FrameCleanup {
+        self.frame.cleanup_ring.push_back(FrameCleanup {
             timeline,
-            pending_downloads: self.pending_downloads,
-            deferred_free_buffers: self.deferred_free_buffers,
-            deferred_free_images: self.deferred_free_images.iter().map(|ip| ip.id).collect(),
-            output_image_id,
+            bump_readback_owned_index: self.bump_readback_owned_index,
+            deferred_owned_buffers: self.deferred_owned_buffers,
+            deferred_buffer_views: self.deferred_buffer_views,
+            deferred_textures: self.deferred_textures,
         });
 
         Ok(())
     }
+}
+
+fn bind_graph_direct<'a>(
+    mut node: NodeBuilder<'a>,
+    bindings: &[GpuBinding<'a>],
+    bind_types: &[BindType],
+) -> NodeBuilder<'a> {
+    for (i, binding) in bindings.iter().enumerate() {
+        let access = bind_types
+            .get(i)
+            .copied()
+            .map(bind_type_to_node_access)
+            .unwrap_or_else(|| {
+                log::warn!(
+                    "bind_types list is shorter than bindings (index {i}); \
+                     defaulting to ReadWrite access — check that shader bindings \
+                     and BindType list are in sync",
+                );
+                NodeAccess::ReadWrite
+            });
+        node = match binding {
+            GpuBinding::Buf(b) => node.bind_buffer(b, access),
+            GpuBinding::View(v) => node.bind_buffer_view(v, access),
+            GpuBinding::Tex(t) => node.bind_texture(t, access),
+        };
+    }
+    node
+}
+
+#[allow(
+    clippy::print_stdout,
+    reason = "dump_dispatch prints manifest paths to stdout for debugging when dump is enabled"
+)]
+fn dump_dispatch_gpu(
+    device: &Device,
+    dispatch_idx: usize,
+    shader_id: ShaderId,
+    dims: (u32, u32, u32),
+    bindings: &[GpuBinding<'_>],
+    indices: &[u32],
+    dump_dir: &str,
+) {
+    use std::io::Write;
+    let dir = format!("{dump_dir}/dispatch_{dispatch_idx}");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        log::error!("[dump] failed to create dump directory {dir}: {e}");
+        return;
+    }
+
+    let manifest_path = format!("{dir}/manifest.txt");
+    let mut manifest = match std::fs::File::create(&manifest_path) {
+        Ok(f) => f,
+        Err(e) => {
+            log::error!("[dump] failed to create manifest {manifest_path}: {e}");
+            return;
+        }
+    };
+
+    macro_rules! wln {
+        ($($arg:tt)*) => {
+            if let Err(e) = writeln!(manifest, $($arg)*) {
+                log::error!("[dump] manifest write failed: {e}");
+                return;
+            }
+        };
+    }
+
+    wln!("shader_id: {}", shader_id.0);
+    wln!("dispatch: ({}, {}, {})", dims.0, dims.1, dims.2);
+    wln!("num_bindings: {}", bindings.len());
+    wln!("resource_slots: {:?}", indices);
+
+    for (i, binding) in bindings.iter().enumerate() {
+        match binding {
+            GpuBinding::Buf(buf) => {
+                let size = buf.size() as usize;
+                wln!(
+                    "binding[{i}]: buf size={size} bindless={}",
+                    buf.bindless_index().unwrap_or(u32::MAX)
+                );
+                let mut data = vec![0_u8; size];
+                let ok = buf.read_to_cpu(device, &mut data).is_ok();
+                if ok {
+                    std::fs::write(format!("{dir}/buf_{i}.bin"), &data).ok();
+                } else {
+                    wln!("  (read failed)");
+                }
+            }
+            GpuBinding::View(view) => {
+                let size = view.size() as usize;
+                wln!(
+                    "binding[{i}]: buf_view size={size} bindless={}",
+                    view.bindless_index().unwrap_or(u32::MAX)
+                );
+                let mut data = vec![0_u8; size];
+                let ok = view.read_to_cpu(device, &mut data).is_ok();
+                if ok {
+                    std::fs::write(format!("{dir}/buf_{i}.bin"), &data).ok();
+                } else {
+                    wln!("  (read failed)");
+                }
+            }
+            GpuBinding::Tex(_) => {
+                wln!("binding[{i}]: texture (dump not implemented)");
+            }
+        }
+    }
+    println!(
+        "[dump] dispatch_{dispatch_idx}: shader={} dims={:?} bindings={}",
+        shader_id.0,
+        dims,
+        bindings.len()
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -1139,14 +867,14 @@ impl GoldyRenderer {
             shaders: FullShaders::empty(),
             resolver: Resolver::new(),
             engine_shaders: Vec::new(),
-            frame: FrameState {
-                bind_map: BindMap::default(),
+            persistent: PersistentState {
                 pool: ResourcePool::default(),
                 storage_ring: BufferPoolRing::new(),
                 tex_pool: TexturePool::default(),
-                downloads: HashMap::new(),
-                cleanup_ring: VecDeque::new(),
                 last_drained_bump: None,
+            },
+            frame: FrameState {
+                cleanup_ring: VecDeque::new(),
             },
             pool_size_history: VecDeque::with_capacity(POOL_SHRINK_WINDOW),
             persistent_bump: None,
@@ -1181,33 +909,9 @@ impl GoldyRenderer {
         p.lines = p.lines.max(bump.lines);
     }
 
-    /// Compute the pool shrink max: if the current pool is significantly
-    /// oversized relative to recent demand, returns `Some(target)` to cap
-    /// the pool and trigger a reallocation. Returns `None` if no shrink needed.
-    fn pool_shrink_max(&self) -> Option<u64> {
-        let current_capacity = self.frame.storage_ring.current_capacity().unwrap_or(0);
-        if current_capacity == 0 {
-            return None;
-        }
-        if self.pool_size_history.len() < POOL_SHRINK_WINDOW {
-            return None;
-        }
-        let rolling_max = self.pool_size_history.iter().copied().max().unwrap_or(0);
-        let threshold = (rolling_max as f64 * POOL_SHRINK_THRESHOLD) as u64;
-        if current_capacity > threshold {
-            let target = rolling_max.saturating_mul(3) / 2;
-            log::info!(
-                "Pool shrink: current={}MB, rolling_max={}MB, target={}MB",
-                current_capacity / 1024 / 1024,
-                rolling_max / 1024 / 1024,
-                target / 1024 / 1024,
-            );
-            Some(target)
-        } else {
-            None
-        }
-    }
-
+    // Compute the pool shrink max: if the current pool is significantly oversized
+    // relative to recent demand, returns `Some(target)` to cap the pool and trigger
+    // a reallocation. Returns `None` if no shrink needed.
     // =======================================================================
     // Public API (unchanged signatures)
     // =======================================================================
@@ -1287,9 +991,12 @@ impl GoldyRenderer {
 
         for _attempt in 0..=MAX_BUMP_RETRIES {
             self.render_to_texture(device, scene, &texture, params)?;
-            self.frame.finish_frame_for_readback(device)?;
+            while let Some(entry) = self.frame.cleanup_ring.pop_front() {
+                self.frame
+                    .process_cleanup(device, entry, true, &mut self.persistent)?;
+            }
 
-            match self.frame.last_drained_bump() {
+            match self.persistent.last_drained_bump() {
                 Some(bump) if bump.failed != 0 => {
                     log::info!(
                         "Bump overflow in render_to_buffer (0x{:x}), retrying",
@@ -1300,7 +1007,7 @@ impl GoldyRenderer {
             }
         }
 
-        if let Some(bump) = self.frame.last_drained_bump()
+        if let Some(bump) = self.persistent.last_drained_bump()
             && bump.failed != 0
         {
             log::warn!(
@@ -1311,7 +1018,7 @@ impl GoldyRenderer {
             );
         }
 
-        self.frame.release_pool(device)?;
+        self.frame.release_pool(device, &mut self.persistent)?;
 
         let mut output = vec![0_u8; texture.byte_size()];
         texture
@@ -1345,14 +1052,14 @@ impl GoldyRenderer {
 
         // --- Non-blocking drain of completed frames ---
         let t_drain_start = Instant::now();
-        self.frame.try_drain_completed_frames(device)?;
+        self.frame
+            .try_drain_completed_frames(device, &mut self.persistent)?;
         let t_drain = t_drain_start.elapsed();
 
-        // Flip storage pool index and evict stale pooled bind_map entries
-        self.frame.storage_ring.advance();
-        self.frame.evict_pooled_entries();
+        // Flip storage pool index — pooled sub-allocations from prior frame are invalid.
+        self.persistent.storage_ring.advance();
 
-        let prev_bump = self.frame.take_last_drained_bump();
+        let prev_bump = self.persistent.take_last_drained_bump();
 
         // Fix 5: Only trust bump readback when robust mode produced valid data.
         // A bump with all-zero counters (no failed flag, no usage) is likely stale
@@ -1388,9 +1095,12 @@ impl GoldyRenderer {
         }
 
         let t0 = Instant::now();
+        // Resolve once: pack the scene and obtain ramp/image references.
+        // The packed data and resolve results are threaded directly into
+        // run_coarse so the scene is never packed a second time.
+        let mut packed = vec![];
+        let (layout, ramps, images) = self.resolver.resolve(encoding, &mut packed);
         let config = {
-            let mut packed = vec![];
-            let (layout, _, _) = self.resolver.resolve(encoding, &mut packed);
             let base = ekrano_encoding::RenderConfig::new(
                 &layout,
                 params.width,
@@ -1407,7 +1117,7 @@ impl GoldyRenderer {
                 );
                 base.with_bump_estimates(&sanitize_bump(bump))
             } else if let Some(ref persistent) = self.persistent_bump {
-                // Fix 3: Use accumulated knowledge to pre-size even without overflow.
+                // Use accumulated knowledge to pre-size even without overflow.
                 base.with_bump_estimates(persistent)
             } else {
                 base
@@ -1423,55 +1133,88 @@ impl GoldyRenderer {
         if self.pool_size_history.len() > POOL_SHRINK_WINDOW {
             self.pool_size_history.pop_front();
         }
-        let shrink_max = self.pool_shrink_max();
+        // Inline pool_shrink_max to avoid a &self borrow that conflicts with the
+        // self.resolver lifetime held by `ramps` and `images`.
+        let shrink_max = {
+            let current_capacity = self.persistent.storage_ring.current_capacity().unwrap_or(0);
+            if current_capacity == 0 || self.pool_size_history.len() < POOL_SHRINK_WINDOW {
+                None
+            } else {
+                let rolling_max = self.pool_size_history.iter().copied().max().unwrap_or(0);
+                let threshold = (rolling_max as f64 * POOL_SHRINK_THRESHOLD) as u64;
+                if current_capacity > threshold {
+                    let target = rolling_max.saturating_mul(3) / 2;
+                    log::info!(
+                        "Pool shrink: current={}MB, rolling_max={}MB, target={}MB",
+                        current_capacity / 1024 / 1024,
+                        rolling_max / 1024 / 1024,
+                        target / 1024 / 1024,
+                    );
+                    Some(target)
+                } else {
+                    None
+                }
+            }
+        };
 
         let t1 = Instant::now();
-        self.frame
+        self.persistent
             .prepare_storage_pool(device, pool_size, shrink_max)?;
         let t_pool = t1.elapsed();
 
         let t2 = Instant::now();
-        let mut recorder =
-            FrameRecorder::new(device, &mut self.frame, &self.engine_shaders, surface_frame);
+        let mut recorder = FrameRecorder::new(
+            device,
+            &mut self.frame,
+            &mut self.persistent,
+            &self.engine_shaders,
+            surface_frame,
+        );
+
+        let (graph, persistent) = recorder.graph_and_persistent();
+        let mut pipeline = crate::gpu_resources::PipelineResources::prepare(
+            device, graph, persistent, encoding, packed, ramps, images, params, &config,
+        )?;
 
         let mut render = Render::new();
-        render.render_encoding_coarse_with_config(
+        render.run_coarse(
             encoding,
-            &mut self.resolver,
+            &mut pipeline,
             &self.shaders,
             params,
             params.robust,
             &config,
             &mut recorder,
         );
-        let out_image = render.out_image();
-        let filter_layers = render.filter_layer_textures();
         let t_coarse = t2.elapsed();
 
-        if let Some(tex) = output_texture {
-            recorder.set_output_image(&out_image, tex);
-        }
-
         let t3 = Instant::now();
-        render.record_fine(encoding, &self.shaders, &mut recorder);
-        render::record_filter_effects(
+        render.record_fine(
+            encoding,
+            &self.shaders,
+            &pipeline,
+            output_texture,
+            &mut recorder,
+        );
+        crate::render::record_filter_effects(
             encoding,
             &self.shaders,
             &mut recorder,
-            params.width,
-            params.height,
-            &filter_layers,
-            out_image,
+            &pipeline,
+            output_texture,
         );
         let t_fine_record = t3.elapsed();
 
         #[cfg(feature = "debug_layers")]
-        if let Some(captured) = render.take_captured_buffers() {
-            captured.release_buffers(&mut recorder);
+        if render.take_captured_buffers().is_some() {
+            log::debug!(
+                "debug_layers: coarse buffer capture is not yet wired for direct GPU resources"
+            );
         }
 
         let t4 = Instant::now();
-        recorder.finish(Some(out_image.id))?;
+        recorder.schedule_pipeline_cleanup(pipeline, params.robust);
+        recorder.finish()?;
         let t_submit = t4.elapsed();
 
         let frame_num = FRAME_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -1581,10 +1324,6 @@ impl GoldyRenderer {
 // Free functions and helper impls (formerly in goldy_engine.rs)
 // -----------------------------------------------------------------------
 
-fn bumps_buf_static_name() -> &'static str {
-    "vello.bump_buf"
-}
-
 fn flush_graph(
     graph: &mut TaskGraph,
     device: &Device,
@@ -1609,179 +1348,4 @@ fn flush_graph(
     }
     *graph = TaskGraph::new();
     Ok(())
-}
-
-fn image_format_to_goldy(format: crate::resource_proxy::ImageFormat) -> TextureFormat {
-    match format {
-        crate::resource_proxy::ImageFormat::Rgba8 => TextureFormat::Rgba8Unorm,
-        crate::resource_proxy::ImageFormat::Bgra8 => TextureFormat::Bgra8Unorm,
-    }
-}
-
-fn bind_type_to_node_access(bt: BindType) -> NodeAccess {
-    match bt {
-        BindType::Buffer | BindType::Image(_) => NodeAccess::ReadWrite,
-        BindType::BufReadOnly | BindType::Uniform | BindType::ImageRead(_) => NodeAccess::Read,
-    }
-}
-
-impl BindMap {
-    fn insert_buf(&mut self, id: ResourceId, gpu_buf: GpuBuffer, name: &'static str) {
-        self.buf_map.insert(id, (gpu_buf, name));
-    }
-
-    fn get_buf(&self, id: ResourceId) -> Option<&(GpuBuffer, &'static str)> {
-        self.buf_map.get(&id)
-    }
-
-    fn remove_buf(&mut self, id: ResourceId) {
-        self.buf_map.remove(&id);
-    }
-
-    fn insert_image(&mut self, id: ResourceId, tex: Texture, name: &'static str) {
-        self.image_map.insert(id, (tex, name));
-    }
-
-    fn get_image(&self, id: ResourceId) -> Option<&(Texture, &'static str)> {
-        self.image_map.get(&id)
-    }
-
-    fn remove_image(&mut self, id: ResourceId) {
-        self.image_map.remove(&id);
-    }
-
-    fn take_image(&mut self, id: ResourceId) -> Option<(Texture, &'static str)> {
-        self.image_map.remove(&id)
-    }
-}
-
-impl ResourcePool {
-    #[allow(
-        dead_code,
-        reason = "convenience wrapper; only get_buf_with_stride is used"
-    )]
-    fn get_buf(
-        &mut self,
-        device: &Device,
-        size: u64,
-        name: &'static str,
-        access: DataAccess,
-    ) -> Result<Buffer> {
-        self.get_buf_with_stride(device, size, name, access, None, BufferFlags::empty())
-    }
-
-    fn get_buf_with_stride(
-        &mut self,
-        device: &Device,
-        size: u64,
-        name: &'static str,
-        access: DataAccess,
-        stride: Option<u32>,
-        buffer_flags: BufferFlags,
-    ) -> Result<Buffer> {
-        let key = BufferKey {
-            size,
-            access,
-            name,
-            buffer_flags,
-        };
-        let pool = self.bufs.entry(key).or_default();
-        if let Some(buf) = pool.pop() {
-            return Ok(buf);
-        }
-        let stride = stride.or_else(|| element_stride_for_buffer(name));
-        Buffer::new_with_stride_and_flags(device, size, access, stride, buffer_flags)
-            .map_err(|e| Error::Shader(e.to_string()))
-    }
-}
-
-fn element_stride_for_buffer(name: &str) -> Option<u32> {
-    match name {
-        "vello.path_buf" => Some(32),
-        "vello.tile_buf" => Some(8),
-        "vello.segments_buf" => Some(24),
-        "vello.seg_counts_buf" => Some(8),
-        "vello.lines_buf" => Some(24),
-        "vello.path_bbox_buf" => Some(24),
-        "vello.bump_buf" => Some(32),
-        "vello.ptcl_buf" => Some(4),
-        "vello.info_bin_data_buf" => Some(4),
-        "vello.tagmonoid_buf" => Some(20),
-        "vello.draw_monoid_buf" => Some(16),
-        "vello.draw_reduced_buf" => Some(16),
-        "vello.reduced_buf" => Some(20),
-        "vello.reduced2_buf" => Some(20),
-        "vello.reduced_scan_buf" => Some(20),
-        "vello.draw_bbox_buf" => Some(16),
-        "vello.bin_header_buf" => Some(8),
-        "vello.clip_inp_buf" => Some(8),
-        "vello.clip_el_buf" => Some(32),
-        "vello.clip_bic_buf" => Some(8),
-        "vello.clip_bbox_buf" => Some(16),
-        "vello.indirect_dispatch" => Some(16),
-        "vello.indirect_count" => Some(16),
-        "vello.config" => Some(size_of::<ekrano_encoding::ConfigUniform>() as u32),
-        "vello.wg_counts" => Some(320),
-        "vello.scene" | "vello.blend_spill" | "vello.mask_lut" => Some(4),
-        _ => {
-            log::error!(
-                "unknown buffer stride for '{name}' — add entry to element_stride_for_buffer \
-                 or set BufferProxy::element_stride at the creation site; \
-                 buffer will be created without stride metadata"
-            );
-            None
-        }
-    }
-}
-
-fn collect_bindless_indices(
-    resources: &[ResourceProxy],
-    bind_types: &[BindType],
-    bind_map: &BindMap,
-    all_uav: bool,
-) -> Result<Vec<u32>, Error> {
-    let mut indices = Vec::with_capacity(resources.len());
-    for (i, res) in resources.iter().enumerate() {
-        let is_read_only = !all_uav && matches!(bind_types.get(i), Some(BindType::BufReadOnly));
-        let idx = match res {
-            ResourceProxy::Buffer(proxy) | ResourceProxy::BufferRange { proxy, .. } => {
-                let (buf, _) = bind_map
-                    .get_buf(proxy.id)
-                    .ok_or_else(|| Error::Shader("buffer not found".into()))?;
-                if is_read_only {
-                    buf.bindless_srv_index()
-                        .ok_or_else(|| Error::Shader("buffer has no SRV index".into()))?
-                } else {
-                    buf.bindless_index()
-                        .ok_or_else(|| Error::Shader("buffer has no bindless index".into()))?
-                }
-            }
-            ResourceProxy::Image(proxy) => {
-                let entry = bind_map.get_image(proxy.id);
-                match entry {
-                    Some((tex, name)) => tex.bindless_index().ok_or_else(|| {
-                        Error::Shader(format!(
-                            "image '{}' (id={}) exists but has no bindless index",
-                            name, proxy.id.0
-                        ))
-                    })?,
-                    None => {
-                        return Err(Error::Shader(format!(
-                            "image not found in bind map (id={}, {}x{})",
-                            proxy.id.0, proxy.width, proxy.height
-                        )));
-                    }
-                }
-            }
-        };
-        indices.push(idx);
-    }
-    if indices.len() > MAX_BINDLESS_SLOTS {
-        return Err(Error::Shader(format!(
-            "shader requires {} bindless slots, exceeds limit of {}",
-            indices.len(),
-            MAX_BINDLESS_SLOTS
-        )));
-    }
-    Ok(indices)
 }

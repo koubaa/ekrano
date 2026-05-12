@@ -67,6 +67,7 @@ pub use draw::{
 pub use encoding::{Encoding, Resources, StreamOffsets};
 pub use filter::{Filter, FilterEdgeMode, FilterPrimitive, FilterUniform, LayerFilterEffect};
 pub use glyph::{Glyph, GlyphRun};
+pub use image_cache::Images;
 pub use mask::{make_mask_lut, make_mask_lut_16};
 pub use math::Transform;
 pub use monoid::Monoid;
