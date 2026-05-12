@@ -42,7 +42,6 @@ impl GpuBuf {
             Self::Pooled(v) => GpuBinding::View(v),
         }
     }
-
 }
 
 pub(crate) enum GpuBinding<'a> {
@@ -70,7 +69,9 @@ impl<'a> GpuBinding<'a> {
             }
             GpuBinding::Tex(tex) => tex.bindless_index(),
         };
-        idx.ok_or_else(|| Error::Shader("bindless index missing for shader resource binding".into()))
+        idx.ok_or_else(|| {
+            Error::Shader("bindless index missing for shader resource binding".into())
+        })
     }
 }
 
@@ -307,7 +308,10 @@ impl PipelineResources {
             cpu_config_owned.gpu.mask_active = 1;
         }
         if let Some(ref m) = encoding.coverage_mask {
-            assert_eq!(m.width, params.width, "coverage_mask width must match render width");
+            assert_eq!(
+                m.width, params.width,
+                "coverage_mask width must match render width"
+            );
             assert_eq!(
                 m.height, params.height,
                 "coverage_mask height must match render height"
@@ -377,27 +381,18 @@ impl PipelineResources {
                     &rgba,
                 )?
             }
-            None => {
-                record_upload_image(
-                    device,
-                    graph,
-                    persistent,
-                    1,
-                    1,
-                    ImageFormat::Rgba8,
-                    &[255, 255, 255, 255],
-                )?
-            }
+            None => record_upload_image(
+                device,
+                graph,
+                persistent,
+                1,
+                1,
+                ImageFormat::Rgba8,
+                &[255, 255, 255, 255],
+            )?,
         };
 
-        let scene = record_upload_bytes(
-            device,
-            graph,
-            persistent,
-            "ekrano.scene",
-            4,
-            &packed,
-        )?;
+        let scene = record_upload_bytes(device, graph, persistent, "ekrano.scene", 4, &packed)?;
         let config = record_upload_bytes(
             device,
             graph,

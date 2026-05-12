@@ -67,6 +67,7 @@ pub use draw::{
 pub use encoding::{Encoding, Resources, StreamOffsets};
 pub use filter::{Filter, FilterEdgeMode, FilterPrimitive, FilterUniform, LayerFilterEffect};
 pub use glyph::{Glyph, GlyphRun};
+pub use image_cache::Images;
 pub use mask::{make_mask_lut, make_mask_lut_16};
 pub use math::Transform;
 pub use monoid::Monoid;
@@ -74,7 +75,6 @@ pub use path::{
     Cubic, LineSoup, Path, PathBbox, PathEncoder, PathMonoid, PathSegment, PathSegmentType,
     PathTag, SegmentCount, Style, Tile,
 };
-pub use image_cache::Images;
 pub use ramp_cache::Ramps;
 pub use resolve::{Layout, Patch, Resolver, resolve_solid_paths_only};
 

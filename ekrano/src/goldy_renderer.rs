@@ -35,8 +35,8 @@ use mem::size_of;
 use crate::{
     Error, RenderParams, Result, Scene,
     gpu_resources::{
-        bind_type_to_node_access, collect_bindless_indices_direct, record_upload_bytes, GpuBinding,
-        GpuBuf,
+        GpuBinding, GpuBuf, bind_type_to_node_access, collect_bindless_indices_direct,
+        record_upload_bytes,
     },
     render::Render,
     resource_proxy::{BindType, ShaderId},
@@ -577,7 +577,12 @@ impl<'a> FrameRecorder<'a> {
         self.upload_strided(name, size_of::<T>() as u32, bytes)
     }
 
-    pub fn dispatch(&mut self, shader: ShaderId, wg_size: (u32, u32, u32), bindings: &[GpuBinding<'_>]) {
+    pub fn dispatch(
+        &mut self,
+        shader: ShaderId,
+        wg_size: (u32, u32, u32),
+        bindings: &[GpuBinding<'_>],
+    ) {
         self.dispatch_inner(shader, wg_size, bindings, &[]);
     }
 
@@ -667,7 +672,8 @@ impl<'a> FrameRecorder<'a> {
         .expect("collect_bindless_indices_direct failed in dispatch_indirect");
 
         if let Some(ref dir) = *DUMP_DIR {
-            let indirect_dims = GoldyRenderer::read_indirect_dims(self.device, indirect_buf, offset);
+            let indirect_dims =
+                GoldyRenderer::read_indirect_dims(self.device, indirect_buf, offset);
             dump_dispatch_gpu(
                 self.device,
                 self.dispatch_count,
@@ -986,7 +992,8 @@ impl GoldyRenderer {
         for _attempt in 0..=MAX_BUMP_RETRIES {
             self.render_to_texture(device, scene, &texture, params)?;
             while let Some(entry) = self.frame.cleanup_ring.pop_front() {
-                self.frame.process_cleanup(device, entry, true, &mut self.persistent)?;
+                self.frame
+                    .process_cleanup(device, entry, true, &mut self.persistent)?;
             }
 
             match self.persistent.last_drained_bump() {
@@ -1129,11 +1136,7 @@ impl GoldyRenderer {
         // Inline pool_shrink_max to avoid a &self borrow that conflicts with the
         // self.resolver lifetime held by `ramps` and `images`.
         let shrink_max = {
-            let current_capacity = self
-                .persistent
-                .storage_ring
-                .current_capacity()
-                .unwrap_or(0);
+            let current_capacity = self.persistent.storage_ring.current_capacity().unwrap_or(0);
             if current_capacity == 0 || self.pool_size_history.len() < POOL_SHRINK_WINDOW {
                 None
             } else {
@@ -1170,15 +1173,7 @@ impl GoldyRenderer {
 
         let (graph, persistent) = recorder.graph_and_persistent();
         let mut pipeline = crate::gpu_resources::PipelineResources::prepare(
-            device,
-            graph,
-            persistent,
-            encoding,
-            packed,
-            ramps,
-            images,
-            params,
-            &config,
+            device, graph, persistent, encoding, packed, ramps, images, params, &config,
         )?;
 
         let mut render = Render::new();

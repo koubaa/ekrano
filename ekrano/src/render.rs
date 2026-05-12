@@ -12,8 +12,8 @@ use crate::{AaConfig, RenderParams};
 use std::mem::size_of;
 
 use ekrano_encoding::{
-    Encoding, FilterPrimitive, FilterUniform, IndirectCount, WorkgroupCountsGpu,
-    WorkgroupSize, make_mask_lut, make_mask_lut_16,
+    Encoding, FilterPrimitive, FilterUniform, IndirectCount, WorkgroupCountsGpu, WorkgroupSize,
+    make_mask_lut, make_mask_lut_16,
 };
 use goldy::Texture;
 use goldy::types::{BufferFlags, SpatialAccess, TextureFlags};
@@ -123,7 +123,9 @@ impl Render {
         const INDIRECT_STRIDE: u64 = size_of::<IndirectCount>() as u64;
 
         if use_indirect {
-            let setup = shaders.pipeline_setup.expect("pipeline_setup when use_indirect");
+            let setup = shaders
+                .pipeline_setup
+                .expect("pipeline_setup when use_indirect");
             let wg_counts_gpu = WorkgroupCountsGpu::from(wg_counts);
             let wg_buf = recorder.upload_typed("ekrano.wg_counts", &wg_counts_gpu);
             let indirect = recorder
@@ -137,10 +139,7 @@ impl Render {
             recorder.dispatch(
                 setup,
                 (1, 1, 1),
-                &[
-                    GpuBinding::Buf(&wg_buf),
-                    indirect.as_binding(),
-                ],
+                &[GpuBinding::Buf(&wg_buf), indirect.as_binding()],
             );
             recorder.defer_owned_buffer(wg_buf);
             pipeline.indirect = Some(indirect);
@@ -276,7 +275,10 @@ impl Render {
             STAGE_BBOX_CLEAR,
             wg_counts.bbox_clear,
             INDIRECT_STRIDE,
-            &[pipeline.config.as_binding(), pipeline.path_bbox.as_binding()],
+            &[
+                pipeline.config.as_binding(),
+                pipeline.path_bbox.as_binding(),
+            ],
         );
 
         let flatten_bindings = [
