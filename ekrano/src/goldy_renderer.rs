@@ -26,8 +26,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use goldy::task_graph::{NodeAccess, NodeBuilder};
 use goldy::types::{BufferFlags, SpatialAccess, TextureFlags, TextureFormat};
 use goldy::{
-    Buffer, BufferPool, BufferPoolRing, BufferView, ComputePipeline, DataAccess, Device,
-    DeviceType, Frame, ShaderModule, TaskGraph, Texture, TexturePool, TimelineValue,
+    Buffer, BufferPool, ComputePipeline, DataAccess, Device, DeviceType, Frame, ShaderModule,
+    TaskGraph, Texture, TexturePool, TimelineValue,
 };
 
 use mem::size_of;
@@ -116,7 +116,6 @@ struct FrameCleanup {
     /// Index into [`FrameCleanup::deferred_owned_buffers`] for bump readback (`ekrano.bump_buf`).
     bump_readback_owned_index: Option<usize>,
     deferred_owned_buffers: Vec<Buffer>,
-    deferred_buffer_views: Vec<BufferView>,
     deferred_textures: Vec<Texture>,
 }
 
@@ -177,7 +176,7 @@ impl ResourcePool {
 
 /// Maximum number of unprocessed `FrameCleanup` entries before we force a
 /// synchronous wait to prevent unbounded growth.
-const MAX_CLEANUP_DEPTH: usize = 2;
+const MAX_CLEANUP_DEPTH: usize = 8;
 
 // -----------------------------------------------------------------------
 // PersistentState — GPU resources that survive across frames
@@ -188,9 +187,9 @@ const MAX_CLEANUP_DEPTH: usize = 2;
 pub(crate) struct PersistentState {
     /// Owned buffer cache: recycles pool-exempt buffers (bump, indirect, etc.)
     pub(crate) pool: ResourcePool,
-    /// Main storage pool: a ring-buffered large GPU allocation that pooled
-    /// compute buffers sub-allocate from each frame.
-    pub(crate) storage_ring: BufferPoolRing,
+    /// Main storage pool: single growable Goldy buffer with a CPU bump allocator
+    /// for pooled compute buffers each frame.
+    pub(crate) storage_pool: Option<BufferPool>,
     /// Texture pool for intermediate render targets (gradient, filter layers, etc.)
     pub(crate) tex_pool: TexturePool,
     /// Bump allocator counters from the most recently drained frame.
@@ -202,19 +201,48 @@ impl PersistentState {
     fn prepare_storage_pool(
         &mut self,
         device: &Device,
+        frame: &FrameState,
         pool_size: u64,
-        max_size: Option<u64>,
+        expected_max: u64,
     ) -> Result<()> {
         if !use_pool(device) {
             return Ok(());
         }
-        self.storage_ring
-            .prepare_bounded(device, pool_size, max_size)
-            .map_err(|e| Error::Shader(e.to_string()))
+        frame.wait_before_storage_pool_reuse(device)?;
+
+        let need_new = match &self.storage_pool {
+            Some(pool) => pool.capacity() < pool_size,
+            None => true,
+        };
+        if need_new {
+            if let Some(pool) = &mut self.storage_pool {
+                pool
+                    .resize(pool_size)
+                    .map_err(|e| Error::Shader(e.to_string()))?;
+            } else {
+                device.reset_buffer_heaps();
+                device.ensure_buffer_heap_capacity(expected_max.max(pool_size));
+                self.storage_pool = Some(
+                    BufferPool::with_alignment_and_capacity_hint(
+                        device,
+                        pool_size,
+                        expected_max,
+                        256,
+                    )
+                    .map_err(|e| Error::Shader(e.to_string()))?,
+                );
+            }
+        } else {
+            self.storage_pool
+                .as_mut()
+                .expect("storage pool must exist when need_new is false")
+                .reset();
+        }
+        Ok(())
     }
 
     pub(crate) fn storage_pool_mut(&mut self) -> Option<&mut BufferPool> {
-        self.storage_ring.current_mut()
+        self.storage_pool.as_mut()
     }
 
     fn last_drained_bump(&self) -> Option<&BumpAllocators> {
@@ -239,12 +267,6 @@ struct FrameState {
 // GoldyRenderer — the merged struct
 // -----------------------------------------------------------------------
 
-/// Number of frames over which pool-size history is tracked for shrink hysteresis.
-const POOL_SHRINK_WINDOW: usize = 60;
-
-/// Only shrink if the current pool is at least this factor larger than the rolling max.
-const POOL_SHRINK_THRESHOLD: f64 = 2.0;
-
 /// Goldy-based 2D renderer.
 ///
 /// Renders scenes to textures using the Goldy GPU backend with Slang shaders.
@@ -258,8 +280,6 @@ pub struct GoldyRenderer {
     persistent: PersistentState,
     /// Per-frame bookkeeping: bind map, cleanup ring, download results.
     frame: FrameState,
-    /// Rolling history of requested pool sizes for shrink hysteresis.
-    pool_size_history: VecDeque<u64>,
     /// Persistent bump estimates: running max across frames. Used to pre-size
     /// buffers even when no overflow occurs, avoiding the cold-start ramp-up.
     persistent_bump: Option<BumpAllocators>,
@@ -270,6 +290,23 @@ pub struct GoldyRenderer {
 // -----------------------------------------------------------------------
 
 impl FrameState {
+    /// [`BufferPool::reset`] is only safe once GPU work that consumed last frame's
+    /// pool suballocations has completed. The most recent [`FrameCleanup`] carries
+    /// that frame's [`TimelineValue`] once recorded (call [`GoldyRenderer::note_frame_presented`]
+    /// on the swapchain path before the next frame).
+    fn wait_before_storage_pool_reuse(&self, device: &Device) -> Result<()> {
+        if let Some(back) = self.cleanup_ring.back() {
+            if let Some(tv) = back.timeline
+                && device.gpu_progress() < tv
+            {
+                device
+                    .wait_until(tv)
+                    .map_err(|e| Error::Shader(e.to_string()))?;
+            }
+        }
+        Ok(())
+    }
+
     /// Non-blocking drain: process any completed cleanup entries from the
     /// front of the ring. If the ring has grown beyond `MAX_CLEANUP_DEPTH`,
     /// force a synchronous wait on the oldest entry to prevent unbounded growth.
@@ -337,9 +374,9 @@ impl FrameState {
             persistent.last_drained_bump = Some(bytemuck::pod_read_unaligned(&output));
         }
 
-        // Owned buffers and pool views: drop (GPU idle).
+        // Owned buffers: drop (GPU idle). Pooled [`BufferView`]s are not deferred;
+        // the growable backing buffer stays alive in [`PersistentState`].
         drop(entry.deferred_owned_buffers);
-        drop(entry.deferred_buffer_views);
         for tex in entry.deferred_textures {
             persistent.tex_pool.release(tex);
         }
@@ -351,7 +388,7 @@ impl FrameState {
 
     fn release_pool(&mut self, device: &Device, persistent: &mut PersistentState) -> Result<()> {
         self.wait_until_gpu_idle(device, persistent)?;
-        persistent.storage_ring.clear();
+        persistent.storage_pool = None;
         Ok(())
     }
 }
@@ -371,7 +408,6 @@ pub(crate) struct FrameRecorder<'a> {
     last_timeline: Option<TimelineValue>,
     bump_readback_owned_index: Option<usize>,
     deferred_owned_buffers: Vec<Buffer>,
-    deferred_buffer_views: Vec<BufferView>,
     deferred_textures: Vec<Texture>,
     dispatch_count: usize,
 }
@@ -385,13 +421,7 @@ impl<'a> FrameRecorder<'a> {
         surface_frame: Option<&'a Frame>,
     ) -> Self {
         let fuav = force_uav(device);
-        let mut graph = TaskGraph::new();
-
-        if persistent.storage_ring.take_clear_flag()
-            && let Some(pool) = persistent.storage_ring.current()
-        {
-            graph.clear_buffer(pool.backing_buffer(), 0, pool.capacity());
-        }
+        let graph = TaskGraph::new();
 
         Self {
             device,
@@ -404,7 +434,6 @@ impl<'a> FrameRecorder<'a> {
             last_timeline: None,
             bump_readback_owned_index: None,
             deferred_owned_buffers: Vec::new(),
-            deferred_buffer_views: Vec::new(),
             deferred_textures: Vec::new(),
             dispatch_count: 0,
         }
@@ -435,7 +464,10 @@ impl<'a> FrameRecorder<'a> {
     pub(crate) fn defer_gpu_buf(&mut self, buf: GpuBuf) {
         match buf {
             GpuBuf::Owned(b) => self.deferred_owned_buffers.push(b),
-            GpuBuf::Pooled(v) => self.deferred_buffer_views.push(v),
+            GpuBuf::Pooled(_v) => {
+                // Backing [`BufferPool`] outlives the frame; views need not keep GPU
+                // work alive (see [`FrameState::wait_before_storage_pool_reuse`]).
+            }
         }
     }
 
@@ -734,7 +766,6 @@ impl<'a> FrameRecorder<'a> {
             timeline,
             bump_readback_owned_index: self.bump_readback_owned_index,
             deferred_owned_buffers: self.deferred_owned_buffers,
-            deferred_buffer_views: self.deferred_buffer_views,
             deferred_textures: self.deferred_textures,
         });
 
@@ -869,14 +900,13 @@ impl GoldyRenderer {
             engine_shaders: Vec::new(),
             persistent: PersistentState {
                 pool: ResourcePool::default(),
-                storage_ring: BufferPoolRing::new(),
+                storage_pool: None,
                 tex_pool: TexturePool::default(),
                 last_drained_bump: None,
             },
             frame: FrameState {
                 cleanup_ring: VecDeque::new(),
             },
-            pool_size_history: VecDeque::with_capacity(POOL_SHRINK_WINDOW),
             persistent_bump: None,
         };
         let shaders = shaders::goldy_full_shaders(device, &mut renderer)?;
@@ -1056,9 +1086,6 @@ impl GoldyRenderer {
             .try_drain_completed_frames(device, &mut self.persistent)?;
         let t_drain = t_drain_start.elapsed();
 
-        // Flip storage pool index — pooled sub-allocations from prior frame are invalid.
-        self.persistent.storage_ring.advance();
-
         let prev_bump = self.persistent.take_last_drained_bump();
 
         // Fix 5: Only trust bump readback when robust mode produced valid data.
@@ -1127,39 +1154,23 @@ impl GoldyRenderer {
 
         let base = BufferPool::padded_size(&config.buffer_sizes.pool_allocs());
         let pool_size = base.saturating_add(POOL_SIZE_SLACK);
-
-        // Fix 2: Track pool size history and allow shrinking with hysteresis.
-        self.pool_size_history.push_back(pool_size);
-        if self.pool_size_history.len() > POOL_SHRINK_WINDOW {
-            self.pool_size_history.pop_front();
-        }
-        // Inline pool_shrink_max to avoid a &self borrow that conflicts with the
-        // self.resolver lifetime held by `ramps` and `images`.
-        let shrink_max = {
-            let current_capacity = self.persistent.storage_ring.current_capacity().unwrap_or(0);
-            if current_capacity == 0 || self.pool_size_history.len() < POOL_SHRINK_WINDOW {
-                None
-            } else {
-                let rolling_max = self.pool_size_history.iter().copied().max().unwrap_or(0);
-                let threshold = (rolling_max as f64 * POOL_SHRINK_THRESHOLD) as u64;
-                if current_capacity > threshold {
-                    let target = rolling_max.saturating_mul(3) / 2;
-                    log::info!(
-                        "Pool shrink: current={}MB, rolling_max={}MB, target={}MB",
-                        current_capacity / 1024 / 1024,
-                        rolling_max / 1024 / 1024,
-                        target / 1024 / 1024,
-                    );
-                    Some(target)
-                } else {
-                    None
-                }
+        let expected_max = {
+            let mut cfg_est = ekrano_encoding::RenderConfig::new(
+                &layout,
+                params.width,
+                params.height,
+                &params.base_color,
+            );
+            if let Some(ref b) = self.persistent_bump {
+                cfg_est = cfg_est.with_bump_estimates(&sanitize_bump(b));
             }
+            let est = BufferPool::padded_size(&cfg_est.buffer_sizes.pool_allocs());
+            est.saturating_add(POOL_SIZE_SLACK).max(pool_size)
         };
 
         let t1 = Instant::now();
         self.persistent
-            .prepare_storage_pool(device, pool_size, shrink_max)?;
+            .prepare_storage_pool(device, &self.frame, pool_size, expected_max)?;
         let t_pool = t1.elapsed();
 
         let t2 = Instant::now();
@@ -1215,6 +1226,11 @@ impl GoldyRenderer {
         let t4 = Instant::now();
         recorder.schedule_pipeline_cleanup(pipeline, params.robust);
         recorder.finish()?;
+        if use_pool(device) {
+            if let Some(pool) = self.persistent.storage_pool_mut() {
+                pool.hint_unused_above(pool.used());
+            }
+        }
         let t_submit = t4.elapsed();
 
         let frame_num = FRAME_COUNTER.fetch_add(1, Ordering::Relaxed);
