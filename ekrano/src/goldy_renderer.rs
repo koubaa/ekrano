@@ -240,17 +240,19 @@ impl PersistentState {
             let config = TransientAllocatorConfig {
                 initial_size: pool_size,
                 expected_max,
-                // For region-based strategies, size each region around the expected per-frame
-                // demand. Falls back to pool_size when the running estimate is unavailable.
                 min_region_size: pool_size,
-                max_regions: 4,
+                max_regions: 3,
                 alignment: 256,
                 flags: BufferFlags::GPU_ONLY,
             };
 
-            let strategy = TransientAllocatorStrategy::from_env();
+            let strategy = std::env::var("EKRANO_TRANSIENT_ALLOCATOR")
+                .ok()
+                .as_deref()
+                .and_then(TransientAllocatorStrategy::parse)
+                .unwrap_or_default();
             log::info!(
-                "[ekrano] transient allocator strategy = {:?} (set GOLDY_TRANSIENT_ALLOCATOR=bump|epoch to override)",
+                "[ekrano] transient allocator strategy = {:?} (set EKRANO_TRANSIENT_ALLOCATOR=bump|epoch to override)",
                 strategy
             );
             self.storage_allocator = Some(
