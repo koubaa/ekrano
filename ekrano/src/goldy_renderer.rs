@@ -216,8 +216,7 @@ impl PersistentState {
         };
         if need_new {
             if let Some(pool) = &mut self.storage_pool {
-                pool
-                    .resize(pool_size)
+                pool.resize(pool_size)
                     .map_err(|e| Error::Shader(e.to_string()))?;
             } else {
                 device.reset_buffer_heaps();
@@ -295,14 +294,13 @@ impl FrameState {
     /// that frame's [`TimelineValue`] once recorded (call [`GoldyRenderer::note_frame_presented`]
     /// on the swapchain path before the next frame).
     fn wait_before_storage_pool_reuse(&self, device: &Device) -> Result<()> {
-        if let Some(back) = self.cleanup_ring.back() {
-            if let Some(tv) = back.timeline
-                && device.gpu_progress() < tv
-            {
-                device
-                    .wait_until(tv)
-                    .map_err(|e| Error::Shader(e.to_string()))?;
-            }
+        if let Some(back) = self.cleanup_ring.back()
+            && let Some(tv) = back.timeline
+            && device.gpu_progress() < tv
+        {
+            device
+                .wait_until(tv)
+                .map_err(|e| Error::Shader(e.to_string()))?;
         }
         Ok(())
     }
@@ -1226,10 +1224,10 @@ impl GoldyRenderer {
         let t4 = Instant::now();
         recorder.schedule_pipeline_cleanup(pipeline, params.robust);
         recorder.finish()?;
-        if use_pool(device) {
-            if let Some(pool) = self.persistent.storage_pool_mut() {
-                pool.hint_unused_above(pool.used());
-            }
+        if use_pool(device)
+            && let Some(pool) = self.persistent.storage_pool_mut()
+        {
+            pool.hint_unused_above(pool.used());
         }
         let t_submit = t4.elapsed();
 
