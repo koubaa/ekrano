@@ -136,7 +136,7 @@ fn force_uav(device: &Device) -> bool {
     device.device_type() == DeviceType::Cpu
 }
 
-#[derive(Hash, PartialEq, Eq)]
+#[derive(Hash, PartialEq, Eq, Clone)]
 struct BufferKey {
     size: u64,
     access: DataAccess,
@@ -171,6 +171,22 @@ impl ResourcePool {
         }
         Buffer::new_with_stride_and_flags(device, size, access, stride, buffer_flags)
             .map_err(|e| Error::Shader(e.to_string()))
+    }
+
+    /// Drop excess pooled [`Buffer`]s per `(size, access, name)` key to bound memory.
+    pub(crate) fn cap_pool_depth(&mut self, max_per_key: usize) {
+        let mut empties = Vec::<BufferKey>::new();
+        for (key, stack) in self.bufs.iter_mut() {
+            while stack.len() > max_per_key {
+                drop(stack.pop());
+            }
+            if stack.is_empty() {
+                empties.push(key.clone());
+            }
+        }
+        for k in empties {
+            self.bufs.remove(&k);
+        }
     }
 }
 
@@ -210,6 +226,16 @@ impl PersistentState {
         }
         frame.wait_before_storage_pool_reuse(device)?;
 
+        // Shrink an oversized persistent pool once demand has dropped for several frames.
+        if let Some(pool) = &mut self.storage_pool {
+            let cap = pool.capacity();
+            if cap > pool_size.saturating_mul(4) && cap > pool_size {
+                pool.resize(pool_size)
+                    .map_err(|e| Error::Shader(e.to_string()))?;
+                pool.reset();
+            }
+        }
+
         let need_new = match &self.storage_pool {
             Some(pool) => pool.capacity() < pool_size,
             None => true,
@@ -222,11 +248,12 @@ impl PersistentState {
                 device.reset_buffer_heaps();
                 device.ensure_buffer_heap_capacity(expected_max.max(pool_size));
                 self.storage_pool = Some(
-                    BufferPool::with_alignment_and_capacity_hint(
+                    BufferPool::with_alignment_capacity_hint_and_flags(
                         device,
                         pool_size,
                         expected_max,
                         256,
+                        BufferFlags::GPU_ONLY,
                     )
                     .map_err(|e| Error::Shader(e.to_string()))?,
                 );
@@ -909,6 +936,7 @@ impl GoldyRenderer {
         };
         let shaders = shaders::goldy_full_shaders(device, &mut renderer)?;
         renderer.shaders = shaders;
+        device.release_idle_shader_compiler();
         Ok(renderer)
     }
 
@@ -1082,6 +1110,7 @@ impl GoldyRenderer {
         let t_drain_start = Instant::now();
         self.frame
             .try_drain_completed_frames(device, &mut self.persistent)?;
+        self.persistent.pool.cap_pool_depth(12);
         let t_drain = t_drain_start.elapsed();
 
         let prev_bump = self.persistent.take_last_drained_bump();
