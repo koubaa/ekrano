@@ -111,11 +111,11 @@ pub(crate) fn alloc_pipeline_buffer(
 ) -> Result<GpuBuf, Error> {
     let pooled = use_pool(device) && !is_pool_exempt(name);
     if pooled {
-        let pool = persistent
-            .storage_pool_mut()
-            .ok_or_else(|| Error::Shader("storage pool not prepared".into()))?;
-        let view = pool
-            .alloc_bytes(size, Some(stride))
+        let allocator = persistent
+            .storage_allocator_mut()
+            .ok_or_else(|| Error::Shader("storage allocator not prepared".into()))?;
+        let view = allocator
+            .alloc(device, size, Some(stride))
             .map_err(|e| Error::Shader(e.to_string()))?;
         Ok(GpuBuf::Pooled(view))
     } else {

@@ -27,7 +27,8 @@ use goldy::task_graph::{NodeAccess, NodeBuilder};
 use goldy::types::{BufferFlags, SpatialAccess, TextureFlags, TextureFormat};
 use goldy::{
     Buffer, BufferPool, ComputePipeline, DataAccess, Device, DeviceType, Frame, ShaderModule,
-    TaskGraph, Texture, TexturePool, TimelineValue,
+    TaskGraph, Texture, TexturePool, TimelineValue, TransientAllocator, TransientAllocatorConfig,
+    TransientAllocatorStrategy,
 };
 
 use mem::size_of;
@@ -203,9 +204,10 @@ const MAX_CLEANUP_DEPTH: usize = 8;
 pub(crate) struct PersistentState {
     /// Owned buffer cache: recycles pool-exempt buffers (bump, indirect, etc.)
     pub(crate) pool: ResourcePool,
-    /// Main storage pool: single growable Goldy buffer with a CPU bump allocator
-    /// for pooled compute buffers each frame.
-    pub(crate) storage_pool: Option<BufferPool>,
+    /// Pluggable transient allocator for sub-frame pool allocations. Selected by
+    /// `GOLDY_TRANSIENT_ALLOCATOR` env var; defaults to [`TransientAllocatorStrategy::BumpReset`]
+    /// for backwards compatibility. Lazily created on first [`Self::prepare_storage_pool`].
+    pub(crate) storage_allocator: Option<Box<dyn TransientAllocator>>,
     /// Texture pool for intermediate render targets (gradient, filter layers, etc.)
     pub(crate) tex_pool: TexturePool,
     /// Bump allocator counters from the most recently drained frame.
@@ -214,61 +216,62 @@ pub(crate) struct PersistentState {
 }
 
 impl PersistentState {
+    /// Prepare the per-frame transient allocator. Lazy-initialises the strategy from
+    /// `GOLDY_TRANSIENT_ALLOCATOR` on the first call, then forwards `begin_frame` so the
+    /// allocator can reclaim retired regions / wait on the previous epoch / grow as needed.
     fn prepare_storage_pool(
         &mut self,
         device: &Device,
-        frame: &FrameState,
+        _frame: &FrameState,
         pool_size: u64,
         expected_max: u64,
     ) -> Result<()> {
         if !use_pool(device) {
             return Ok(());
         }
-        frame.wait_before_storage_pool_reuse(device)?;
 
-        // Shrink an oversized persistent pool once demand has dropped for several frames.
-        if let Some(pool) = &mut self.storage_pool {
-            let cap = pool.capacity();
-            if cap > pool_size.saturating_mul(4) && cap > pool_size {
-                pool.resize(pool_size)
-                    .map_err(|e| Error::Shader(e.to_string()))?;
-                pool.reset();
-            }
-        }
+        if self.storage_allocator.is_none() {
+            // Reserve virtual address range up front so growth within `expected_max` is
+            // a no-op page-bind rather than a costly realloc. Equivalent to the old hand-
+            // rolled path in this function pre-refactor.
+            device.reset_buffer_heaps();
+            device.ensure_buffer_heap_capacity(expected_max.max(pool_size));
 
-        let need_new = match &self.storage_pool {
-            Some(pool) => pool.capacity() < pool_size,
-            None => true,
-        };
-        if need_new {
-            if let Some(pool) = &mut self.storage_pool {
-                pool.resize(pool_size)
-                    .map_err(|e| Error::Shader(e.to_string()))?;
-            } else {
-                device.reset_buffer_heaps();
-                device.ensure_buffer_heap_capacity(expected_max.max(pool_size));
-                self.storage_pool = Some(
-                    BufferPool::with_alignment_capacity_hint_and_flags(
-                        device,
-                        pool_size,
-                        expected_max,
-                        256,
-                        BufferFlags::GPU_ONLY,
-                    )
+            let config = TransientAllocatorConfig {
+                initial_size: pool_size,
+                expected_max,
+                // For region-based strategies, size each region around the expected per-frame
+                // demand. Falls back to pool_size when the running estimate is unavailable.
+                min_region_size: pool_size,
+                max_regions: 4,
+                alignment: 256,
+                flags: BufferFlags::GPU_ONLY,
+            };
+
+            let strategy = TransientAllocatorStrategy::from_env();
+            log::info!(
+                "[ekrano] transient allocator strategy = {:?} (set GOLDY_TRANSIENT_ALLOCATOR=bump|epoch to override)",
+                strategy
+            );
+            self.storage_allocator = Some(
+                strategy
+                    .create(device, config)
                     .map_err(|e| Error::Shader(e.to_string()))?,
-                );
-            }
-        } else {
-            self.storage_pool
-                .as_mut()
-                .expect("storage pool must exist when need_new is false")
-                .reset();
+            );
         }
+
+        let allocator = self
+            .storage_allocator
+            .as_mut()
+            .expect("storage allocator was just initialised");
+        allocator
+            .begin_frame(device, pool_size)
+            .map_err(|e| Error::Shader(e.to_string()))?;
         Ok(())
     }
 
-    pub(crate) fn storage_pool_mut(&mut self) -> Option<&mut BufferPool> {
-        self.storage_pool.as_mut()
+    pub(crate) fn storage_allocator_mut(&mut self) -> Option<&mut Box<dyn TransientAllocator>> {
+        self.storage_allocator.as_mut()
     }
 
     fn last_drained_bump(&self) -> Option<&BumpAllocators> {
@@ -316,22 +319,6 @@ pub struct GoldyRenderer {
 // -----------------------------------------------------------------------
 
 impl FrameState {
-    /// [`BufferPool::reset`] is only safe once GPU work that consumed last frame's
-    /// pool suballocations has completed. The most recent [`FrameCleanup`] carries
-    /// that frame's [`TimelineValue`] once recorded (call [`GoldyRenderer::note_frame_presented`]
-    /// on the swapchain path before the next frame).
-    fn wait_before_storage_pool_reuse(&self, device: &Device) -> Result<()> {
-        if let Some(back) = self.cleanup_ring.back()
-            && let Some(tv) = back.timeline
-            && device.gpu_progress() < tv
-        {
-            device
-                .wait_until(tv)
-                .map_err(|e| Error::Shader(e.to_string()))?;
-        }
-        Ok(())
-    }
-
     /// Non-blocking drain: process any completed cleanup entries from the
     /// front of the ring. If the ring has grown beyond `MAX_CLEANUP_DEPTH`,
     /// force a synchronous wait on the oldest entry to prevent unbounded growth.
@@ -413,7 +400,7 @@ impl FrameState {
 
     fn release_pool(&mut self, device: &Device, persistent: &mut PersistentState) -> Result<()> {
         self.wait_until_gpu_idle(device, persistent)?;
-        persistent.storage_pool = None;
+        persistent.storage_allocator = None;
         Ok(())
     }
 }
@@ -504,8 +491,8 @@ impl<'a> FrameRecorder<'a> {
         match buf {
             GpuBuf::Owned(b) => self.deferred_owned_buffers.push(b),
             GpuBuf::Pooled(_v) => {
-                // Backing [`BufferPool`] outlives the frame; views need not keep GPU
-                // work alive (see [`FrameState::wait_before_storage_pool_reuse`]).
+                // Backing [`TransientAllocator`] outlives the frame; views need not keep GPU
+                // work alive — the allocator strategy handles epoch-based reuse safety.
             }
         }
     }
@@ -939,7 +926,7 @@ impl GoldyRenderer {
             engine_shaders: Vec::new(),
             persistent: PersistentState {
                 pool: ResourcePool::default(),
-                storage_pool: None,
+                storage_allocator: None,
                 tex_pool: TexturePool::default(),
                 last_drained_bump: None,
             },
@@ -990,12 +977,16 @@ impl GoldyRenderer {
     ///
     /// Fills in the timeline on the most recent `FrameCleanup` entry (the one
     /// pushed by `FrameRecorder::finish` for the surface path where the
-    /// timeline isn't known until after present).
+    /// timeline isn't known until after present) and informs the transient
+    /// allocator so it can retire this frame's regions with the correct epoch.
     pub fn note_frame_presented(&mut self, tv: TimelineValue) {
         if let Some(back) = self.frame.cleanup_ring.back_mut()
             && back.timeline.is_none()
         {
             back.timeline = Some(tv);
+        }
+        if let Some(allocator) = self.persistent.storage_allocator_mut() {
+            allocator.end_frame(tv);
         }
     }
 
@@ -1272,9 +1263,18 @@ impl GoldyRenderer {
         recorder.schedule_pipeline_cleanup(pipeline, params.robust);
         recorder.finish()?;
         if use_pool(device)
-            && let Some(pool) = self.persistent.storage_pool_mut()
+            && let Some(allocator) = self.persistent.storage_allocator_mut()
         {
-            pool.hint_unused_above(pool.used());
+            let used = allocator.used_this_frame();
+            allocator.hint_unused_above(used);
+        }
+        // Notify the allocator about the frame's epoch so it can track in-flight allocations.
+        // For non-surface paths the timeline is on the just-pushed cleanup entry; for surface
+        // paths it's filled in later by `note_frame_presented` (see that method's hook).
+        if let Some(tv) = self.frame.cleanup_ring.back().and_then(|e| e.timeline)
+            && let Some(allocator) = self.persistent.storage_allocator_mut()
+        {
+            allocator.end_frame(tv);
         }
         let t_submit = t4.elapsed();
 
