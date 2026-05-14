@@ -468,6 +468,20 @@ impl<'a> FrameRecorder<'a> {
         (&mut self.graph, self.persistent)
     }
 
+    /// Submit the current graph as a command buffer and start a fresh one.
+    ///
+    /// This lets the GPU begin executing early work (e.g. coarse rasterization)
+    /// while the CPU continues recording later work (fine rasterization, filters)
+    /// into a new command buffer.
+    pub(crate) fn flush_mid_frame(&mut self) -> Result<()> {
+        flush_graph(
+            &mut self.graph,
+            self.device,
+            &mut self.last_timeline,
+            self.surface_frame,
+        )
+    }
+
     pub(crate) fn alloc_pipeline_buffer_named(
         &mut self,
         size: u64,
@@ -668,10 +682,10 @@ impl<'a> FrameRecorder<'a> {
             );
             return;
         }
-        let bind_types: Vec<_> = self.shaders[shader_id.0].bindings.clone();
+        let bind_types = &self.shaders[shader_id.0].bindings;
         let indices = collect_bindless_indices_direct(
             bindings,
-            &bind_types,
+            bind_types,
             self.force_uav,
             MAX_BINDLESS_SLOTS,
         )
@@ -694,9 +708,9 @@ impl<'a> FrameRecorder<'a> {
         let mut node = self
             .graph
             .node("dispatch", &self.shaders[shader_id.0].pipeline);
-        node = bind_graph_direct(node, bindings, &bind_types);
+        node = bind_graph_direct(node, bindings, bind_types);
         if !indices.is_empty() || !push_tail.is_empty() {
-            node = node.bind_resources_raw_with_user(&indices, push_tail);
+            node = node.bind_resources_raw_with_user(indices, push_tail);
         }
         node.dispatch(x, y, z);
         self.dispatch_count += 1;
@@ -719,10 +733,10 @@ impl<'a> FrameRecorder<'a> {
         offset: u64,
         bindings: &[GpuBinding<'_>],
     ) {
-        let bind_types: Vec<_> = self.shaders[shader_id.0].bindings.clone();
+        let bind_types = &self.shaders[shader_id.0].bindings;
         let indices = collect_bindless_indices_direct(
             bindings,
-            &bind_types,
+            bind_types,
             self.force_uav,
             MAX_BINDLESS_SLOTS,
         )
@@ -745,10 +759,10 @@ impl<'a> FrameRecorder<'a> {
         let mut node = self
             .graph
             .node("dispatch_indirect", &self.shaders[shader_id.0].pipeline);
-        node = bind_graph_direct(node, bindings, &bind_types);
+        node = bind_graph_direct(node, bindings, bind_types);
         node = node.bind_buffer(indirect_buf, NodeAccess::Read);
         if !indices.is_empty() {
-            node = node.bind_resources_raw(&indices);
+            node = node.bind_resources_raw(indices);
         }
         node.dispatch_indirect(indirect_buf, offset);
         self.dispatch_count += 1;
@@ -1225,6 +1239,10 @@ impl GoldyRenderer {
             &mut recorder,
         );
         let t_coarse = t2.elapsed();
+
+        // Submit coarse work as a separate command buffer so the GPU can begin
+        // executing it while the CPU records fine rasterization and filters.
+        recorder.flush_mid_frame()?;
 
         let t3 = Instant::now();
         render.record_fine(
