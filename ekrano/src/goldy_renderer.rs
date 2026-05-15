@@ -128,11 +128,11 @@ struct FrameCleanup {
     /// Index into [`FrameCleanup::deferred_owned_buffers`] for bump readback (`ekrano.bump_buf`).
     bump_readback_owned_index: Option<usize>,
     deferred_owned_buffers: Vec<Buffer>,
-    /// Pooled sub-allocations from [`TransientAllocator`]. Must outlive GPU work because each
-    /// [`BufferView`] holds a bindless descriptor slot; dropping it early recycles the slot while
-    /// surface-path submissions are still queued (before `Frame::present`), allowing the next
-    /// frame to overwrite the argument buffer and corrupt in-flight dispatches.
+    /// Views whose byte ranges still need freeing at cleanup time.
     deferred_pool_views: Vec<BufferView>,
+    /// Views whose byte ranges were freed mid-pipeline (epoch=None, stamped by end_frame).
+    /// Only held here for bindless slot lifetime; no byte-range freeing needed.
+    range_freed_pool_views: Vec<BufferView>,
     deferred_textures: Vec<Texture>,
 }
 
@@ -421,22 +421,25 @@ impl FrameState {
             persistent.last_drained_bump = Some(bytemuck::pod_read_unaligned(&output));
         }
 
-        // Return byte ranges to the heap allocator now that the GPU is done with them.
-        // Mid-pipeline `free_gpu_buf` calls already freed some ranges eagerly; the
-        // remaining views (deferred because their bindless slots must stay valid until
-        // the GPU retires) are freed here.
+        // Free byte ranges for views that were NOT freed mid-pipeline. The timeline
+        // is already retired at this point so the epoch is immediately drainable.
         if let Some(allocator) = persistent.storage_allocator.as_mut() {
+            let retired_epoch = entry.timeline.unwrap_or(0);
             for view in &entry.deferred_pool_views {
-                allocator.free(view.offset(), view.size(), None);
+                allocator.free(view.offset(), view.size(), Some(retired_epoch));
             }
         }
+        // range_freed_pool_views had their byte ranges freed mid-pipeline;
+        // dropping them retires their bindless slots.
         drop(entry.deferred_owned_buffers);
         drop(entry.deferred_pool_views);
+        drop(entry.range_freed_pool_views);
         for tex in entry.deferred_textures {
             persistent.tex_pool.release(tex);
         }
 
         device.flush_deferred_deletions();
+        device.compact_overflow_heaps();
 
         Ok(())
     }
@@ -463,7 +466,13 @@ pub(crate) struct FrameRecorder<'a> {
     last_timeline: Option<TimelineValue>,
     bump_readback_owned_index: Option<usize>,
     deferred_owned_buffers: Vec<Buffer>,
+    /// Views whose byte ranges were NOT freed mid-pipeline. Cleanup must free
+    /// both the byte range and the view (for bindless slot retirement).
     deferred_pool_views: Vec<BufferView>,
+    /// Views whose byte ranges were already freed mid-pipeline via `free_gpu_buf`.
+    /// Cleanup only needs to drop these (for bindless slot retirement); the byte
+    /// range was already returned to the allocator with epoch=None.
+    range_freed_pool_views: Vec<BufferView>,
     deferred_textures: Vec<Texture>,
     dispatch_count: usize,
 }
@@ -491,6 +500,7 @@ impl<'a> FrameRecorder<'a> {
             bump_readback_owned_index: None,
             deferred_owned_buffers: Vec::new(),
             deferred_pool_views: Vec::new(),
+            range_freed_pool_views: Vec::new(),
             deferred_textures: Vec::new(),
             dispatch_count: 0,
         }
@@ -825,13 +835,16 @@ impl<'a> FrameRecorder<'a> {
     pub(crate) fn free_gpu_buf(&mut self, buf: GpuBuf) {
         match buf {
             GpuBuf::Pooled(view) => {
-                let epoch = self.last_timeline;
+                // Free the byte range with epoch=None. The allocator's
+                // drain_retired skips None-epoch entries, so these bytes
+                // won't be recycled until end_frame stamps them with the
+                // current frame's timeline and a future begin_frame drains
+                // past that epoch. The view itself is kept alive until
+                // cleanup for bindless slot lifetime.
                 if let Some(allocator) = self.persistent.storage_allocator_mut() {
-                    allocator.free(view.offset(), view.size(), epoch);
+                    allocator.free(view.offset(), view.size(), None);
                 }
-                // Always defer the view itself so its bindless slot stays alive
-                // until the GPU finishes the dispatches that reference it.
-                self.deferred_pool_views.push(view);
+                self.range_freed_pool_views.push(view);
             }
             GpuBuf::Owned(b) => self.deferred_owned_buffers.push(b),
         }
@@ -857,6 +870,7 @@ impl<'a> FrameRecorder<'a> {
             bump_readback_owned_index: self.bump_readback_owned_index,
             deferred_owned_buffers: self.deferred_owned_buffers,
             deferred_pool_views: self.deferred_pool_views,
+            range_freed_pool_views: self.range_freed_pool_views,
             deferred_textures: self.deferred_textures,
         });
 

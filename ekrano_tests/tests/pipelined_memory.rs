@@ -17,7 +17,7 @@ use ekrano::{AaConfig, GoldyRenderer, RenderParams, Scene};
 use goldy::types::{SpatialAccess, TextureFlags, TextureFormat};
 use goldy::{Device, DeviceType, Instance};
 
-const FRAME_COUNT: usize = 100;
+const FRAME_COUNT: usize = 200;
 const WIDTH: u32 = 64;
 const HEIGHT: u32 = 64;
 
