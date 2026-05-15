@@ -68,6 +68,17 @@ pub struct FrameStats {
     pub bump_retries: u32,
 }
 
+/// Snapshot of the transient allocator's state, useful for tests and diagnostics.
+#[derive(Debug, Clone, Copy)]
+pub struct AllocatorStats {
+    /// Total capacity of the backing buffer in bytes.
+    pub capacity: u64,
+    /// Bytes currently live (allocated minus freed-and-retired).
+    pub used: u64,
+    /// Number of frames waiting in the cleanup ring.
+    pub cleanup_ring_depth: usize,
+}
+
 /// Upper bound applied to observed bump counters before they're fed into
 /// `RenderConfig::with_bump_estimates`. Legitimate scenes need far less than
 /// this (the tiger hits ~13K segments, paris-30k a few hundred thousand),
@@ -215,7 +226,7 @@ impl ResourcePool {
 /// frames are submitted faster than the GPU retires them. Depth 1 forces a
 /// synchronous wait each frame, eliminating pipelining but keeping the total
 /// under ~500 MB.
-const MAX_CLEANUP_DEPTH: usize = 1;
+const MAX_CLEANUP_DEPTH: usize = 3;
 
 // -----------------------------------------------------------------------
 // PersistentState — GPU resources that survive across frames
@@ -263,7 +274,7 @@ impl PersistentState {
                 initial_size: pool_size,
                 expected_max,
                 min_region_size: pool_size,
-                max_regions: MAX_CLEANUP_DEPTH + 1,
+                max_regions: MAX_CLEANUP_DEPTH,
                 alignment: 256,
                 flags: BufferFlags::GPU_ONLY,
             };
@@ -410,9 +421,15 @@ impl FrameState {
             persistent.last_drained_bump = Some(bytemuck::pod_read_unaligned(&output));
         }
 
-        // Drop buffers and pool views after the GPU timeline for this frame has completed.
-        // (See [`FrameCleanup::deferred_pool_views`] for why views must be deferred on the
-        // surface path.)
+        // Return byte ranges to the heap allocator now that the GPU is done with them.
+        // Mid-pipeline `free_gpu_buf` calls already freed some ranges eagerly; the
+        // remaining views (deferred because their bindless slots must stay valid until
+        // the GPU retires) are freed here.
+        if let Some(allocator) = persistent.storage_allocator.as_mut() {
+            for view in &entry.deferred_pool_views {
+                allocator.free(view.offset(), view.size(), None);
+            }
+        }
         drop(entry.deferred_owned_buffers);
         drop(entry.deferred_pool_views);
         for tex in entry.deferred_textures {
@@ -569,7 +586,9 @@ impl<'a> FrameRecorder<'a> {
         self.defer_texture(gradient);
         self.defer_texture(image_atlas);
         self.defer_texture(mask_atlas);
-        self.defer_gpu_buf(scene);
+        if let Some(b) = scene {
+            self.defer_gpu_buf(b);
+        }
         self.defer_gpu_buf(config);
         if let Some(b) = wg_counts {
             self.defer_gpu_buf(b);
@@ -582,11 +601,11 @@ impl<'a> FrameRecorder<'a> {
         self.defer_gpu_buf(tile);
         self.defer_gpu_buf(segments);
         self.defer_gpu_buf(ptcl);
-        self.defer_gpu_buf(reduced);
-        self.defer_gpu_buf(reduced2);
-        self.defer_gpu_buf(reduced_scan);
-        self.defer_gpu_buf(tagmonoid);
-        self.defer_gpu_buf(path_bbox);
+        if let Some(b) = reduced { self.defer_gpu_buf(b); }
+        if let Some(b) = reduced2 { self.defer_gpu_buf(b); }
+        if let Some(b) = reduced_scan { self.defer_gpu_buf(b); }
+        if let Some(b) = tagmonoid { self.defer_gpu_buf(b); }
+        if let Some(b) = path_bbox { self.defer_gpu_buf(b); }
         let bump_idx = if bump_readback {
             Some(self.deferred_owned_buffers.len())
         } else {
@@ -594,17 +613,17 @@ impl<'a> FrameRecorder<'a> {
         };
         self.defer_gpu_buf(bump);
         self.bump_readback_owned_index = bump_idx;
-        self.defer_gpu_buf(lines);
-        self.defer_gpu_buf(draw_reduced);
-        self.defer_gpu_buf(draw_monoid);
-        self.defer_gpu_buf(clip_inp);
-        self.defer_gpu_buf(clip_el);
-        self.defer_gpu_buf(clip_bic);
-        self.defer_gpu_buf(clip_bbox);
-        self.defer_gpu_buf(draw_bbox);
-        self.defer_gpu_buf(bin_header);
-        self.defer_gpu_buf(path);
-        self.defer_gpu_buf(seg_counts);
+        if let Some(b) = lines { self.defer_gpu_buf(b); }
+        if let Some(b) = draw_reduced { self.defer_gpu_buf(b); }
+        if let Some(b) = draw_monoid { self.defer_gpu_buf(b); }
+        if let Some(b) = clip_inp { self.defer_gpu_buf(b); }
+        if let Some(b) = clip_el { self.defer_gpu_buf(b); }
+        if let Some(b) = clip_bic { self.defer_gpu_buf(b); }
+        if let Some(b) = clip_bbox { self.defer_gpu_buf(b); }
+        if let Some(b) = draw_bbox { self.defer_gpu_buf(b); }
+        if let Some(b) = bin_header { self.defer_gpu_buf(b); }
+        if let Some(b) = path { self.defer_gpu_buf(b); }
+        if let Some(b) = seg_counts { self.defer_gpu_buf(b); }
         self.defer_gpu_buf(blend_spill);
         self.defer_texture(out_image);
         for t in filter_layers {
@@ -798,6 +817,26 @@ impl<'a> FrameRecorder<'a> {
         self.deferred_owned_buffers.push(buf);
     }
 
+    /// Return a pooled sub-allocation's byte range to the transient allocator for mid-frame
+    /// reuse. The view's bindless slot is still deferred until GPU completion, but the
+    /// underlying memory can be reused by later allocations in this or subsequent frames.
+    ///
+    /// Owned buffers are simply deferred as before (ResourcePool manages their lifetime).
+    pub(crate) fn free_gpu_buf(&mut self, buf: GpuBuf) {
+        match buf {
+            GpuBuf::Pooled(view) => {
+                let epoch = self.last_timeline;
+                if let Some(allocator) = self.persistent.storage_allocator_mut() {
+                    allocator.free(view.offset(), view.size(), epoch);
+                }
+                // Always defer the view itself so its bindless slot stays alive
+                // until the GPU finishes the dispatches that reference it.
+                self.deferred_pool_views.push(view);
+            }
+            GpuBuf::Owned(b) => self.deferred_owned_buffers.push(b),
+        }
+    }
+
     /// Finish dispatch: flush the final graph and push a `FrameCleanup`
     /// entry onto the deque for deferred processing after GPU completion.
     fn finish(mut self) -> Result<()> {
@@ -944,7 +983,19 @@ fn dump_dispatch_gpu(
 
 impl GoldyRenderer {
     /// Create a new renderer for the given device.
+    ///
+    /// Installs a [`TrackingVramAllocator`] with a 512 MiB budget on the device
+    /// to prevent runaway GPU memory growth under heavy pipelining.
     pub fn new(device: &Device) -> Result<Self> {
+        use goldy::vram_allocator::{DefaultVramAllocator, TrackingVramAllocator};
+
+        let budget = 512 * 1024 * 1024; // 512 MiB
+        let tracking = TrackingVramAllocator::with_budget(
+            std::sync::Arc::new(DefaultVramAllocator),
+            budget,
+        );
+        let device = device.with_vram_allocator(std::sync::Arc::new(tracking));
+
         let mut renderer = Self {
             device: device.clone(),
             shaders: FullShaders::empty(),
@@ -961,7 +1012,7 @@ impl GoldyRenderer {
             },
             persistent_bump: None,
         };
-        let shaders = shaders::goldy_full_shaders(device, &mut renderer)?;
+        let shaders = shaders::goldy_full_shaders(&device, &mut renderer)?;
         renderer.shaders = shaders;
         device.release_idle_shader_compiler();
         Ok(renderer)
@@ -1050,6 +1101,17 @@ impl GoldyRenderer {
         params: &RenderParams,
     ) -> Result<FrameStats> {
         self.run_frame(device, scene, params, Some(frame.texture()), Some(frame))
+    }
+
+    /// Query the transient allocator's current state for diagnostics or test assertions.
+    ///
+    /// Returns `None` if the allocator hasn't been initialised yet (no frames rendered).
+    pub fn allocator_stats(&self) -> Option<AllocatorStats> {
+        self.persistent.storage_allocator.as_ref().map(|a| AllocatorStats {
+            capacity: a.capacity(),
+            used: a.used_this_frame(),
+            cleanup_ring_depth: self.frame.cleanup_ring.len(),
+        })
     }
 
     /// Render a scene and return the pixel data as RGBA bytes.
@@ -1311,8 +1373,20 @@ impl GoldyRenderer {
             ""
         };
 
+        let (alloc_cap_mb, alloc_used_mb, ring_depth) = if let Some(a) =
+            self.persistent.storage_allocator.as_ref()
+        {
+            (
+                a.capacity() as f64 / (1024.0 * 1024.0),
+                a.used_this_frame() as f64 / (1024.0 * 1024.0),
+                self.frame.cleanup_ring.len(),
+            )
+        } else {
+            (0.0, 0.0, self.frame.cleanup_ring.len())
+        };
+
         log::debug!(
-            "[PERF] frame={} drain={:.2}ms resolve={:.2}ms pool={:.2}ms coarse_record={:.2}ms fine_record={:.2}ms submit={:.2}ms total={:.2}ms {label}",
+            "[PERF] frame={} drain={:.2}ms resolve={:.2}ms pool={:.2}ms coarse_record={:.2}ms fine_record={:.2}ms submit={:.2}ms total={:.2}ms alloc={:.1}/{:.1}MB ring={} {label}",
             frame_num,
             t_drain.as_secs_f64() * 1000.0,
             t_resolve.as_secs_f64() * 1000.0,
@@ -1321,6 +1395,9 @@ impl GoldyRenderer {
             t_fine_record.as_secs_f64() * 1000.0,
             t_submit.as_secs_f64() * 1000.0,
             frame_start.elapsed().as_secs_f64() * 1000.0,
+            alloc_used_mb,
+            alloc_cap_mb,
+            ring_depth,
         );
 
         Ok(stats)

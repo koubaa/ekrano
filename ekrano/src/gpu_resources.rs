@@ -44,6 +44,19 @@ impl GpuBuf {
     }
 }
 
+/// Extension trait so `Option<GpuBuf>` fields can be bound with `.binding()` in dispatch
+/// call sites. Panics if the buffer has already been freed mid-pipeline.
+pub(crate) trait OptGpuBufExt {
+    fn binding(&self) -> GpuBinding<'_>;
+}
+
+impl OptGpuBufExt for Option<GpuBuf> {
+    #[track_caller]
+    fn binding(&self) -> GpuBinding<'_> {
+        self.as_ref().expect("pipeline buffer already freed").as_binding()
+    }
+}
+
 pub(crate) enum GpuBinding<'a> {
     Buf(&'a Buffer),
     View(&'a BufferView),
@@ -85,11 +98,6 @@ fn is_pool_exempt(name: &'static str) -> bool {
         "ekrano.bump_buf"
             | "ekrano.indirect_count"
             | "ekrano.indirect_dispatch"
-            | "ekrano.tile_buf"
-            | "ekrano.lines_buf"
-            | "ekrano.seg_counts_buf"
-            | "ekrano.segments_buf"
-            | "ekrano.path_buf"
     )
 }
 
@@ -247,7 +255,7 @@ pub(crate) struct PipelineResources {
     pub gradient: Texture,
     pub image_atlas: Texture,
     pub mask_atlas: Texture,
-    pub scene: GpuBuf,
+    pub scene: Option<GpuBuf>,
     pub config: GpuBuf,
     pub wg_counts: Option<GpuBuf>,
     pub indirect: Option<GpuBuf>,
@@ -256,34 +264,29 @@ pub(crate) struct PipelineResources {
     pub tile: GpuBuf,
     pub segments: GpuBuf,
     pub ptcl: GpuBuf,
-    pub reduced: GpuBuf,
-    pub reduced2: GpuBuf,
-    pub reduced_scan: GpuBuf,
-    pub tagmonoid: GpuBuf,
-    pub path_bbox: GpuBuf,
+    pub reduced: Option<GpuBuf>,
+    pub reduced2: Option<GpuBuf>,
+    pub reduced_scan: Option<GpuBuf>,
+    pub tagmonoid: Option<GpuBuf>,
+    pub path_bbox: Option<GpuBuf>,
     pub bump: GpuBuf,
-    pub lines: GpuBuf,
-    pub draw_reduced: GpuBuf,
-    pub draw_monoid: GpuBuf,
-    pub clip_inp: GpuBuf,
-    pub clip_el: GpuBuf,
-    pub clip_bic: GpuBuf,
-    pub clip_bbox: GpuBuf,
-    pub draw_bbox: GpuBuf,
-    pub bin_header: GpuBuf,
-    pub path: GpuBuf,
-    pub seg_counts: GpuBuf,
+    pub lines: Option<GpuBuf>,
+    pub draw_reduced: Option<GpuBuf>,
+    pub draw_monoid: Option<GpuBuf>,
+    pub clip_inp: Option<GpuBuf>,
+    pub clip_el: Option<GpuBuf>,
+    pub clip_bic: Option<GpuBuf>,
+    pub clip_bbox: Option<GpuBuf>,
+    pub draw_bbox: Option<GpuBuf>,
+    pub bin_header: Option<GpuBuf>,
+    pub path: Option<GpuBuf>,
+    pub seg_counts: Option<GpuBuf>,
     pub blend_spill: GpuBuf,
     pub out_image: Texture,
     pub filter_layers: [Texture; 4],
 }
 
 impl PipelineResources {
-    #[inline]
-    pub(crate) fn path_indirect(&self) -> &GpuBuf {
-        self.indirect.as_ref().unwrap_or(&self.fallback_indirect)
-    }
-
     #[allow(
         clippy::too_many_arguments,
         reason = "Single setup function threads every pipeline buffer and texture from resolve data"
@@ -568,7 +571,7 @@ impl PipelineResources {
             gradient,
             image_atlas,
             mask_atlas,
-            scene,
+            scene: Some(scene),
             config,
             wg_counts: None,
             indirect: None,
@@ -577,23 +580,23 @@ impl PipelineResources {
             tile,
             segments,
             ptcl,
-            reduced,
-            reduced2,
-            reduced_scan,
-            tagmonoid,
-            path_bbox,
+            reduced: Some(reduced),
+            reduced2: Some(reduced2),
+            reduced_scan: Some(reduced_scan),
+            tagmonoid: Some(tagmonoid),
+            path_bbox: Some(path_bbox),
             bump,
-            lines,
-            draw_reduced,
-            draw_monoid,
-            clip_inp,
-            clip_el,
-            clip_bic,
-            clip_bbox,
-            draw_bbox,
-            bin_header,
-            path,
-            seg_counts,
+            lines: Some(lines),
+            draw_reduced: Some(draw_reduced),
+            draw_monoid: Some(draw_monoid),
+            clip_inp: Some(clip_inp),
+            clip_el: Some(clip_el),
+            clip_bic: Some(clip_bic),
+            clip_bbox: Some(clip_bbox),
+            draw_bbox: Some(draw_bbox),
+            bin_header: Some(bin_header),
+            path: Some(path),
+            seg_counts: Some(seg_counts),
             blend_spill,
             out_image,
             filter_layers,

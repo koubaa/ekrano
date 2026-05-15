@@ -133,7 +133,7 @@ pub use peniko;
 pub use peniko::kurbo;
 
 pub use goldy::{Frame, TimelineValue};
-pub use goldy_renderer::{FrameStats, GoldyRenderer};
+pub use goldy_renderer::{AllocatorStats, FrameStats, GoldyRenderer};
 
 pub use ekrano_encoding::{Glyph, NormalizedCoord};
 pub use scene::{DrawGlyphs, Scene};
