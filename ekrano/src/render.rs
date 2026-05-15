@@ -5,7 +5,7 @@
 //! Take an encoded scene and create a graph to render it
 
 use crate::goldy_renderer::FrameRecorder;
-use crate::gpu_resources::{GpuBinding, OptGpuBufExt, PipelineResources};
+use crate::gpu_resources::{GpuBinding, PipelineResources};
 use crate::shaders::FullShaders;
 use crate::{AaConfig, RenderParams};
 
@@ -165,8 +165,8 @@ impl Render {
             INDIRECT_STRIDE,
             &[
                 pipeline.config.as_binding(),
-                pipeline.scene.binding(),
-                pipeline.reduced.binding(),
+                pipeline.scene.as_binding(),
+                pipeline.reduced.as_binding(),
             ],
         );
         let mut pathtag_parent = &pipeline.reduced;
@@ -180,8 +180,8 @@ impl Render {
                 wg_counts.path_reduce2,
                 INDIRECT_STRIDE,
                 &[
-                    pipeline.reduced.binding(),
-                    pipeline.reduced2.binding(),
+                    pipeline.reduced.as_binding(),
+                    pipeline.reduced2.as_binding(),
                 ],
             );
             dispatch_stage(
@@ -193,9 +193,9 @@ impl Render {
                 wg_counts.path_scan1,
                 INDIRECT_STRIDE,
                 &[
-                    pipeline.reduced.binding(),
-                    pipeline.reduced2.binding(),
-                    pipeline.reduced_scan.binding(),
+                    pipeline.reduced.as_binding(),
+                    pipeline.reduced2.as_binding(),
+                    pipeline.reduced_scan.as_binding(),
                 ],
             );
             dispatch_stage(
@@ -208,9 +208,9 @@ impl Render {
                 INDIRECT_STRIDE,
                 &[
                     pipeline.config.as_binding(),
-                    pipeline.scene.binding(),
-                    pipeline.reduced.binding(),
-                    pipeline.tagmonoid.binding(),
+                    pipeline.scene.as_binding(),
+                    pipeline.reduced.as_binding(),
+                    pipeline.tagmonoid.as_binding(),
                 ],
             );
             dispatch_stage(
@@ -223,9 +223,9 @@ impl Render {
                 INDIRECT_STRIDE,
                 &[
                     pipeline.config.as_binding(),
-                    pipeline.scene.binding(),
-                    pipeline.reduced_scan.binding(),
-                    pipeline.tagmonoid.binding(),
+                    pipeline.scene.as_binding(),
+                    pipeline.reduced_scan.as_binding(),
+                    pipeline.tagmonoid.as_binding(),
                 ],
             );
         } else if use_large_path_scan {
@@ -233,17 +233,17 @@ impl Render {
                 shaders.pathtag_reduce2,
                 wg_counts.path_reduce2,
                 &[
-                    pipeline.reduced.binding(),
-                    pipeline.reduced2.binding(),
+                    pipeline.reduced.as_binding(),
+                    pipeline.reduced2.as_binding(),
                 ],
             );
             recorder.dispatch(
                 shaders.pathtag_scan1,
                 wg_counts.path_scan1,
                 &[
-                    pipeline.reduced.binding(),
-                    pipeline.reduced2.binding(),
-                    pipeline.reduced_scan.binding(),
+                    pipeline.reduced.as_binding(),
+                    pipeline.reduced2.as_binding(),
+                    pipeline.reduced_scan.as_binding(),
                 ],
             );
             pathtag_parent = &pipeline.reduced_scan;
@@ -252,9 +252,9 @@ impl Render {
                 wg_counts.path_scan,
                 &[
                     pipeline.config.as_binding(),
-                    pipeline.scene.binding(),
-                    pathtag_parent.binding(),
-                    pipeline.tagmonoid.binding(),
+                    pipeline.scene.as_binding(),
+                    pathtag_parent.as_binding(),
+                    pipeline.tagmonoid.as_binding(),
                 ],
             );
         } else {
@@ -263,17 +263,12 @@ impl Render {
                 wg_counts.path_scan,
                 &[
                     pipeline.config.as_binding(),
-                    pipeline.scene.binding(),
-                    pathtag_parent.binding(),
-                    pipeline.tagmonoid.binding(),
+                    pipeline.scene.as_binding(),
+                    pathtag_parent.as_binding(),
+                    pipeline.tagmonoid.as_binding(),
                 ],
             );
         }
-
-        // --- Free: pathtag prefix-scan intermediates (dead after scan) ---
-        if let Some(b) = pipeline.reduced.take() { recorder.free_gpu_buf(b); }
-        if let Some(b) = pipeline.reduced2.take() { recorder.free_gpu_buf(b); }
-        if let Some(b) = pipeline.reduced_scan.take() { recorder.free_gpu_buf(b); }
 
         dispatch_stage(
             recorder,
@@ -285,17 +280,17 @@ impl Render {
             INDIRECT_STRIDE,
             &[
                 pipeline.config.as_binding(),
-                pipeline.path_bbox.binding(),
+                pipeline.path_bbox.as_binding(),
             ],
         );
 
         let flatten_bindings = [
             pipeline.config.as_binding(),
-            pipeline.scene.binding(),
-            pipeline.tagmonoid.binding(),
-            pipeline.path_bbox.binding(),
+            pipeline.scene.as_binding(),
+            pipeline.tagmonoid.as_binding(),
+            pipeline.path_bbox.as_binding(),
             pipeline.bump.as_binding(),
-            pipeline.lines.binding(),
+            pipeline.lines.as_binding(),
         ];
         let flat_wg_x = wg_counts.flatten.0;
         if flat_wg_x > MAX_FLATTEN_WG_PER_SUBMIT {
@@ -331,9 +326,6 @@ impl Render {
             );
         }
 
-        // --- Free: tagmonoid (dead after flatten) ---
-        if let Some(b) = pipeline.tagmonoid.take() { recorder.free_gpu_buf(b); }
-
         dispatch_stage(
             recorder,
             use_indirect,
@@ -344,8 +336,8 @@ impl Render {
             INDIRECT_STRIDE,
             &[
                 pipeline.config.as_binding(),
-                pipeline.scene.binding(),
-                pipeline.draw_reduced.binding(),
+                pipeline.scene.as_binding(),
+                pipeline.draw_reduced.as_binding(),
             ],
         );
 
@@ -359,17 +351,14 @@ impl Render {
             INDIRECT_STRIDE,
             &[
                 pipeline.config.as_binding(),
-                pipeline.scene.binding(),
-                pipeline.draw_reduced.binding(),
-                pipeline.path_bbox.binding(),
-                pipeline.draw_monoid.binding(),
+                pipeline.scene.as_binding(),
+                pipeline.draw_reduced.as_binding(),
+                pipeline.path_bbox.as_binding(),
+                pipeline.draw_monoid.as_binding(),
                 pipeline.info_bin_data.as_binding(),
-                pipeline.clip_inp.binding(),
+                pipeline.clip_inp.as_binding(),
             ],
         );
-
-        // --- Free: draw_reduced (dead after draw_leaf) ---
-        if let Some(b) = pipeline.draw_reduced.take() { recorder.free_gpu_buf(b); }
 
         if use_indirect || wg_counts.clip_reduce.0 > 0 {
             dispatch_stage(
@@ -381,10 +370,10 @@ impl Render {
                 wg_counts.clip_reduce,
                 INDIRECT_STRIDE,
                 &[
-                    pipeline.clip_inp.binding(),
-                    pipeline.path_bbox.binding(),
-                    pipeline.clip_bic.binding(),
-                    pipeline.clip_el.binding(),
+                    pipeline.clip_inp.as_binding(),
+                    pipeline.path_bbox.as_binding(),
+                    pipeline.clip_bic.as_binding(),
+                    pipeline.clip_el.as_binding(),
                 ],
             );
         }
@@ -399,20 +388,15 @@ impl Render {
                 INDIRECT_STRIDE,
                 &[
                     pipeline.config.as_binding(),
-                    pipeline.clip_inp.binding(),
-                    pipeline.path_bbox.binding(),
-                    pipeline.clip_bic.binding(),
-                    pipeline.clip_el.binding(),
-                    pipeline.draw_monoid.binding(),
-                    pipeline.clip_bbox.binding(),
+                    pipeline.clip_inp.as_binding(),
+                    pipeline.path_bbox.as_binding(),
+                    pipeline.clip_bic.as_binding(),
+                    pipeline.clip_el.as_binding(),
+                    pipeline.draw_monoid.as_binding(),
+                    pipeline.clip_bbox.as_binding(),
                 ],
             );
         }
-
-        // --- Free: clip intermediates (dead after clip_leaf) ---
-        if let Some(b) = pipeline.clip_inp.take() { recorder.free_gpu_buf(b); }
-        if let Some(b) = pipeline.clip_bic.take() { recorder.free_gpu_buf(b); }
-        if let Some(b) = pipeline.clip_el.take() { recorder.free_gpu_buf(b); }
 
         dispatch_stage(
             recorder,
@@ -424,20 +408,16 @@ impl Render {
             INDIRECT_STRIDE,
             &[
                 pipeline.config.as_binding(),
-                pipeline.scene.binding(),
-                pipeline.draw_monoid.binding(),
-                pipeline.path_bbox.binding(),
-                pipeline.clip_bbox.binding(),
-                pipeline.draw_bbox.binding(),
+                pipeline.scene.as_binding(),
+                pipeline.draw_monoid.as_binding(),
+                pipeline.path_bbox.as_binding(),
+                pipeline.clip_bbox.as_binding(),
+                pipeline.draw_bbox.as_binding(),
                 pipeline.bump.as_binding(),
                 pipeline.info_bin_data.as_binding(),
-                pipeline.bin_header.binding(),
+                pipeline.bin_header.as_binding(),
             ],
         );
-
-        // --- Free: clip_bbox, path_bbox (dead after binning) ---
-        if let Some(b) = pipeline.clip_bbox.take() { recorder.free_gpu_buf(b); }
-        if let Some(b) = pipeline.path_bbox.take() { recorder.free_gpu_buf(b); }
 
         dispatch_stage(
             recorder,
@@ -449,16 +429,13 @@ impl Render {
             INDIRECT_STRIDE,
             &[
                 pipeline.config.as_binding(),
-                pipeline.scene.binding(),
-                pipeline.draw_bbox.binding(),
+                pipeline.scene.as_binding(),
+                pipeline.draw_bbox.as_binding(),
                 pipeline.bump.as_binding(),
-                pipeline.path.binding(),
+                pipeline.path.as_binding(),
                 pipeline.tile.as_binding(),
             ],
         );
-
-        // --- Free: draw_bbox (dead after tile_alloc) ---
-        if let Some(b) = pipeline.draw_bbox.take() { recorder.free_gpu_buf(b); }
 
         recorder.dispatch(
             shaders.path_count_setup,
@@ -478,10 +455,10 @@ impl Render {
             &[
                 pipeline.config.as_binding(),
                 pipeline.bump.as_binding(),
-                pipeline.lines.binding(),
-                pipeline.path.binding(),
+                pipeline.lines.as_binding(),
+                pipeline.path.as_binding(),
                 pipeline.tile.as_binding(),
-                pipeline.seg_counts.binding(),
+                pipeline.seg_counts.as_binding(),
             ],
         );
 
@@ -496,7 +473,7 @@ impl Render {
             &[
                 pipeline.config.as_binding(),
                 pipeline.bump.as_binding(),
-                pipeline.path.binding(),
+                pipeline.path.as_binding(),
                 pipeline.tile.as_binding(),
             ],
         );
@@ -511,21 +488,16 @@ impl Render {
             INDIRECT_STRIDE,
             &[
                 pipeline.config.as_binding(),
-                pipeline.scene.binding(),
-                pipeline.draw_monoid.binding(),
-                pipeline.bin_header.binding(),
+                pipeline.scene.as_binding(),
+                pipeline.draw_monoid.as_binding(),
+                pipeline.bin_header.as_binding(),
                 pipeline.info_bin_data.as_binding(),
-                pipeline.path.binding(),
+                pipeline.path.as_binding(),
                 pipeline.tile.as_binding(),
                 pipeline.bump.as_binding(),
                 pipeline.ptcl.as_binding(),
             ],
         );
-
-        // --- Free: scene, draw_monoid, bin_header (dead after coarse) ---
-        if let Some(b) = pipeline.scene.take() { recorder.free_gpu_buf(b); }
-        if let Some(b) = pipeline.draw_monoid.take() { recorder.free_gpu_buf(b); }
-        if let Some(b) = pipeline.bin_header.take() { recorder.free_gpu_buf(b); }
 
         recorder.dispatch(
             shaders.path_tiling_setup,
@@ -548,18 +520,13 @@ impl Render {
             path_tiling_offset,
             &[
                 pipeline.bump.as_binding(),
-                pipeline.seg_counts.binding(),
-                pipeline.lines.binding(),
-                pipeline.path.binding(),
+                pipeline.seg_counts.as_binding(),
+                pipeline.lines.as_binding(),
+                pipeline.path.as_binding(),
                 pipeline.tile.as_binding(),
                 pipeline.segments.as_binding(),
             ],
         );
-
-        // --- Free: path_tiling intermediates (dead after path_tiling) ---
-        if let Some(b) = pipeline.seg_counts.take() { recorder.free_gpu_buf(b); }
-        if let Some(b) = pipeline.lines.take() { recorder.free_gpu_buf(b); }
-        if let Some(b) = pipeline.path.take() { recorder.free_gpu_buf(b); }
 
         self.fine_wg_count = Some(wg_counts.fine);
         self.aa_config = params.antialiasing_method;

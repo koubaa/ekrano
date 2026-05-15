@@ -25,6 +25,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use goldy::task_graph::{NodeAccess, NodeBuilder};
 use goldy::types::{BufferFlags, SpatialAccess, TextureFlags, TextureFormat};
+use goldy::placement_heap::PlacementHeap;
 use goldy::{
     Buffer, BufferPool, BufferView, ComputePipeline, DataAccess, Device, DeviceType, Frame,
     ShaderModule, TaskGraph, Texture, TexturePool, TimelineValue, TransientAllocator,
@@ -128,13 +129,14 @@ struct FrameCleanup {
     /// Index into [`FrameCleanup::deferred_owned_buffers`] for bump readback (`ekrano.bump_buf`).
     bump_readback_owned_index: Option<usize>,
     deferred_owned_buffers: Vec<Buffer>,
-    /// Views whose byte ranges still need freeing at cleanup time.
     deferred_pool_views: Vec<BufferView>,
-    /// Views whose byte ranges were freed mid-pipeline (epoch=None, stamped by end_frame).
-    /// Only held here for bindless slot lifetime; no byte-range freeing needed.
-    range_freed_pool_views: Vec<BufferView>,
     deferred_textures: Vec<Texture>,
 }
+
+/// Initial capacity for the persistent placement heap (256 MiB).
+/// Grows on demand if a single frame needs more, but steady-state scenes
+/// stabilise within this budget.
+const PLACEMENT_HEAP_INITIAL_CAPACITY: u64 = 256 * 1024 * 1024;
 
 struct GoldyShader {
     pipeline: ComputePipeline,
@@ -246,6 +248,10 @@ pub(crate) struct PersistentState {
     /// Bump allocator counters from the most recently drained frame.
     /// `None` until the first GPU readback completes.
     last_drained_bump: Option<BumpAllocators>,
+    /// Persistent placement heap for graph-colored transient buffers. One large
+    /// backing [`Buffer`] shared across in-flight frames; each frame acquires a
+    /// contiguous region via a ring allocator. Lazily created on first use.
+    placement_heap: Option<PlacementHeap>,
 }
 
 impl PersistentState {
@@ -429,11 +435,8 @@ impl FrameState {
                 allocator.free(view.offset(), view.size(), Some(retired_epoch));
             }
         }
-        // range_freed_pool_views had their byte ranges freed mid-pipeline;
-        // dropping them retires their bindless slots.
         drop(entry.deferred_owned_buffers);
         drop(entry.deferred_pool_views);
-        drop(entry.range_freed_pool_views);
         for tex in entry.deferred_textures {
             persistent.tex_pool.release(tex);
         }
@@ -466,13 +469,7 @@ pub(crate) struct FrameRecorder<'a> {
     last_timeline: Option<TimelineValue>,
     bump_readback_owned_index: Option<usize>,
     deferred_owned_buffers: Vec<Buffer>,
-    /// Views whose byte ranges were NOT freed mid-pipeline. Cleanup must free
-    /// both the byte range and the view (for bindless slot retirement).
     deferred_pool_views: Vec<BufferView>,
-    /// Views whose byte ranges were already freed mid-pipeline via `free_gpu_buf`.
-    /// Cleanup only needs to drop these (for bindless slot retirement); the byte
-    /// range was already returned to the allocator with epoch=None.
-    range_freed_pool_views: Vec<BufferView>,
     deferred_textures: Vec<Texture>,
     dispatch_count: usize,
 }
@@ -500,7 +497,6 @@ impl<'a> FrameRecorder<'a> {
             bump_readback_owned_index: None,
             deferred_owned_buffers: Vec::new(),
             deferred_pool_views: Vec::new(),
-            range_freed_pool_views: Vec::new(),
             deferred_textures: Vec::new(),
             dispatch_count: 0,
         }
@@ -516,11 +512,18 @@ impl<'a> FrameRecorder<'a> {
     /// while the CPU continues recording later work (fine rasterization, filters)
     /// into a new command buffer.
     pub(crate) fn flush_mid_frame(&mut self) -> Result<()> {
+        // With graph-colored transients the entire pipeline must live in one
+        // graph so wave-interval coloring sees all lifetimes. Skip the mid-frame
+        // split; the full graph is flushed in finish().
+        if self.graph.has_transient_buffers() {
+            return Ok(());
+        }
         flush_graph(
             &mut self.graph,
             self.device,
             &mut self.last_timeline,
             self.surface_frame,
+            self.persistent,
         )
     }
 
@@ -546,6 +549,9 @@ impl<'a> FrameRecorder<'a> {
         match buf {
             GpuBuf::Owned(b) => self.deferred_owned_buffers.push(b),
             GpuBuf::Pooled(v) => self.deferred_pool_views.push(v),
+            GpuBuf::Transient(_) => {
+                // Transient buffers live in the graph-scoped heap; no per-view cleanup needed.
+            }
         }
     }
 
@@ -596,9 +602,7 @@ impl<'a> FrameRecorder<'a> {
         self.defer_texture(gradient);
         self.defer_texture(image_atlas);
         self.defer_texture(mask_atlas);
-        if let Some(b) = scene {
-            self.defer_gpu_buf(b);
-        }
+        self.defer_gpu_buf(scene);
         self.defer_gpu_buf(config);
         if let Some(b) = wg_counts {
             self.defer_gpu_buf(b);
@@ -611,11 +615,11 @@ impl<'a> FrameRecorder<'a> {
         self.defer_gpu_buf(tile);
         self.defer_gpu_buf(segments);
         self.defer_gpu_buf(ptcl);
-        if let Some(b) = reduced { self.defer_gpu_buf(b); }
-        if let Some(b) = reduced2 { self.defer_gpu_buf(b); }
-        if let Some(b) = reduced_scan { self.defer_gpu_buf(b); }
-        if let Some(b) = tagmonoid { self.defer_gpu_buf(b); }
-        if let Some(b) = path_bbox { self.defer_gpu_buf(b); }
+        self.defer_gpu_buf(reduced);
+        self.defer_gpu_buf(reduced2);
+        self.defer_gpu_buf(reduced_scan);
+        self.defer_gpu_buf(tagmonoid);
+        self.defer_gpu_buf(path_bbox);
         let bump_idx = if bump_readback {
             Some(self.deferred_owned_buffers.len())
         } else {
@@ -623,17 +627,17 @@ impl<'a> FrameRecorder<'a> {
         };
         self.defer_gpu_buf(bump);
         self.bump_readback_owned_index = bump_idx;
-        if let Some(b) = lines { self.defer_gpu_buf(b); }
-        if let Some(b) = draw_reduced { self.defer_gpu_buf(b); }
-        if let Some(b) = draw_monoid { self.defer_gpu_buf(b); }
-        if let Some(b) = clip_inp { self.defer_gpu_buf(b); }
-        if let Some(b) = clip_el { self.defer_gpu_buf(b); }
-        if let Some(b) = clip_bic { self.defer_gpu_buf(b); }
-        if let Some(b) = clip_bbox { self.defer_gpu_buf(b); }
-        if let Some(b) = draw_bbox { self.defer_gpu_buf(b); }
-        if let Some(b) = bin_header { self.defer_gpu_buf(b); }
-        if let Some(b) = path { self.defer_gpu_buf(b); }
-        if let Some(b) = seg_counts { self.defer_gpu_buf(b); }
+        self.defer_gpu_buf(lines);
+        self.defer_gpu_buf(draw_reduced);
+        self.defer_gpu_buf(draw_monoid);
+        self.defer_gpu_buf(clip_inp);
+        self.defer_gpu_buf(clip_el);
+        self.defer_gpu_buf(clip_bic);
+        self.defer_gpu_buf(clip_bbox);
+        self.defer_gpu_buf(draw_bbox);
+        self.defer_gpu_buf(bin_header);
+        self.defer_gpu_buf(path);
+        self.defer_gpu_buf(seg_counts);
         self.defer_gpu_buf(blend_spill);
         self.defer_texture(out_image);
         for t in filter_layers {
@@ -827,29 +831,6 @@ impl<'a> FrameRecorder<'a> {
         self.deferred_owned_buffers.push(buf);
     }
 
-    /// Return a pooled sub-allocation's byte range to the transient allocator for mid-frame
-    /// reuse. The view's bindless slot is still deferred until GPU completion, but the
-    /// underlying memory can be reused by later allocations in this or subsequent frames.
-    ///
-    /// Owned buffers are simply deferred as before (ResourcePool manages their lifetime).
-    pub(crate) fn free_gpu_buf(&mut self, buf: GpuBuf) {
-        match buf {
-            GpuBuf::Pooled(view) => {
-                // Free the byte range with epoch=None. The allocator's
-                // drain_retired skips None-epoch entries, so these bytes
-                // won't be recycled until end_frame stamps them with the
-                // current frame's timeline and a future begin_frame drains
-                // past that epoch. The view itself is kept alive until
-                // cleanup for bindless slot lifetime.
-                if let Some(allocator) = self.persistent.storage_allocator_mut() {
-                    allocator.free(view.offset(), view.size(), None);
-                }
-                self.range_freed_pool_views.push(view);
-            }
-            GpuBuf::Owned(b) => self.deferred_owned_buffers.push(b),
-        }
-    }
-
     /// Finish dispatch: flush the final graph and push a `FrameCleanup`
     /// entry onto the deque for deferred processing after GPU completion.
     fn finish(mut self) -> Result<()> {
@@ -858,6 +839,7 @@ impl<'a> FrameRecorder<'a> {
             self.device,
             &mut self.last_timeline,
             self.surface_frame,
+            self.persistent,
         )?;
 
         let timeline = match self.surface_frame {
@@ -870,7 +852,6 @@ impl<'a> FrameRecorder<'a> {
             bump_readback_owned_index: self.bump_readback_owned_index,
             deferred_owned_buffers: self.deferred_owned_buffers,
             deferred_pool_views: self.deferred_pool_views,
-            range_freed_pool_views: self.range_freed_pool_views,
             deferred_textures: self.deferred_textures,
         });
 
@@ -900,6 +881,7 @@ fn bind_graph_direct<'a>(
             GpuBinding::Buf(b) => node.bind_buffer(b, access),
             GpuBinding::View(v) => node.bind_buffer_view(v, access),
             GpuBinding::Tex(t) => node.bind_texture(t, access),
+            GpuBinding::Transient(id) => node.bind_transient_buffer(*id, access),
         };
     }
     node
@@ -981,6 +963,9 @@ fn dump_dispatch_gpu(
             GpuBinding::Tex(_) => {
                 wln!("binding[{i}]: texture (dump not implemented)");
             }
+            GpuBinding::Transient(id) => {
+                wln!("binding[{i}]: transient(id={})", id.0);
+            }
         }
     }
     println!(
@@ -1020,6 +1005,7 @@ impl GoldyRenderer {
                 storage_allocator: None,
                 tex_pool: TexturePool::default(),
                 last_drained_bump: None,
+                placement_heap: None,
             },
             frame: FrameState {
                 cleanup_ring: VecDeque::new(),
@@ -1078,6 +1064,11 @@ impl GoldyRenderer {
         }
         if let Some(allocator) = self.persistent.storage_allocator_mut() {
             allocator.end_frame(tv);
+        }
+        // Stamp any placement heap entries that were submitted on the surface
+        // path (timeline was unknown until the frame was presented).
+        if let Some(ref mut heap) = self.persistent.placement_heap {
+            heap.stamp_all_pending(tv);
         }
     }
 
@@ -1508,10 +1499,28 @@ fn flush_graph(
     device: &Device,
     last_timeline: &mut Option<TimelineValue>,
     surface_frame: Option<&Frame>,
+    persistent: &mut PersistentState,
 ) -> Result<()> {
     if graph.is_empty() {
         return Ok(());
     }
+
+    if graph.has_transient_buffers() {
+        flush_graph_colored(graph, device, last_timeline, surface_frame, persistent)?;
+    } else {
+        flush_graph_simple(graph, device, last_timeline, surface_frame)?;
+    }
+
+    *graph = TaskGraph::new();
+    Ok(())
+}
+
+fn flush_graph_simple(
+    graph: &TaskGraph,
+    device: &Device,
+    last_timeline: &mut Option<TimelineValue>,
+    surface_frame: Option<&Frame>,
+) -> Result<()> {
     match surface_frame {
         None => {
             let tv = device
@@ -1525,6 +1534,95 @@ fn flush_graph(
                 .map_err(|e| Error::Shader(e.to_string()))?;
         }
     }
-    *graph = TaskGraph::new();
+    Ok(())
+}
+
+/// Resolve graph-colored transients and submit without blocking.
+///
+/// 1. Compute wave-interval coloring (greedy interval packing)
+/// 2. Acquire a region from the persistent placement heap
+/// 3. Create `BufferView`s at `base_offset + colored_offset`; collect bindless indices
+/// 4. Patch dispatch `resource_slots` with real bindless indices
+/// 5. Submit the resolved IR (views kept alive in the ring until GPU retires)
+fn flush_graph_colored(
+    graph: &TaskGraph,
+    device: &Device,
+    last_timeline: &mut Option<TimelineValue>,
+    _surface_frame: Option<&Frame>,
+    persistent: &mut PersistentState,
+) -> Result<()> {
+    let (total_size, layout) = graph
+        .transient_heap_size_and_layout()
+        .map_err(|e| Error::Shader(e.to_string()))?;
+
+    // Lazily create or grow the placement heap.
+    let heap = persistent
+        .placement_heap
+        .get_or_insert_with(|| {
+            let cap = PLACEMENT_HEAP_INITIAL_CAPACITY.max(total_size * (MAX_CLEANUP_DEPTH as u64 + 1));
+            PlacementHeap::with_capacity(device, cap)
+                .expect("failed to create placement heap")
+        });
+
+    // Reclaim any retired regions from previous frames.
+    let progress = device.gpu_progress();
+    heap.reclaim(progress);
+
+    // Acquire a region from the placement heap.
+    let base_offset = match heap.acquire(total_size.max(256)) {
+        Some(off) => off,
+        None => {
+            // Ring full — wait for the oldest in-flight frame to retire.
+            let tv = device.gpu_progress();
+            heap.reclaim(tv);
+            heap.acquire(total_size.max(256))
+                .ok_or_else(|| Error::Shader(format!(
+                    "PlacementHeap exhausted: need {} bytes, cap={}, in_flight={}",
+                    total_size, heap.capacity(), heap.in_flight_bytes(),
+                )))?
+        }
+    };
+
+    let buf = heap.buffer();
+
+    // Create BufferViews at colored offsets, collecting bindless indices.
+    let mut views = Vec::with_capacity(layout.len());
+    let mut bindless_map: HashMap<u32, (u32, u32)> = HashMap::with_capacity(layout.len());
+
+    for spec in graph.transient_specs() {
+        let offset = base_offset + layout[&spec.id];
+        let view = buf
+            .create_view(offset, spec.size, Some(4))
+            .map_err(|e| Error::Shader(e.to_string()))?;
+        let uav = view.bindless_index().unwrap_or(u32::MAX);
+        let srv = view.bindless_srv_index().unwrap_or(uav);
+        bindless_map.insert(spec.id, (uav, srv));
+        views.push(view);
+    }
+
+    // Lower IR: patch TransientBuffer → BufferRange + patch resource_slots.
+    // Range map offsets are relative to the backing buffer (base_offset + colored_offset).
+    let range_map = TaskGraph::transient_buffer_range_map_with_base(
+        buf,
+        &layout,
+        graph.transient_specs(),
+        base_offset,
+    );
+    let resolved_ir = graph
+        .lower_transient_buffers_with_bindless(&range_map, &bindless_map)
+        .map_err(|e| Error::Shader(e.to_string()))?;
+
+    // Build a resolved graph (no transient specs) so compile_commands won't panic.
+    let resolved_graph = graph.into_resolved(resolved_ir);
+
+    let tv = device
+        .submit(&resolved_graph)
+        .map_err(|e| Error::Shader(e.to_string()))?;
+    *last_timeline = Some(tv);
+
+    // Stamp and attach views to the region so they're dropped on reclaim.
+    heap.stamp(tv);
+    heap.attach_views(views);
+
     Ok(())
 }
