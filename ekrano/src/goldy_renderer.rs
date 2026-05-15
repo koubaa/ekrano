@@ -26,9 +26,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use goldy::task_graph::{NodeAccess, NodeBuilder};
 use goldy::types::{BufferFlags, SpatialAccess, TextureFlags, TextureFormat};
 use goldy::{
-    Buffer, BufferPool, ComputePipeline, DataAccess, Device, DeviceType, Frame, ShaderModule,
-    TaskGraph, Texture, TexturePool, TimelineValue, TransientAllocator, TransientAllocatorConfig,
-    TransientAllocatorStrategy,
+    Buffer, BufferPool, BufferView, ComputePipeline, DataAccess, Device, DeviceType, Frame,
+    ShaderModule, TaskGraph, Texture, TexturePool, TimelineValue, TransientAllocator,
+    TransientAllocatorConfig, TransientAllocatorStrategy,
 };
 
 use mem::size_of;
@@ -117,6 +117,11 @@ struct FrameCleanup {
     /// Index into [`FrameCleanup::deferred_owned_buffers`] for bump readback (`ekrano.bump_buf`).
     bump_readback_owned_index: Option<usize>,
     deferred_owned_buffers: Vec<Buffer>,
+    /// Pooled sub-allocations from [`TransientAllocator`]. Must outlive GPU work because each
+    /// [`BufferView`] holds a bindless descriptor slot; dropping it early recycles the slot while
+    /// surface-path submissions are still queued (before `Frame::present`), allowing the next
+    /// frame to overwrite the argument buffer and corrupt in-flight dispatches.
+    deferred_pool_views: Vec<BufferView>,
     deferred_textures: Vec<Texture>,
 }
 
@@ -193,7 +198,24 @@ impl ResourcePool {
 
 /// Maximum number of unprocessed `FrameCleanup` entries before we force a
 /// synchronous wait to prevent unbounded growth.
-const MAX_CLEANUP_DEPTH: usize = 8;
+///
+/// This directly controls the amount of per-frame GPU resources (textures,
+/// owned buffers, pool views) that can be alive simultaneously. Each frame
+/// allocates full-resolution textures (`out_image` + `filter_layers`), so a
+/// depth of N means N * ~5 render-target-sized textures in flight. On a
+/// Retina display, each texture can be >13 MB, so high values cause OOM
+/// when vsync is off and frames outrun the GPU. Kept in sync with the
+/// transient allocator's `max_regions`.
+///
+/// With the Tiger Lottie at Retina resolution, each frame holds ~173 MB of
+/// compute buffers (in an allocator region) plus ~8 full-resolution textures
+/// (~130 MB) plus ~11 owned buffers. Depth N means (N+1) × that footprint
+/// alive simultaneously (ring + current frame). On Apple Silicon with unified
+/// memory, depth >= 2 can exceed the GPU memory budget when vsync is off and
+/// frames are submitted faster than the GPU retires them. Depth 1 forces a
+/// synchronous wait each frame, eliminating pipelining but keeping the total
+/// under ~500 MB.
+const MAX_CLEANUP_DEPTH: usize = 1;
 
 // -----------------------------------------------------------------------
 // PersistentState — GPU resources that survive across frames
@@ -241,7 +263,7 @@ impl PersistentState {
                 initial_size: pool_size,
                 expected_max,
                 min_region_size: pool_size,
-                max_regions: 3,
+                max_regions: MAX_CLEANUP_DEPTH + 1,
                 alignment: 256,
                 flags: BufferFlags::GPU_ONLY,
             };
@@ -388,9 +410,11 @@ impl FrameState {
             persistent.last_drained_bump = Some(bytemuck::pod_read_unaligned(&output));
         }
 
-        // Owned buffers: drop (GPU idle). Pooled [`BufferView`]s are not deferred;
-        // the growable backing buffer stays alive in [`PersistentState`].
+        // Drop buffers and pool views after the GPU timeline for this frame has completed.
+        // (See [`FrameCleanup::deferred_pool_views`] for why views must be deferred on the
+        // surface path.)
         drop(entry.deferred_owned_buffers);
+        drop(entry.deferred_pool_views);
         for tex in entry.deferred_textures {
             persistent.tex_pool.release(tex);
         }
@@ -422,6 +446,7 @@ pub(crate) struct FrameRecorder<'a> {
     last_timeline: Option<TimelineValue>,
     bump_readback_owned_index: Option<usize>,
     deferred_owned_buffers: Vec<Buffer>,
+    deferred_pool_views: Vec<BufferView>,
     deferred_textures: Vec<Texture>,
     dispatch_count: usize,
 }
@@ -448,6 +473,7 @@ impl<'a> FrameRecorder<'a> {
             last_timeline: None,
             bump_readback_owned_index: None,
             deferred_owned_buffers: Vec::new(),
+            deferred_pool_views: Vec::new(),
             deferred_textures: Vec::new(),
             dispatch_count: 0,
         }
@@ -492,10 +518,7 @@ impl<'a> FrameRecorder<'a> {
     pub(crate) fn defer_gpu_buf(&mut self, buf: GpuBuf) {
         match buf {
             GpuBuf::Owned(b) => self.deferred_owned_buffers.push(b),
-            GpuBuf::Pooled(_v) => {
-                // Backing [`TransientAllocator`] outlives the frame; views need not keep GPU
-                // work alive — the allocator strategy handles epoch-based reuse safety.
-            }
+            GpuBuf::Pooled(v) => self.deferred_pool_views.push(v),
         }
     }
 
@@ -794,6 +817,7 @@ impl<'a> FrameRecorder<'a> {
             timeline,
             bump_readback_owned_index: self.bump_readback_owned_index,
             deferred_owned_buffers: self.deferred_owned_buffers,
+            deferred_pool_views: self.deferred_pool_views,
             deferred_textures: self.deferred_textures,
         });
 
@@ -1286,6 +1310,7 @@ impl GoldyRenderer {
         } else {
             ""
         };
+
         log::debug!(
             "[PERF] frame={} drain={:.2}ms resolve={:.2}ms pool={:.2}ms coarse_record={:.2}ms fine_record={:.2}ms submit={:.2}ms total={:.2}ms {label}",
             frame_num,
