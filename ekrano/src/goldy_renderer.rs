@@ -175,7 +175,7 @@ impl ResourcePool {
         if let Some(buf) = pool.pop() {
             return Ok(buf);
         }
-        Buffer::new_with_stride_and_flags(device, size, access, stride, buffer_flags)
+        device.alloc_buffer(size, access, stride, buffer_flags)
             .map_err(|e| Error::Shader(e.to_string()))
     }
 
@@ -1066,15 +1066,15 @@ impl GoldyRenderer {
     ) -> Result<Vec<u8>> {
         let width = params.width;
         let height = params.height;
-        let texture = Texture::new(
-            device,
-            width,
-            height,
-            TextureFormat::Rgba8Unorm,
-            SpatialAccess::Direct,
-            TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
-        )
-        .map_err(|e| Error::Gpu(e.to_string()))?;
+        let texture = device
+            .alloc_texture(
+                width,
+                height,
+                TextureFormat::Rgba8Unorm,
+                SpatialAccess::Direct,
+                TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
+            )
+            .map_err(|e| Error::Gpu(e.to_string()))?;
 
         for _attempt in 0..=MAX_BUMP_RETRIES {
             self.render_to_texture(device, scene, &texture, params)?;
