@@ -80,6 +80,17 @@ pub struct AllocatorStats {
     pub cleanup_ring_depth: usize,
 }
 
+/// Snapshot of the placement heap's state for Metal trace verification.
+#[derive(Debug, Clone, Copy)]
+pub struct PlacementHeapStats {
+    /// Total capacity of the backing buffer in bytes.
+    pub capacity: u64,
+    /// Bytes currently occupied by in-flight regions.
+    pub in_flight_bytes: u64,
+    /// Number of in-flight regions (one per submitted frame).
+    pub in_flight_count: usize,
+}
+
 /// Upper bound applied to observed bump counters before they're fed into
 /// `RenderConfig::with_bump_estimates`. Legitimate scenes need far less than
 /// this (the tiger hits ~13K segments, paris-30k a few hundred thousand),
@@ -1116,6 +1127,17 @@ impl GoldyRenderer {
             capacity: a.capacity(),
             used: a.used_this_frame(),
             cleanup_ring_depth: self.frame.cleanup_ring.len(),
+        })
+    }
+
+    /// Query the placement heap's current state for Metal trace verification.
+    ///
+    /// Returns `None` if the placement heap hasn't been created yet.
+    pub fn placement_heap_stats(&self) -> Option<PlacementHeapStats> {
+        self.persistent.placement_heap.as_ref().map(|h| PlacementHeapStats {
+            capacity: h.capacity(),
+            in_flight_bytes: h.in_flight_bytes(),
+            in_flight_count: h.in_flight_count(),
         })
     }
 
