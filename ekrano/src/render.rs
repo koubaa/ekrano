@@ -15,8 +15,8 @@ use ekrano_encoding::{
     Encoding, FilterPrimitive, FilterUniform, IndirectCount, WorkgroupCountsGpu, WorkgroupSize,
     make_mask_lut, make_mask_lut_16,
 };
-use goldy::{Buffer, Texture};
 use goldy::types::{BufferFlags, SpatialAccess, TextureFlags};
+use goldy::{Buffer, Texture};
 use peniko::color::{PremulColor, Srgb};
 
 use ekrano_encoding::{
@@ -147,7 +147,9 @@ impl Render {
 
         let use_large_path_scan = wg_counts.use_large_path_scan && !shaders.pathtag_is_cpu;
 
-        let indirect_buf = pipeline.indirect.as_ref()
+        let indirect_buf = pipeline
+            .indirect
+            .as_ref()
             .unwrap_or(&pipeline.fallback_indirect)
             .as_indirect_buffer()
             .expect("indirect buffer must be a `Buffer` for dispatch_indirect");

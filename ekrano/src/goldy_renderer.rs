@@ -23,9 +23,9 @@ use std::mem;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use goldy::placement_heap::PlacementHeap;
 use goldy::task_graph::{NodeAccess, NodeBuilder};
 use goldy::types::{BufferFlags, SpatialAccess, TextureFlags, TextureFormat};
-use goldy::placement_heap::PlacementHeap;
 use goldy::{
     Buffer, BufferPool, BufferView, ComputePipeline, DataAccess, Device, DeviceType, Frame,
     ShaderModule, TaskGraph, Texture, TexturePool, TimelineValue, TransientAllocator,
@@ -199,7 +199,8 @@ impl ResourcePool {
         if let Some(buf) = pool.pop() {
             return Ok(buf);
         }
-        device.alloc_buffer(size, access, stride, buffer_flags)
+        device
+            .alloc_buffer(size, access, stride, buffer_flags)
             .map_err(|e| Error::Shader(e.to_string()))
     }
 
@@ -1000,10 +1001,8 @@ impl GoldyRenderer {
         use goldy::vram_allocator::{DefaultVramAllocator, TrackingVramAllocator};
 
         let budget = 512 * 1024 * 1024; // 512 MiB
-        let tracking = TrackingVramAllocator::with_budget(
-            std::sync::Arc::new(DefaultVramAllocator),
-            budget,
-        );
+        let tracking =
+            TrackingVramAllocator::with_budget(std::sync::Arc::new(DefaultVramAllocator), budget);
         let device = device.with_vram_allocator(std::sync::Arc::new(tracking));
 
         let mut renderer = Self {
@@ -1123,22 +1122,28 @@ impl GoldyRenderer {
     ///
     /// Returns `None` if the allocator hasn't been initialised yet (no frames rendered).
     pub fn allocator_stats(&self) -> Option<AllocatorStats> {
-        self.persistent.storage_allocator.as_ref().map(|a| AllocatorStats {
-            capacity: a.capacity(),
-            used: a.used_this_frame(),
-            cleanup_ring_depth: self.frame.cleanup_ring.len(),
-        })
+        self.persistent
+            .storage_allocator
+            .as_ref()
+            .map(|a| AllocatorStats {
+                capacity: a.capacity(),
+                used: a.used_this_frame(),
+                cleanup_ring_depth: self.frame.cleanup_ring.len(),
+            })
     }
 
     /// Query the placement heap's current state for Metal trace verification.
     ///
     /// Returns `None` if the placement heap hasn't been created yet.
     pub fn placement_heap_stats(&self) -> Option<PlacementHeapStats> {
-        self.persistent.placement_heap.as_ref().map(|h| PlacementHeapStats {
-            capacity: h.capacity(),
-            in_flight_bytes: h.in_flight_bytes(),
-            in_flight_count: h.in_flight_count(),
-        })
+        self.persistent
+            .placement_heap
+            .as_ref()
+            .map(|h| PlacementHeapStats {
+                capacity: h.capacity(),
+                in_flight_bytes: h.in_flight_bytes(),
+                in_flight_count: h.in_flight_count(),
+            })
     }
 
     /// Render a scene and return the pixel data as RGBA bytes.
@@ -1400,17 +1405,16 @@ impl GoldyRenderer {
             ""
         };
 
-        let (alloc_cap_mb, alloc_used_mb, ring_depth) = if let Some(a) =
-            self.persistent.storage_allocator.as_ref()
-        {
-            (
-                a.capacity() as f64 / (1024.0 * 1024.0),
-                a.used_this_frame() as f64 / (1024.0 * 1024.0),
-                self.frame.cleanup_ring.len(),
-            )
-        } else {
-            (0.0, 0.0, self.frame.cleanup_ring.len())
-        };
+        let (alloc_cap_mb, alloc_used_mb, ring_depth) =
+            if let Some(a) = self.persistent.storage_allocator.as_ref() {
+                (
+                    a.capacity() as f64 / (1024.0 * 1024.0),
+                    a.used_this_frame() as f64 / (1024.0 * 1024.0),
+                    self.frame.cleanup_ring.len(),
+                )
+            } else {
+                (0.0, 0.0, self.frame.cleanup_ring.len())
+            };
 
         log::debug!(
             "[PERF] frame={} drain={:.2}ms resolve={:.2}ms pool={:.2}ms coarse_record={:.2}ms fine_record={:.2}ms submit={:.2}ms total={:.2}ms alloc={:.1}/{:.1}MB ring={} {label}",
@@ -1566,6 +1570,14 @@ fn flush_graph_simple(
 /// 3. Create `BufferView`s at `base_offset + colored_offset`; collect bindless indices
 /// 4. Patch dispatch `resource_slots` with real bindless indices
 /// 5. Submit the resolved IR (views kept alive in the ring until GPU retires)
+///
+/// # Leaky abstraction
+///
+/// Steps 3-5 reach into goldy internals (`lower_transient_buffers_with_bindless`,
+/// `into_resolved`, `Buffer::create_view` with per-buffer strides) because goldy has
+/// no submit path that accepts an externally-managed backing buffer. This should be
+/// replaced with a first-class `Device::submit_with_backing_buffer` once that API
+/// exists. See goldy issue #145.
 fn flush_graph_colored(
     graph: &TaskGraph,
     device: &Device,
@@ -1573,37 +1585,41 @@ fn flush_graph_colored(
     _surface_frame: Option<&Frame>,
     persistent: &mut PersistentState,
 ) -> Result<()> {
-    let (total_size, layout) = graph
+    let (total_size, base_align, layout) = graph
         .transient_heap_size_and_layout()
         .map_err(|e| Error::Shader(e.to_string()))?;
 
+    // Over-allocate by `base_align - 1` so we can align the returned offset.
+    let alloc_size = (total_size + base_align - 1).max(256);
+
     // Lazily create or grow the placement heap.
-    let heap = persistent
-        .placement_heap
-        .get_or_insert_with(|| {
-            let cap = PLACEMENT_HEAP_INITIAL_CAPACITY.max(total_size * (MAX_CLEANUP_DEPTH as u64 + 1));
-            PlacementHeap::with_capacity(device, cap)
-                .expect("failed to create placement heap")
-        });
+    let heap = persistent.placement_heap.get_or_insert_with(|| {
+        let cap = PLACEMENT_HEAP_INITIAL_CAPACITY.max(alloc_size * (MAX_CLEANUP_DEPTH as u64 + 1));
+        PlacementHeap::with_capacity(device, cap).expect("failed to create placement heap")
+    });
 
     // Reclaim any retired regions from previous frames.
     let progress = device.gpu_progress();
     heap.reclaim(progress);
 
-    // Acquire a region from the placement heap.
-    let base_offset = match heap.acquire(total_size.max(256)) {
+    // Acquire a region from the placement heap, then align the start.
+    let raw_offset = match heap.acquire(alloc_size) {
         Some(off) => off,
         None => {
             // Ring full — wait for the oldest in-flight frame to retire.
             let tv = device.gpu_progress();
             heap.reclaim(tv);
-            heap.acquire(total_size.max(256))
-                .ok_or_else(|| Error::Shader(format!(
+            heap.acquire(alloc_size).ok_or_else(|| {
+                Error::Shader(format!(
                     "PlacementHeap exhausted: need {} bytes, cap={}, in_flight={}",
-                    total_size, heap.capacity(), heap.in_flight_bytes(),
-                )))?
+                    alloc_size,
+                    heap.capacity(),
+                    heap.in_flight_bytes(),
+                ))
+            })?
         }
     };
+    let base_offset = raw_offset.div_ceil(base_align) * base_align;
 
     let buf = heap.buffer();
 
@@ -1613,8 +1629,9 @@ fn flush_graph_colored(
 
     for spec in graph.transient_specs() {
         let offset = base_offset + layout[&spec.id];
+        let view_stride = spec.stride.max(1);
         let view = buf
-            .create_view(offset, spec.size, Some(4))
+            .create_view(offset, spec.size, Some(view_stride))
             .map_err(|e| Error::Shader(e.to_string()))?;
         let uav = view.bindless_index().unwrap_or(u32::MAX);
         let srv = view.bindless_srv_index().unwrap_or(uav);

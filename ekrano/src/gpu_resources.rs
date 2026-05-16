@@ -86,9 +86,7 @@ fn use_pool(device: &Device) -> bool {
 fn is_pool_exempt(name: &'static str) -> bool {
     matches!(
         name,
-        "ekrano.bump_buf"
-            | "ekrano.indirect_count"
-            | "ekrano.indirect_dispatch"
+        "ekrano.bump_buf" | "ekrano.indirect_count" | "ekrano.indirect_dispatch"
     )
 }
 
@@ -112,7 +110,7 @@ pub(crate) fn alloc_pipeline_buffer(
         && !is_pool_exempt(name)
         && std::env::var("EKRANO_NO_GRAPH_COLORING").is_err();
     if use_graph_coloring {
-        let tid = graph.transient_buffer(size);
+        let tid = graph.transient_buffer_with_stride(size, stride);
         Ok(GpuBuf::Transient(tid))
     } else if use_pool(device) && !is_pool_exempt(name) {
         let allocator = persistent
@@ -248,9 +246,7 @@ pub(crate) fn clear_gpu_buf(
             let sz = size.unwrap_or_else(|| v.size().saturating_sub(off));
             graph.clear_buffer_view(v, off, sz);
         }
-        GpuBuf::Transient(_) => {
-            // Transient heap memory is zero-initialized at allocation time.
-        }
+        GpuBuf::Transient(_) => {}
     }
     Ok(())
 }

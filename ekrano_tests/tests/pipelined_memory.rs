@@ -51,7 +51,13 @@ fn pipelined_allocator_capacity_stable() {
     let device = make_device();
     let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new");
     let texture = device
-        .alloc_texture(WIDTH, HEIGHT, TextureFormat::Rgba8Unorm, SpatialAccess::Direct, TextureFlags::COPY_DST)
+        .alloc_texture(
+            WIDTH,
+            HEIGHT,
+            TextureFormat::Rgba8Unorm,
+            SpatialAccess::Direct,
+            TextureFlags::COPY_DST,
+        )
         .expect("alloc_texture");
     let scene = tiny_scene();
     let params = RenderParams {
@@ -80,7 +86,8 @@ fn pipelined_allocator_capacity_stable() {
     let max_cap = *tail.iter().max().unwrap();
     let min_cap = *tail.iter().min().unwrap();
     assert_eq!(
-        max_cap, min_cap,
+        max_cap,
+        min_cap,
         "allocator capacity is still growing in the last 50 frames: \
          min={min_cap} max={max_cap} (delta={})",
         max_cap - min_cap,
@@ -105,7 +112,13 @@ fn pipelined_allocator_used_converges() {
     let device = make_device();
     let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new");
     let texture = device
-        .alloc_texture(WIDTH, HEIGHT, TextureFormat::Rgba8Unorm, SpatialAccess::Direct, TextureFlags::COPY_DST)
+        .alloc_texture(
+            WIDTH,
+            HEIGHT,
+            TextureFormat::Rgba8Unorm,
+            SpatialAccess::Direct,
+            TextureFlags::COPY_DST,
+        )
         .expect("alloc_texture");
     let scene = tiny_scene();
     let params = RenderParams {

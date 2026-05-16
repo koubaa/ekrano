@@ -77,7 +77,10 @@ fn placement_heap_ring_stable() {
 
     eprintln!();
     eprintln!("=== Per-Frame Placement Heap Trace ===");
-    eprintln!("{:>6}  {:>10}  {:>10}  {:>8}", "frame", "cap (MiB)", "inflight", "regions");
+    eprintln!(
+        "{:>6}  {:>10}  {:>10}  {:>8}",
+        "frame", "cap (MiB)", "inflight", "regions"
+    );
     eprintln!("{:-<6}  {:-<10}  {:-<10}  {:-<8}", "", "", "", "");
 
     for i in 0..FRAME_COUNT {
@@ -107,17 +110,25 @@ fn placement_heap_ring_stable() {
     // Print summary.
     if let Some(stats) = renderer.placement_heap_stats() {
         eprintln!("=== Summary ===");
-        eprintln!("  backing buffer capacity : {:.2} MiB", stats.capacity as f64 / (1024.0 * 1024.0));
+        eprintln!(
+            "  backing buffer capacity : {:.2} MiB",
+            stats.capacity as f64 / (1024.0 * 1024.0)
+        );
         eprintln!("  final in-flight regions : {}", stats.in_flight_count);
-        eprintln!("  final in-flight bytes   : {:.2} MiB", stats.in_flight_bytes as f64 / (1024.0 * 1024.0));
+        eprintln!(
+            "  final in-flight bytes   : {:.2} MiB",
+            stats.in_flight_bytes as f64 / (1024.0 * 1024.0)
+        );
     }
 
     if !capacities.is_empty() {
         let max_cap = *capacities.iter().max().unwrap();
         let min_cap = *capacities.iter().min().unwrap();
-        eprintln!("  capacity range          : [{:.2}, {:.2}] MiB",
+        eprintln!(
+            "  capacity range          : [{:.2}, {:.2}] MiB",
             min_cap as f64 / (1024.0 * 1024.0),
-            max_cap as f64 / (1024.0 * 1024.0));
+            max_cap as f64 / (1024.0 * 1024.0)
+        );
 
         assert_eq!(
             max_cap, min_cap,
@@ -141,11 +152,14 @@ fn placement_heap_ring_stable() {
         let tail = &in_flight_bytes_samples[in_flight_bytes_samples.len().saturating_sub(50)..];
         let max_tail = *tail.iter().max().unwrap();
         let min_tail = *tail.iter().min().unwrap();
-        eprintln!("  in-flight bytes range   : [{:.2}, {:.2}] MiB (last 50 frames)",
+        eprintln!(
+            "  in-flight bytes range   : [{:.2}, {:.2}] MiB (last 50 frames)",
             min_tail as f64 / (1024.0 * 1024.0),
-            max_tail as f64 / (1024.0 * 1024.0));
+            max_tail as f64 / (1024.0 * 1024.0)
+        );
 
-        let per_region = max_tail / in_flight_counts.iter().max().copied().unwrap_or(1).max(1) as u64;
+        let per_region =
+            max_tail / in_flight_counts.iter().max().copied().unwrap_or(1).max(1) as u64;
         let tolerance = per_region * 2;
         assert!(
             max_tail - min_tail <= tolerance,
@@ -206,10 +220,15 @@ fn placement_heap_capacity_sized_correctly() {
         eprintln!();
         eprintln!("=== Placement Heap Capacity ===");
         eprintln!("  backing buffer  : {cap_mb:.2} MiB");
-        eprintln!("  in-flight       : {inflight_mb:.2} MiB ({} regions)", stats.in_flight_count);
+        eprintln!(
+            "  in-flight       : {inflight_mb:.2} MiB ({} regions)",
+            stats.in_flight_count
+        );
         eprintln!("  per-region avg  : {per_region_mb:.2} MiB");
-        eprintln!("  expected        : {per_region_mb:.2} × 4 = {:.2} MiB",
-            per_region_mb * 4.0);
+        eprintln!(
+            "  expected        : {per_region_mb:.2} × 4 = {:.2} MiB",
+            per_region_mb * 4.0
+        );
 
         // Capacity should be allocated once and never change.
         let max_cap = *capacities.iter().max().unwrap();
@@ -228,7 +247,9 @@ fn placement_heap_capacity_sized_correctly() {
             assert!(
                 stats.capacity >= expected_min,
                 "capacity {} < expected minimum {} (per_region={} × 3)",
-                stats.capacity, expected_min, per_region,
+                stats.capacity,
+                expected_min,
+                per_region,
             );
         }
 
