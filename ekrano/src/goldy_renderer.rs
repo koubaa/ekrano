@@ -520,7 +520,16 @@ impl<'a> FrameRecorder<'a> {
     /// This lets the GPU begin executing early work (e.g. coarse rasterization)
     /// while the CPU continues recording later work (fine rasterization, filters)
     /// into a new command buffer.
+    ///
+    /// When the graph owns transient buffers the flush is skipped: all pipeline
+    /// resources (coarse + fine) are currently allocated into a single graph
+    /// before the first flush, so submitting early would leave fine-phase specs
+    /// with no matching node.  A future refactor that splits allocation into
+    /// coarse and fine phases will unlock pipelining for transient graphs too.
     pub(crate) fn flush_mid_frame(&mut self) -> Result<()> {
+        if self.graph.has_transient_buffers() {
+            return Ok(());
+        }
         flush_graph(
             &mut self.graph,
             self.device,
@@ -1510,18 +1519,17 @@ fn flush_graph(
         return Ok(());
     }
 
-    match surface_frame {
-        None => {
-            let tv = device
-                .submit(graph)
-                .map_err(|e| Error::Shader(e.to_string()))?;
-            *last_timeline = Some(tv);
-        }
-        Some(frame) => {
-            frame
-                .submit_compute(graph)
-                .map_err(|e| Error::Shader(e.to_string()))?;
-        }
+    // Graphs with transient buffers must go through device.submit — Frame::submit_compute
+    // calls compile_commands which panics when transient buffers are present.
+    if graph.has_transient_buffers() || surface_frame.is_none() {
+        let tv = device
+            .submit(graph)
+            .map_err(|e| Error::Shader(e.to_string()))?;
+        *last_timeline = Some(tv);
+    } else if let Some(frame) = surface_frame {
+        frame
+            .submit_compute(graph)
+            .map_err(|e| Error::Shader(e.to_string()))?;
     }
 
     *graph = TaskGraph::new();
