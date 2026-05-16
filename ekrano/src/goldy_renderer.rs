@@ -1013,7 +1013,7 @@ fn dump_dispatch_gpu(
 impl GoldyRenderer {
     /// Create a new renderer for the given device.
     ///
-    /// Installs a [`TrackingVramAllocator`] with a 512 MiB budget on the device
+    /// Installs a [`TrackingVramAllocator`](goldy::vram_allocator::TrackingVramAllocator) with a 512 MiB budget on the device
     /// to prevent runaway GPU memory growth under heavy pipelining.
     pub fn new(device: &Device) -> Result<Self> {
         use goldy::vram_allocator::{DefaultVramAllocator, TrackingVramAllocator};

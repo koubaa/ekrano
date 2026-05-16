@@ -172,7 +172,7 @@ fn placement_heap_ring_stable() {
 }
 
 /// Verify that the placement heap's backing buffer is sized correctly:
-/// capacity = per_frame_demand × (MAX_CLEANUP_DEPTH + 1), allocated once.
+/// capacity = `per_frame_demand` × (`MAX_CLEANUP_DEPTH` + 1), allocated once.
 #[test]
 fn placement_heap_capacity_sized_correctly() {
     env_logger::try_init().ok();
