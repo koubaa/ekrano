@@ -23,7 +23,6 @@ use std::mem;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use goldy::placement_heap::PlacementHeap;
 use goldy::task_graph::{NodeAccess, NodeBuilder};
 use goldy::types::{BufferFlags, SpatialAccess, TextureFlags, TextureFormat};
 use goldy::{
@@ -80,17 +79,6 @@ pub struct AllocatorStats {
     pub cleanup_ring_depth: usize,
 }
 
-/// Snapshot of the placement heap's state for Metal trace verification.
-#[derive(Debug, Clone, Copy)]
-pub struct PlacementHeapStats {
-    /// Total capacity of the backing buffer in bytes.
-    pub capacity: u64,
-    /// Bytes currently occupied by in-flight regions.
-    pub in_flight_bytes: u64,
-    /// Number of in-flight regions (one per submitted frame).
-    pub in_flight_count: usize,
-}
-
 /// Upper bound applied to observed bump counters before they're fed into
 /// `RenderConfig::with_bump_estimates`. Legitimate scenes need far less than
 /// this (the tiger hits ~13K segments, paris-30k a few hundred thousand),
@@ -143,11 +131,6 @@ struct FrameCleanup {
     deferred_pool_views: Vec<BufferView>,
     deferred_textures: Vec<Texture>,
 }
-
-/// Initial capacity for the persistent placement heap (256 MiB).
-/// Grows on demand if a single frame needs more, but steady-state scenes
-/// stabilise within this budget.
-const PLACEMENT_HEAP_INITIAL_CAPACITY: u64 = 256 * 1024 * 1024;
 
 struct GoldyShader {
     pipeline: ComputePipeline,
@@ -260,10 +243,6 @@ pub(crate) struct PersistentState {
     /// Bump allocator counters from the most recently drained frame.
     /// `None` until the first GPU readback completes.
     last_drained_bump: Option<BumpAllocators>,
-    /// Persistent placement heap for graph-colored transient buffers. One large
-    /// backing [`Buffer`] shared across in-flight frames; each frame acquires a
-    /// contiguous region via a ring allocator. Lazily created on first use.
-    placement_heap: Option<PlacementHeap>,
 }
 
 impl PersistentState {
@@ -541,10 +520,13 @@ impl<'a> FrameRecorder<'a> {
     /// This lets the GPU begin executing early work (e.g. coarse rasterization)
     /// while the CPU continues recording later work (fine rasterization, filters)
     /// into a new command buffer.
+    ///
+    /// When the graph owns transient buffers the flush is skipped: all pipeline
+    /// resources (coarse + fine) are currently allocated into a single graph
+    /// before the first flush, so submitting early would leave fine-phase specs
+    /// with no matching node.  A future refactor that splits allocation into
+    /// coarse and fine phases will unlock pipelining for transient graphs too.
     pub(crate) fn flush_mid_frame(&mut self) -> Result<()> {
-        // With graph-colored transients the entire pipeline must live in one
-        // graph so wave-interval coloring sees all lifetimes. Skip the mid-frame
-        // split; the full graph is flushed in finish().
         if self.graph.has_transient_buffers() {
             return Ok(());
         }
@@ -1033,7 +1015,6 @@ impl GoldyRenderer {
                 storage_allocator: None,
                 tex_pool: TexturePool::default(),
                 last_drained_bump: None,
-                placement_heap: None,
             },
             frame: FrameState {
                 cleanup_ring: VecDeque::new(),
@@ -1093,11 +1074,6 @@ impl GoldyRenderer {
         if let Some(allocator) = self.persistent.storage_allocator_mut() {
             allocator.end_frame(tv);
         }
-        // Stamp any placement heap entries that were submitted on the surface
-        // path (timeline was unknown until the frame was presented).
-        if let Some(ref mut heap) = self.persistent.placement_heap {
-            heap.stamp_all_pending(tv);
-        }
     }
 
     /// Render a scene to the given texture.
@@ -1150,18 +1126,12 @@ impl GoldyRenderer {
             })
     }
 
-    /// Query the placement heap's current state for Metal trace verification.
+    /// Query the device-owned placement heap's state for diagnostics / tests.
     ///
-    /// Returns `None` if the placement heap hasn't been created yet.
-    pub fn placement_heap_stats(&self) -> Option<PlacementHeapStats> {
-        self.persistent
-            .placement_heap
-            .as_ref()
-            .map(|h| PlacementHeapStats {
-                capacity: h.capacity(),
-                in_flight_bytes: h.in_flight_bytes(),
-                in_flight_count: h.in_flight_count(),
-            })
+    /// Delegates to [`Device::placement_heap_stats`](goldy::Device::placement_heap_stats).
+    /// Returns `None` if no transient-buffer graphs have been submitted yet.
+    pub fn placement_heap_stats(&self) -> Option<goldy::placement_heap::PlacementHeapStats> {
+        self.device.placement_heap_stats()
     }
 
     /// Render a scene and return the pixel data as RGBA bytes.
@@ -1543,143 +1513,25 @@ fn flush_graph(
     device: &Device,
     last_timeline: &mut Option<TimelineValue>,
     surface_frame: Option<&Frame>,
-    persistent: &mut PersistentState,
+    _persistent: &mut PersistentState,
 ) -> Result<()> {
     if graph.is_empty() {
         return Ok(());
     }
 
-    if graph.has_transient_buffers() {
-        flush_graph_colored(graph, device, last_timeline, surface_frame, persistent)?;
-    } else {
-        flush_graph_simple(graph, device, last_timeline, surface_frame)?;
+    // Graphs with transient buffers must go through device.submit — Frame::submit_compute
+    // calls compile_commands which panics when transient buffers are present.
+    if graph.has_transient_buffers() || surface_frame.is_none() {
+        let tv = device
+            .submit(graph)
+            .map_err(|e| Error::Shader(e.to_string()))?;
+        *last_timeline = Some(tv);
+    } else if let Some(frame) = surface_frame {
+        frame
+            .submit_compute(graph)
+            .map_err(|e| Error::Shader(e.to_string()))?;
     }
 
     *graph = TaskGraph::new();
-    Ok(())
-}
-
-fn flush_graph_simple(
-    graph: &TaskGraph,
-    device: &Device,
-    last_timeline: &mut Option<TimelineValue>,
-    surface_frame: Option<&Frame>,
-) -> Result<()> {
-    match surface_frame {
-        None => {
-            let tv = device
-                .submit(graph)
-                .map_err(|e| Error::Shader(e.to_string()))?;
-            *last_timeline = Some(tv);
-        }
-        Some(frame) => {
-            frame
-                .submit_compute(graph)
-                .map_err(|e| Error::Shader(e.to_string()))?;
-        }
-    }
-    Ok(())
-}
-
-/// Resolve graph-colored transients and submit without blocking.
-///
-/// 1. Compute wave-interval coloring (greedy interval packing)
-/// 2. Acquire a region from the persistent placement heap
-/// 3. Create `BufferView`s at `base_offset + colored_offset`; collect bindless indices
-/// 4. Patch dispatch `resource_slots` with real bindless indices
-/// 5. Submit the resolved IR (views kept alive in the ring until GPU retires)
-///
-/// # Leaky abstraction
-///
-/// Steps 3-5 reach into goldy internals (`lower_transient_buffers_with_bindless`,
-/// `into_resolved`, `Buffer::create_view` with per-buffer strides) because goldy has
-/// no submit path that accepts an externally-managed backing buffer. This should be
-/// replaced with a first-class `Device::submit_with_backing_buffer` once that API
-/// exists. See goldy issue #145.
-fn flush_graph_colored(
-    graph: &TaskGraph,
-    device: &Device,
-    last_timeline: &mut Option<TimelineValue>,
-    _surface_frame: Option<&Frame>,
-    persistent: &mut PersistentState,
-) -> Result<()> {
-    let (total_size, base_align, layout) = graph
-        .transient_heap_size_and_layout()
-        .map_err(|e| Error::Shader(e.to_string()))?;
-
-    // Over-allocate by `base_align - 1` so we can align the returned offset.
-    let alloc_size = (total_size + base_align - 1).max(256);
-
-    // Lazily create or grow the placement heap.
-    let heap = persistent.placement_heap.get_or_insert_with(|| {
-        let cap = PLACEMENT_HEAP_INITIAL_CAPACITY.max(alloc_size * (MAX_CLEANUP_DEPTH as u64 + 1));
-        PlacementHeap::with_capacity(device, cap).expect("failed to create placement heap")
-    });
-
-    // Reclaim any retired regions from previous frames.
-    let progress = device.gpu_progress();
-    heap.reclaim(progress);
-
-    // Acquire a region from the placement heap, then align the start.
-    let raw_offset = match heap.acquire(alloc_size) {
-        Some(off) => off,
-        None => {
-            // Ring full — wait for the oldest in-flight frame to retire.
-            let tv = device.gpu_progress();
-            heap.reclaim(tv);
-            heap.acquire(alloc_size).ok_or_else(|| {
-                Error::Shader(format!(
-                    "PlacementHeap exhausted: need {} bytes, cap={}, in_flight={}",
-                    alloc_size,
-                    heap.capacity(),
-                    heap.in_flight_bytes(),
-                ))
-            })?
-        }
-    };
-    let base_offset = raw_offset.div_ceil(base_align) * base_align;
-
-    let buf = heap.buffer();
-
-    // Create BufferViews at colored offsets, collecting bindless indices.
-    let mut views = Vec::with_capacity(layout.len());
-    let mut bindless_map: HashMap<u32, (u32, u32)> = HashMap::with_capacity(layout.len());
-
-    for spec in graph.transient_specs() {
-        let offset = base_offset + layout[&spec.id];
-        let view_stride = spec.stride.max(1);
-        let view = buf
-            .create_view(offset, spec.size, Some(view_stride))
-            .map_err(|e| Error::Shader(e.to_string()))?;
-        let uav = view.bindless_index().unwrap_or(u32::MAX);
-        let srv = view.bindless_srv_index().unwrap_or(uav);
-        bindless_map.insert(spec.id, (uav, srv));
-        views.push(view);
-    }
-
-    // Lower IR: patch TransientBuffer → BufferRange + patch resource_slots.
-    // Range map offsets are relative to the backing buffer (base_offset + colored_offset).
-    let range_map = TaskGraph::transient_buffer_range_map_with_base(
-        buf,
-        &layout,
-        graph.transient_specs(),
-        base_offset,
-    );
-    let resolved_ir = graph
-        .lower_transient_buffers_with_bindless(&range_map, &bindless_map)
-        .map_err(|e| Error::Shader(e.to_string()))?;
-
-    // Build a resolved graph (no transient specs) so compile_commands won't panic.
-    let resolved_graph = graph.into_resolved(resolved_ir);
-
-    let tv = device
-        .submit(&resolved_graph)
-        .map_err(|e| Error::Shader(e.to_string()))?;
-    *last_timeline = Some(tv);
-
-    // Stamp and attach views to the region so they're dropped on reclaim.
-    heap.stamp(tv);
-    heap.attach_views(views);
-
     Ok(())
 }

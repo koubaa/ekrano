@@ -132,8 +132,9 @@ pub use peniko;
 /// 2D geometry, with a focus on curves.
 pub use peniko::kurbo;
 
+pub use goldy::placement_heap::PlacementHeapStats;
 pub use goldy::{Frame, TimelineValue};
-pub use goldy_renderer::{AllocatorStats, FrameStats, GoldyRenderer, PlacementHeapStats};
+pub use goldy_renderer::{AllocatorStats, FrameStats, GoldyRenderer};
 
 pub use ekrano_encoding::{Glyph, NormalizedCoord};
 pub use scene::{DrawGlyphs, Scene};
