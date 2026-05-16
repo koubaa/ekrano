@@ -23,11 +23,13 @@ use std::mem;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use goldy::placement_heap::PlacementHeap;
 use goldy::task_graph::{NodeAccess, NodeBuilder};
 use goldy::types::{BufferFlags, SpatialAccess, TextureFlags, TextureFormat};
 use goldy::{
-    Buffer, BufferPool, ComputePipeline, DataAccess, Device, DeviceType, Frame, ShaderModule,
-    TaskGraph, Texture, TexturePool, TimelineValue,
+    Buffer, BufferPool, BufferView, ComputePipeline, DataAccess, Device, DeviceType, Frame,
+    ShaderModule, TaskGraph, Texture, TexturePool, TimelineValue, TransientAllocator,
+    TransientAllocatorConfig, TransientAllocatorStrategy,
 };
 
 use mem::size_of;
@@ -65,6 +67,28 @@ pub struct FrameStats {
     /// Number of times the bump allocator overflowed and the frame was retried.
     /// Zero on a clean frame.
     pub bump_retries: u32,
+}
+
+/// Snapshot of the transient allocator's state, useful for tests and diagnostics.
+#[derive(Debug, Clone, Copy)]
+pub struct AllocatorStats {
+    /// Total capacity of the backing buffer in bytes.
+    pub capacity: u64,
+    /// Bytes currently live (allocated minus freed-and-retired).
+    pub used: u64,
+    /// Number of frames waiting in the cleanup ring.
+    pub cleanup_ring_depth: usize,
+}
+
+/// Snapshot of the placement heap's state for Metal trace verification.
+#[derive(Debug, Clone, Copy)]
+pub struct PlacementHeapStats {
+    /// Total capacity of the backing buffer in bytes.
+    pub capacity: u64,
+    /// Bytes currently occupied by in-flight regions.
+    pub in_flight_bytes: u64,
+    /// Number of in-flight regions (one per submitted frame).
+    pub in_flight_count: usize,
 }
 
 /// Upper bound applied to observed bump counters before they're fed into
@@ -116,8 +140,14 @@ struct FrameCleanup {
     /// Index into [`FrameCleanup::deferred_owned_buffers`] for bump readback (`ekrano.bump_buf`).
     bump_readback_owned_index: Option<usize>,
     deferred_owned_buffers: Vec<Buffer>,
+    deferred_pool_views: Vec<BufferView>,
     deferred_textures: Vec<Texture>,
 }
+
+/// Initial capacity for the persistent placement heap (256 MiB).
+/// Grows on demand if a single frame needs more, but steady-state scenes
+/// stabilise within this budget.
+const PLACEMENT_HEAP_INITIAL_CAPACITY: u64 = 256 * 1024 * 1024;
 
 struct GoldyShader {
     pipeline: ComputePipeline,
@@ -136,7 +166,7 @@ fn force_uav(device: &Device) -> bool {
     device.device_type() == DeviceType::Cpu
 }
 
-#[derive(Hash, PartialEq, Eq)]
+#[derive(Hash, PartialEq, Eq, Clone)]
 struct BufferKey {
     size: u64,
     access: DataAccess,
@@ -169,14 +199,48 @@ impl ResourcePool {
         if let Some(buf) = pool.pop() {
             return Ok(buf);
         }
-        Buffer::new_with_stride_and_flags(device, size, access, stride, buffer_flags)
+        device
+            .alloc_buffer(size, access, stride, buffer_flags)
             .map_err(|e| Error::Shader(e.to_string()))
+    }
+
+    /// Drop excess pooled [`Buffer`]s per `(size, access, name)` key to bound memory.
+    pub(crate) fn cap_pool_depth(&mut self, max_per_key: usize) {
+        let mut empties = Vec::<BufferKey>::new();
+        for (key, stack) in self.bufs.iter_mut() {
+            while stack.len() > max_per_key {
+                drop(stack.pop());
+            }
+            if stack.is_empty() {
+                empties.push(key.clone());
+            }
+        }
+        for k in empties {
+            self.bufs.remove(&k);
+        }
     }
 }
 
 /// Maximum number of unprocessed `FrameCleanup` entries before we force a
 /// synchronous wait to prevent unbounded growth.
-const MAX_CLEANUP_DEPTH: usize = 8;
+///
+/// This directly controls the amount of per-frame GPU resources (textures,
+/// owned buffers, pool views) that can be alive simultaneously. Each frame
+/// allocates full-resolution textures (`out_image` + `filter_layers`), so a
+/// depth of N means N * ~5 render-target-sized textures in flight. On a
+/// Retina display, each texture can be >13 MB, so high values cause OOM
+/// when vsync is off and frames outrun the GPU. Kept in sync with the
+/// transient allocator's `max_regions`.
+///
+/// With the Tiger Lottie at Retina resolution, each frame holds ~173 MB of
+/// compute buffers (in an allocator region) plus ~8 full-resolution textures
+/// (~130 MB) plus ~11 owned buffers. Depth N means (N+1) × that footprint
+/// alive simultaneously (ring + current frame). On Apple Silicon with unified
+/// memory, depth >= 2 can exceed the GPU memory budget when vsync is off and
+/// frames are submitted faster than the GPU retires them. Depth 1 forces a
+/// synchronous wait each frame, eliminating pipelining but keeping the total
+/// under ~500 MB.
+const MAX_CLEANUP_DEPTH: usize = 3;
 
 // -----------------------------------------------------------------------
 // PersistentState — GPU resources that survive across frames
@@ -187,61 +251,80 @@ const MAX_CLEANUP_DEPTH: usize = 8;
 pub(crate) struct PersistentState {
     /// Owned buffer cache: recycles pool-exempt buffers (bump, indirect, etc.)
     pub(crate) pool: ResourcePool,
-    /// Main storage pool: single growable Goldy buffer with a CPU bump allocator
-    /// for pooled compute buffers each frame.
-    pub(crate) storage_pool: Option<BufferPool>,
+    /// Pluggable transient allocator for sub-frame pool allocations. Selected by
+    /// `GOLDY_TRANSIENT_ALLOCATOR` env var; defaults to [`TransientAllocatorStrategy::BumpReset`]
+    /// for backwards compatibility. Lazily created on first [`Self::prepare_storage_pool`].
+    pub(crate) storage_allocator: Option<Box<dyn TransientAllocator>>,
     /// Texture pool for intermediate render targets (gradient, filter layers, etc.)
     pub(crate) tex_pool: TexturePool,
     /// Bump allocator counters from the most recently drained frame.
     /// `None` until the first GPU readback completes.
     last_drained_bump: Option<BumpAllocators>,
+    /// Persistent placement heap for graph-colored transient buffers. One large
+    /// backing [`Buffer`] shared across in-flight frames; each frame acquires a
+    /// contiguous region via a ring allocator. Lazily created on first use.
+    placement_heap: Option<PlacementHeap>,
 }
 
 impl PersistentState {
+    /// Prepare the per-frame transient allocator. Lazy-initialises the strategy from
+    /// `GOLDY_TRANSIENT_ALLOCATOR` on the first call, then forwards `begin_frame` so the
+    /// allocator can reclaim retired regions / wait on the previous epoch / grow as needed.
     fn prepare_storage_pool(
         &mut self,
         device: &Device,
-        frame: &FrameState,
+        _frame: &FrameState,
         pool_size: u64,
         expected_max: u64,
     ) -> Result<()> {
         if !use_pool(device) {
             return Ok(());
         }
-        frame.wait_before_storage_pool_reuse(device)?;
 
-        let need_new = match &self.storage_pool {
-            Some(pool) => pool.capacity() < pool_size,
-            None => true,
-        };
-        if need_new {
-            if let Some(pool) = &mut self.storage_pool {
-                pool.resize(pool_size)
-                    .map_err(|e| Error::Shader(e.to_string()))?;
-            } else {
-                device.reset_buffer_heaps();
-                device.ensure_buffer_heap_capacity(expected_max.max(pool_size));
-                self.storage_pool = Some(
-                    BufferPool::with_alignment_and_capacity_hint(
-                        device,
-                        pool_size,
-                        expected_max,
-                        256,
-                    )
+        if self.storage_allocator.is_none() {
+            // Reserve virtual address range up front so growth within `expected_max` is
+            // a no-op page-bind rather than a costly realloc. Equivalent to the old hand-
+            // rolled path in this function pre-refactor.
+            device.reset_buffer_heaps();
+            device.ensure_buffer_heap_capacity(expected_max.max(pool_size));
+
+            let config = TransientAllocatorConfig {
+                initial_size: pool_size,
+                expected_max,
+                min_region_size: pool_size,
+                max_regions: MAX_CLEANUP_DEPTH,
+                alignment: 256,
+                flags: BufferFlags::GPU_ONLY,
+            };
+
+            let strategy = std::env::var("EKRANO_TRANSIENT_ALLOCATOR")
+                .ok()
+                .as_deref()
+                .and_then(TransientAllocatorStrategy::parse)
+                .unwrap_or_default();
+            log::info!(
+                "[ekrano] transient allocator strategy = {:?} (set EKRANO_TRANSIENT_ALLOCATOR=bump|epoch to override)",
+                strategy
+            );
+            self.storage_allocator = Some(
+                strategy
+                    .create(device, config)
                     .map_err(|e| Error::Shader(e.to_string()))?,
-                );
-            }
-        } else {
-            self.storage_pool
-                .as_mut()
-                .expect("storage pool must exist when need_new is false")
-                .reset();
+            );
         }
+
+        let allocator = self
+            .storage_allocator
+            .as_mut()
+            .expect("storage allocator was just initialised");
+        allocator
+            .begin_frame(device, pool_size)
+            .map_err(|e| Error::Shader(e.to_string()))?;
         Ok(())
     }
 
-    pub(crate) fn storage_pool_mut(&mut self) -> Option<&mut BufferPool> {
-        self.storage_pool.as_mut()
+    pub(crate) fn storage_allocator_mut(&mut self) -> Option<&mut Box<dyn TransientAllocator>> {
+        self.storage_allocator.as_mut()
     }
 
     fn last_drained_bump(&self) -> Option<&BumpAllocators> {
@@ -284,27 +367,29 @@ pub struct GoldyRenderer {
     persistent_bump: Option<BumpAllocators>,
 }
 
+impl Drop for GoldyRenderer {
+    fn drop(&mut self) {
+        // Wait for all in-flight GPU work before dropping resources.
+        // Without this, the cleanup ring and placement heap drop their
+        // buffers/views while the GPU is still executing dispatches that
+        // reference them, causing D3D12 device removal (exit code 2173).
+        let max_tv = self
+            .frame
+            .cleanup_ring
+            .iter()
+            .filter_map(|e| e.timeline)
+            .max();
+        if let Some(tv) = max_tv {
+            let _ = self.device.wait_until(tv);
+        }
+    }
+}
+
 // -----------------------------------------------------------------------
 // impl FrameState — bookkeeping methods (pool access via PersistentState)
 // -----------------------------------------------------------------------
 
 impl FrameState {
-    /// [`BufferPool::reset`] is only safe once GPU work that consumed last frame's
-    /// pool suballocations has completed. The most recent [`FrameCleanup`] carries
-    /// that frame's [`TimelineValue`] once recorded (call [`GoldyRenderer::note_frame_presented`]
-    /// on the swapchain path before the next frame).
-    fn wait_before_storage_pool_reuse(&self, device: &Device) -> Result<()> {
-        if let Some(back) = self.cleanup_ring.back()
-            && let Some(tv) = back.timeline
-            && device.gpu_progress() < tv
-        {
-            device
-                .wait_until(tv)
-                .map_err(|e| Error::Shader(e.to_string()))?;
-        }
-        Ok(())
-    }
-
     /// Non-blocking drain: process any completed cleanup entries from the
     /// front of the ring. If the ring has grown beyond `MAX_CLEANUP_DEPTH`,
     /// force a synchronous wait on the oldest entry to prevent unbounded growth.
@@ -372,21 +457,29 @@ impl FrameState {
             persistent.last_drained_bump = Some(bytemuck::pod_read_unaligned(&output));
         }
 
-        // Owned buffers: drop (GPU idle). Pooled [`BufferView`]s are not deferred;
-        // the growable backing buffer stays alive in [`PersistentState`].
+        // Free byte ranges for views that were NOT freed mid-pipeline. The timeline
+        // is already retired at this point so the epoch is immediately drainable.
+        if let Some(allocator) = persistent.storage_allocator.as_mut() {
+            let retired_epoch = entry.timeline.unwrap_or(0);
+            for view in &entry.deferred_pool_views {
+                allocator.free(view.offset(), view.size(), Some(retired_epoch));
+            }
+        }
         drop(entry.deferred_owned_buffers);
+        drop(entry.deferred_pool_views);
         for tex in entry.deferred_textures {
             persistent.tex_pool.release(tex);
         }
 
         device.flush_deferred_deletions();
+        device.compact_overflow_heaps();
 
         Ok(())
     }
 
     fn release_pool(&mut self, device: &Device, persistent: &mut PersistentState) -> Result<()> {
         self.wait_until_gpu_idle(device, persistent)?;
-        persistent.storage_pool = None;
+        persistent.storage_allocator = None;
         Ok(())
     }
 }
@@ -406,6 +499,7 @@ pub(crate) struct FrameRecorder<'a> {
     last_timeline: Option<TimelineValue>,
     bump_readback_owned_index: Option<usize>,
     deferred_owned_buffers: Vec<Buffer>,
+    deferred_pool_views: Vec<BufferView>,
     deferred_textures: Vec<Texture>,
     dispatch_count: usize,
 }
@@ -432,6 +526,7 @@ impl<'a> FrameRecorder<'a> {
             last_timeline: None,
             bump_readback_owned_index: None,
             deferred_owned_buffers: Vec::new(),
+            deferred_pool_views: Vec::new(),
             deferred_textures: Vec::new(),
             dispatch_count: 0,
         }
@@ -439,6 +534,27 @@ impl<'a> FrameRecorder<'a> {
 
     pub(crate) fn graph_and_persistent(&mut self) -> (&mut TaskGraph, &mut PersistentState) {
         (&mut self.graph, self.persistent)
+    }
+
+    /// Submit the current graph as a command buffer and start a fresh one.
+    ///
+    /// This lets the GPU begin executing early work (e.g. coarse rasterization)
+    /// while the CPU continues recording later work (fine rasterization, filters)
+    /// into a new command buffer.
+    pub(crate) fn flush_mid_frame(&mut self) -> Result<()> {
+        // With graph-colored transients the entire pipeline must live in one
+        // graph so wave-interval coloring sees all lifetimes. Skip the mid-frame
+        // split; the full graph is flushed in finish().
+        if self.graph.has_transient_buffers() {
+            return Ok(());
+        }
+        flush_graph(
+            &mut self.graph,
+            self.device,
+            &mut self.last_timeline,
+            self.surface_frame,
+            self.persistent,
+        )
     }
 
     pub(crate) fn alloc_pipeline_buffer_named(
@@ -462,9 +578,9 @@ impl<'a> FrameRecorder<'a> {
     pub(crate) fn defer_gpu_buf(&mut self, buf: GpuBuf) {
         match buf {
             GpuBuf::Owned(b) => self.deferred_owned_buffers.push(b),
-            GpuBuf::Pooled(_v) => {
-                // Backing [`BufferPool`] outlives the frame; views need not keep GPU
-                // work alive (see [`FrameState::wait_before_storage_pool_reuse`]).
+            GpuBuf::Pooled(v) => self.deferred_pool_views.push(v),
+            GpuBuf::Transient(_) => {
+                // Transient buffers live in the graph-scoped heap; no per-view cleanup needed.
             }
         }
     }
@@ -641,10 +757,10 @@ impl<'a> FrameRecorder<'a> {
             );
             return;
         }
-        let bind_types: Vec<_> = self.shaders[shader_id.0].bindings.clone();
+        let bind_types = &self.shaders[shader_id.0].bindings;
         let indices = collect_bindless_indices_direct(
             bindings,
-            &bind_types,
+            bind_types,
             self.force_uav,
             MAX_BINDLESS_SLOTS,
         )
@@ -667,9 +783,9 @@ impl<'a> FrameRecorder<'a> {
         let mut node = self
             .graph
             .node("dispatch", &self.shaders[shader_id.0].pipeline);
-        node = bind_graph_direct(node, bindings, &bind_types);
+        node = bind_graph_direct(node, bindings, bind_types);
         if !indices.is_empty() || !push_tail.is_empty() {
-            node = node.bind_resources_raw_with_user(&indices, push_tail);
+            node = node.bind_resources_raw_with_user(indices, push_tail);
         }
         node.dispatch(x, y, z);
         self.dispatch_count += 1;
@@ -692,10 +808,10 @@ impl<'a> FrameRecorder<'a> {
         offset: u64,
         bindings: &[GpuBinding<'_>],
     ) {
-        let bind_types: Vec<_> = self.shaders[shader_id.0].bindings.clone();
+        let bind_types = &self.shaders[shader_id.0].bindings;
         let indices = collect_bindless_indices_direct(
             bindings,
-            &bind_types,
+            bind_types,
             self.force_uav,
             MAX_BINDLESS_SLOTS,
         )
@@ -718,10 +834,10 @@ impl<'a> FrameRecorder<'a> {
         let mut node = self
             .graph
             .node("dispatch_indirect", &self.shaders[shader_id.0].pipeline);
-        node = bind_graph_direct(node, bindings, &bind_types);
+        node = bind_graph_direct(node, bindings, bind_types);
         node = node.bind_buffer(indirect_buf, NodeAccess::Read);
         if !indices.is_empty() {
-            node = node.bind_resources_raw(&indices);
+            node = node.bind_resources_raw(indices);
         }
         node.dispatch_indirect(indirect_buf, offset);
         self.dispatch_count += 1;
@@ -753,6 +869,7 @@ impl<'a> FrameRecorder<'a> {
             self.device,
             &mut self.last_timeline,
             self.surface_frame,
+            self.persistent,
         )?;
 
         let timeline = match self.surface_frame {
@@ -764,6 +881,7 @@ impl<'a> FrameRecorder<'a> {
             timeline,
             bump_readback_owned_index: self.bump_readback_owned_index,
             deferred_owned_buffers: self.deferred_owned_buffers,
+            deferred_pool_views: self.deferred_pool_views,
             deferred_textures: self.deferred_textures,
         });
 
@@ -793,6 +911,7 @@ fn bind_graph_direct<'a>(
             GpuBinding::Buf(b) => node.bind_buffer(b, access),
             GpuBinding::View(v) => node.bind_buffer_view(v, access),
             GpuBinding::Tex(t) => node.bind_texture(t, access),
+            GpuBinding::Transient(id) => node.bind_transient_buffer(*id, access),
         };
     }
     node
@@ -874,6 +993,9 @@ fn dump_dispatch_gpu(
             GpuBinding::Tex(_) => {
                 wln!("binding[{i}]: texture (dump not implemented)");
             }
+            GpuBinding::Transient(id) => {
+                wln!("binding[{i}]: transient(id={})", id.0);
+            }
         }
     }
     println!(
@@ -890,7 +1012,17 @@ fn dump_dispatch_gpu(
 
 impl GoldyRenderer {
     /// Create a new renderer for the given device.
+    ///
+    /// Installs a [`TrackingVramAllocator`](goldy::vram_allocator::TrackingVramAllocator) with a 512 MiB budget on the device
+    /// to prevent runaway GPU memory growth under heavy pipelining.
     pub fn new(device: &Device) -> Result<Self> {
+        use goldy::vram_allocator::{DefaultVramAllocator, TrackingVramAllocator};
+
+        let budget = 512 * 1024 * 1024; // 512 MiB
+        let tracking =
+            TrackingVramAllocator::with_budget(std::sync::Arc::new(DefaultVramAllocator), budget);
+        let device = device.with_vram_allocator(std::sync::Arc::new(tracking));
+
         let mut renderer = Self {
             device: device.clone(),
             shaders: FullShaders::empty(),
@@ -898,17 +1030,19 @@ impl GoldyRenderer {
             engine_shaders: Vec::new(),
             persistent: PersistentState {
                 pool: ResourcePool::default(),
-                storage_pool: None,
+                storage_allocator: None,
                 tex_pool: TexturePool::default(),
                 last_drained_bump: None,
+                placement_heap: None,
             },
             frame: FrameState {
                 cleanup_ring: VecDeque::new(),
             },
             persistent_bump: None,
         };
-        let shaders = shaders::goldy_full_shaders(device, &mut renderer)?;
+        let shaders = shaders::goldy_full_shaders(&device, &mut renderer)?;
         renderer.shaders = shaders;
+        device.release_idle_shader_compiler();
         Ok(renderer)
     }
 
@@ -948,12 +1082,21 @@ impl GoldyRenderer {
     ///
     /// Fills in the timeline on the most recent `FrameCleanup` entry (the one
     /// pushed by `FrameRecorder::finish` for the surface path where the
-    /// timeline isn't known until after present).
+    /// timeline isn't known until after present) and informs the transient
+    /// allocator so it can retire this frame's regions with the correct epoch.
     pub fn note_frame_presented(&mut self, tv: TimelineValue) {
         if let Some(back) = self.frame.cleanup_ring.back_mut()
             && back.timeline.is_none()
         {
             back.timeline = Some(tv);
+        }
+        if let Some(allocator) = self.persistent.storage_allocator_mut() {
+            allocator.end_frame(tv);
+        }
+        // Stamp any placement heap entries that were submitted on the surface
+        // path (timeline was unknown until the frame was presented).
+        if let Some(ref mut heap) = self.persistent.placement_heap {
+            heap.stamp_all_pending(tv);
         }
     }
 
@@ -993,6 +1136,34 @@ impl GoldyRenderer {
         self.run_frame(device, scene, params, Some(frame.texture()), Some(frame))
     }
 
+    /// Query the transient allocator's current state for diagnostics or test assertions.
+    ///
+    /// Returns `None` if the allocator hasn't been initialised yet (no frames rendered).
+    pub fn allocator_stats(&self) -> Option<AllocatorStats> {
+        self.persistent
+            .storage_allocator
+            .as_ref()
+            .map(|a| AllocatorStats {
+                capacity: a.capacity(),
+                used: a.used_this_frame(),
+                cleanup_ring_depth: self.frame.cleanup_ring.len(),
+            })
+    }
+
+    /// Query the placement heap's current state for Metal trace verification.
+    ///
+    /// Returns `None` if the placement heap hasn't been created yet.
+    pub fn placement_heap_stats(&self) -> Option<PlacementHeapStats> {
+        self.persistent
+            .placement_heap
+            .as_ref()
+            .map(|h| PlacementHeapStats {
+                capacity: h.capacity(),
+                in_flight_bytes: h.in_flight_bytes(),
+                in_flight_count: h.in_flight_count(),
+            })
+    }
+
     /// Render a scene and return the pixel data as RGBA bytes.
     ///
     /// Unlike [`render_to_texture`](Self::render_to_texture), this path is
@@ -1007,15 +1178,15 @@ impl GoldyRenderer {
     ) -> Result<Vec<u8>> {
         let width = params.width;
         let height = params.height;
-        let texture = Texture::new(
-            device,
-            width,
-            height,
-            TextureFormat::Rgba8Unorm,
-            SpatialAccess::Direct,
-            TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
-        )
-        .map_err(|e| Error::Gpu(e.to_string()))?;
+        let texture = device
+            .alloc_texture(
+                width,
+                height,
+                TextureFormat::Rgba8Unorm,
+                SpatialAccess::Direct,
+                TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
+            )
+            .map_err(|e| Error::Gpu(e.to_string()))?;
 
         for _attempt in 0..=MAX_BUMP_RETRIES {
             self.render_to_texture(device, scene, &texture, params)?;
@@ -1082,6 +1253,7 @@ impl GoldyRenderer {
         let t_drain_start = Instant::now();
         self.frame
             .try_drain_completed_frames(device, &mut self.persistent)?;
+        self.persistent.pool.cap_pool_depth(12);
         let t_drain = t_drain_start.elapsed();
 
         let prev_bump = self.persistent.take_last_drained_bump();
@@ -1197,6 +1369,10 @@ impl GoldyRenderer {
         );
         let t_coarse = t2.elapsed();
 
+        // Submit coarse work as a separate command buffer so the GPU can begin
+        // executing it while the CPU records fine rasterization and filters.
+        recorder.flush_mid_frame()?;
+
         let t3 = Instant::now();
         render.record_fine(
             encoding,
@@ -1225,9 +1401,18 @@ impl GoldyRenderer {
         recorder.schedule_pipeline_cleanup(pipeline, params.robust);
         recorder.finish()?;
         if use_pool(device)
-            && let Some(pool) = self.persistent.storage_pool_mut()
+            && let Some(allocator) = self.persistent.storage_allocator_mut()
         {
-            pool.hint_unused_above(pool.used());
+            let used = allocator.used_this_frame();
+            allocator.hint_unused_above(used);
+        }
+        // Notify the allocator about the frame's epoch so it can track in-flight allocations.
+        // For non-surface paths the timeline is on the just-pushed cleanup entry; for surface
+        // paths it's filled in later by `note_frame_presented` (see that method's hook).
+        if let Some(tv) = self.frame.cleanup_ring.back().and_then(|e| e.timeline)
+            && let Some(allocator) = self.persistent.storage_allocator_mut()
+        {
+            allocator.end_frame(tv);
         }
         let t_submit = t4.elapsed();
 
@@ -1237,8 +1422,20 @@ impl GoldyRenderer {
         } else {
             ""
         };
+
+        let (alloc_cap_mb, alloc_used_mb, ring_depth) =
+            if let Some(a) = self.persistent.storage_allocator.as_ref() {
+                (
+                    a.capacity() as f64 / (1024.0 * 1024.0),
+                    a.used_this_frame() as f64 / (1024.0 * 1024.0),
+                    self.frame.cleanup_ring.len(),
+                )
+            } else {
+                (0.0, 0.0, self.frame.cleanup_ring.len())
+            };
+
         log::debug!(
-            "[PERF] frame={} drain={:.2}ms resolve={:.2}ms pool={:.2}ms coarse_record={:.2}ms fine_record={:.2}ms submit={:.2}ms total={:.2}ms {label}",
+            "[PERF] frame={} drain={:.2}ms resolve={:.2}ms pool={:.2}ms coarse_record={:.2}ms fine_record={:.2}ms submit={:.2}ms total={:.2}ms alloc={:.1}/{:.1}MB ring={} {label}",
             frame_num,
             t_drain.as_secs_f64() * 1000.0,
             t_resolve.as_secs_f64() * 1000.0,
@@ -1247,6 +1444,9 @@ impl GoldyRenderer {
             t_fine_record.as_secs_f64() * 1000.0,
             t_submit.as_secs_f64() * 1000.0,
             frame_start.elapsed().as_secs_f64() * 1000.0,
+            alloc_used_mb,
+            alloc_cap_mb,
+            ring_depth,
         );
 
         Ok(stats)
@@ -1343,10 +1543,28 @@ fn flush_graph(
     device: &Device,
     last_timeline: &mut Option<TimelineValue>,
     surface_frame: Option<&Frame>,
+    persistent: &mut PersistentState,
 ) -> Result<()> {
     if graph.is_empty() {
         return Ok(());
     }
+
+    if graph.has_transient_buffers() {
+        flush_graph_colored(graph, device, last_timeline, surface_frame, persistent)?;
+    } else {
+        flush_graph_simple(graph, device, last_timeline, surface_frame)?;
+    }
+
+    *graph = TaskGraph::new();
+    Ok(())
+}
+
+fn flush_graph_simple(
+    graph: &TaskGraph,
+    device: &Device,
+    last_timeline: &mut Option<TimelineValue>,
+    surface_frame: Option<&Frame>,
+) -> Result<()> {
     match surface_frame {
         None => {
             let tv = device
@@ -1360,6 +1578,108 @@ fn flush_graph(
                 .map_err(|e| Error::Shader(e.to_string()))?;
         }
     }
-    *graph = TaskGraph::new();
+    Ok(())
+}
+
+/// Resolve graph-colored transients and submit without blocking.
+///
+/// 1. Compute wave-interval coloring (greedy interval packing)
+/// 2. Acquire a region from the persistent placement heap
+/// 3. Create `BufferView`s at `base_offset + colored_offset`; collect bindless indices
+/// 4. Patch dispatch `resource_slots` with real bindless indices
+/// 5. Submit the resolved IR (views kept alive in the ring until GPU retires)
+///
+/// # Leaky abstraction
+///
+/// Steps 3-5 reach into goldy internals (`lower_transient_buffers_with_bindless`,
+/// `into_resolved`, `Buffer::create_view` with per-buffer strides) because goldy has
+/// no submit path that accepts an externally-managed backing buffer. This should be
+/// replaced with a first-class `Device::submit_with_backing_buffer` once that API
+/// exists. See goldy issue #145.
+fn flush_graph_colored(
+    graph: &TaskGraph,
+    device: &Device,
+    last_timeline: &mut Option<TimelineValue>,
+    _surface_frame: Option<&Frame>,
+    persistent: &mut PersistentState,
+) -> Result<()> {
+    let (total_size, base_align, layout) = graph
+        .transient_heap_size_and_layout()
+        .map_err(|e| Error::Shader(e.to_string()))?;
+
+    // Over-allocate by `base_align - 1` so we can align the returned offset.
+    let alloc_size = (total_size + base_align - 1).max(256);
+
+    // Lazily create or grow the placement heap.
+    let heap = persistent.placement_heap.get_or_insert_with(|| {
+        let cap = PLACEMENT_HEAP_INITIAL_CAPACITY.max(alloc_size * (MAX_CLEANUP_DEPTH as u64 + 1));
+        PlacementHeap::with_capacity(device, cap).expect("failed to create placement heap")
+    });
+
+    // Reclaim any retired regions from previous frames.
+    let progress = device.gpu_progress();
+    heap.reclaim(progress);
+
+    // Acquire a region from the placement heap, then align the start.
+    let raw_offset = match heap.acquire(alloc_size) {
+        Some(off) => off,
+        None => {
+            // Ring full — wait for the oldest in-flight frame to retire.
+            let tv = device.gpu_progress();
+            heap.reclaim(tv);
+            heap.acquire(alloc_size).ok_or_else(|| {
+                Error::Shader(format!(
+                    "PlacementHeap exhausted: need {} bytes, cap={}, in_flight={}",
+                    alloc_size,
+                    heap.capacity(),
+                    heap.in_flight_bytes(),
+                ))
+            })?
+        }
+    };
+    let base_offset = raw_offset.div_ceil(base_align) * base_align;
+
+    let buf = heap.buffer();
+
+    // Create BufferViews at colored offsets, collecting bindless indices.
+    let mut views = Vec::with_capacity(layout.len());
+    let mut bindless_map: HashMap<u32, (u32, u32)> = HashMap::with_capacity(layout.len());
+
+    for spec in graph.transient_specs() {
+        let offset = base_offset + layout[&spec.id];
+        let view_stride = spec.stride.max(1);
+        let view = buf
+            .create_view(offset, spec.size, Some(view_stride))
+            .map_err(|e| Error::Shader(e.to_string()))?;
+        let uav = view.bindless_index().unwrap_or(u32::MAX);
+        let srv = view.bindless_srv_index().unwrap_or(uav);
+        bindless_map.insert(spec.id, (uav, srv));
+        views.push(view);
+    }
+
+    // Lower IR: patch TransientBuffer → BufferRange + patch resource_slots.
+    // Range map offsets are relative to the backing buffer (base_offset + colored_offset).
+    let range_map = TaskGraph::transient_buffer_range_map_with_base(
+        buf,
+        &layout,
+        graph.transient_specs(),
+        base_offset,
+    );
+    let resolved_ir = graph
+        .lower_transient_buffers_with_bindless(&range_map, &bindless_map)
+        .map_err(|e| Error::Shader(e.to_string()))?;
+
+    // Build a resolved graph (no transient specs) so compile_commands won't panic.
+    let resolved_graph = graph.into_resolved(resolved_ir);
+
+    let tv = device
+        .submit(&resolved_graph)
+        .map_err(|e| Error::Shader(e.to_string()))?;
+    *last_timeline = Some(tv);
+
+    // Stamp and attach views to the region so they're dropped on reclaim.
+    heap.stamp(tv);
+    heap.attach_views(views);
+
     Ok(())
 }

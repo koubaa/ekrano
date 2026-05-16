@@ -15,8 +15,8 @@ use ekrano_encoding::{
     Encoding, FilterPrimitive, FilterUniform, IndirectCount, WorkgroupCountsGpu, WorkgroupSize,
     make_mask_lut, make_mask_lut_16,
 };
-use goldy::Texture;
 use goldy::types::{BufferFlags, SpatialAccess, TextureFlags};
+use goldy::{Buffer, Texture};
 use peniko::color::{PremulColor, Srgb};
 
 use ekrano_encoding::{
@@ -31,7 +31,7 @@ pub struct Render {
     fine_wg_count: Option<WorkgroupSize>,
     aa_config: AaConfig,
     /// MSAA subpixel mask LUT (uploaded once, reused while this [`Render`] lives).
-    mask_lut_buf: Option<goldy::Buffer>,
+    mask_lut_buf: Option<Buffer>,
 
     #[cfg(feature = "debug_layers")]
     captured_buffers: Option<CapturedBuffers>,
@@ -61,7 +61,7 @@ const FLATTEN_THREADS_PER_GROUP: u32 = 256;
 fn dispatch_stage(
     recorder: &mut FrameRecorder<'_>,
     use_indirect: bool,
-    indirect: &goldy::Buffer,
+    indirect: &Buffer,
     shader: crate::ShaderId,
     stage: u32,
     wg: WorkgroupSize,
@@ -148,9 +148,14 @@ impl Render {
         let use_large_path_scan = wg_counts.use_large_path_scan && !shaders.pathtag_is_cpu;
 
         let indirect_buf = pipeline
-            .path_indirect()
+            .indirect
+            .as_ref()
+            .unwrap_or(&pipeline.fallback_indirect)
             .as_indirect_buffer()
             .expect("indirect buffer must be a `Buffer` for dispatch_indirect");
+        // Decouple the borrow: indirect_buf only references `indirect` or
+        // `fallback_indirect`, neither of which we free mid-pipeline.
+        let indirect_buf: &Buffer = unsafe { &*(indirect_buf as *const Buffer) };
 
         dispatch_stage(
             recorder,

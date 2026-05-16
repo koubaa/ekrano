@@ -5,11 +5,15 @@
 
 use std::mem::size_of;
 
-use goldy::task_graph::NodeAccess;
+use goldy::task_graph::{NodeAccess, TransientId};
 use goldy::types::{BufferFlags, SpatialAccess, TextureFlags};
 use goldy::{
     Buffer, BufferView, DataAccess, Device, DeviceType, TaskGraph, Texture, TextureFormat,
 };
+
+/// Sentinel bindless index for transient buffers whose real slot is resolved at
+/// flush time after graph coloring. Must not collide with valid slot indices.
+pub(crate) const TRANSIENT_SLOT_PLACEHOLDER: u32 = u32::MAX;
 
 use crate::goldy_renderer::PersistentState;
 use crate::resource_proxy::{BindType, ImageFormat};
@@ -19,20 +23,16 @@ use ekrano_encoding::{BumpAllocators, Encoding, Images, IndirectCount, Ramps, Re
 pub(crate) enum GpuBuf {
     Owned(Buffer),
     Pooled(BufferView),
+    /// Graph-scoped transient: physical allocation is deferred until graph flush,
+    /// when wave-lifetime coloring packs non-overlapping buffers into the same offset.
+    Transient(TransientId),
 }
 
 impl GpuBuf {
-    pub(crate) fn size(&self) -> u64 {
-        match self {
-            Self::Owned(b) => b.size(),
-            Self::Pooled(v) => v.size(),
-        }
-    }
-
     pub(crate) fn as_indirect_buffer(&self) -> Option<&Buffer> {
         match self {
             Self::Owned(b) => Some(b),
-            Self::Pooled(_) => None,
+            Self::Pooled(_) | Self::Transient(_) => None,
         }
     }
 
@@ -40,6 +40,7 @@ impl GpuBuf {
         match self {
             Self::Owned(b) => GpuBinding::Buf(b),
             Self::Pooled(v) => GpuBinding::View(v),
+            Self::Transient(id) => GpuBinding::Transient(*id),
         }
     }
 }
@@ -48,6 +49,8 @@ pub(crate) enum GpuBinding<'a> {
     Buf(&'a Buffer),
     View(&'a BufferView),
     Tex(&'a Texture),
+    /// Deferred: physical allocation happens at graph flush after coloring.
+    Transient(TransientId),
 }
 
 impl<'a> GpuBinding<'a> {
@@ -68,6 +71,7 @@ impl<'a> GpuBinding<'a> {
                 }
             }
             GpuBinding::Tex(tex) => tex.bindless_index(),
+            GpuBinding::Transient(_) => return Ok(TRANSIENT_SLOT_PLACEHOLDER),
         };
         idx.ok_or_else(|| {
             Error::Shader("bindless index missing for shader resource binding".into())
@@ -82,14 +86,7 @@ fn use_pool(device: &Device) -> bool {
 fn is_pool_exempt(name: &'static str) -> bool {
     matches!(
         name,
-        "ekrano.bump_buf"
-            | "ekrano.indirect_count"
-            | "ekrano.indirect_dispatch"
-            | "ekrano.tile_buf"
-            | "ekrano.lines_buf"
-            | "ekrano.seg_counts_buf"
-            | "ekrano.segments_buf"
-            | "ekrano.path_buf"
+        "ekrano.bump_buf" | "ekrano.indirect_count" | "ekrano.indirect_dispatch"
     )
 }
 
@@ -109,13 +106,18 @@ pub(crate) fn alloc_pipeline_buffer(
     name: &'static str,
     flags: BufferFlags,
 ) -> Result<GpuBuf, Error> {
-    let pooled = use_pool(device) && !is_pool_exempt(name);
-    if pooled {
-        let pool = persistent
-            .storage_pool_mut()
-            .ok_or_else(|| Error::Shader("storage pool not prepared".into()))?;
-        let view = pool
-            .alloc_bytes(size, Some(stride))
+    let use_graph_coloring = use_pool(device)
+        && !is_pool_exempt(name)
+        && std::env::var("EKRANO_NO_GRAPH_COLORING").is_err();
+    if use_graph_coloring {
+        let tid = graph.transient_buffer_with_stride(size, stride);
+        Ok(GpuBuf::Transient(tid))
+    } else if use_pool(device) && !is_pool_exempt(name) {
+        let allocator = persistent
+            .storage_allocator_mut()
+            .ok_or_else(|| Error::Shader("storage allocator not prepared".into()))?;
+        let view = allocator
+            .alloc(device, size, Some(stride))
             .map_err(|e| Error::Shader(e.to_string()))?;
         Ok(GpuBuf::Pooled(view))
     } else {
@@ -235,10 +237,16 @@ pub(crate) fn clear_gpu_buf(
     off: u64,
     size: Option<u64>,
 ) -> Result<(), Error> {
-    let sz = size.unwrap_or_else(|| buf.size().saturating_sub(off));
     match buf {
-        GpuBuf::Owned(b) => graph.clear_buffer(b, off, sz),
-        GpuBuf::Pooled(v) => graph.clear_buffer_view(v, off, sz),
+        GpuBuf::Owned(b) => {
+            let sz = size.unwrap_or_else(|| b.size().saturating_sub(off));
+            graph.clear_buffer(b, off, sz);
+        }
+        GpuBuf::Pooled(v) => {
+            let sz = size.unwrap_or_else(|| v.size().saturating_sub(off));
+            graph.clear_buffer_view(v, off, sz);
+        }
+        GpuBuf::Transient(_) => {}
     }
     Ok(())
 }
@@ -279,11 +287,6 @@ pub(crate) struct PipelineResources {
 }
 
 impl PipelineResources {
-    #[inline]
-    pub(crate) fn path_indirect(&self) -> &GpuBuf {
-        self.indirect.as_ref().unwrap_or(&self.fallback_indirect)
-    }
-
     #[allow(
         clippy::too_many_arguments,
         reason = "Single setup function threads every pipeline buffer and texture from resolve data"
@@ -613,6 +616,7 @@ pub(crate) fn collect_bindless_indices_direct(
         let idx = match binding {
             GpuBinding::Buf(_) | GpuBinding::View(_) => binding.bindless_slot(is_read_only)?,
             GpuBinding::Tex(_) => binding.bindless_slot(false)?,
+            GpuBinding::Transient(_) => TRANSIENT_SLOT_PLACEHOLDER,
         };
         indices.push(idx);
     }
