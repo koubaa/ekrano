@@ -367,6 +367,24 @@ pub struct GoldyRenderer {
     persistent_bump: Option<BumpAllocators>,
 }
 
+impl Drop for GoldyRenderer {
+    fn drop(&mut self) {
+        // Wait for all in-flight GPU work before dropping resources.
+        // Without this, the cleanup ring and placement heap drop their
+        // buffers/views while the GPU is still executing dispatches that
+        // reference them, causing D3D12 device removal (exit code 2173).
+        let max_tv = self
+            .frame
+            .cleanup_ring
+            .iter()
+            .filter_map(|e| e.timeline)
+            .max();
+        if let Some(tv) = max_tv {
+            let _ = self.device.wait_until(tv);
+        }
+    }
+}
+
 // -----------------------------------------------------------------------
 // impl FrameState — bookkeeping methods (pool access via PersistentState)
 // -----------------------------------------------------------------------
