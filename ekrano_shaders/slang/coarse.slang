@@ -189,6 +189,7 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
     while (true) {
         for (uint i = 0; i < N_SLICE; i++)
             sh_bitmaps[i][local_id.x] = 0;
+        GroupMemoryBarrierWithGroupSync();
 
         while (true) {
             if (ready_ix == wr_ix && partition_ix < n_partitions) {
