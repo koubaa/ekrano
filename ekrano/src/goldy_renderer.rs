@@ -861,14 +861,14 @@ impl<'a> FrameRecorder<'a> {
         // buffers (those that don't need CPU readback) directly into goldy's ring.
         // This avoids tracking them in FrameCleanup and lets goldy manage their
         // lifetime alongside its own deferred-deletion ring.
-        if let Some(tv) = timeline {
-            if !self.deferred_owned_buffers.is_empty() {
-                let mut guard = GpuGuard::new(self.device, tv);
-                for buf in self.deferred_owned_buffers.drain(..) {
-                    guard.hold(buf);
-                }
-                // guard dropped here — buffers registered in goldy's deferred ring
+        if let Some(tv) = timeline
+            && !self.deferred_owned_buffers.is_empty()
+        {
+            let mut guard = GpuGuard::new(self.device, tv);
+            for buf in self.deferred_owned_buffers.drain(..) {
+                guard.hold(buf);
             }
+            // guard dropped here — buffers registered in goldy's deferred ring
         }
         // Surface path: buffers remain in `deferred_owned_buffers` and are moved
         // to `surface_owned_buffers`; they'll be deferred in `note_frame_presented`

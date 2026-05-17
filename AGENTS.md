@@ -61,9 +61,9 @@ EKRANO_TEST_CREATE=all cargo test -p ekrano_tests     # create new snapshots
 ## Linting (do at the end of each agent interaction after code changes)
 
 ```bash
-`cargo check`
+cargo check
 cargo fmt -p ekrano -p ekrano_encoding -p ekrano_shaders -p ekrano_tests -p xtask -p headless -p scenes --check
 taplo fmt --check --diff
 bash .github/copyright.sh
-`cargo clippy --workspace --locked --all-features`
+cargo clippy --workspace --locked --all-features
 ```
