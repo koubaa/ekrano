@@ -103,8 +103,9 @@ fn many_bins() {
             (true, false) => red_count += 1,
             (false, true) => {
                 black_count += 1;
-                let px = (i as u32) % width;
-                let py = (i as u32) / width;
+                let idx: u32 = i.try_into().expect("pixel index should fit u32");
+                let px = idx % width;
+                let py = idx / width;
                 let bin_ix = (py / 256) * 17 + (px / 256);
                 if bin_ix < 256 {
                     non_red_in_valid.push((px, py));
@@ -327,8 +328,8 @@ fn single_bin_red_fill() {
     let image = ekrano_tests::render_then_debug_sync(&scene, &params).unwrap();
     assert_eq!(image.format, ImageFormat::Rgba8);
 
-    let total = 256u32 * 256;
-    let mut red_count = 0u32;
+    let total = 256_u32 * 256;
+    let mut red_count = 0_u32;
     for pixel in image.data.data().chunks_exact(4) {
         let &[r, g, b, a] = pixel else { unreachable!() };
         if r == 255 && g == 0 && b == 0 && a == 255 {
@@ -373,14 +374,14 @@ fn four_bin_colored_quadrants() {
     let image = ekrano_tests::render_then_debug_sync(&scene, &params).unwrap();
     assert_eq!(image.format, ImageFormat::Rgba8);
 
-    let mut non_black_count = 0u32;
+    let mut non_black_count = 0_u32;
     for pixel in image.data.data().chunks_exact(4) {
         let &[r, g, b, a] = pixel else { unreachable!() };
         if a == 255 && (r > 0 || g > 0 || b > 0) {
             non_black_count += 1;
         }
     }
-    let total = 512u32 * 512;
+    let total = 512_u32 * 512;
     assert_eq!(
         non_black_count,
         total,
@@ -408,8 +409,8 @@ fn medium_bins_red_fill() {
     let image = ekrano_tests::render_then_debug_sync(&scene, &params).unwrap();
     assert_eq!(image.format, ImageFormat::Rgba8);
 
-    let total = 1024u32 * 1024;
-    let mut red_count = 0u32;
+    let total = 1024_u32 * 1024;
+    let mut red_count = 0_u32;
     for pixel in image.data.data().chunks_exact(4) {
         let &[r, g, b, a] = pixel else { unreachable!() };
         if r == 255 && g == 0 && b == 0 && a == 255 {
@@ -446,7 +447,7 @@ fn repeated_many_bins() {
         let params = TestParams::new("repeated_many_bins", 256 * 17, 256 * 17);
         let image = ekrano_tests::render_then_debug_sync(&scene, &params).unwrap();
 
-        let mut red_count = 0u32;
+        let mut red_count = 0_u32;
         for pixel in image.data.data().chunks_exact(4) {
             let &[r, g, b, _a] = pixel else {
                 unreachable!()
