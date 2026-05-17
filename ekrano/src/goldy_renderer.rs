@@ -527,16 +527,7 @@ impl<'a> FrameRecorder<'a> {
     /// This lets the GPU begin executing early work (e.g. coarse rasterization)
     /// while the CPU continues recording later work (fine rasterization, filters)
     /// into a new command buffer.
-    ///
-    /// When the graph owns transient buffers the flush is skipped: all pipeline
-    /// resources (coarse + fine) are currently allocated into a single graph
-    /// before the first flush, so submitting early would leave fine-phase specs
-    /// with no matching node.  A future refactor that splits allocation into
-    /// coarse and fine phases will unlock pipelining for transient graphs too.
     pub(crate) fn flush_mid_frame(&mut self) -> Result<()> {
-        if self.graph.has_transient_buffers() {
-            return Ok(());
-        }
         flush_graph(
             &mut self.graph,
             self.device,
@@ -1076,7 +1067,7 @@ impl GoldyRenderer {
     /// pushed by `FrameRecorder::finish` for the surface path where the
     /// timeline isn't known until after present) and informs the transient
     /// allocator so it can retire this frame's regions with the correct epoch.
-    pub fn note_frame_presented(&mut self, tv: TimelineValue) {
+    pub fn note_frame_presented(&mut self, device: &Device, tv: TimelineValue) {
         // Stamp the most recent cleanup entry with the presentation timeline so
         // process_cleanup knows when its buffers can be recycled.
         if let Some(back) = self.frame.cleanup_ring.back_mut()
@@ -1086,11 +1077,10 @@ impl GoldyRenderer {
         }
 
         if let Some(allocator) = self.persistent.storage_allocator_mut() {
-            allocator.end_frame(tv);
+            allocator.end_frame(device, tv);
         }
     }
 
-    /// Render a scene to the given texture.
     ///
     /// **Pipelined:** drains the *previous* frame's GPU work at the start,
     /// then submits the current frame and returns without waiting.  The bump
@@ -1396,7 +1386,7 @@ impl GoldyRenderer {
         if let Some(tv) = self.frame.cleanup_ring.back().and_then(|e| e.timeline)
             && let Some(allocator) = self.persistent.storage_allocator_mut()
         {
-            allocator.end_frame(tv);
+            allocator.end_frame(device, tv);
         }
         let t_submit = t4.elapsed();
 
@@ -1533,17 +1523,15 @@ fn flush_graph(
         return Ok(());
     }
 
-    // Graphs with transient buffers must go through device.submit — Frame::submit_compute
-    // calls compile_commands which panics when transient buffers are present.
-    if graph.has_transient_buffers() || surface_frame.is_none() {
+    if let Some(frame) = surface_frame {
+        frame
+            .submit_compute(graph)
+            .map_err(|e| Error::Shader(e.to_string()))?;
+    } else {
         let tv = device
             .submit(graph)
             .map_err(|e| Error::Shader(e.to_string()))?;
         *last_timeline = Some(tv);
-    } else if let Some(frame) = surface_frame {
-        frame
-            .submit_compute(graph)
-            .map_err(|e| Error::Shader(e.to_string()))?;
     }
 
     *graph = TaskGraph::new();
