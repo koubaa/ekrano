@@ -14,18 +14,20 @@ static const uint LG_N_TILE = 8;
 static const uint BLEND_CLIP = (128 << 8) | 3;
 
 groupshared uint sh_bitmaps[N_SLICE][N_TILE];
-groupshared uint sh_part_count[256];
-groupshared uint sh_part_offsets[256];
-groupshared uint sh_drawobj_ix[256];
-groupshared uint sh_tile_stride[256];
-groupshared uint sh_tile_width[256];
-groupshared uint sh_tile_x0y0[256];
-groupshared uint sh_tile_count[256];
-groupshared uint sh_tile_base[256];
+// Shared-memory overlay (issue #46): partition bins reuse the same slots as tile metadata — phases never overlap.
+groupshared uint sh_union_pc_stride[N_TILE]; // BinHeader.element_count prefix scan, then path stride for tiles.
+groupshared uint sh_union_po_width[N_TILE]; // BinHeader.chunk_offset during partition loads, then tile x-span (pixels).
+groupshared uint sh_drawobj_ix[N_TILE];
+groupshared uint sh_tile_x0y0[N_TILE];
+groupshared uint sh_tile_count[N_TILE];
+groupshared uint sh_tile_base[N_TILE];
+groupshared uint sh_wave_scan_scratch[32];
 
 void alloc_cmd(inout uint cmd_offset, inout uint cmd_limit,
     StorageBuffer<uint> ptcl, StorageBuffer<BumpAllocators> bump,
     Config config, uint size) {
+    // Issue #46 suggested per-wave PTCL bump batching via WavePrefixSum/WaveActiveSum.
+    // alloc_cmd runs under divergent control flow inside the bitmap-driven PTCL writer — inactive wave lanes break the assumptions for Wave intrinsics, so we keep one atomic per overflow event on each lane that reaches here.
     if (cmd_offset + size >= cmd_limit) {
         uint ptcl_dyn_start = config.width_in_tiles * config.height_in_tiles * PTCL_INITIAL_ALLOC;
         uint new_cmd; InterlockedAdd(bump[0].ptcl, PTCL_INCREMENT, new_cmd); new_cmd += ptcl_dyn_start;
@@ -147,10 +149,10 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
         uint failed = bump[0].failed & (STAGE_BINNING | STAGE_TILE_ALLOC | STAGE_FLATTEN);
         if (bump[0].seg_counts > config.seg_counts_size)
             failed |= STAGE_PATH_COUNT;
-        sh_part_count[0] = failed;
+        sh_union_pc_stride[0] = failed;
     }
     GroupMemoryBarrierWithGroupSync();
-    uint failed = sh_part_count[0];
+    uint failed = sh_union_pc_stride[0];
     if (failed != 0) {
         if (wg_id.x == 0 && local_id.x == 0)
             InterlockedOr(bump[0].failed, failed);
@@ -186,11 +188,13 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
     uint blend_offset = cmd_offset;
     cmd_offset += 1;
 
-    while (true) {
-        for (uint i = 0; i < N_SLICE; i++)
-            sh_bitmaps[i][local_id.x] = 0;
-        GroupMemoryBarrierWithGroupSync();
+    // Issue #46: bitmaps zero once before first iteration; thereafter cleared at loop bottom
+    // (after bitmap reads) so we skip one barrier per iteration vs clearing at the top.
+    for (uint i = 0; i < N_SLICE; i++)
+        sh_bitmaps[i][local_id.x] = 0;
+    GroupMemoryBarrierWithGroupSync();
 
+    while (true) {
         while (true) {
             if (ready_ix == wr_ix && partition_ix < n_partitions) {
                 part_start_ix = ready_ix;
@@ -199,28 +203,19 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
                     uint in_ix = (partition_ix + local_id.x) * N_TILE + bin_ix;
                     BinHeader bh = bin_headers[in_ix];
                     count = bh.element_count;
-                    sh_part_offsets[local_id.x] = bh.chunk_offset;
+                    sh_union_po_width[local_id.x] = bh.chunk_offset;
                 }
-                sh_part_count[local_id.x] = count;
-                for (uint i = 0; i < LG_WG_SIZE; i++) {
-                    GroupMemoryBarrierWithGroupSync();
-                    if (local_id.x >= (1u << i)) {
-                        uint other = sh_part_count[local_id.x - (1u << i)];
-                        count = other + count;
-                    }
-                    GroupMemoryBarrierWithGroupSync();
-                    sh_part_count[local_id.x] = count;
-                }
-                sh_part_count[local_id.x] = part_start_ix + count;
+                count = workgroup_inclusive_scan_wave_uint_sum<256>(count, local_id.x, sh_wave_scan_scratch);
+                sh_union_pc_stride[local_id.x] = part_start_ix + count;
                 GroupMemoryBarrierWithGroupSync();
-                ready_ix = sh_part_count[WG_SIZE - 1];
+                ready_ix = sh_union_pc_stride[WG_SIZE - 1];
                 partition_ix += WG_SIZE;
             }
             uint ix = rd_ix + local_id.x;
             if (ix >= wr_ix && ix < ready_ix) {
-                uint part_ix = workgroup_upper_bound<LG_WG_SIZE>(ix, sh_part_count);
-                ix -= (part_ix > 0) ? sh_part_count[part_ix - 1] : part_start_ix;
-                uint offset = config.bin_data_start + sh_part_offsets[part_ix];
+                uint part_ix = workgroup_upper_bound<LG_WG_SIZE>(ix, sh_union_pc_stride);
+                ix -= (part_ix > 0) ? sh_union_pc_stride[part_ix - 1] : part_start_ix;
+                uint offset = config.bin_data_start + sh_union_po_width[part_ix];
                 sh_drawobj_ix[local_id.x] = info_bin_data[offset + ix];
             }
             wr_ix = min(rd_ix + N_TILE, ready_ix);
@@ -240,29 +235,21 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
             uint path_ix = draw_monoids[drawobj_ix].path_ix;
             Path path = paths[path_ix];
             int stride = int(path.bbox.z - path.bbox.x);
-            sh_tile_stride[local_id.x] = path.bbox.z - path.bbox.x;
+            sh_union_pc_stride[local_id.x] = path.bbox.z - path.bbox.x;
             int dx = int(path.bbox.x) - int(bin_tile_x);
             int dy = int(path.bbox.y) - int(bin_tile_y);
             int x0 = clamp(dx, 0, int(N_TILE_X));
             int y0 = clamp(dy, 0, int(N_TILE_Y));
             int x1 = clamp(int(path.bbox.z) - int(bin_tile_x), 0, int(N_TILE_X));
             int y1 = clamp(int(path.bbox.w) - int(bin_tile_y), 0, int(N_TILE_Y));
-            sh_tile_width[local_id.x] = uint(x1 - x0);
+            sh_union_po_width[local_id.x] = uint(x1 - x0);
             sh_tile_x0y0[local_id.x] = uint(x0) | (uint(y0) << 16);
             tile_count = uint(x1 - x0) * uint(y1 - y0);
             sh_tile_base[local_id.x] = path.tiles - uint(dy * stride + dx);
         }
 
+        tile_count = workgroup_inclusive_scan_wave_uint_sum<256>(tile_count, local_id.x, sh_wave_scan_scratch);
         sh_tile_count[local_id.x] = tile_count;
-        for (uint i = 0; i < LG_WG_SIZE; i++) {
-            GroupMemoryBarrierWithGroupSync();
-            if (local_id.x >= (1u << i)) {
-                uint other = sh_tile_count[local_id.x - (1u << i)];
-                tile_count = other + tile_count;
-            }
-            GroupMemoryBarrierWithGroupSync();
-            sh_tile_count[local_id.x] = tile_count;
-        }
         GroupMemoryBarrierWithGroupSync();
         uint total_tile_count = sh_tile_count[N_TILE - 1];
 
@@ -271,11 +258,11 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
             drawobj_ix = sh_drawobj_ix[el_ix];
             tag = scene[config.drawtag_base + drawobj_ix];
             uint seq_ix = ix - ((el_ix > 0) ? sh_tile_count[el_ix - 1] : 0);
-            uint width = sh_tile_width[el_ix];
+            uint width = sh_union_po_width[el_ix];
             uint x0y0 = sh_tile_x0y0[el_ix];
             uint x = (x0y0 & 0xffff) + seq_ix % width;
             uint y = (x0y0 >> 16) + seq_ix / width;
-            uint tile_ix = sh_tile_base[el_ix] + sh_tile_stride[el_ix] * y + x;
+            uint tile_ix = sh_tile_base[el_ix] + sh_union_pc_stride[el_ix] * y + x;
             Tile tile = tiles[tile_ix];
             bool is_clip = (tag & 1) != 0;
             bool is_blend = false;
@@ -325,7 +312,7 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
             uint draw_flags = info_bin_data[di];
 
             if (clip_zero_depth == 0) {
-                uint tile_ix = sh_tile_base[el_ix] + sh_tile_stride[el_ix] * tile_y + tile_x;
+                uint tile_ix = sh_tile_base[el_ix] + sh_union_pc_stride[el_ix] * tile_y + tile_x;
                 Tile tile = tiles[tile_ix];
                 if (drawtag == DRAWTAG_FILL_COLOR) {
                     write_path(tile, tile_ix, draw_flags, cmd_offset, cmd_limit, ptcl, bump, tiles, config);
@@ -404,6 +391,8 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
         if (rd_ix >= ready_ix && partition_ix >= n_partitions)
             break;
         GroupMemoryBarrierWithGroupSync();
+        for (uint i = 0; i < N_SLICE; i++)
+            sh_bitmaps[i][local_id.x] = 0;
     }
 
     if (bin_tile_x + tile_x < config.width_in_tiles && bin_tile_y + tile_y < config.height_in_tiles) {

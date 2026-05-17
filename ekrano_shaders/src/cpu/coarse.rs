@@ -1,4 +1,5 @@
 // Copyright 2023 the Vello Authors
+// Copyright 2026 the Ekrano Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT OR Unlicense
 
 use std::cmp::max;
@@ -52,6 +53,8 @@ impl TileState {
         bump: &mut BumpAllocators,
         ptcl: &mut [u32],
     ) {
+        // GPU `alloc_cmd` keeps per-thread PTCL bumps (issue #46 wave batching would need
+        // reconvergent wave masks; divergent bitmap-driven PTCL writes make that unsafe).
         if self.cmd_offset + size >= self.cmd_limit {
             let ptcl_dyn_start =
                 config.width_in_tiles * config.height_in_tiles * PTCL_INITIAL_ALLOC;
@@ -247,6 +250,8 @@ fn coarse_main(
             }
         }
         // compacted now has the list of draw objects for each tile.
+        // GPU coarse.slang clears draw-object bitmap state between batches (issue #46);
+        // this CPU path rebuilds `compacted` per bin so no explicit clear step is needed.
         // While the GPU coarse shader does at most 256 draw objects at a time,
         // this version does all the draw objects in a tile.
         for tile_ix in 0..N_TILE {
