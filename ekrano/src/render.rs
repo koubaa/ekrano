@@ -141,7 +141,7 @@ impl Render {
                 (1, 1, 1),
                 &[GpuBinding::Buf(&wg_buf), indirect.as_binding()],
             );
-            recorder.defer_owned_buffer(wg_buf);
+            recorder.defer_owned_buffer(wg_buf, "ekrano.wg_counts");
             pipeline.indirect = Some(indirect);
         }
 
@@ -649,7 +649,7 @@ fn filter_dispatch(
             GpuBinding::Tex(dst),
         ],
     );
-    recorder.defer_owned_buffer(buf);
+    recorder.defer_owned_buffer(buf, "ekrano.filter_uniform");
 }
 
 /// Per-layer filter chain for [`Encoding::layer_filter_effects`] after fine rasterization.
