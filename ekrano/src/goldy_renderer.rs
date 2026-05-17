@@ -528,6 +528,13 @@ impl<'a> FrameRecorder<'a> {
     /// while the CPU continues recording later work (fine rasterization, filters)
     /// into a new command buffer.
     pub(crate) fn flush_mid_frame(&mut self) -> Result<()> {
+        // When the graph owns transient resources the flush is skipped: all
+        // pipeline resources (coarse + fine) are currently allocated into a
+        // single graph before the first flush, so submitting early would leave
+        // fine-phase specs with no matching node.
+        if self.graph.has_transient_resources() {
+            return Ok(());
+        }
         flush_graph(
             &mut self.graph,
             self.device,
