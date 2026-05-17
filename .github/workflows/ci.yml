@@ -114,8 +114,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        # TODO: re-enable windows-latest when Windows CI is green again
-        os: [macos-latest, ubuntu-latest]
+        os: [windows-latest, macos-latest, ubuntu-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -175,14 +174,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # TODO: re-enable windows-latest when Windows CI is green again
-        os: [macos-latest, ubuntu-24.04]
+        os: [windows-latest, macos-latest, ubuntu-24.04]
         include:
           - os: ubuntu-24.04
             runner: linux-gpu
             gpu: 'yes'
           - os: macos-latest
             runner: macos-latest
+            gpu: 'yes'
+          - os: windows-latest
+            runner: windows-latest
+            # GPU snapshot tests use Goldy DX12 on WARP (software rasterizer), same idea as goldy CI.
             gpu: 'yes'
     steps:
       - uses: actions/checkout@v4
@@ -340,8 +342,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        # TODO: re-enable windows-latest when Windows CI is green again
-        os: [macos-latest, ubuntu-latest]
+        os: [windows-latest, macos-latest, ubuntu-latest]
     steps:
       - uses: actions/checkout@v4
 
