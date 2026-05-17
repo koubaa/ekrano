@@ -27,7 +27,7 @@ use goldy::task_graph::{NodeAccess, NodeBuilder};
 use goldy::types::{BufferFlags, SpatialAccess, TextureFlags, TextureFormat};
 use goldy::{
     Buffer, BufferPool, BufferView, ComputePipeline, DataAccess, Device, DeviceType, Frame,
-    ShaderModule, TaskGraph, Texture, TexturePool, TimelineValue, TransientAllocator,
+    GpuGuard, ShaderModule, TaskGraph, Texture, TexturePool, TimelineValue, TransientAllocator,
     TransientAllocatorConfig, TransientAllocatorStrategy,
 };
 
@@ -125,9 +125,14 @@ static FRAME_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 struct FrameCleanup {
     timeline: Option<TimelineValue>,
-    /// Index into [`FrameCleanup::deferred_owned_buffers`] for bump readback (`ekrano.bump_buf`).
-    bump_readback_owned_index: Option<usize>,
-    deferred_owned_buffers: Vec<Buffer>,
+    /// The bump readback buffer (`ekrano.bump_buf`) for `robust=true` frames.
+    /// Read to CPU on cleanup to update bump estimates; `None` for non-robust frames.
+    bump_buf: Option<Buffer>,
+    /// Owned buffers for the **surface path only** (timeline unknown until
+    /// `note_frame_presented`). On the non-surface path these are deferred
+    /// directly into goldy's ring in [`FrameRecorder::finish`] and this vec
+    /// is always empty.
+    surface_owned_buffers: Vec<Buffer>,
     deferred_pool_views: Vec<BufferView>,
     deferred_textures: Vec<Texture>,
 }
@@ -346,24 +351,6 @@ pub struct GoldyRenderer {
     persistent_bump: Option<BumpAllocators>,
 }
 
-impl Drop for GoldyRenderer {
-    fn drop(&mut self) {
-        // Wait for all in-flight GPU work before dropping resources.
-        // Without this, the cleanup ring and placement heap drop their
-        // buffers/views while the GPU is still executing dispatches that
-        // reference them, causing D3D12 device removal (exit code 2173).
-        let max_tv = self
-            .frame
-            .cleanup_ring
-            .iter()
-            .filter_map(|e| e.timeline)
-            .max();
-        if let Some(tv) = max_tv {
-            let _ = self.device.wait_until(tv);
-        }
-    }
-}
-
 // -----------------------------------------------------------------------
 // impl FrameState — bookkeeping methods (pool access via PersistentState)
 // -----------------------------------------------------------------------
@@ -426,9 +413,8 @@ impl FrameState {
             }
         }
 
-        if let Some(idx) = entry.bump_readback_owned_index
-            && let Some(buf) = entry.deferred_owned_buffers.get(idx)
-        {
+        // Read bump counters from GPU buffer (robust frames only).
+        if let Some(buf) = &entry.bump_buf {
             let size = buf.size() as usize;
             let mut output = vec![0_u8; size];
             buf.read_to_cpu(device, &mut output)
@@ -436,19 +422,25 @@ impl FrameState {
             persistent.last_drained_bump = Some(bytemuck::pod_read_unaligned(&output));
         }
 
-        // Free byte ranges for views that were NOT freed mid-pipeline. The timeline
-        // is already retired at this point so the epoch is immediately drainable.
+        // Return byte ranges for pool views that were not freed mid-pipeline.
+        // The timeline is retired at this point, so the epoch is immediately drainable.
         if let Some(allocator) = persistent.storage_allocator.as_mut() {
             let retired_epoch = entry.timeline.unwrap_or(0);
             for view in &entry.deferred_pool_views {
                 allocator.free(view.offset(), view.size(), Some(retired_epoch));
             }
         }
-        drop(entry.deferred_owned_buffers);
         drop(entry.deferred_pool_views);
+
         for tex in entry.deferred_textures {
             persistent.tex_pool.release(tex);
         }
+
+        // `surface_owned_buffers` is empty on the non-surface path (deferred to goldy's
+        // ring in `finish`). On the surface path it was drained in `note_frame_presented`,
+        // so this is typically a no-op; on forced shutdown it just drops them after the
+        // preceding wait guarantees GPU safety.
+        drop(entry.surface_owned_buffers);
 
         device.flush_deferred_deletions();
         device.compact_overflow_heaps();
@@ -476,7 +468,9 @@ pub(crate) struct FrameRecorder<'a> {
     force_uav: bool,
     surface_frame: Option<&'a Frame>,
     last_timeline: Option<TimelineValue>,
-    bump_readback_owned_index: Option<usize>,
+    /// The bump readback buffer, separated from the general deferred-buffer list
+    /// so it can be read back to CPU in `process_cleanup` without index arithmetic.
+    bump_buf_for_readback: Option<Buffer>,
     deferred_owned_buffers: Vec<Buffer>,
     deferred_pool_views: Vec<BufferView>,
     deferred_textures: Vec<Texture>,
@@ -503,7 +497,7 @@ impl<'a> FrameRecorder<'a> {
             force_uav: fuav,
             surface_frame,
             last_timeline: None,
-            bump_readback_owned_index: None,
+            bump_buf_for_readback: None,
             deferred_owned_buffers: Vec::new(),
             deferred_pool_views: Vec::new(),
             deferred_textures: Vec::new(),
@@ -632,13 +626,17 @@ impl<'a> FrameRecorder<'a> {
         self.defer_gpu_buf(reduced_scan);
         self.defer_gpu_buf(tagmonoid);
         self.defer_gpu_buf(path_bbox);
-        let bump_idx = if bump_readback {
-            Some(self.deferred_owned_buffers.len())
+        if bump_readback {
+            // Route bump buffer through a dedicated field so process_cleanup can
+            // do the CPU readback without index arithmetic.
+            if let GpuBuf::Owned(b) = bump {
+                self.bump_buf_for_readback = Some(b);
+            } else {
+                self.defer_gpu_buf(bump);
+            }
         } else {
-            None
-        };
-        self.defer_gpu_buf(bump);
-        self.bump_readback_owned_index = bump_idx;
+            self.defer_gpu_buf(bump);
+        }
         self.defer_gpu_buf(lines);
         self.defer_gpu_buf(draw_reduced);
         self.defer_gpu_buf(draw_monoid);
@@ -859,10 +857,27 @@ impl<'a> FrameRecorder<'a> {
             Some(_) => None,
         };
 
+        // On the non-surface path the epoch is known right now, so defer owned
+        // buffers (those that don't need CPU readback) directly into goldy's ring.
+        // This avoids tracking them in FrameCleanup and lets goldy manage their
+        // lifetime alongside its own deferred-deletion ring.
+        if let Some(tv) = timeline
+            && !self.deferred_owned_buffers.is_empty()
+        {
+            let mut guard = GpuGuard::new(self.device, tv);
+            for buf in self.deferred_owned_buffers.drain(..) {
+                guard.hold(buf);
+            }
+            // guard dropped here — buffers registered in goldy's deferred ring
+        }
+        // Surface path: buffers remain in `deferred_owned_buffers` and are moved
+        // to `surface_owned_buffers`; they'll be deferred in `note_frame_presented`
+        // once the timeline value is known.
+
         self.frame.cleanup_ring.push_back(FrameCleanup {
             timeline,
-            bump_readback_owned_index: self.bump_readback_owned_index,
-            deferred_owned_buffers: self.deferred_owned_buffers,
+            bump_buf: self.bump_buf_for_readback,
+            surface_owned_buffers: self.deferred_owned_buffers,
             deferred_pool_views: self.deferred_pool_views,
             deferred_textures: self.deferred_textures,
         });
@@ -1001,8 +1016,10 @@ impl GoldyRenderer {
         use goldy::vram_allocator::{DefaultVramAllocator, TrackingVramAllocator};
 
         let budget = 512 * 1024 * 1024; // 512 MiB
-        let tracking =
-            TrackingVramAllocator::with_budget(std::sync::Arc::new(DefaultVramAllocator), budget);
+        let tracking = TrackingVramAllocator::with_budget(
+            std::sync::Arc::new(DefaultVramAllocator::new()),
+            budget,
+        );
         let device = device.with_vram_allocator(std::sync::Arc::new(tracking));
 
         let mut renderer = Self {
@@ -1066,11 +1083,26 @@ impl GoldyRenderer {
     /// timeline isn't known until after present) and informs the transient
     /// allocator so it can retire this frame's regions with the correct epoch.
     pub fn note_frame_presented(&mut self, tv: TimelineValue) {
-        if let Some(back) = self.frame.cleanup_ring.back_mut()
+        // Take the surface-path owned buffers out of the cleanup ring while we
+        // still hold the mutable borrow, then defer them to goldy's ring below.
+        let surface_bufs = if let Some(back) = self.frame.cleanup_ring.back_mut()
             && back.timeline.is_none()
         {
             back.timeline = Some(tv);
+            mem::take(&mut back.surface_owned_buffers)
+        } else {
+            Vec::new()
+        };
+
+        // Defer surface-path owned buffers now that the timeline is known.
+        if !surface_bufs.is_empty() {
+            let mut guard = GpuGuard::new(&self.device, tv);
+            for buf in surface_bufs {
+                guard.hold(buf);
+            }
+            // guard dropped here — buffers registered in goldy's deferred ring
         }
+
         if let Some(allocator) = self.persistent.storage_allocator_mut() {
             allocator.end_frame(tv);
         }
