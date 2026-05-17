@@ -17,6 +17,27 @@ use ekrano::{AaConfig, GoldyRenderer, RenderParams, Scene};
 use goldy::types::{SpatialAccess, TextureFlags, TextureFormat};
 use goldy::{Device, DeviceType, Instance};
 
+/// Serialize GPU tests when the D3D12 debug layer is active.
+///
+/// The debug layer validates resources process-wide. Running two D3D12 devices
+/// simultaneously (via Cargo's default parallel test threads) causes the debug
+/// layer to terminate the process with exit code 2173. When validation is off
+/// the lock is skipped so tests run in parallel at full speed.
+#[cfg(target_os = "windows")]
+fn gpu_test_lock() -> Option<std::sync::MutexGuard<'static, ()>> {
+    use std::sync::{Mutex, OnceLock};
+    if goldy::backend::dx12::is_debug_mode() {
+        static GPU_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        return Some(GPU_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap());
+    }
+    None
+}
+
+#[cfg(not(target_os = "windows"))]
+fn gpu_test_lock() -> Option<()> {
+    None
+}
+
 const FRAME_COUNT: usize = 200;
 const WIDTH: u32 = 64;
 const HEIGHT: u32 = 64;
@@ -47,6 +68,7 @@ fn tiny_scene() -> Scene {
 #[test]
 fn pipelined_allocator_capacity_stable() {
     env_logger::try_init().ok();
+    let _gpu_guard = gpu_test_lock();
 
     let device = make_device();
     let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new");
@@ -108,6 +130,7 @@ fn pipelined_allocator_capacity_stable() {
 #[test]
 fn pipelined_allocator_used_converges() {
     env_logger::try_init().ok();
+    let _gpu_guard = gpu_test_lock();
 
     let device = make_device();
     let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new");

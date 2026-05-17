@@ -336,7 +336,8 @@ fn single_bin_red_fill() {
         }
     }
     assert_eq!(
-        red_count, total,
+        red_count,
+        total,
         "expected {total} red pixels in 1-bin fill, got {red_count} (deficit: {})",
         total - red_count
     );
@@ -381,7 +382,8 @@ fn four_bin_colored_quadrants() {
     }
     let total = 512u32 * 512;
     assert_eq!(
-        non_black_count, total,
+        non_black_count,
+        total,
         "expected {total} non-black pixels in 2x2 bin fill, got {non_black_count} (deficit: {})",
         total - non_black_count
     );
@@ -415,7 +417,8 @@ fn medium_bins_red_fill() {
         }
     }
     assert_eq!(
-        red_count, total,
+        red_count,
+        total,
         "expected {total} red pixels in 4x4 bin fill, got {red_count} (deficit: {})",
         total - red_count
     );
@@ -445,7 +448,9 @@ fn repeated_many_bins() {
 
         let mut red_count = 0u32;
         for pixel in image.data.data().chunks_exact(4) {
-            let &[r, g, b, _a] = pixel else { unreachable!() };
+            let &[r, g, b, _a] = pixel else {
+                unreachable!()
+            };
             if r == 255 && g == 0 && b == 0 {
                 red_count += 1;
             }
