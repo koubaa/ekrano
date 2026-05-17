@@ -85,10 +85,13 @@ fn many_bins() {
     // To view, use EKRANO_DEBUG_TEST=many_bins
     let image = ekrano_tests::render_then_debug_sync(&scene, &params).unwrap();
     assert_eq!(image.format, ImageFormat::Rgba8);
-    let mut red_count = 0;
-    let mut black_count = 0;
+    let mut red_count: u32 = 0;
+    let mut black_count: u32 = 0;
 
-    for pixel in image.data.data().chunks_exact(4) {
+    let width: u32 = 256 * 17;
+    let mut non_red_in_valid: Vec<(u32, u32)> = Vec::new();
+
+    for (i, pixel) in image.data.data().chunks_exact(4).enumerate() {
         let &[r, g, b, a] = pixel else { unreachable!() };
         let is_red = r == 255 && g == 0 && b == 0 && a == 255;
         let is_black = r == 0 && g == 0 && b == 0 && a == 255;
@@ -98,21 +101,39 @@ fn many_bins() {
         match (is_red, is_black) {
             (true, true) => unreachable!(),
             (true, false) => red_count += 1,
-            (false, true) => black_count += 1,
+            (false, true) => {
+                black_count += 1;
+                let idx: u32 = i.try_into().expect("pixel index should fit u32");
+                let px = idx % width;
+                let py = idx / width;
+                let bin_ix = (py / 256) * 17 + (px / 256);
+                if bin_ix < 256 {
+                    non_red_in_valid.push((px, py));
+                }
+            }
             (false, false) => panic!("Got unexpected pixel {pixel:?}"),
         }
     }
 
-    // When #680 is fully fixed, this will become:
-    // let drawn_bins = 17 /* x bins */ * 17 /* y bins*/;
-
     // The coarse shader caps bin_ix at 256 (see vello #680), so at most 256 of the
     // 289 bins render.  With the binning OOB fix all 256 should be correct.
     const MIN_RED_COUNT: u32 = 256 * 256 * 256;
-    assert!(
-        red_count >= MIN_RED_COUNT,
-        "expected at least {MIN_RED_COUNT} red pixels, got {red_count}"
-    );
+    if red_count < MIN_RED_COUNT {
+        let deficit = MIN_RED_COUNT - red_count;
+        use std::collections::BTreeSet;
+        let mut affected_tiles: BTreeSet<(u32, u32)> = BTreeSet::new();
+        let mut affected_bins: BTreeSet<(u32, u32)> = BTreeSet::new();
+        for &(px, py) in &non_red_in_valid {
+            affected_tiles.insert((px / 16, py / 16));
+            affected_bins.insert((px / 256, py / 256));
+        }
+        panic!(
+            "expected at least {MIN_RED_COUNT} red pixels, got {red_count} \
+             (deficit: {deficit} pixels = {} tiles in bins {:?})",
+            affected_tiles.len(),
+            affected_bins,
+        );
+    }
     assert!(black_count > 0);
 }
 
@@ -276,4 +297,176 @@ fn clip_blends() {
     snapshot_test_sync(scene, &params)
         .unwrap()
         .assert_mean_less_than(0.001);
+}
+
+// ---------------------------------------------------------------------------
+// GPU synchronization stress tests (ekrano issue #26)
+//
+// Simpler scenes that exercise the same clear → dispatch → read-back pipeline
+// as `many_bins_test` but with less complexity, making failures easier to
+// diagnose. Run in a loop to detect intermittent flakes:
+//   cargo test -p ekrano_tests --test known_issues <name> -- --nocapture
+// ---------------------------------------------------------------------------
+
+/// Single-bin red fill: simplest possible scene that exercises the full pipeline.
+///
+/// A 256x256 viewport fits in exactly one bin. If the clear → coarse → fine
+/// barrier chain has a hole, the output may contain stale pixels. Unlike
+/// `many_bins_test` which needs 17x17 bins to trigger the race, this test
+/// checks whether even the minimal one-bin path is solid.
+#[test]
+fn single_bin_red_fill() {
+    let mut scene = Scene::new();
+    scene.fill(
+        ekrano::peniko::Fill::NonZero,
+        Affine::IDENTITY,
+        palette::css::RED,
+        None,
+        &Rect::new(0., 0., 256., 256.),
+    );
+    let params = TestParams::new("single_bin_red_fill", 256, 256);
+    let image = ekrano_tests::render_then_debug_sync(&scene, &params).unwrap();
+    assert_eq!(image.format, ImageFormat::Rgba8);
+
+    let total = 256_u32 * 256;
+    let mut red_count = 0_u32;
+    for pixel in image.data.data().chunks_exact(4) {
+        let &[r, g, b, a] = pixel else { unreachable!() };
+        if r == 255 && g == 0 && b == 0 && a == 255 {
+            red_count += 1;
+        }
+    }
+    assert_eq!(
+        red_count,
+        total,
+        "expected {total} red pixels in 1-bin fill, got {red_count} (deficit: {})",
+        total - red_count
+    );
+}
+
+/// Four-bin grid: 2x2 bins with different colors per quadrant.
+///
+/// Uses a 512x512 viewport (2x2 bins). Each quadrant is filled with a distinct
+/// color. Verifies that inter-bin boundaries don't lose pixels due to
+/// synchronization issues in the coarse rasterizer.
+#[test]
+fn four_bin_colored_quadrants() {
+    let mut scene = Scene::new();
+    let colors = [
+        palette::css::RED,
+        palette::css::GREEN,
+        palette::css::BLUE,
+        palette::css::YELLOW,
+    ];
+    let half = 256.0;
+    for (i, &color) in colors.iter().enumerate() {
+        let x = (i % 2) as f64 * half;
+        let y = (i / 2) as f64 * half;
+        scene.fill(
+            ekrano::peniko::Fill::NonZero,
+            Affine::IDENTITY,
+            color,
+            None,
+            &Rect::new(x, y, x + half, y + half),
+        );
+    }
+    let params = TestParams::new("four_bin_quadrants", 512, 512);
+    let image = ekrano_tests::render_then_debug_sync(&scene, &params).unwrap();
+    assert_eq!(image.format, ImageFormat::Rgba8);
+
+    let mut non_black_count = 0_u32;
+    for pixel in image.data.data().chunks_exact(4) {
+        let &[r, g, b, a] = pixel else { unreachable!() };
+        if a == 255 && (r > 0 || g > 0 || b > 0) {
+            non_black_count += 1;
+        }
+    }
+    let total = 512_u32 * 512;
+    assert_eq!(
+        non_black_count,
+        total,
+        "expected {total} non-black pixels in 2x2 bin fill, got {non_black_count} (deficit: {})",
+        total - non_black_count
+    );
+}
+
+/// Medium-scale fill across 4x4 bins (1024x1024).
+///
+/// Larger than 4-bin but smaller than `many_bins_test`. Exercises more
+/// workgroups in the coarse shader. A synchronization bug that loses a
+/// fraction of bins should be visible here.
+#[test]
+fn medium_bins_red_fill() {
+    let mut scene = Scene::new();
+    scene.fill(
+        ekrano::peniko::Fill::NonZero,
+        Affine::IDENTITY,
+        palette::css::RED,
+        None,
+        &Rect::new(-5., -5., 1030., 1030.),
+    );
+    let params = TestParams::new("medium_bins_red_fill", 1024, 1024);
+    let image = ekrano_tests::render_then_debug_sync(&scene, &params).unwrap();
+    assert_eq!(image.format, ImageFormat::Rgba8);
+
+    let total = 1024_u32 * 1024;
+    let mut red_count = 0_u32;
+    for pixel in image.data.data().chunks_exact(4) {
+        let &[r, g, b, a] = pixel else { unreachable!() };
+        if r == 255 && g == 0 && b == 0 && a == 255 {
+            red_count += 1;
+        }
+    }
+    assert_eq!(
+        red_count,
+        total,
+        "expected {total} red pixels in 4x4 bin fill, got {red_count} (deficit: {})",
+        total - red_count
+    );
+}
+
+/// Repeated rendering: render the same scene N times and verify each time.
+///
+/// Catches flakiness that only manifests occasionally due to GPU timing
+/// variations. Uses the same viewport size as `many_bins_test` but renders
+/// repeatedly to amplify the failure probability.
+#[test]
+fn repeated_many_bins() {
+    const ITERATIONS: u32 = 10;
+    let mut failures = Vec::new();
+
+    for iter in 0..ITERATIONS {
+        let mut scene = Scene::new();
+        scene.fill(
+            ekrano::peniko::Fill::NonZero,
+            Affine::IDENTITY,
+            palette::css::RED,
+            None,
+            &Rect::new(-5., -5., 256. * 20., 256. * 20.),
+        );
+        let params = TestParams::new("repeated_many_bins", 256 * 17, 256 * 17);
+        let image = ekrano_tests::render_then_debug_sync(&scene, &params).unwrap();
+
+        let mut red_count = 0_u32;
+        for pixel in image.data.data().chunks_exact(4) {
+            let &[r, g, b, _a] = pixel else {
+                unreachable!()
+            };
+            if r == 255 && g == 0 && b == 0 {
+                red_count += 1;
+            }
+        }
+
+        const MIN_RED_COUNT: u32 = 256 * 256 * 256;
+        if red_count < MIN_RED_COUNT {
+            failures.push((iter, red_count));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "failed {}/{ITERATIONS} iterations: {:?}",
+        failures.len(),
+        failures
+    );
 }
