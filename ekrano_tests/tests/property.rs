@@ -191,3 +191,117 @@ fn premultiplied_image() {
         }
     }
 }
+
+/// Confirms that [`ImageAlphaType::Alpha`] (straight-alpha) and
+/// [`ImageAlphaType::AlphaPremultiplied`] produce pixel-equivalent output when the
+/// source data describes the same visual colours.  Since we now premultiply straight-alpha
+/// images on CPU before uploading to the atlas, the GPU path treats both identically.
+#[test]
+fn straight_alpha_equals_premultiplied() {
+    use ekrano::peniko::{ImageBrush, ImageQuality, ImageSampler};
+
+    let opaque_colors: [Color; 4] = [
+        palette::css::RED,
+        palette::css::BLUE,
+        palette::css::LIME,
+        palette::css::WHITE,
+    ];
+    let alpha: u8 = 128;
+
+    let straight_blob: Vec<u8> = opaque_colors
+        .iter()
+        .flat_map(|c| {
+            let [r, g, b, _] = c.to_rgba8().to_u8_array();
+            [r, g, b, alpha]
+        })
+        .collect();
+
+    let premul_blob: Vec<u8> = opaque_colors
+        .iter()
+        .flat_map(|c| {
+            let [r, g, b, _] = c.to_rgba8().to_u8_array();
+            let pm = |ch: u8| u8::try_from((u32::from(ch) * u32::from(alpha) + 127) / 255).unwrap();
+            [pm(r), pm(g), pm(b), alpha]
+        })
+        .collect();
+
+    let make_brush = |data: Vec<u8>, at: ImageAlphaType| -> ImageBrush {
+        ImageBrush {
+            image: ImageData {
+                data: data.into(),
+                format: ImageFormat::Rgba8,
+                width: 2,
+                height: 2,
+                alpha_type: at,
+            },
+            sampler: ImageSampler {
+                quality: ImageQuality::Low,
+                ..Default::default()
+            },
+        }
+    };
+
+    let render = |brush: ImageBrush| {
+        let mut scene = Scene::new();
+        scene.draw_image(&brush, Affine::IDENTITY);
+        let mut params = TestParams::new("premul_equiv", 2, 2);
+        params.base_color = Some(TRANSPARENT);
+        ekrano_tests::render_then_debug_sync(&scene, &params).unwrap()
+    };
+
+    let out_straight = render(make_brush(straight_blob, ImageAlphaType::Alpha));
+    let out_premul = render(make_brush(premul_blob, ImageAlphaType::AlphaPremultiplied));
+
+    assert_eq!(
+        out_straight.data.data(),
+        out_premul.data.data(),
+        "straight-alpha and premultiplied-alpha must produce byte-identical output \
+         after atlas premultiplication"
+    );
+}
+
+/// Confirms that fully-opaque straight-alpha images are rendered correctly after
+/// the CPU premultiplication pass (premul is a no-op when a=255).
+#[test]
+fn fully_opaque_straight_alpha_unchanged() {
+    let colors = [
+        palette::css::RED,
+        palette::css::BLUE,
+        palette::css::LIME,
+        palette::css::WHITE,
+    ];
+    let blob: Vec<u8> = colors
+        .iter()
+        .flat_map(|c| c.to_rgba8().to_u8_array())
+        .collect();
+    let image = ekrano::peniko::ImageBrush {
+        image: ImageData {
+            data: blob.into(),
+            format: ImageFormat::Rgba8,
+            width: 2,
+            height: 2,
+            alpha_type: ImageAlphaType::Alpha,
+        },
+        sampler: ImageSampler {
+            quality: ekrano::peniko::ImageQuality::Low,
+            ..Default::default()
+        },
+    };
+    let mut scene = Scene::new();
+    scene.draw_image(&image, Affine::IDENTITY);
+    let result = ekrano_tests::render_then_debug_sync(
+        &scene,
+        &TestParams::new("fully_opaque_straight", 2, 2),
+    )
+    .unwrap();
+    assert_eq!(result.format, ImageFormat::Rgba8);
+    for (i, pixel) in result.data.data().chunks_exact(4).enumerate() {
+        let &[r, g, b, a] = pixel else { unreachable!() };
+        let image_color = Color::from_rgba8(r, g, b, a);
+        let expected = colors[i];
+        assert!(
+            image_color.premultiply().difference(expected.premultiply()) < 1e-3,
+            "pixel {i}: got {image_color:?}, expected {expected:?}"
+        );
+    }
+}

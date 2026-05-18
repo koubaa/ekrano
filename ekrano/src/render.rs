@@ -599,6 +599,25 @@ impl Render {
         for fl in &pipeline.filter_layers {
             fine_resources.push(GpuBinding::Tex(fl));
         }
+        // Hardware samplers for gradient ramps and image atlas (slots 13–14 / 14–15).
+        fine_resources.push(GpuBinding::Sampler(
+            recorder
+                .persistent
+                .linear_clamp_sampler
+                .as_ref()
+                .expect("linear_clamp_sampler must be initialised before fine pass")
+                .bindless_index()
+                .expect("linear_clamp_sampler has no bindless index"),
+        ));
+        fine_resources.push(GpuBinding::Sampler(
+            recorder
+                .persistent
+                .nearest_clamp_sampler
+                .as_ref()
+                .expect("nearest_clamp_sampler must be initialised before fine pass")
+                .bindless_index()
+                .expect("nearest_clamp_sampler has no bindless index"),
+        ));
 
         let width_px = out_tex.width();
         let height_px = out_tex.height();
@@ -631,6 +650,16 @@ fn premul_srgb_u32(c: PremulColor<Srgb>) -> u32 {
     c.to_rgba8().to_u32()
 }
 
+fn linear_clamp_sampler_index(recorder: &FrameRecorder<'_>) -> u32 {
+    recorder
+        .persistent
+        .linear_clamp_sampler
+        .as_ref()
+        .expect("linear_clamp_sampler must be initialised before filter pass")
+        .bindless_index()
+        .expect("linear_clamp_sampler has no bindless index")
+}
+
 fn filter_dispatch(
     recorder: &mut FrameRecorder<'_>,
     shader: crate::ShaderId,
@@ -639,17 +668,139 @@ fn filter_dispatch(
     src: &Texture,
     dst: &Texture,
 ) {
+    let sampler_idx = linear_clamp_sampler_index(recorder);
     let buf = recorder.upload_typed("ekrano.filter_uniform", uniform);
     recorder.dispatch(
         shader,
         wg,
         &[
             GpuBinding::Buf(&buf),
-            GpuBinding::Tex(src),
-            GpuBinding::Tex(dst),
+            GpuBinding::Tex(src), // src_sampled (Interpolated — SRV)
+            GpuBinding::Tex(src), // src (DirectSpatial — UAV)
+            GpuBinding::Tex(dst), // dst (DirectSpatial — UAV)
+            GpuBinding::Sampler(sampler_idx),
         ],
     );
     recorder.defer_owned_buffer(buf, "ekrano.filter_uniform");
+}
+
+/// Like `filter_dispatch` but uses `sampled_src` for the SRV slot and `uav_src` for the UAV slot.
+/// Used by pyramid shadow composite `pass_kinds` (13/14) where the pre-blurred source and the
+/// original foreground layer are different textures.
+fn filter_dispatch_two_src(
+    recorder: &mut FrameRecorder<'_>,
+    shader: crate::ShaderId,
+    uniform: &FilterUniform,
+    wg: (u32, u32, u32),
+    sampled_src: &Texture,
+    uav_src: &Texture,
+    dst: &Texture,
+) {
+    let sampler_idx = linear_clamp_sampler_index(recorder);
+    let buf = recorder.upload_typed("ekrano.filter_uniform", uniform);
+    recorder.dispatch(
+        shader,
+        wg,
+        &[
+            GpuBinding::Buf(&buf),
+            GpuBinding::Tex(sampled_src), // src_sampled (Interpolated — SRV)
+            GpuBinding::Tex(uav_src),     // src (DirectSpatial — UAV)
+            GpuBinding::Tex(dst),         // dst (DirectSpatial — UAV)
+            GpuBinding::Sampler(sampler_idx),
+        ],
+    );
+    recorder.defer_owned_buffer(buf, "ekrano.filter_uniform");
+}
+
+/// Apply a 2D pyramid blur on `src`, writing the blurred full-resolution result into `dst`.
+///
+/// The pyramid:
+/// 1. Downsample `src` `num_levels` times (hardware bilinear, each level at half the previous).
+/// 2. Blur the bottom level with the separable Gaussian (σ = `std_dev / 2^num_levels`).
+/// 3. Upsample back `num_levels` times (hardware bilinear).
+///
+/// `levels` is clamped to a maximum of 6 (64× downsample). Allocates and releases transient
+/// `DirectInterpolated` textures for each intermediate level.
+fn pyramid_blur(
+    shader: crate::ShaderId,
+    recorder: &mut FrameRecorder<'_>,
+    src: &Texture,
+    dst: &Texture,
+    std_dev: f32,
+    edge_mode: ekrano_encoding::FilterEdgeMode,
+    width: u32,
+    height: u32,
+) {
+    let levels = (std_dev.log2().floor() as u32).clamp(1, 6) as usize;
+    let sigma_residual = std_dev / (1_u32 << levels) as f32;
+
+    // Allocate pyramid textures (level 0 = half full-res, level `levels-1` = bottom).
+    let pyramid: Vec<Texture> = (0..levels)
+        .map(|l| {
+            let lw = (width >> (l + 1)).max(1);
+            let lh = (height >> (l + 1)).max(1);
+            crate::gpu_resources::acquire_texture_rgba(
+                recorder.device,
+                recorder.persistent,
+                lw,
+                lh,
+                SpatialAccess::DirectInterpolated,
+                TextureFlags::empty(),
+            )
+            .expect("pyramid level texture")
+        })
+        .collect();
+
+    // Downsample: src → pyramid[0] → pyramid[1] → ... → pyramid[levels-1]
+    let mut prev_src = src;
+    for (l, level) in pyramid.iter().enumerate() {
+        let lw = (width >> (l + 1)).max(1);
+        let lh = (height >> (l + 1)).max(1);
+        let wg = (lw.div_ceil(16), lh.div_ceil(16), 1);
+        let u = FilterUniform::downsample(lw, lh);
+        filter_dispatch(recorder, shader, &u, wg, prev_src, level);
+        prev_src = level;
+    }
+
+    // Blur at bottom level (1D separable Gaussian with σ_residual).
+    let bottom = &pyramid[levels - 1];
+    let bw = (width >> levels).max(1);
+    let bh = (height >> levels).max(1);
+    let wg_b = (bw.div_ceil(16), bh.div_ceil(16), 1);
+
+    // Allocate a transient scratch for the H-blur result at the bottom level.
+    let bottom_scratch = crate::gpu_resources::acquire_texture_rgba(
+        recorder.device,
+        recorder.persistent,
+        bw,
+        bh,
+        SpatialAccess::DirectInterpolated,
+        TextureFlags::empty(),
+    )
+    .expect("pyramid bottom scratch");
+
+    let u_h = FilterUniform::gaussian_blur(bw, bh, true, sigma_residual, edge_mode);
+    filter_dispatch(recorder, shader, &u_h, wg_b, bottom, &bottom_scratch);
+    let u_v = FilterUniform::gaussian_blur(bw, bh, false, sigma_residual, edge_mode);
+    filter_dispatch(recorder, shader, &u_v, wg_b, &bottom_scratch, bottom);
+
+    // Upsample: pyramid[levels-1] → ... → pyramid[0] → dst
+    for l in (0..levels).rev() {
+        let (dst_tex, uw, uh): (&Texture, u32, u32) = if l == 0 {
+            (dst, width, height)
+        } else {
+            (&pyramid[l - 1], (width >> l).max(1), (height >> l).max(1))
+        };
+        let wg = (uw.div_ceil(16), uh.div_ceil(16), 1);
+        let u = FilterUniform::upsample(uw, uh);
+        filter_dispatch(recorder, shader, &u, wg, &pyramid[l], dst_tex);
+    }
+
+    // Release transient textures.
+    for tex in pyramid {
+        recorder.defer_texture(tex);
+    }
+    recorder.defer_texture(bottom_scratch);
 }
 
 /// Per-layer filter chain for [`Encoding::layer_filter_effects`] after fine rasterization.
@@ -680,7 +831,7 @@ pub(crate) fn record_filter_effects(
         recorder.persistent,
         width,
         height,
-        SpatialAccess::Direct,
+        SpatialAccess::DirectInterpolated,
         TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
     )
     .expect("filter scratch texture");
@@ -718,7 +869,56 @@ pub(crate) fn record_filter_effects(
                 color,
                 edge_mode,
             } => {
-                let u = if effect.is_nested {
+                // For large radii use the pyramid path; small radii use the one-shot path.
+                const PYRAMID_THRESHOLD: f32 = 16.0;
+                if *std_dev > PYRAMID_THRESHOLD {
+                    // Allocate a full-res DirectInterpolated scratch for the blurred alpha.
+                    let blur_dst = crate::gpu_resources::acquire_texture_rgba(
+                        recorder.device,
+                        recorder.persistent,
+                        width,
+                        height,
+                        SpatialAccess::DirectInterpolated,
+                        TextureFlags::empty(),
+                    )
+                    .expect("pyramid blur_dst");
+
+                    if effect.is_nested {
+                        let inner_idx = (effect.layer_index as usize).saturating_sub(1).min(3);
+                        let inner_ft = &filter_layers[inner_idx];
+                        pyramid_blur(
+                            shader, recorder, inner_ft, &blur_dst, *std_dev, *edge_mode, width,
+                            height,
+                        );
+                        let u_comp = FilterUniform::shadow_composite_preblurred_nested(
+                            width,
+                            height,
+                            *dx,
+                            *dy,
+                            premul_srgb_u32(*color),
+                        );
+                        filter_dispatch_two_src(
+                            recorder, shader, &u_comp, wg, &blur_dst, inner_ft, ft,
+                        );
+                    } else {
+                        pyramid_blur(
+                            shader, recorder, ft, &blur_dst, *std_dev, *edge_mode, width, height,
+                        );
+                        let u_comp = FilterUniform::shadow_composite_preblurred(
+                            width,
+                            height,
+                            *dx,
+                            *dy,
+                            premul_srgb_u32(*color),
+                        );
+                        filter_dispatch_two_src(
+                            recorder, shader, &u_comp, wg, &blur_dst, ft, &scratch,
+                        );
+                        let u_copy = FilterUniform::copy(width, height);
+                        filter_dispatch(recorder, shader, &u_copy, wg, &scratch, ft);
+                    }
+                    recorder.defer_texture(blur_dst);
+                } else if effect.is_nested {
                     let inner_idx = (effect.layer_index as usize).saturating_sub(1).min(3);
                     let inner_ft = &filter_layers[inner_idx];
                     let u = FilterUniform::drop_shadow_nested(
@@ -735,7 +935,7 @@ pub(crate) fn record_filter_effects(
                     filter_dispatch(recorder, shader, &u_copy, wg, &scratch, ft);
                     continue;
                 } else {
-                    FilterUniform::drop_shadow(
+                    let u = FilterUniform::drop_shadow(
                         width,
                         height,
                         *dx,
@@ -743,11 +943,11 @@ pub(crate) fn record_filter_effects(
                         *std_dev,
                         premul_srgb_u32(*color),
                         *edge_mode,
-                    )
-                };
-                filter_dispatch(recorder, shader, &u, wg, ft, &scratch);
-                let u_copy = FilterUniform::copy(width, height);
-                filter_dispatch(recorder, shader, &u_copy, wg, &scratch, ft);
+                    );
+                    filter_dispatch(recorder, shader, &u, wg, ft, &scratch);
+                    let u_copy = FilterUniform::copy(width, height);
+                    filter_dispatch(recorder, shader, &u_copy, wg, &scratch, ft);
+                }
             }
         }
     }

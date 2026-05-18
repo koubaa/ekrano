@@ -605,14 +605,16 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
              Scattered<uint> blend_spill, DirectSpatial<float4> output,
              Interpolated<float4> gradients, Interpolated<float4> image_atlas,
              Interpolated<float4> mask_atlas,
-             // Slots 9-13: in non-msaa: filter_tex0-3 at 9-12 (slot_13 unused)
-             //             in msaa:     mask_lut at 9, filter_tex0-3 at 10-13
+             // Slots 9-12 / 9-13: filter layer snapshots (or mask_lut + layers for MSAA)
+             // Slots 13-14 (non-MSAA) / 14-15 (MSAA): hardware samplers for gradients & images.
 #ifdef msaa
              BufRO<uint> mask_lut, DirectSpatial<float4> filter_tex0, DirectSpatial<float4> filter_tex1,
              DirectSpatial<float4> filter_tex2, DirectSpatial<float4> filter_tex3,
+             Filter linear_clamp, Filter nearest_clamp,
 #else
              DirectSpatial<float4> filter_tex0, DirectSpatial<float4> filter_tex1,
              DirectSpatial<float4> filter_tex2, DirectSpatial<float4> filter_tex3,
+             Filter linear_clamp, Filter nearest_clamp,
 #endif
              ThreadId global_id, GroupThreadId local_id, GroupId wg_id) {
     Config config = config_buf[0];
@@ -621,6 +623,15 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
     uint tile_ix = actual_y * config.width_in_tiles + wg_id.x;
     float2 xy = float2(float(global_id.x * PIXELS_PER_THREAD), float(local_id.y + actual_y * TILE_HEIGHT));
     float2 local_xy = float2(float(local_id.x * PIXELS_PER_THREAD), float(local_id.y));
+
+    // Fetch atlas dimensions once per thread for hardware-sampled UV normalisation.
+    uint grad_w, grad_h;
+    gradients.GetDimensions(grad_w, grad_h);
+    float2 inv_grad = float2(1.0 / float(grad_w), 1.0 / float(grad_h));
+
+    uint atlas_w, atlas_h;
+    image_atlas.GetDimensions(atlas_w, atlas_h);
+    float2 inv_atlas = float2(1.0 / float(atlas_w), 1.0 / float(atlas_h));
 
     float4 base_color = unpackUnorm4x8ToFloat(config.base_color);
     float4 rgba[4];
@@ -800,8 +811,9 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
             for (uint i = 0; i < 4; i++) {
                 float my_d = d + lin.line_x * float(i);
                 float t = extend_mode_normalized(my_d, lin.extend_mode);
-                int2 grad_coord = int2(round(t * float(GRADIENT_WIDTH - 1)), int(lin.index));
-                float4 fg_rgba = gradients.Load(int3(grad_coord, 0));
+                float u = (t * float(grad_w - 1) + 0.5) * inv_grad.x;
+                float2 grad_uv = float2(u, (float(lin.index) + 0.5) * inv_grad.y);
+                float4 fg_rgba = gradients.SampleLevel(nearest_clamp, grad_uv, 0);
                 float4 fg_i = fg_rgba * area[i] * mask_w[i];
                 uint BLEND_DEFAULT = (MIX_NORMAL << 8) | COMPOSE_SRC_OVER;
                 rgba[i] = ((draw_blend & 0x7FFFu) == BLEND_DEFAULT)
@@ -842,8 +854,9 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
                 if (is_valid) {
                     t = extend_mode_normalized(rad.focal_x + t_sign * t, rad.extend_mode);
                     t = is_swapped ? (1.0 - t) : t;
-                    int2 grad_coord = int2(round(t * float(GRADIENT_WIDTH - 1)), int(rad.index));
-                    float4 fg_rgba = gradients.Load(int3(grad_coord, 0));
+                    float u = (t * float(grad_w - 1) + 0.5) * inv_grad.x;
+                    float2 grad_uv = float2(u, (float(rad.index) + 0.5) * inv_grad.y);
+                    float4 fg_rgba = gradients.SampleLevel(nearest_clamp, grad_uv, 0);
                     float4 fg_i = fg_rgba * area[i] * mask_w[i];
                     uint BLEND_DEFAULT_R = (MIX_NORMAL << 8) | COMPOSE_SRC_OVER;
                     rgba[i] = ((draw_blend & 0x7FFFu) == BLEND_DEFAULT_R)
@@ -869,8 +882,9 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
                 if (phi != phi) phi = 0.0;
                 phi = (phi - sweep.t0) * scale;
                 float t = extend_mode_normalized(phi, sweep.extend_mode);
-                int2 grad_coord = int2(round(t * float(GRADIENT_WIDTH - 1)), int(sweep.index));
-                float4 fg_rgba = gradients.Load(int3(grad_coord, 0));
+                float u = (t * float(grad_w - 1) + 0.5) * inv_grad.x;
+                float2 grad_uv = float2(u, (float(sweep.index) + 0.5) * inv_grad.y);
+                float4 fg_rgba = gradients.SampleLevel(nearest_clamp, grad_uv, 0);
                 float4 fg_i = fg_rgba * area[i] * mask_w[i];
                 uint BLEND_DEFAULT_S = (MIX_NORMAL << 8) | COMPOSE_SRC_OVER;
                 rgba[i] = ((draw_blend & 0x7FFFu) == BLEND_DEFAULT_S)
@@ -881,17 +895,21 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
         } else if (tag == CMD_IMAGE) {
             CmdImage image = read_image_cmd(ptcl, info, cmd_ix);
             float2 atlas_max = image.atlas_offset + image.extents - 1.0;
+            // Clamp bounds for hardware bilinear: keep sampling 0.5px inside each edge so the
+            // hardware bilinear footprint never bleeds into adjacent atlas images.
+            float2 norm_min = (image.atlas_offset + 0.5) * inv_atlas;
+            float2 norm_max = (image.atlas_offset + image.extents - 0.5) * inv_atlas;
             if (image.quality == IMAGE_QUALITY_LOW) {
-                // Nearest neighbor (matches original Vello fine shader IMAGE_QUALITY_LOW)
+                // Nearest-neighbor via hardware sampler (atlas stores premultiplied RGBA).
                 for (uint i = 0; i < 4; i++) {
                     if (area[i] != 0.0) {
                         float2 my_xy = float2(xy.x + float(i), xy.y);
                         float2 atlas_uv = image.xform * my_xy;
                         atlas_uv.x = extend_mode(atlas_uv.x, image.x_extend_mode, image.extents.x);
                         atlas_uv.y = extend_mode(atlas_uv.y, image.y_extend_mode, image.extents.y);
-                        atlas_uv += image.atlas_offset;
-                        float2 atlas_uv_clamped = clamp(atlas_uv, image.atlas_offset, atlas_max);
-                        float4 fg_rgba = maybe_premul_alpha(image_atlas.Load(int3(int2(atlas_uv_clamped), 0)), image.alpha_type);
+                        atlas_uv = floor(atlas_uv) + image.atlas_offset;
+                        float2 norm_uv = clamp((atlas_uv + 0.5) * inv_atlas, norm_min, norm_max);
+                        float4 fg_rgba = image_atlas.SampleLevel(nearest_clamp, norm_uv, 0);
                         float4 fg_i = pixel_format(fg_rgba * area[i] * mask_w[i] * image.alpha, image.format);
                         uint BLEND_DEFAULT_IL = (MIX_NORMAL << 8) | COMPOSE_SRC_OVER;
                         rgba[i] = ((draw_blend & 0x7FFFu) == BLEND_DEFAULT_IL)
@@ -900,23 +918,19 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
                     }
                 }
             } else {
-                // Bilinear (matches original Vello fine shader IMAGE_QUALITY_MEDIUM)
+                // Bilinear via hardware sampler (atlas stores premultiplied RGBA; 4× fewer
+                // texture ops vs the manual 4-tap path this replaced).
                 for (uint i = 0; i < 4; i++) {
                     if (area[i] != 0.0) {
                         float2 my_xy = float2(xy.x + float(i), xy.y);
                         float2 atlas_uv = image.xform * my_xy;
                         atlas_uv.x = extend_mode(atlas_uv.x, image.x_extend_mode, image.extents.x);
                         atlas_uv.y = extend_mode(atlas_uv.y, image.y_extend_mode, image.extents.y);
+                        // +atlas_offset - 0.5: shift to atlas pixel space; -0.5 aligns with
+                        // hardware bilinear convention (sample at sub-texel position).
                         atlas_uv += image.atlas_offset - 0.5;
-                        float2 atlas_uv_clamped = clamp(atlas_uv, image.atlas_offset, atlas_max);
-                        int2 uv00 = int2(floor(atlas_uv_clamped));
-                        int2 uv11 = int2(ceil(atlas_uv_clamped));
-                        float2 uv_frac = frac(atlas_uv);
-                        float4 a = maybe_premul_alpha(image_atlas.Load(int3(uv00, 0)), image.alpha_type);
-                        float4 b = maybe_premul_alpha(image_atlas.Load(int3(uv00.x, uv11.y, 0)), image.alpha_type);
-                        float4 c = maybe_premul_alpha(image_atlas.Load(int3(uv11.x, uv00.y, 0)), image.alpha_type);
-                        float4 d = maybe_premul_alpha(image_atlas.Load(int3(uv11, 0)), image.alpha_type);
-                        float4 fg_rgba = lerp(lerp(a, b, uv_frac.y), lerp(c, d, uv_frac.y), uv_frac.x);
+                        float2 norm_uv = clamp((atlas_uv + 0.5) * inv_atlas, norm_min, norm_max);
+                        float4 fg_rgba = image_atlas.SampleLevel(linear_clamp, norm_uv, 0);
                         float4 fg_i = pixel_format(fg_rgba * area[i] * mask_w[i] * image.alpha, image.format);
                         uint BLEND_DEFAULT_IM = (MIX_NORMAL << 8) | COMPOSE_SRC_OVER;
                         rgba[i] = ((draw_blend & 0x7FFFu) == BLEND_DEFAULT_IM)

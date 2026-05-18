@@ -31,6 +31,8 @@ pub enum BindType {
     Image(ImageFormat),
     /// A storage image with read only access.
     ImageRead(ImageFormat),
+    /// A GPU sampler (stateless; slot flows through push-constants but no barrier tracking needed).
+    Sampler,
 }
 
 #[cfg(feature = "debug_layers")]
