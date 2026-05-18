@@ -5,7 +5,7 @@ use ekrano_encoding::{BumpAllocators, LineSoup, Path, SegmentCount, Tile};
 
 use super::{
     CpuBinding,
-    util::{ONE_MINUS_ULP, ROBUST_EPSILON, Vec2, span},
+    util::{ONE_MINUS_ULP, ROBUST_EPSILON, Vec2, morton_encode_2d, span},
 };
 
 const TILE_SCALE: f32 = 1.0 / 16.0;
@@ -60,8 +60,10 @@ fn path_count_main(
             bbox[3] as i32,
         ];
         let xmin = s0.x.min(s1.x);
-        let stride = bbox[2] - bbox[0];
-        if s0.y >= bbox[3] as f32 || s1.y < bbox[1] as f32 || xmin >= bbox[2] as f32 || stride == 0
+        if s0.y >= bbox[3] as f32
+            || s1.y < bbox[1] as f32
+            || xmin >= bbox[2] as f32
+            || bbox[0] >= bbox[2]
         {
             continue;
         }
@@ -124,9 +126,10 @@ fn path_count_main(
         imax = imin.max(imax);
         ymin = ymin.max(bbox[1]);
         ymax = ymax.min(bbox[3]);
+        let tile_base = path.tiles as i32;
         for y in ymin..ymax {
-            let base = path.tiles as i32 + (y - bbox[1]) * stride;
-            tile[base as usize].backdrop += delta;
+            let tile_ix = tile_base + morton_encode_2d(0, (y - bbox[1]) as u32) as i32;
+            tile[tile_ix as usize].backdrop += delta;
         }
         let mut last_z = (a * (imin as f32 - 1.0) + b).floor();
         let seg_base = bump.seg_counts;
@@ -136,15 +139,18 @@ fn path_count_main(
             let z = zf.floor();
             let y = (y0 + i as f32 - z) as i32;
             let x = (x0 + sign * z) as i32;
-            let base = path.tiles as i32 + (y - bbox[1]) * stride - bbox[0];
+            let px = (x - bbox[0]) as u32;
+            let py = (y - bbox[1]) as u32;
             let top_edge = if i == 0 { y0 == s0.y } else { last_z == z };
             if top_edge && x + 1 < bbox[2] {
-                let x_bump = (x + 1).max(bbox[0]);
-                tile[(base + x_bump) as usize].backdrop += delta;
+                let x_bump = (x + 1).max(bbox[0]) as u32;
+                let ix =
+                    (tile_base + morton_encode_2d(x_bump - bbox[0] as u32, py) as i32) as usize;
+                tile[ix].backdrop += delta;
             }
-            // .segments is another name for the .count field; it's overloaded
-            let seg_within_slice = tile[(base + x) as usize].segment_count_or_ix;
-            tile[(base + x) as usize].segment_count_or_ix += 1;
+            let tile_ix = (tile_base + morton_encode_2d(px, py) as i32) as usize;
+            let seg_within_slice = tile[tile_ix].segment_count_or_ix;
+            tile[tile_ix].segment_count_or_ix += 1;
             let counts = (seg_within_slice << 16) | i;
             let seg_count = SegmentCount { line_ix, counts };
             seg_counts[(seg_base + i - imin) as usize] = seg_count;

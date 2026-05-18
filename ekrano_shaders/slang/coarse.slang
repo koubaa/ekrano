@@ -14,18 +14,20 @@ static const uint LG_N_TILE = 8;
 static const uint BLEND_CLIP = (128 << 8) | 3;
 
 groupshared uint sh_bitmaps[N_SLICE][N_TILE];
-groupshared uint sh_part_count[256];
-groupshared uint sh_part_offsets[256];
-groupshared uint sh_drawobj_ix[256];
-groupshared uint sh_tile_stride[256];
-groupshared uint sh_tile_width[256];
-groupshared uint sh_tile_x0y0[256];
-groupshared uint sh_tile_count[256];
-groupshared uint sh_tile_base[256];
+groupshared uint sh_part_count[N_TILE];   // BinHeader.element_count inclusive prefix sum (partition phase)
+groupshared uint sh_part_offsets[N_TILE]; // BinHeader.chunk_offset (partition phase)
+groupshared uint sh_drawobj_ix[N_TILE];
+groupshared uint sh_tile_bbox_xy[N_TILE]; // path.bbox.x | (path.bbox.y << 16) for Morton index (scatter/render phase)
+groupshared uint sh_tile_width[N_TILE];   // tile x-span (scatter phase)
+groupshared uint sh_tile_x0y0[N_TILE];
+groupshared uint sh_tile_count[N_TILE];
+groupshared uint sh_tile_base[N_TILE];
 
 void alloc_cmd(inout uint cmd_offset, inout uint cmd_limit,
     StorageBuffer<uint> ptcl, StorageBuffer<BumpAllocators> bump,
     Config config, uint size) {
+    // Issue #46 suggested per-wave PTCL bump batching via WavePrefixSum/WaveActiveSum.
+    // alloc_cmd runs under divergent control flow inside the bitmap-driven PTCL writer — inactive wave lanes break the assumptions for Wave intrinsics, so we keep one atomic per overflow event on each lane that reaches here.
     if (cmd_offset + size >= cmd_limit) {
         uint ptcl_dyn_start = config.width_in_tiles * config.height_in_tiles * PTCL_INITIAL_ALLOC;
         uint new_cmd; InterlockedAdd(bump[0].ptcl, PTCL_INCREMENT, new_cmd); new_cmd += ptcl_dyn_start;
@@ -186,11 +188,13 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
     uint blend_offset = cmd_offset;
     cmd_offset += 1;
 
-    while (true) {
-        for (uint i = 0; i < N_SLICE; i++)
-            sh_bitmaps[i][local_id.x] = 0;
-        GroupMemoryBarrierWithGroupSync();
+    // Issue #46: bitmaps zero once before first iteration; thereafter cleared at loop bottom
+    // (after bitmap reads) so we skip one barrier per iteration vs clearing at the top.
+    for (uint i = 0; i < N_SLICE; i++)
+        sh_bitmaps[i][local_id.x] = 0;
+    GroupMemoryBarrierWithGroupSync();
 
+    while (true) {
         while (true) {
             if (ready_ix == wr_ix && partition_ix < n_partitions) {
                 part_start_ix = ready_ix;
@@ -199,18 +203,18 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
                     uint in_ix = (partition_ix + local_id.x) * N_TILE + bin_ix;
                     BinHeader bh = bin_headers[in_ix];
                     count = bh.element_count;
-                    sh_part_offsets[local_id.x] = bh.chunk_offset;
+                sh_part_offsets[local_id.x] = bh.chunk_offset;
                 }
                 sh_part_count[local_id.x] = count;
-                for (uint i = 0; i < LG_WG_SIZE; i++) {
+                for (uint scan_i = 0; scan_i < LG_WG_SIZE; scan_i++) {
                     GroupMemoryBarrierWithGroupSync();
-                    if (local_id.x >= (1u << i)) {
-                        uint other = sh_part_count[local_id.x - (1u << i)];
-                        count = other + count;
+                    if (local_id.x >= (1u << scan_i)) {
+                        count = sh_part_count[local_id.x - (1u << scan_i)] + count;
                     }
                     GroupMemoryBarrierWithGroupSync();
                     sh_part_count[local_id.x] = count;
                 }
+                GroupMemoryBarrierWithGroupSync();
                 sh_part_count[local_id.x] = part_start_ix + count;
                 GroupMemoryBarrierWithGroupSync();
                 ready_ix = sh_part_count[WG_SIZE - 1];
@@ -239,8 +243,6 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
         if (tag != DRAWTAG_NOP) {
             uint path_ix = draw_monoids[drawobj_ix].path_ix;
             Path path = paths[path_ix];
-            int stride = int(path.bbox.z - path.bbox.x);
-            sh_tile_stride[local_id.x] = path.bbox.z - path.bbox.x;
             int dx = int(path.bbox.x) - int(bin_tile_x);
             int dy = int(path.bbox.y) - int(bin_tile_y);
             int x0 = clamp(dx, 0, int(N_TILE_X));
@@ -250,7 +252,11 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
             sh_tile_width[local_id.x] = uint(x1 - x0);
             sh_tile_x0y0[local_id.x] = uint(x0) | (uint(y0) << 16);
             tile_count = uint(x1 - x0) * uint(y1 - y0);
-            sh_tile_base[local_id.x] = path.tiles - uint(dy * stride + dx);
+            // Morton layout: sh_tile_base holds path.tiles (flat base offset);
+            // sh_tile_bbox_xy holds path.bbox.xy packed so the inner
+            // loop can convert bin-local tile_x/tile_y to path-relative coordinates.
+            sh_tile_base[local_id.x] = path.tiles;
+            sh_tile_bbox_xy[local_id.x] = path.bbox.x | (path.bbox.y << 16);
         }
 
         sh_tile_count[local_id.x] = tile_count;
@@ -273,9 +279,13 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
             uint seq_ix = ix - ((el_ix > 0) ? sh_tile_count[el_ix - 1] : 0);
             uint width = sh_tile_width[el_ix];
             uint x0y0 = sh_tile_x0y0[el_ix];
+            uint bbox_xy = sh_tile_bbox_xy[el_ix];
             uint x = (x0y0 & 0xffff) + seq_ix % width;
             uint y = (x0y0 >> 16) + seq_ix / width;
-            uint tile_ix = sh_tile_base[el_ix] + sh_tile_stride[el_ix] * y + x;
+            // Convert bin-local (x, y) to path-relative coordinates for Morton index.
+            uint x_path = uint(int(bin_tile_x) + int(x) - int(bbox_xy & 0xffffu));
+            uint y_path = uint(int(bin_tile_y) + int(y) - int(bbox_xy >> 16u));
+            uint tile_ix = sh_tile_base[el_ix] + morton_encode_2d(x_path, y_path);
             Tile tile = tiles[tile_ix];
             bool is_clip = (tag & 1) != 0;
             bool is_blend = false;
@@ -325,7 +335,12 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
             uint draw_flags = info_bin_data[di];
 
             if (clip_zero_depth == 0) {
-                uint tile_ix = sh_tile_base[el_ix] + sh_tile_stride[el_ix] * tile_y + tile_x;
+                // Convert this thread's bin-local tile coordinates to path-relative
+                // for Morton index computation.
+                uint bbox_xy = sh_tile_bbox_xy[el_ix];
+                uint px = uint(int(bin_tile_x) + int(tile_x) - int(bbox_xy & 0xffffu));
+                uint py = uint(int(bin_tile_y) + int(tile_y) - int(bbox_xy >> 16u));
+                uint tile_ix = sh_tile_base[el_ix] + morton_encode_2d(px, py);
                 Tile tile = tiles[tile_ix];
                 if (drawtag == DRAWTAG_FILL_COLOR) {
                     write_path(tile, tile_ix, draw_flags, cmd_offset, cmd_limit, ptcl, bump, tiles, config);
@@ -404,6 +419,8 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
         if (rd_ix >= ready_ix && partition_ix >= n_partitions)
             break;
         GroupMemoryBarrierWithGroupSync();
+        for (uint i = 0; i < N_SLICE; i++)
+            sh_bitmaps[i][local_id.x] = 0;
     }
 
     if (bin_tile_x + tile_x < config.width_in_tiles && bin_tile_y + tile_y < config.height_in_tiles) {

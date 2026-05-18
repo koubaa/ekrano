@@ -1,9 +1,11 @@
 // Copyright 2023 the Vello Authors
+// Copyright 2026 the Ekrano Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT OR Unlicense
 
 use ekrano_encoding::{BumpAllocators, ConfigUniform, Path, Tile};
 
 use super::CpuBinding;
+use super::util::morton_encode_2d;
 
 fn backdrop_main(config: &ConfigUniform, _: &BumpAllocators, paths: &[Path], tiles: &mut [Tile]) {
     for drawobj_ix in 0..config.layout.n_draw_objects {
@@ -13,10 +15,12 @@ fn backdrop_main(config: &ConfigUniform, _: &BumpAllocators, paths: &[Path], til
         let base = path.tiles;
         for y in 0..height {
             let mut sum = 0;
-            for x in 0..width {
-                let tile = &mut tiles[(base + y * width + x) as usize];
-                sum += tile.backdrop;
-                tile.backdrop = sum;
+            let tile_ix0 = (base + morton_encode_2d(0, y)) as usize;
+            sum += tiles[tile_ix0].backdrop;
+            for x in 1..width {
+                let tile_ix = (base + morton_encode_2d(x, y)) as usize;
+                sum += tiles[tile_ix].backdrop;
+                tiles[tile_ix].backdrop = sum;
             }
         }
     }

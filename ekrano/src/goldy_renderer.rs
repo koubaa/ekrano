@@ -527,11 +527,17 @@ impl<'a> FrameRecorder<'a> {
     /// This lets the GPU begin executing early work (e.g. coarse rasterization)
     /// while the CPU continues recording later work (fine rasterization, filters)
     /// into a new command buffer.
+    ///
+    /// Coarse vs fine **GPU overlap**: coarse PTCL generation still completes before fine is
+    /// recorded here — true concurrent coarse+fine compute within one frame would require
+    /// bin/tile granular readiness (issue #46). See `doc/ISSUE_46_DEFERRED.md`.
     pub(crate) fn flush_mid_frame(&mut self) -> Result<()> {
         // When the graph owns transient resources the flush is skipped: all
         // pipeline resources (coarse + fine) are currently allocated into a
         // single graph before the first flush, so submitting early would leave
-        // fine-phase specs with no matching node.
+        // fine-phase specs with no matching node. Splitting coarse vs fine allocation
+        // (or staging transient graphs differently) would unlock the same pipelining
+        // transient graphs already skip — still orthogonal to GPU-side coarse/fine overlap.
         if self.graph.has_transient_resources() {
             return Ok(());
         }
@@ -1350,8 +1356,9 @@ impl GoldyRenderer {
         );
         let t_coarse = t2.elapsed();
 
-        // Submit coarse work as a separate command buffer so the GPU can begin
-        // executing it while the CPU records fine rasterization and filters.
+        // Submit coarse wave pipeline before recording fine so the GPU can start coarse work
+        // while this thread fills fine dispatch — CPU/GPU overlap only (issue #46 discusses
+        // deeper GPU coarse+fine concurrency).
         recorder.flush_mid_frame()?;
 
         let t3 = Instant::now();
