@@ -243,7 +243,7 @@ fn straight_alpha_equals_premultiplied() {
 
     let render = |brush: ImageBrush| {
         let mut scene = Scene::new();
-        scene.draw_image(&brush, ekrano::kurbo::Affine::IDENTITY);
+        scene.draw_image(&brush, Affine::IDENTITY);
         let mut params = TestParams::new("premul_equiv", 2, 2);
         params.base_color = Some(TRANSPARENT);
         ekrano_tests::render_then_debug_sync(&scene, &params).unwrap()
@@ -288,7 +288,7 @@ fn fully_opaque_straight_alpha_unchanged() {
         },
     };
     let mut scene = Scene::new();
-    scene.draw_image(&image, ekrano::kurbo::Affine::IDENTITY);
+    scene.draw_image(&image, Affine::IDENTITY);
     let result =
         ekrano_tests::render_then_debug_sync(&scene, &TestParams::new("fully_opaque_straight", 2, 2))
             .unwrap();

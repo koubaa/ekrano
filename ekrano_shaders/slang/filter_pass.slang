@@ -141,7 +141,7 @@ void cs_main(BufRO<FilterUniform> uniforms_buf,
 
         // Centre tap.
         float w_c = gaussian_weight(0, std_dev);
-        acc += src_sampled.Sample(linear_clamp, centre_uv) * w_c;
+        acc += src_sampled.SampleLevel(linear_clamp, centre_uv, 0) * w_c;
         wsum += w_c;
 
         // Paired taps: merge (i, i+1) into one bilinear sample at the weight-averaged offset.
@@ -152,8 +152,8 @@ void cs_main(BufRO<FilterUniform> uniforms_buf,
             float w = w0 + w1;
             float offset = (w > 0.0) ? (float(i) * w0 + float(i + 1) * w1) / w : float(i);
             float2 off = axis * (offset * inv_dim);
-            acc += (src_sampled.Sample(linear_clamp, centre_uv + off) +
-                    src_sampled.Sample(linear_clamp, centre_uv - off)) * w;
+            acc += (src_sampled.SampleLevel(linear_clamp, centre_uv + off, 0) +
+                    src_sampled.SampleLevel(linear_clamp, centre_uv - off, 0)) * w;
             wsum += 2.0 * w;
         }
 
@@ -212,7 +212,7 @@ void cs_main(BufRO<FilterUniform> uniforms_buf,
         // 2× downsample: dst dimensions = u.width × u.height, src_sampled is 2× larger.
         // Sampling at the dst centre UV gives hardware bilinear average of the 2×2 src block.
         float2 uv = (float2(p) + 0.5) / float2(u.width, u.height);
-        dst[gxy] = src_sampled.Sample(linear_clamp, uv);
+        dst[gxy] = src_sampled.SampleLevel(linear_clamp, uv, 0);
         return;
     }
 
@@ -220,7 +220,7 @@ void cs_main(BufRO<FilterUniform> uniforms_buf,
         // 2× upsample: dst is 2× the dimensions of src_sampled.
         // Sampling at the dst centre UV lets hardware bilinear interpolate between src texels.
         float2 uv = (float2(p) + 0.5) / float2(u.width, u.height);
-        dst[gxy] = src_sampled.Sample(linear_clamp, uv);
+        dst[gxy] = src_sampled.SampleLevel(linear_clamp, uv, 0);
         return;
     }
 
@@ -233,7 +233,7 @@ void cs_main(BufRO<FilterUniform> uniforms_buf,
         int2 off = int2(int(floor(u.dx + 0.5)), int(floor(u.dy + 0.5)));
         float2 blur_uv = (float2(p) + 0.5 - float2(off)) * inv_dim;
         blur_uv = clamp(blur_uv, 0.0, 1.0);
-        float blur_a = src_sampled.Sample(linear_clamp, blur_uv).a;
+        float blur_a = src_sampled.SampleLevel(linear_clamp, blur_uv, 0).a;
         float4 sh = unpackUnorm4x8ToFloat(u.color) * blur_a;
         float4 fg = src[uint2(p)];
         dst[gxy] = fg + (1.0 - fg.a) * sh;
@@ -246,7 +246,7 @@ void cs_main(BufRO<FilterUniform> uniforms_buf,
         int2 off = int2(int(floor(u.dx + 0.5)), int(floor(u.dy + 0.5)));
         float2 blur_uv = (float2(p) + 0.5 - float2(off)) * inv_dim;
         blur_uv = clamp(blur_uv, 0.0, 1.0);
-        float blur_a = src_sampled.Sample(linear_clamp, blur_uv).a;
+        float blur_a = src_sampled.SampleLevel(linear_clamp, blur_uv, 0).a;
         float4 sh = unpackUnorm4x8ToFloat(u.color) * blur_a;
         dst[gxy] = sh;
         return;

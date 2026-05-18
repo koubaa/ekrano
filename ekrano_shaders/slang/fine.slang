@@ -812,7 +812,7 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
                 float my_d = d + lin.line_x * float(i);
                 float t = extend_mode_normalized(my_d, lin.extend_mode);
                 float2 grad_uv = float2(t, (float(lin.index) + 0.5) * inv_grad.y);
-                float4 fg_rgba = gradients.Sample(linear_clamp, grad_uv);
+                float4 fg_rgba = gradients.SampleLevel(linear_clamp, grad_uv, 0);
                 float4 fg_i = fg_rgba * area[i] * mask_w[i];
                 uint BLEND_DEFAULT = (MIX_NORMAL << 8) | COMPOSE_SRC_OVER;
                 rgba[i] = ((draw_blend & 0x7FFFu) == BLEND_DEFAULT)
@@ -854,7 +854,7 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
                     t = extend_mode_normalized(rad.focal_x + t_sign * t, rad.extend_mode);
                     t = is_swapped ? (1.0 - t) : t;
                     float2 grad_uv = float2(t, (float(rad.index) + 0.5) * inv_grad.y);
-                    float4 fg_rgba = gradients.Sample(linear_clamp, grad_uv);
+                    float4 fg_rgba = gradients.SampleLevel(linear_clamp, grad_uv, 0);
                     float4 fg_i = fg_rgba * area[i] * mask_w[i];
                     uint BLEND_DEFAULT_R = (MIX_NORMAL << 8) | COMPOSE_SRC_OVER;
                     rgba[i] = ((draw_blend & 0x7FFFu) == BLEND_DEFAULT_R)
@@ -881,7 +881,7 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
                 phi = (phi - sweep.t0) * scale;
                 float t = extend_mode_normalized(phi, sweep.extend_mode);
                 float2 grad_uv = float2(t, (float(sweep.index) + 0.5) * inv_grad.y);
-                float4 fg_rgba = gradients.Sample(linear_clamp, grad_uv);
+                float4 fg_rgba = gradients.SampleLevel(linear_clamp, grad_uv, 0);
                 float4 fg_i = fg_rgba * area[i] * mask_w[i];
                 uint BLEND_DEFAULT_S = (MIX_NORMAL << 8) | COMPOSE_SRC_OVER;
                 rgba[i] = ((draw_blend & 0x7FFFu) == BLEND_DEFAULT_S)
@@ -906,7 +906,7 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
                         atlas_uv.y = extend_mode(atlas_uv.y, image.y_extend_mode, image.extents.y);
                         atlas_uv += image.atlas_offset;
                         float2 norm_uv = clamp((atlas_uv + 0.5) * inv_atlas, norm_min, norm_max);
-                        float4 fg_rgba = image_atlas.Sample(nearest_clamp, norm_uv);
+                        float4 fg_rgba = image_atlas.SampleLevel(nearest_clamp, norm_uv, 0);
                         float4 fg_i = pixel_format(fg_rgba * area[i] * mask_w[i] * image.alpha, image.format);
                         uint BLEND_DEFAULT_IL = (MIX_NORMAL << 8) | COMPOSE_SRC_OVER;
                         rgba[i] = ((draw_blend & 0x7FFFu) == BLEND_DEFAULT_IL)
@@ -927,7 +927,7 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
                         // hardware bilinear convention (sample at sub-texel position).
                         atlas_uv += image.atlas_offset - 0.5;
                         float2 norm_uv = clamp((atlas_uv + 0.5) * inv_atlas, norm_min, norm_max);
-                        float4 fg_rgba = image_atlas.Sample(linear_clamp, norm_uv);
+                        float4 fg_rgba = image_atlas.SampleLevel(linear_clamp, norm_uv, 0);
                         float4 fg_i = pixel_format(fg_rgba * area[i] * mask_w[i] * image.alpha, image.format);
                         uint BLEND_DEFAULT_IM = (MIX_NORMAL << 8) | COMPOSE_SRC_OVER;
                         rgba[i] = ((draw_blend & 0x7FFFu) == BLEND_DEFAULT_IM)
