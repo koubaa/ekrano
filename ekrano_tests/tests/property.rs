@@ -206,13 +206,13 @@ fn straight_alpha_equals_premultiplied() {
         palette::css::LIME,
         palette::css::WHITE,
     ];
-    let alpha: u32 = 128;
+    let alpha: u8 = 128;
 
     let straight_blob: Vec<u8> = opaque_colors
         .iter()
         .flat_map(|c| {
             let [r, g, b, _] = c.to_rgba8().to_u8_array();
-            [r, g, b, alpha as u8]
+            [r, g, b, alpha]
         })
         .collect();
 
@@ -220,8 +220,10 @@ fn straight_alpha_equals_premultiplied() {
         .iter()
         .flat_map(|c| {
             let [r, g, b, _] = c.to_rgba8().to_u8_array();
-            let pm = |ch: u8| ((ch as u32 * alpha + 127) / 255) as u8;
-            [pm(r), pm(g), pm(b), alpha as u8]
+            let pm = |ch: u8| {
+                u8::try_from((u32::from(ch) * u32::from(alpha) + 127) / 255).unwrap()
+            };
+            [pm(r), pm(g), pm(b), alpha]
         })
         .collect();
 
