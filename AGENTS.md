@@ -62,8 +62,8 @@ EKRANO_TEST_CREATE=all cargo test -p ekrano_tests     # create new snapshots
 
 ```bash
 cargo check
-cargo fmt -p ekrano -p ekrano_encoding -p ekrano_shaders -p ekrano_tests -p xtask -p headless -p scenes --check
 taplo fmt --check --diff
 bash .github/copyright.sh
 cargo clippy --workspace --locked --all-features --tests --benches --examples -- -D warnings
+cargo fmt -p ekrano -p ekrano_encoding -p ekrano_shaders -p ekrano_tests -p xtask -p headless -p scenes --check
 ```

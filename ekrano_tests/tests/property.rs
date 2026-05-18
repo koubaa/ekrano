@@ -220,9 +220,7 @@ fn straight_alpha_equals_premultiplied() {
         .iter()
         .flat_map(|c| {
             let [r, g, b, _] = c.to_rgba8().to_u8_array();
-            let pm = |ch: u8| {
-                u8::try_from((u32::from(ch) * u32::from(alpha) + 127) / 255).unwrap()
-            };
+            let pm = |ch: u8| u8::try_from((u32::from(ch) * u32::from(alpha) + 127) / 255).unwrap();
             [pm(r), pm(g), pm(b), alpha]
         })
         .collect();
