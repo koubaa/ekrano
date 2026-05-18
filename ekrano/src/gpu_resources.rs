@@ -645,8 +645,18 @@ pub(crate) fn collect_bindless_indices_direct(
     let mut indices = Vec::with_capacity(bindings.len());
     for (i, binding) in bindings.iter().enumerate() {
         let is_read_only = !force_uav && matches!(bind_types.get(i), Some(BindType::BufReadOnly));
+        let is_sampled_image = matches!(bind_types.get(i), Some(BindType::ImageRead(_)));
         let idx = match binding {
             GpuBinding::Buf(_) | GpuBinding::View(_) => binding.bindless_slot(is_read_only)?,
+            GpuBinding::Tex(tex) if is_sampled_image => {
+                tex.bindless_sampled_index()
+                    .or_else(|| tex.bindless_index())
+                    .ok_or_else(|| {
+                        Error::Shader(
+                            "bindless sampled index missing for ImageRead texture binding".into(),
+                        )
+                    })?
+            }
             GpuBinding::Tex(_) => binding.bindless_slot(false)?,
             GpuBinding::Transient(_) => TRANSIENT_SLOT_PLACEHOLDER,
             GpuBinding::Sampler(idx) => *idx,
