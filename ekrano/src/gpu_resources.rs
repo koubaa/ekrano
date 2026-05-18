@@ -51,6 +51,10 @@ pub(crate) enum GpuBinding<'a> {
     Tex(&'a Texture),
     /// Deferred: physical allocation happens at graph flush after coloring.
     Transient(TransientId),
+    /// A GPU sampler represented by its pre-resolved bindless index.
+    /// We store the index directly (not a reference) so `fine_resources` doesn't
+    /// borrow from `recorder.persistent`, which would conflict with `recorder.dispatch()`.
+    Sampler(u32),
 }
 
 impl<'a> GpuBinding<'a> {
@@ -72,6 +76,7 @@ impl<'a> GpuBinding<'a> {
             }
             GpuBinding::Tex(tex) => tex.bindless_index(),
             GpuBinding::Transient(_) => return Ok(TRANSIENT_SLOT_PLACEHOLDER),
+            GpuBinding::Sampler(idx) => return Ok(*idx),
         };
         idx.ok_or_else(|| {
             Error::Shader("bindless index missing for shader resource binding".into())
@@ -196,7 +201,20 @@ pub(crate) fn write_image_region(
                      or unregistered before this render was submitted",
         });
     }
-    let bytes = image_data.data.data();
+    let raw_bytes = image_data.data.data();
+
+    // The atlas is always sampled with hardware bilinear, which requires premultiplied-alpha
+    // texels to avoid fringing on transparent edges. Straight-alpha images (ImageAlphaType::Alpha)
+    // are converted to premultiplied on the CPU before upload; premultiplied sources are used
+    // as-is.  Callers' ImageData is never mutated.
+    let premul_storage;
+    let bytes: &[u8] = if image_data.alpha_type == peniko::ImageAlphaType::Alpha {
+        premul_storage = premultiply_rgba8(raw_bytes);
+        &premul_storage
+    } else {
+        raw_bytes
+    };
+
     graph
         .write_texture_region(
             tex,
@@ -208,6 +226,20 @@ pub(crate) fn write_image_region(
         )
         .map_err(|e| Error::Shader(e.to_string()))?;
     Ok(())
+}
+
+/// Premultiply every RGBA8 pixel: `(r, g, b, a)` → `(r*a/255, g*a/255, b*a/255, a)`.
+///
+/// Uses integer arithmetic to match the GPU's 8-bit rounding behaviour precisely.
+fn premultiply_rgba8(bytes: &[u8]) -> Vec<u8> {
+    let mut out = bytes.to_vec();
+    for chunk in out.chunks_exact_mut(4) {
+        let a = chunk[3] as u32;
+        chunk[0] = ((chunk[0] as u32 * a + 127) / 255) as u8;
+        chunk[1] = ((chunk[1] as u32 * a + 127) / 255) as u8;
+        chunk[2] = ((chunk[2] as u32 * a + 127) / 255) as u8;
+    }
+    out
 }
 
 pub(crate) fn acquire_texture_rgba(
@@ -561,7 +593,7 @@ impl PipelineResources {
                 persistent,
                 params.width,
                 params.height,
-                SpatialAccess::Direct,
+                SpatialAccess::DirectInterpolated,
                 TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
             )
             .expect("filter layer")
@@ -617,6 +649,7 @@ pub(crate) fn collect_bindless_indices_direct(
             GpuBinding::Buf(_) | GpuBinding::View(_) => binding.bindless_slot(is_read_only)?,
             GpuBinding::Tex(_) => binding.bindless_slot(false)?,
             GpuBinding::Transient(_) => TRANSIENT_SLOT_PLACEHOLDER,
+            GpuBinding::Sampler(idx) => *idx,
         };
         indices.push(idx);
     }
@@ -634,5 +667,6 @@ pub(crate) fn bind_type_to_node_access(bt: BindType) -> NodeAccess {
     match bt {
         BindType::Buffer | BindType::Image(_) => NodeAccess::ReadWrite,
         BindType::BufReadOnly | BindType::Uniform | BindType::ImageRead(_) => NodeAccess::Read,
+        BindType::Sampler => NodeAccess::Read,
     }
 }

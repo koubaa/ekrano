@@ -930,10 +930,6 @@ public float4 blend_mix_compose(float4 backdrop, float4 src, uint mode) {
         return float4(lerp(backdrop.rgb, cs, src.a), src.a + backdrop.a * (1.0 - src.a));
     return blend_compose(cb, cs, backdrop.a, src.a, compose_mode);
 }
-public float4 premul_alpha(float4 rgba) {
-    return float4(rgba.rgb * rgba.a, rgba.a);
-}
-
 // === Fine shader helpers ===
 public static const uint LUMINANCE_MASK_LAYER = 0x10000;
 public static const uint IMAGE_QUALITY_LOW = 0;
@@ -941,18 +937,12 @@ public static const uint IMAGE_QUALITY_MEDIUM = 1;
 public static const uint IMAGE_QUALITY_HIGH = 2;
 public static const uint PIXEL_FORMAT_RGBA = 0;
 public static const uint PIXEL_FORMAT_BGRA = 1;
-public static const uint ALPHA = 0;
-public static const uint PREMULTIPLIED_ALPHA = 1;
 public static const uint EXTEND_PAD = 0;
 public static const uint EXTEND_REPEAT = 1;
 public static const uint EXTEND_REFLECT = 2;
 
 public float3 unpremultiply(float4 color) { return blend_unpremultiply(color); }
 public float svg_lum(float3 c) { return blend_svg_lum(c); }
-
-public float4 maybe_premul_alpha(float4 pixel, uint alpha_type) {
-    return (alpha_type == PREMULTIPLIED_ALPHA) ? pixel : premul_alpha(pixel);
-}
 
 public float extend_mode_normalized(float t, uint mode) {
     if (mode == EXTEND_PAD) return saturate(t);
@@ -969,6 +959,9 @@ public float4 pixel_format(float4 pixel, uint format) {
 }
 
 public static const uint GRADIENT_WIDTH = 512;
+/// Maximum number of gradient ramp rows that the ramp cache retains.
+/// The actual texture height may be less; shaders must call GetDimensions() for the real height.
+public static const uint GRADIENT_HEIGHT = 64;
 public static const uint PIXELS_PER_THREAD = 4;
 
 public float4 premul_over(float4 bg, float4 fg) {

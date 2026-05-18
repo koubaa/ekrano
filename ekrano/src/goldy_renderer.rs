@@ -257,6 +257,11 @@ pub(crate) struct PersistentState {
     /// Bump allocator counters from the most recently drained frame.
     /// `None` until the first GPU readback completes.
     last_drained_bump: Option<BumpAllocators>,
+    /// Persistent linear-filter + clamp-to-edge sampler for hardware-filtered texture reads
+    /// (gradient ramps, image atlas bilinear). Lazily created on first render.
+    pub(crate) linear_clamp_sampler: Option<goldy::Sampler>,
+    /// Persistent nearest-filter + clamp-to-edge sampler for IMAGE_QUALITY_LOW reads.
+    pub(crate) nearest_clamp_sampler: Option<goldy::Sampler>,
 }
 
 impl PersistentState {
@@ -907,6 +912,9 @@ fn bind_graph_direct<'a>(
             GpuBinding::View(v) => node.bind_buffer_view(v, access),
             GpuBinding::Tex(t) => node.bind_texture(t, access),
             GpuBinding::Transient(id) => node.bind_transient_buffer(*id, access),
+            // Samplers are stateless — their slot index flows through push-constants
+            // but they need no resource-barrier tracking in the task graph.
+            GpuBinding::Sampler(_) => node,
         };
     }
     node
@@ -991,6 +999,9 @@ fn dump_dispatch_gpu(
             GpuBinding::Transient(id) => {
                 wln!("binding[{i}]: transient(id={})", id.0);
             }
+            GpuBinding::Sampler(_) => {
+                wln!("binding[{i}]: sampler");
+            }
         }
     }
     println!(
@@ -1030,6 +1041,8 @@ impl GoldyRenderer {
                 storage_allocator: None,
                 tex_pool: TexturePool::default(),
                 last_drained_bump: None,
+                linear_clamp_sampler: None,
+                nearest_clamp_sampler: None,
             },
             frame: FrameState {
                 cleanup_ring: VecDeque::new(),
@@ -1326,6 +1339,15 @@ impl GoldyRenderer {
         };
 
         let t1 = Instant::now();
+        // Lazily create persistent samplers on the first frame.
+        if self.persistent.linear_clamp_sampler.is_none() {
+            self.persistent.linear_clamp_sampler =
+                Some(goldy::Sampler::linear(device).map_err(|e| Error::Gpu(e.to_string()))?);
+        }
+        if self.persistent.nearest_clamp_sampler.is_none() {
+            self.persistent.nearest_clamp_sampler =
+                Some(goldy::Sampler::nearest(device).map_err(|e| Error::Gpu(e.to_string()))?);
+        }
         self.persistent
             .prepare_storage_pool(device, &self.frame, pool_size, expected_max)?;
         let t_pool = t1.elapsed();

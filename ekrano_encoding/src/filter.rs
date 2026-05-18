@@ -254,4 +254,84 @@ impl FilterUniform {
             _pad: 0,
         }
     }
+
+    /// 2× downsample: read src_sampled (2× larger) via hardware bilinear, write to dst at
+    /// (width, height) (`pass_kind` 9).
+    pub fn downsample(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            edge_mode: 0,
+            pass_kind: 9,
+            std_dev: 0.0,
+            dx: 0.0,
+            dy: 0.0,
+            color: 0,
+            _pad: 0,
+        }
+    }
+
+    /// 2× upsample: read src_sampled (2× smaller) via hardware bilinear, write to dst at
+    /// (width, height), overwriting the existing contents (`pass_kind` 11).
+    pub fn upsample(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            edge_mode: 0,
+            pass_kind: 11,
+            std_dev: 0.0,
+            dx: 0.0,
+            dy: 0.0,
+            color: 0,
+            _pad: 0,
+        }
+    }
+
+    /// Shadow composite from a pre-blurred source (`pass_kind` 13).
+    ///
+    /// Reads the pre-blurred alpha from `src_sampled` at `(p - offset)`, colorises it with
+    /// `shadow_rgba`, and composites the shadow under the unblurred foreground from `src` (UAV).
+    ///
+    /// Used for the pyramid drop-shadow where the blur and composite are separated.
+    pub fn shadow_composite_preblurred(
+        width: u32,
+        height: u32,
+        dx: f32,
+        dy: f32,
+        shadow_rgba: u32,
+    ) -> Self {
+        Self {
+            width,
+            height,
+            edge_mode: 0,
+            pass_kind: 13,
+            std_dev: 0.0,
+            dx,
+            dy,
+            color: shadow_rgba,
+            _pad: 0,
+        }
+    }
+
+    /// Nested shadow composite from a pre-blurred source — shadow only, no foreground
+    /// (`pass_kind` 14).
+    pub fn shadow_composite_preblurred_nested(
+        width: u32,
+        height: u32,
+        dx: f32,
+        dy: f32,
+        shadow_rgba: u32,
+    ) -> Self {
+        Self {
+            width,
+            height,
+            edge_mode: 0,
+            pass_kind: 14,
+            std_dev: 0.0,
+            dx,
+            dy,
+            color: shadow_rgba,
+            _pad: 0,
+        }
+    }
 }

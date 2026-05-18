@@ -328,6 +328,8 @@ pub(crate) fn goldy_full_shaders(
         Image(ImageFormat::Rgba8),
         Image(ImageFormat::Rgba8),
         Image(ImageFormat::Rgba8),
+        Sampler, // linear_clamp
+        Sampler, // nearest_clamp
     ];
     let fine_msaa_resources = [
         BufReadOnly,
@@ -344,6 +346,8 @@ pub(crate) fn goldy_full_shaders(
         Image(ImageFormat::Rgba8),
         Image(ImageFormat::Rgba8),
         Image(ImageFormat::Rgba8),
+        Sampler, // linear_clamp
+        Sampler, // nearest_clamp
     ];
     let fine_area = Some(renderer.add_compute_shader_with_options(
         device,
@@ -383,9 +387,11 @@ pub(crate) fn goldy_full_shaders(
             "filter_pass",
             ekrano_shaders::slang::FILTER_PASS,
             &[
-                BufReadOnly,
-                Image(ImageFormat::Rgba8),
-                Image(ImageFormat::Rgba8),
+                BufReadOnly,           // uniform / FilterUniform
+                ImageRead(ImageFormat::Rgba8), // src_sampled  (SRV — Interpolated<float4>)
+                Image(ImageFormat::Rgba8),     // src (UAV — DirectSpatial<float4>)
+                Image(ImageFormat::Rgba8),     // dst (UAV — DirectSpatial<float4>)
+                Sampler,               // linear_clamp sampler
             ],
             &search_paths,
             &[],
