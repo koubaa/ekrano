@@ -18,7 +18,7 @@
 
 pub const MAX_BINDLESS_SLOTS: usize = 16;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::mem;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -27,8 +27,8 @@ use goldy::task_graph::{NodeAccess, NodeBuilder};
 use goldy::types::{BufferFlags, SpatialAccess, TextureFlags, TextureFormat};
 use goldy::{
     Buffer, BufferPool, BufferView, ComputePipeline, DataAccess, Device, DeviceType, Frame,
-    ShaderModule, TaskGraph, Texture, TexturePool, TimelineValue, TransientAllocator,
-    TransientAllocatorConfig, TransientAllocatorStrategy,
+    FrameHandle, FrameOrchestrator, ShaderModule, TaskGraph, Texture, TexturePool, TimelineValue,
+    TransientAllocator, TransientAllocatorConfig, TransientAllocatorStrategy,
 };
 
 use mem::size_of;
@@ -124,7 +124,6 @@ static FRAME_COUNTER: AtomicU64 = AtomicU64::new(0);
 // -----------------------------------------------------------------------
 
 struct FrameCleanup {
-    timeline: Option<TimelineValue>,
     /// The bump readback buffer (`ekrano.bump_buf`) for `robust=true` frames.
     /// Read to CPU on cleanup to update bump estimates; `None` for non-robust frames.
     bump_buf: Option<Buffer>,
@@ -271,7 +270,6 @@ impl PersistentState {
     fn prepare_storage_pool(
         &mut self,
         device: &Device,
-        _frame: &FrameState,
         pool_size: u64,
         expected_max: u64,
     ) -> Result<()> {
@@ -334,13 +332,51 @@ impl PersistentState {
     }
 }
 
-// -----------------------------------------------------------------------
-// FrameState — per-frame bookkeeping (bind map, cleanup ring, downloads)
-// -----------------------------------------------------------------------
+fn process_retired_cleanup(
+    device: &Device,
+    persistent: &mut PersistentState,
+    timeline: TimelineValue,
+    entry: FrameCleanup,
+) -> Result<()> {
+    let FrameCleanup {
+        bump_buf,
+        recyclable_owned,
+        deferred_pool_views,
+        deferred_textures,
+    } = entry;
 
-/// Per-frame bookkeeping: deferred cleanup ring (no bind map).
-struct FrameState {
-    cleanup_ring: VecDeque<FrameCleanup>,
+    if let Some(ref buf) = bump_buf {
+        let size = buf.size() as usize;
+        let mut output = vec![0_u8; size];
+        buf.read_to_cpu(device, &mut output)
+            .map_err(|e| Error::Shader(e.to_string()))?;
+        persistent.last_drained_bump = Some(bytemuck::pod_read_unaligned(&output));
+    }
+
+    if let Some(allocator) = persistent.storage_allocator.as_mut() {
+        for view in &deferred_pool_views {
+            allocator.free(view.offset(), view.size(), Some(timeline));
+        }
+    }
+
+    drop(deferred_pool_views);
+
+    for tex in deferred_textures {
+        persistent.tex_pool.release(tex);
+    }
+
+    for (buf, name) in recyclable_owned {
+        persistent.pool.return_buf(buf, name);
+    }
+
+    if let Some(buf) = bump_buf {
+        persistent.pool.return_buf(buf, "ekrano.bump_buf");
+    }
+
+    device.flush_deferred_deletions();
+    device.compact_overflow_heaps();
+
+    Ok(())
 }
 
 // -----------------------------------------------------------------------
@@ -358,119 +394,11 @@ pub struct GoldyRenderer {
     engine_shaders: Vec<GoldyShader>,
     /// Cross-frame GPU resources: pools, texture cache, bump readback.
     persistent: PersistentState,
-    /// Per-frame bookkeeping: bind map, cleanup ring, download results.
-    frame: FrameState,
+    /// Pipelined frame cleanup (see `goldy::FrameOrchestrator`).
+    frame_pipeline: FrameOrchestrator<FrameCleanup>,
     /// Persistent bump estimates: running max across frames. Used to pre-size
     /// buffers even when no overflow occurs, avoiding the cold-start ramp-up.
     persistent_bump: Option<BumpAllocators>,
-}
-
-// -----------------------------------------------------------------------
-// impl FrameState — bookkeeping methods (pool access via PersistentState)
-// -----------------------------------------------------------------------
-
-impl FrameState {
-    /// Non-blocking drain: process any completed cleanup entries from the
-    /// front of the ring. If the ring has grown beyond `MAX_CLEANUP_DEPTH`,
-    /// force a synchronous wait on the oldest entry to prevent unbounded growth.
-    fn try_drain_completed_frames(
-        &mut self,
-        device: &Device,
-        persistent: &mut PersistentState,
-    ) -> Result<()> {
-        let progress = device.gpu_progress();
-
-        while let Some(front) = self.cleanup_ring.front() {
-            let done = match front.timeline {
-                Some(tv) => progress >= tv,
-                None => false,
-            };
-            let must_wait = !done && self.cleanup_ring.len() >= MAX_CLEANUP_DEPTH;
-            if done || must_wait {
-                let entry = self.cleanup_ring.pop_front().unwrap();
-                self.process_cleanup(device, entry, must_wait, persistent)?;
-            } else {
-                break;
-            }
-        }
-        Ok(())
-    }
-
-    fn wait_until_gpu_idle(
-        &mut self,
-        device: &Device,
-        persistent: &mut PersistentState,
-    ) -> Result<()> {
-        while let Some(entry) = self.cleanup_ring.pop_front() {
-            self.process_cleanup(device, entry, true, persistent)?;
-        }
-        Ok(())
-    }
-
-    fn process_cleanup(
-        &mut self,
-        device: &Device,
-        entry: FrameCleanup,
-        force_wait: bool,
-        persistent: &mut PersistentState,
-    ) -> Result<()> {
-        if let Some(tv) = entry.timeline {
-            let already_done = device.gpu_progress() >= tv;
-            if !already_done {
-                if force_wait {
-                    device
-                        .wait_until(tv)
-                        .map_err(|e| Error::Shader(e.to_string()))?;
-                } else {
-                    return Ok(());
-                }
-            }
-        }
-
-        // Read bump counters from GPU buffer (robust frames only).
-        if let Some(buf) = &entry.bump_buf {
-            let size = buf.size() as usize;
-            let mut output = vec![0_u8; size];
-            buf.read_to_cpu(device, &mut output)
-                .map_err(|e| Error::Shader(e.to_string()))?;
-            persistent.last_drained_bump = Some(bytemuck::pod_read_unaligned(&output));
-        }
-
-        // Return byte ranges for pool views that were not freed mid-pipeline.
-        // The timeline is retired at this point, so the epoch is immediately drainable.
-        if let Some(allocator) = persistent.storage_allocator.as_mut() {
-            let retired_epoch = entry.timeline.unwrap_or(0);
-            for view in &entry.deferred_pool_views {
-                allocator.free(view.offset(), view.size(), Some(retired_epoch));
-            }
-        }
-        drop(entry.deferred_pool_views);
-
-        for tex in entry.deferred_textures {
-            persistent.tex_pool.release(tex);
-        }
-
-        // Return owned buffers to the pool for reuse by future frames.
-        for (buf, name) in entry.recyclable_owned {
-            persistent.pool.return_buf(buf, name);
-        }
-
-        // Return the bump readback buffer to the pool (if present).
-        if let Some(buf) = entry.bump_buf {
-            persistent.pool.return_buf(buf, "ekrano.bump_buf");
-        }
-
-        device.flush_deferred_deletions();
-        device.compact_overflow_heaps();
-
-        Ok(())
-    }
-
-    fn release_pool(&mut self, device: &Device, persistent: &mut PersistentState) -> Result<()> {
-        self.wait_until_gpu_idle(device, persistent)?;
-        persistent.storage_allocator = None;
-        Ok(())
-    }
 }
 
 // -----------------------------------------------------------------------
@@ -480,14 +408,18 @@ impl FrameState {
 pub(crate) struct FrameRecorder<'a> {
     pub(crate) device: &'a Device,
     graph: TaskGraph,
-    frame: &'a mut FrameState,
+    frame_pipeline: &'a mut FrameOrchestrator<FrameCleanup>,
+    frame_handle: FrameHandle,
     pub(crate) persistent: &'a mut PersistentState,
     shaders: &'a [GoldyShader],
     force_uav: bool,
     surface_frame: Option<&'a Frame>,
     last_timeline: Option<TimelineValue>,
+    /// Set to `true` by `finish` or `abort`; the `Drop` impl aborts the open frame
+    /// if the recorder is dropped without being properly completed (e.g. on a `?` return).
+    finished: bool,
     /// The bump readback buffer, separated from the general deferred-buffer list
-    /// so it can be read back to CPU in `process_cleanup` without index arithmetic.
+    /// so it can be read back to CPU in `process_retired_cleanup` without index arithmetic.
     bump_buf_for_readback: Option<Buffer>,
     deferred_owned_buffers: Vec<(Buffer, &'static str)>,
     deferred_pool_views: Vec<BufferView>,
@@ -498,7 +430,8 @@ pub(crate) struct FrameRecorder<'a> {
 impl<'a> FrameRecorder<'a> {
     fn new(
         device: &'a Device,
-        frame: &'a mut FrameState,
+        frame_pipeline: &'a mut FrameOrchestrator<FrameCleanup>,
+        frame_handle: FrameHandle,
         persistent: &'a mut PersistentState,
         shaders: &'a [GoldyShader],
         surface_frame: Option<&'a Frame>,
@@ -509,7 +442,8 @@ impl<'a> FrameRecorder<'a> {
         Self {
             device,
             graph,
-            frame,
+            frame_pipeline,
+            frame_handle,
             persistent,
             shaders,
             force_uav: fuav,
@@ -520,6 +454,7 @@ impl<'a> FrameRecorder<'a> {
             deferred_pool_views: Vec::new(),
             deferred_textures: Vec::new(),
             dispatch_count: 0,
+            finished: false,
         }
     }
 
@@ -540,19 +475,20 @@ impl<'a> FrameRecorder<'a> {
         // When the graph owns transient resources the flush is skipped: all
         // pipeline resources (coarse + fine) are currently allocated into a
         // single graph before the first flush, so submitting early would leave
-        // fine-phase specs with no matching node. Splitting coarse vs fine allocation
-        // (or staging transient graphs differently) would unlock the same pipelining
-        // transient graphs already skip — still orthogonal to GPU-side coarse/fine overlap.
+        // fine-phase specs with no matching node. Splitting coarse vs fine
+        // transient allocation would unlock pipelining for transient graphs too
+        // (see goldy issue #141).
         if self.graph.has_transient_resources() {
             return Ok(());
         }
-        flush_graph(
-            &mut self.graph,
-            self.device,
-            &mut self.last_timeline,
-            self.surface_frame,
-            self.persistent,
-        )
+        self.frame_pipeline
+            .flush(
+                self.frame_handle,
+                &mut self.graph,
+                self.surface_frame,
+                &mut self.last_timeline,
+            )
+            .map_err(|e| Error::Shader(e.to_string()))
     }
 
     pub(crate) fn alloc_pipeline_buffer_named(
@@ -861,31 +797,53 @@ impl<'a> FrameRecorder<'a> {
         self.deferred_owned_buffers.push((buf, name));
     }
 
-    /// Finish dispatch: flush the final graph and push a `FrameCleanup`
-    /// entry onto the deque for deferred processing after GPU completion.
-    fn finish(mut self) -> Result<()> {
-        flush_graph(
-            &mut self.graph,
-            self.device,
-            &mut self.last_timeline,
-            self.surface_frame,
-            self.persistent,
-        )?;
-
-        let timeline = match self.surface_frame {
-            None => self.last_timeline.take(),
-            Some(_) => None,
+    /// Finish dispatch: flush the final graph and register a frame slot with the orchestrator.
+    fn finish(mut self) -> Result<Option<TimelineValue>> {
+        self.finished = true;
+        let cleanup = FrameCleanup {
+            bump_buf: self.bump_buf_for_readback.take(),
+            recyclable_owned: mem::take(&mut self.deferred_owned_buffers),
+            deferred_pool_views: mem::take(&mut self.deferred_pool_views),
+            deferred_textures: mem::take(&mut self.deferred_textures),
         };
 
-        self.frame.cleanup_ring.push_back(FrameCleanup {
-            timeline,
-            bump_buf: self.bump_buf_for_readback,
-            recyclable_owned: self.deferred_owned_buffers,
-            deferred_pool_views: self.deferred_pool_views,
-            deferred_textures: self.deferred_textures,
-        });
+        let graph = mem::replace(&mut self.graph, TaskGraph::new());
 
-        Ok(())
+        if let Some(surface) = self.surface_frame {
+            self.frame_pipeline
+                .end_frame_for_surface(self.frame_handle, &graph, surface, cleanup)
+                .map_err(|e| Error::Shader(e.to_string()))?;
+            Ok(None)
+        } else {
+            let tv = self
+                .frame_pipeline
+                .end_frame_standalone(self.frame_handle, graph, self.last_timeline, cleanup)
+                .map_err(|e| Error::Shader(e.to_string()))?;
+            Ok(Some(tv))
+        }
+    }
+
+    /// Abort the open frame on error so the orchestrator is not left in a broken state.
+    ///
+    /// After calling this the recorder must not be used again.
+    #[allow(
+        dead_code,
+        reason = "Public escape hatch for explicit abort; callers typically rely on Drop."
+    )]
+    fn abort(mut self) {
+        self.finished = true;
+        self.frame_pipeline.abort_frame(self.frame_handle);
+    }
+}
+
+impl Drop for FrameRecorder<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            // The recorder is being dropped without finish() or abort() — this happens when
+            // an early `?` propagates an error out of run_frame before finish() is reached.
+            // Abort the open frame so the orchestrator is not permanently stuck.
+            self.frame_pipeline.abort_frame(self.frame_handle);
+        }
     }
 }
 
@@ -1029,10 +987,16 @@ impl GoldyRenderer {
             std::sync::Arc::new(DefaultVramAllocator::new()),
             budget,
         );
-        let device = device.with_vram_allocator(std::sync::Arc::new(tracking));
+        let tracked_device = device.with_vram_allocator(std::sync::Arc::new(tracking));
 
+        // FrameOrchestrator uses the original (unbudgeted) device for transient-buffer
+        // submission.  The placement heap for transient allocations must not be
+        // constrained by the 512 MiB TrackingVramAllocator budget, because the heap
+        // size depends on the scene's transient footprint and can legitimately exceed
+        // that figure for large scenes. The tracked device is still used for storage-
+        // pool allocations (via `prepare_storage_pool`).
         let mut renderer = Self {
-            device: device.clone(),
+            device: tracked_device.clone(),
             shaders: FullShaders::empty(),
             resolver: Resolver::new(),
             engine_shaders: Vec::new(),
@@ -1044,14 +1008,12 @@ impl GoldyRenderer {
                 linear_clamp_sampler: None,
                 nearest_clamp_sampler: None,
             },
-            frame: FrameState {
-                cleanup_ring: VecDeque::new(),
-            },
+            frame_pipeline: FrameOrchestrator::new(device, MAX_CLEANUP_DEPTH),
             persistent_bump: None,
         };
-        let shaders = shaders::goldy_full_shaders(&device, &mut renderer)?;
+        let shaders = shaders::goldy_full_shaders(&tracked_device, &mut renderer)?;
         renderer.shaders = shaders;
-        device.release_idle_shader_compiler();
+        tracked_device.release_idle_shader_compiler();
         Ok(renderer)
     }
 
@@ -1094,14 +1056,7 @@ impl GoldyRenderer {
     /// timeline isn't known until after present) and informs the transient
     /// allocator so it can retire this frame's regions with the correct epoch.
     pub fn note_frame_presented(&mut self, device: &Device, tv: TimelineValue) {
-        // Stamp the most recent cleanup entry with the presentation timeline so
-        // process_cleanup knows when its buffers can be recycled.
-        if let Some(back) = self.frame.cleanup_ring.back_mut()
-            && back.timeline.is_none()
-        {
-            back.timeline = Some(tv);
-        }
-
+        self.frame_pipeline.note_presented(tv);
         if let Some(allocator) = self.persistent.storage_allocator_mut() {
             allocator.end_frame(device, tv);
         }
@@ -1152,7 +1107,7 @@ impl GoldyRenderer {
             .map(|a| AllocatorStats {
                 capacity: a.capacity(),
                 used: a.used_this_frame(),
-                cleanup_ring_depth: self.frame.cleanup_ring.len(),
+                cleanup_ring_depth: self.frame_pipeline.pending_frames(),
             })
     }
 
@@ -1190,10 +1145,11 @@ impl GoldyRenderer {
 
         for _attempt in 0..=MAX_BUMP_RETRIES {
             self.render_to_texture(device, scene, &texture, params)?;
-            while let Some(entry) = self.frame.cleanup_ring.pop_front() {
-                self.frame
-                    .process_cleanup(device, entry, true, &mut self.persistent)?;
-            }
+            self.frame_pipeline
+                .drain_all(|dev, rf| {
+                    process_retired_cleanup(dev, &mut self.persistent, rf.timeline, rf.data)
+                })
+                .map_err(|e| Error::Shader(e.to_string()))?;
 
             match self.persistent.last_drained_bump() {
                 Some(bump) if bump.failed != 0 => {
@@ -1217,7 +1173,11 @@ impl GoldyRenderer {
             );
         }
 
-        self.frame.release_pool(device, &mut self.persistent)?;
+        self.frame_pipeline
+            .drain_all(|dev, rf| {
+                process_retired_cleanup(dev, &mut self.persistent, rf.timeline, rf.data)
+            })
+            .map_err(|e| Error::Shader(e.to_string()))?;
 
         let mut output = vec![0_u8; texture.byte_size()];
         texture
@@ -1249,10 +1209,14 @@ impl GoldyRenderer {
         let encoding = scene.encoding();
         let mut stats = FrameStats::default();
 
-        // --- Non-blocking drain of completed frames ---
+        // --- Reclaim completed frames & open recording bracket ---
         let t_drain_start = Instant::now();
-        self.frame
-            .try_drain_completed_frames(device, &mut self.persistent)?;
+        let frame_handle = self
+            .frame_pipeline
+            .begin_frame(|dev, rf| {
+                process_retired_cleanup(dev, &mut self.persistent, rf.timeline, rf.data)
+            })
+            .map_err(|e| Error::Shader(e.to_string()))?;
         self.persistent.pool.cap_pool_depth(12);
         let t_drain = t_drain_start.elapsed();
 
@@ -1348,14 +1312,20 @@ impl GoldyRenderer {
             self.persistent.nearest_clamp_sampler =
                 Some(goldy::Sampler::nearest(device).map_err(|e| Error::Gpu(e.to_string()))?);
         }
-        self.persistent
-            .prepare_storage_pool(device, &self.frame, pool_size, expected_max)?;
+        if let Err(e) = self
+            .persistent
+            .prepare_storage_pool(device, pool_size, expected_max)
+        {
+            self.frame_pipeline.abort_frame(frame_handle);
+            return Err(e);
+        }
         let t_pool = t1.elapsed();
 
         let t2 = Instant::now();
         let mut recorder = FrameRecorder::new(
             device,
-            &mut self.frame,
+            &mut self.frame_pipeline,
+            frame_handle,
             &mut self.persistent,
             &self.engine_shaders,
             surface_frame,
@@ -1409,17 +1379,16 @@ impl GoldyRenderer {
 
         let t4 = Instant::now();
         recorder.schedule_pipeline_cleanup(pipeline, params.robust);
-        recorder.finish()?;
+        let opt_tv = recorder.finish()?;
         if use_pool(device)
             && let Some(allocator) = self.persistent.storage_allocator_mut()
         {
             let used = allocator.used_this_frame();
             allocator.hint_unused_above(used);
         }
-        // Notify the allocator about the frame's epoch so it can track in-flight allocations.
-        // For non-surface paths the timeline is on the just-pushed cleanup entry; for surface
-        // paths it's filled in later by `note_frame_presented` (see that method's hook).
-        if let Some(tv) = self.frame.cleanup_ring.back().and_then(|e| e.timeline)
+        // Notify the allocator about the frame's epoch (standalone path).
+        // Surface paths receive `end_frame` from `note_frame_presented`.
+        if let Some(tv) = opt_tv
             && let Some(allocator) = self.persistent.storage_allocator_mut()
         {
             allocator.end_frame(device, tv);
@@ -1438,10 +1407,10 @@ impl GoldyRenderer {
                 (
                     a.capacity() as f64 / (1024.0 * 1024.0),
                     a.used_this_frame() as f64 / (1024.0 * 1024.0),
-                    self.frame.cleanup_ring.len(),
+                    self.frame_pipeline.pending_frames(),
                 )
             } else {
-                (0.0, 0.0, self.frame.cleanup_ring.len())
+                (0.0, 0.0, self.frame_pipeline.pending_frames())
             };
 
         log::debug!(
@@ -1542,34 +1511,4 @@ impl GoldyRenderer {
 
         (0, 0, 0)
     }
-}
-
-// -----------------------------------------------------------------------
-// Free functions and helper impls (formerly in goldy_engine.rs)
-// -----------------------------------------------------------------------
-
-fn flush_graph(
-    graph: &mut TaskGraph,
-    device: &Device,
-    last_timeline: &mut Option<TimelineValue>,
-    surface_frame: Option<&Frame>,
-    _persistent: &mut PersistentState,
-) -> Result<()> {
-    if graph.is_empty() {
-        return Ok(());
-    }
-
-    if let Some(frame) = surface_frame {
-        frame
-            .submit_compute(graph)
-            .map_err(|e| Error::Shader(e.to_string()))?;
-    } else {
-        let tv = device
-            .submit(graph)
-            .map_err(|e| Error::Shader(e.to_string()))?;
-        *last_timeline = Some(tv);
-    }
-
-    *graph = TaskGraph::new();
-    Ok(())
 }
