@@ -112,36 +112,53 @@ void cs_main(BufRO<FilterUniform> uniforms_buf,
     }
 
     if (u.pass_kind == 0u || u.pass_kind == 1u) {
-        // 1D separable Gaussian using the linear-sampling trick:
-        // pair adjacent taps (i, i+1) into a single bilinear sample at the
-        // Gaussian-weighted midpoint, which the hardware blends for free.
         float std_dev = max(u.std_dev, 1e-4);
         int r = int(min(64.0, ceil(3.0 * std_dev)));
-        float2 inv_dim = 1.0 / float2(float(u.width), float(u.height));
-        float2 centre_uv = (float2(p) + 0.5) * inv_dim;
-        float2 axis = (u.pass_kind == 0u) ? float2(1.0, 0.0) : float2(0.0, 1.0);
+        int2 step = (u.pass_kind == 0u) ? int2(1, 0) : int2(0, 1);
 
-        float4 acc = float4(0, 0, 0, 0);
-        float wsum = 0.0;
+        if (u.edge_mode == 1u) {
+            // Duplicate (clamp-to-edge): use the linear-sampling trick — pair adjacent
+            // taps (i, i+1) into a single bilinear sample at the Gaussian-weighted
+            // midpoint, which the hardware blends for free.  ~2× fewer texture ops.
+            float2 inv_dim = 1.0 / float2(float(u.width), float(u.height));
+            float2 centre_uv = (float2(p) + 0.5) * inv_dim;
+            float2 axis = float2(step);
 
-        float w_c = gaussian_weight(0, std_dev);
-        acc += src_sampled.SampleLevel(linear_clamp, centre_uv, 0) * w_c;
-        wsum += w_c;
+            float4 acc = float4(0, 0, 0, 0);
+            float wsum = 0.0;
 
-        for (int i = 1; i <= r; i += 2) {
-            float w0 = gaussian_weight(i, std_dev);
-            float w1 = (i + 1 <= r) ? gaussian_weight(i + 1, std_dev) : 0.0;
-            float w = w0 + w1;
-            float offset = (w > 0.0) ? (float(i) * w0 + float(i + 1) * w1) / w : float(i);
-            float2 off = axis * (offset * inv_dim);
-            acc += (src_sampled.SampleLevel(linear_clamp, centre_uv + off, 0) +
-                    src_sampled.SampleLevel(linear_clamp, centre_uv - off, 0)) * w;
-            wsum += 2.0 * w;
+            float w_c = gaussian_weight(0, std_dev);
+            acc += src_sampled.SampleLevel(linear_clamp, centre_uv, 0) * w_c;
+            wsum += w_c;
+
+            for (int i = 1; i <= r; i += 2) {
+                float w0 = gaussian_weight(i, std_dev);
+                float w1 = (i + 1 <= r) ? gaussian_weight(i + 1, std_dev) : 0.0;
+                float w = w0 + w1;
+                float offset = (w > 0.0) ? (float(i) * w0 + float(i + 1) * w1) / w : float(i);
+                float2 off = axis * (offset * inv_dim);
+                acc += (src_sampled.SampleLevel(linear_clamp, centre_uv + off, 0) +
+                        src_sampled.SampleLevel(linear_clamp, centre_uv - off, 0)) * w;
+                wsum += 2.0 * w;
+            }
+
+            if (wsum > 0.0)
+                acc /= wsum;
+            dst[gxy] = acc;
+        } else {
+            // None / wrap / mirror: manual per-texel sampling for correct edge handling.
+            float4 acc = float4(0, 0, 0, 0);
+            float wsum = 0.0;
+            for (int i = -r; i <= r; i++) {
+                float w = gaussian_weight(i, std_dev);
+                float4 s = sample_tex(src, p + step * i, dim, u.edge_mode);
+                acc += s * w;
+                wsum += w;
+            }
+            if (wsum > 0.0)
+                acc /= wsum;
+            dst[gxy] = acc;
         }
-
-        if (wsum > 0.0)
-            acc /= wsum;
-        dst[gxy] = acc;
         return;
     }
 
