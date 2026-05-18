@@ -4,6 +4,7 @@
 use ekrano_encoding::{BumpAllocators, ConfigUniform, DrawTag, Path, Tile};
 
 use super::CpuBinding;
+use super::util::morton_tile_dim;
 
 const TILE_WIDTH: usize = 16;
 const TILE_HEIGHT: usize = 16;
@@ -40,7 +41,9 @@ fn tile_alloc_main(
         let uy0 = y0.clamp(0, height_in_tiles) as u32;
         let ux1 = x1.clamp(0, width_in_tiles) as u32;
         let uy1 = y1.clamp(0, height_in_tiles) as u32;
-        let tile_count = (ux1 - ux0) * (uy1 - uy0);
+        // Morton layout: allocate a power-of-two square.
+        let mdim = morton_tile_dim(ux1 - ux0, uy1 - uy0);
+        let tile_count = mdim * mdim;
         let offset = bump.tile;
         bump.tile += tile_count;
         // We construct it this way because padding is private.

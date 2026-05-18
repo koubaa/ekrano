@@ -9,6 +9,7 @@ use ekrano_encoding::{
     Path, Tile,
 };
 
+use super::util::morton_encode_2d;
 use super::{
     CMD_BEGIN_CLIP, CMD_BLUR_RECT, CMD_COLOR, CMD_END, CMD_END_CLIP, CMD_FILL, CMD_IMAGE, CMD_JUMP,
     CMD_LIN_GRAD, CMD_RAD_GRAD, CMD_SET_BLEND_MODE, CMD_SOLID, CMD_SWEEP_GRAD, CpuBinding,
@@ -271,10 +272,10 @@ fn coarse_main(
                     let draw_monoid = draw_monoids[*drawobj_ix as usize];
                     let path = paths[draw_monoid.path_ix as usize];
                     let bbox = path.bbox;
-                    let stride = bbox[2] - bbox[0];
                     let x = bin_tile_x + tile_x - bbox[0];
                     let y = bin_tile_y + tile_y - bbox[1];
-                    let tile = &mut tiles[(path.tiles + y * stride + x) as usize];
+                    let tile_ix_morton = (path.tiles + morton_encode_2d(x, y)) as usize;
+                    let tile = &mut tiles[tile_ix_morton];
                     let is_clip = (drawtag & 1) != 0;
                     let mut is_blend = false;
                     let dd = config.layout.draw_data_base + draw_monoid.scene_offset;

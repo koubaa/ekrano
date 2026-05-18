@@ -59,10 +59,11 @@ void cs_main(BufRO<Config> config_buf, Scattered<BumpAllocators> bump,
         uint width = sh_row_width[el_ix];
         if (width > 0) {
             uint seq_ix = row - (el_ix > 0 ? sh_row_count[el_ix - 1] : 0);
-            uint tile_ix = sh_offset[el_ix] + seq_ix * width;
-            int sum = tiles[tile_ix].backdrop;
+            uint path_base = sh_offset[el_ix];
+            uint row_y = seq_ix;  // row index within this path's bbox
+            int sum = tiles[path_base + morton_encode_2d(0u, row_y)].backdrop;
             for (uint x = 1; x < width; x++) {
-                tile_ix++;
+                uint tile_ix = path_base + morton_encode_2d(x, row_y);
                 sum += tiles[tile_ix].backdrop;
                 Tile t = tiles[tile_ix];
                 t.backdrop = sum;

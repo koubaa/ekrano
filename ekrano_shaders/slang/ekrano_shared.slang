@@ -204,6 +204,68 @@ public static const uint DRAWTAG_END_CLIP_FILTER = 0x0D;
 public static const uint DRAWTAG_SET_BLEND_MODE = 0x04;
 public static const uint DRAW_INFO_FLAGS_FILL_RULE_BIT = 1;
 
+// === Morton / Z-curve utilities ===
+//
+// Encode/decode 2D tile coordinates to/from a Z-curve (Morton) index.
+// Both x and y must be < 65536; for Ekrano tile bboxes (≤ 8192 tiles per
+// side) this is always satisfied.
+//
+// These are provided as infrastructure for storing tiles in Morton order
+// inside each path bbox.  When that layout lands, every site that computes
+//   path.tiles + (y - bbox.y) * stride + (x - bbox.x)
+// should become
+//   path.tiles + morton_encode_2d(x - bbox.x, y - bbox.y)
+
+[ForceInline]
+uint morton_expand(uint x) {
+    x &= 0x0000ffffu;
+    x = (x ^ (x <<  8u)) & 0x00ff00ffu;
+    x = (x ^ (x <<  4u)) & 0x0f0f0f0fu;
+    x = (x ^ (x <<  2u)) & 0x33333333u;
+    x = (x ^ (x <<  1u)) & 0x55555555u;
+    return x;
+}
+
+[ForceInline]
+uint morton_compact(uint x) {
+    x &= 0x55555555u;
+    x = (x ^ (x >>  1u)) & 0x33333333u;
+    x = (x ^ (x >>  2u)) & 0x0f0f0f0fu;
+    x = (x ^ (x >>  4u)) & 0x00ff00ffu;
+    x = (x ^ (x >>  8u)) & 0x0000ffffu;
+    return x;
+}
+
+/// Encode a 2D tile coordinate (x, y) into a Z-curve (Morton) index.
+/// X bits occupy even positions; Y bits occupy odd positions.
+[ForceInline]
+public uint morton_encode_2d(uint x, uint y) {
+    return morton_expand(x) | (morton_expand(y) << 1u);
+}
+
+/// Decode a Z-curve (Morton) index into a 2D tile coordinate (x, y).
+[ForceInline]
+public void morton_decode_2d(uint z, out uint x, out uint y) {
+    x = morton_compact(z);
+    y = morton_compact(z >> 1u);
+}
+
+/// Return the side length of the smallest power-of-two square that holds a
+/// width × height tile bbox.  The tile buffer for each path is allocated as
+/// dim × dim slots so that morton_encode_2d(x,y) is always a valid index for
+/// any (x,y) with 0 ≤ x < width, 0 ≤ y < height.
+///
+/// Returns 0 when either dimension is zero (empty bbox — no allocation needed).
+[ForceInline]
+public uint morton_tile_dim(uint width, uint height) {
+    if (width == 0u || height == 0u) return 0u;
+    uint d = max(width, height);
+    d--;
+    d |= d >> 1u; d |= d >> 2u; d |= d >> 4u; d |= d >> 8u; d |= d >> 16u;
+    d++;
+    return d;
+}
+
 // === Tile ===
 public struct Path {
     public uint4 bbox;

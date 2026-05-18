@@ -47,8 +47,7 @@ void cs_main(Scattered<BumpAllocators> bump, BufRO<SegmentCount> seg_counts, Buf
 
     Path path = paths[line.path_ix];
     int4 bbox = int4(asint(path.bbox.x), asint(path.bbox.y), asint(path.bbox.z), asint(path.bbox.w));
-    int stride = bbox.z - bbox.x;
-    int tile_ix = int(path.tiles) + (y - bbox.y) * stride + x - bbox.x;
+    int tile_ix = int(path.tiles) + int(morton_encode_2d(uint(x - bbox.x), uint(y - bbox.y)));
     Tile tile = tiles[tile_ix];
     uint seg_start = ~tile.segment_count_or_ix;
     if (int(seg_start) < 0)

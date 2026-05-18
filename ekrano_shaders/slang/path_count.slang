@@ -51,8 +51,7 @@ void cs_main(BufRO<Config> config_buf, Scattered<BumpAllocators> bump, BufRO<Lin
     Path path = paths[line.path_ix];
     int4 bbox = int4(asint(path.bbox.x), asint(path.bbox.y), asint(path.bbox.z), asint(path.bbox.w));
     float xmin = min(s0.x, s1.x);
-    int stride = bbox.z - bbox.x;
-    if (s0.y >= float(bbox.w) || s1.y <= float(bbox.y) || xmin >= float(bbox.z) || stride == 0)
+    if (s0.y >= float(bbox.w) || s1.y <= float(bbox.y) || xmin >= float(bbox.z) || bbox.x >= bbox.z)
         return;
 
     uint imin = 0;
@@ -110,9 +109,9 @@ void cs_main(BufRO<Config> config_buf, Scattered<BumpAllocators> bump, BufRO<Lin
 
     ymin = max(ymin, bbox.y);
     ymax = min(ymax, bbox.w);
+    uint tile_base = path.tiles;
     for (int y = ymin; y < ymax; y++) {
-        int base = int(path.tiles) + (y - bbox.y) * stride;
-        InterlockedAdd(tile[base].backdrop, delta);
+        InterlockedAdd(tile[int(tile_base) + int(morton_encode_2d(0u, uint(y - bbox.y)))].backdrop, delta);
     }
 
     float last_z = floor(a * (float(imin) - 1.0) + b);
@@ -124,13 +123,14 @@ void cs_main(BufRO<Config> config_buf, Scattered<BumpAllocators> bump, BufRO<Lin
         float z = floor(zf);
         int y = int(y0 + float(subix) - z);
         int x = int(x0 + x_sign * z);
-        int base = int(path.tiles) + (y - bbox.y) * stride - bbox.x;
+        uint px = uint(x - bbox.x);
+        uint py = uint(y - bbox.y);
         bool top_edge = (subix == 0) ? (y0 == s0.y) : (last_z == z);
         if (top_edge && x + 1 < bbox.z) {
             int x_bump = max(x + 1, bbox.x);
-            InterlockedAdd(tile[base + x_bump].backdrop, delta);
+            InterlockedAdd(tile[int(tile_base) + int(morton_encode_2d(uint(x_bump - bbox.x), py))].backdrop, delta);
         }
-        uint seg_within_slice; InterlockedAdd(tile[base + x].segment_count_or_ix, 1, seg_within_slice);
+        uint seg_within_slice; InterlockedAdd(tile[int(tile_base) + int(morton_encode_2d(px, py))].segment_count_or_ix, 1, seg_within_slice);
         // (no inner-loop diagnostic)
         uint counts = (seg_within_slice << 16) | subix;
         uint seg_ix = seg_base + i - imin;

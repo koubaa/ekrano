@@ -5,7 +5,7 @@ use ekrano_encoding::{BumpAllocators, LineSoup, Path, PathSegment, SegmentCount,
 
 use super::{
     CpuBinding,
-    util::{ONE_MINUS_ULP, ROBUST_EPSILON, Vec2, span},
+    util::{ONE_MINUS_ULP, ROBUST_EPSILON, Vec2, morton_encode_2d, span},
 };
 
 const TILE_WIDTH: u32 = 16;
@@ -65,8 +65,8 @@ fn path_tiling_main(
             bbox[2] as i32,
             bbox[3] as i32,
         ];
-        let stride = bbox[2] - bbox[0];
-        let tile_ix = path.tiles as i32 + (y - bbox[1]) * stride + x - bbox[0];
+        let tile_ix =
+            path.tiles as i32 + morton_encode_2d((x - bbox[0]) as u32, (y - bbox[1]) as u32) as i32;
         let tile = tiles[tile_ix as usize];
         let seg_start = !tile.segment_count_or_ix;
         if (seg_start as i32) < 0 {

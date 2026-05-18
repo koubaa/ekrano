@@ -52,7 +52,11 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene, BufRO<float4> draw_bbo
     uint uy0 = uint(clamp(y0, 0, int(config.height_in_tiles)));
     uint ux1 = uint(clamp(x1, 0, int(config.width_in_tiles)));
     uint uy1 = uint(clamp(y1, 0, int(config.height_in_tiles)));
-    uint tile_count = (ux1 - ux0) * (uy1 - uy0);
+    // Morton layout: allocate a power-of-two square so that
+    // morton_encode_2d(x, y) is always a valid index within the allocation.
+    // Trade-off: up to 4× memory for highly non-square bboxes.
+    uint mdim = morton_tile_dim(ux1 - ux0, uy1 - uy0);
+    uint tile_count = mdim * mdim;
     sh_tile_count[local_id.x] = tile_count;
     for (uint i = 0; i < LG_WG_SIZE; i++) {
         GroupMemoryBarrierWithGroupSync();
