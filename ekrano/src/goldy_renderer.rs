@@ -821,7 +821,10 @@ impl<'a> FrameRecorder<'a> {
     /// Abort the open frame on error so the orchestrator is not left in a broken state.
     ///
     /// After calling this the recorder must not be used again.
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "Public escape hatch for explicit abort; callers typically rely on Drop."
+    )]
     fn abort(mut self) {
         self.finished = true;
         self.frame_pipeline.abort_frame(self.frame_handle);
