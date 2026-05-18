@@ -289,9 +289,11 @@ fn fully_opaque_straight_alpha_unchanged() {
     };
     let mut scene = Scene::new();
     scene.draw_image(&image, Affine::IDENTITY);
-    let result =
-        ekrano_tests::render_then_debug_sync(&scene, &TestParams::new("fully_opaque_straight", 2, 2))
-            .unwrap();
+    let result = ekrano_tests::render_then_debug_sync(
+        &scene,
+        &TestParams::new("fully_opaque_straight", 2, 2),
+    )
+    .unwrap();
     assert_eq!(result.format, ImageFormat::Rgba8);
     for (i, pixel) in result.data.data().chunks_exact(4).enumerate() {
         let &[r, g, b, a] = pixel else { unreachable!() };

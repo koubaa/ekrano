@@ -675,9 +675,9 @@ fn filter_dispatch(
         wg,
         &[
             GpuBinding::Buf(&buf),
-            GpuBinding::Tex(src),  // src_sampled (Interpolated — SRV)
-            GpuBinding::Tex(src),  // src (DirectSpatial — UAV)
-            GpuBinding::Tex(dst),  // dst (DirectSpatial — UAV)
+            GpuBinding::Tex(src), // src_sampled (Interpolated — SRV)
+            GpuBinding::Tex(src), // src (DirectSpatial — UAV)
+            GpuBinding::Tex(dst), // dst (DirectSpatial — UAV)
             GpuBinding::Sampler(sampler_idx),
         ],
     );
@@ -887,22 +887,29 @@ pub(crate) fn record_filter_effects(
                         let inner_idx = (effect.layer_index as usize).saturating_sub(1).min(3);
                         let inner_ft = &filter_layers[inner_idx];
                         pyramid_blur(
-                            shader, recorder, inner_ft, &blur_dst, *std_dev, *edge_mode,
-                            width, height,
+                            shader, recorder, inner_ft, &blur_dst, *std_dev, *edge_mode, width,
+                            height,
                         );
                         let u_comp = FilterUniform::shadow_composite_preblurred_nested(
-                            width, height, *dx, *dy, premul_srgb_u32(*color),
+                            width,
+                            height,
+                            *dx,
+                            *dy,
+                            premul_srgb_u32(*color),
                         );
                         filter_dispatch_two_src(
                             recorder, shader, &u_comp, wg, &blur_dst, inner_ft, ft,
                         );
                     } else {
                         pyramid_blur(
-                            shader, recorder, ft, &blur_dst, *std_dev, *edge_mode,
-                            width, height,
+                            shader, recorder, ft, &blur_dst, *std_dev, *edge_mode, width, height,
                         );
                         let u_comp = FilterUniform::shadow_composite_preblurred(
-                            width, height, *dx, *dy, premul_srgb_u32(*color),
+                            width,
+                            height,
+                            *dx,
+                            *dy,
+                            premul_srgb_u32(*color),
                         );
                         filter_dispatch_two_src(
                             recorder, shader, &u_comp, wg, &blur_dst, ft, &scratch,
