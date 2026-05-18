@@ -259,7 +259,7 @@ pub(crate) struct PersistentState {
     /// Persistent linear-filter + clamp-to-edge sampler for hardware-filtered texture reads
     /// (gradient ramps, image atlas bilinear). Lazily created on first render.
     pub(crate) linear_clamp_sampler: Option<goldy::Sampler>,
-    /// Persistent nearest-filter + clamp-to-edge sampler for IMAGE_QUALITY_LOW reads.
+    /// Persistent nearest-filter + clamp-to-edge sampler for `IMAGE_QUALITY_LOW` reads.
     pub(crate) nearest_clamp_sampler: Option<goldy::Sampler>,
 }
 

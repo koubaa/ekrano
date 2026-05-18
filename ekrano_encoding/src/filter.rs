@@ -255,7 +255,7 @@ impl FilterUniform {
         }
     }
 
-    /// 2× downsample: read src_sampled (2× larger) via hardware bilinear, write to dst at
+    /// 2× downsample: read `src_sampled` (2× larger) via hardware bilinear, write to dst at
     /// (width, height) (`pass_kind` 9).
     pub fn downsample(width: u32, height: u32) -> Self {
         Self {
@@ -271,7 +271,7 @@ impl FilterUniform {
         }
     }
 
-    /// 2× upsample: read src_sampled (2× smaller) via hardware bilinear, write to dst at
+    /// 2× upsample: read `src_sampled` (2× smaller) via hardware bilinear, write to dst at
     /// (width, height), overwriting the existing contents (`pass_kind` 11).
     pub fn upsample(width: u32, height: u32) -> Self {
         Self {

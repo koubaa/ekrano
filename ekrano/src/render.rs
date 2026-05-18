@@ -685,7 +685,7 @@ fn filter_dispatch(
 }
 
 /// Like `filter_dispatch` but uses `sampled_src` for the SRV slot and `uav_src` for the UAV slot.
-/// Used by pyramid shadow composite pass_kinds (13/14) where the pre-blurred source and the
+/// Used by pyramid shadow composite `pass_kinds` (13/14) where the pre-blurred source and the
 /// original foreground layer are different textures.
 fn filter_dispatch_two_src(
     recorder: &mut FrameRecorder<'_>,
@@ -732,7 +732,7 @@ fn pyramid_blur(
     height: u32,
 ) {
     let levels = (std_dev.log2().floor() as u32).clamp(1, 6) as usize;
-    let sigma_residual = std_dev / (1u32 << levels) as f32;
+    let sigma_residual = std_dev / (1_u32 << levels) as f32;
 
     // Allocate pyramid textures (level 0 = half full-res, level `levels-1` = bottom).
     let pyramid: Vec<Texture> = (0..levels)
