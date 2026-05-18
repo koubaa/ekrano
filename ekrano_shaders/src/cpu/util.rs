@@ -256,7 +256,10 @@ pub(crate) fn morton_encode_2d(x: u32, y: u32) -> u32 {
 }
 
 /// Decode a Z-curve (Morton) index back to (x, y).
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "only referenced from #[cfg(test)] round-trip tests"
+)]
 #[inline(always)]
 pub(crate) fn morton_decode_2d(z: u32) -> (u32, u32) {
     (morton_compact(z), morton_compact(z >> 1))
@@ -318,7 +321,7 @@ mod morton_tests {
 
     #[test]
     fn expand_compact_roundtrip() {
-        for x in [0u32, 1, 2, 3, 7, 15, 255, 65535] {
+        for x in [0_u32, 1, 2, 3, 7, 15, 255, 65535] {
             let expanded = morton_expand(x);
             let compacted = morton_compact(expanded);
             assert_eq!(compacted, x, "roundtrip failed for x={x}");
@@ -400,7 +403,7 @@ mod morton_tests {
 
     #[test]
     fn no_index_overflow_square_bboxes() {
-        for dim in [1u32, 2, 4, 8, 16] {
+        for dim in [1_u32, 2, 4, 8, 16] {
             assert_no_overflow(dim, dim);
         }
     }
