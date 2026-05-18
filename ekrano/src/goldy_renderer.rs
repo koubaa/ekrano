@@ -449,6 +449,7 @@ impl<'a> FrameRecorder<'a> {
             deferred_pool_views: Vec::new(),
             deferred_textures: Vec::new(),
             dispatch_count: 0,
+            finished: false,
         }
     }
 
@@ -792,23 +793,26 @@ impl<'a> FrameRecorder<'a> {
     }
 
     /// Finish dispatch: flush the final graph and register a frame slot with the orchestrator.
-    fn finish(self) -> Result<Option<TimelineValue>> {
+    fn finish(mut self) -> Result<Option<TimelineValue>> {
+        self.finished = true;
         let cleanup = FrameCleanup {
-            bump_buf: self.bump_buf_for_readback,
-            recyclable_owned: self.deferred_owned_buffers,
-            deferred_pool_views: self.deferred_pool_views,
-            deferred_textures: self.deferred_textures,
+            bump_buf: self.bump_buf_for_readback.take(),
+            recyclable_owned: mem::take(&mut self.deferred_owned_buffers),
+            deferred_pool_views: mem::take(&mut self.deferred_pool_views),
+            deferred_textures: mem::take(&mut self.deferred_textures),
         };
+
+        let graph = mem::replace(&mut self.graph, TaskGraph::new());
 
         if let Some(surface) = self.surface_frame {
             self.frame_pipeline
-                .end_frame_for_surface(self.frame_handle, &self.graph, surface, cleanup)
+                .end_frame_for_surface(self.frame_handle, &graph, surface, cleanup)
                 .map_err(|e| Error::Shader(e.to_string()))?;
             Ok(None)
         } else {
             let tv = self
                 .frame_pipeline
-                .end_frame_standalone(self.frame_handle, self.graph, self.last_timeline, cleanup)
+                .end_frame_standalone(self.frame_handle, graph, self.last_timeline, cleanup)
                 .map_err(|e| Error::Shader(e.to_string()))?;
             Ok(Some(tv))
         }
@@ -817,8 +821,21 @@ impl<'a> FrameRecorder<'a> {
     /// Abort the open frame on error so the orchestrator is not left in a broken state.
     ///
     /// After calling this the recorder must not be used again.
-    fn abort(self) {
+    #[allow(dead_code)]
+    fn abort(mut self) {
+        self.finished = true;
         self.frame_pipeline.abort_frame(self.frame_handle);
+    }
+}
+
+impl Drop for FrameRecorder<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            // The recorder is being dropped without finish() or abort() — this happens when
+            // an early `?` propagates an error out of run_frame before finish() is reached.
+            // Abort the open frame so the orchestrator is not permanently stuck.
+            self.frame_pipeline.abort_frame(self.frame_handle);
+        }
     }
 }
 
@@ -956,10 +973,16 @@ impl GoldyRenderer {
             std::sync::Arc::new(DefaultVramAllocator::new()),
             budget,
         );
-        let device = device.with_vram_allocator(std::sync::Arc::new(tracking));
+        let tracked_device = device.with_vram_allocator(std::sync::Arc::new(tracking));
 
+        // FrameOrchestrator uses the original (unbudgeted) device for transient-buffer
+        // submission.  The placement heap for transient allocations must not be
+        // constrained by the 512 MiB TrackingVramAllocator budget, because the heap
+        // size depends on the scene's transient footprint and can legitimately exceed
+        // that figure for large scenes. The tracked device is still used for storage-
+        // pool allocations (via `prepare_storage_pool`).
         let mut renderer = Self {
-            device: device.clone(),
+            device: tracked_device.clone(),
             shaders: FullShaders::empty(),
             resolver: Resolver::new(),
             engine_shaders: Vec::new(),
@@ -969,12 +992,12 @@ impl GoldyRenderer {
                 tex_pool: TexturePool::default(),
                 last_drained_bump: None,
             },
-            frame_pipeline: FrameOrchestrator::new(&device, MAX_CLEANUP_DEPTH),
+            frame_pipeline: FrameOrchestrator::new(device, MAX_CLEANUP_DEPTH),
             persistent_bump: None,
         };
-        let shaders = shaders::goldy_full_shaders(&device, &mut renderer)?;
+        let shaders = shaders::goldy_full_shaders(&tracked_device, &mut renderer)?;
         renderer.shaders = shaders;
-        device.release_idle_shader_compiler();
+        tracked_device.release_idle_shader_compiler();
         Ok(renderer)
     }
 
@@ -1264,12 +1287,13 @@ impl GoldyRenderer {
         };
 
         let t1 = Instant::now();
-        self.persistent
+        if let Err(e) = self
+            .persistent
             .prepare_storage_pool(device, pool_size, expected_max)
-            .map_err(|e| {
-                self.frame_pipeline.abort_frame(frame_handle);
-                e
-            })?;
+        {
+            self.frame_pipeline.abort_frame(frame_handle);
+            return Err(e);
+        }
         let t_pool = t1.elapsed();
 
         let t2 = Instant::now();
@@ -1285,11 +1309,7 @@ impl GoldyRenderer {
         let (graph, persistent) = recorder.graph_and_persistent();
         let mut pipeline = crate::gpu_resources::PipelineResources::prepare(
             device, graph, persistent, encoding, packed, ramps, images, params, &config,
-        )
-        .map_err(|e| {
-            recorder.abort();
-            e
-        })?;
+        )?;
 
         let mut render = Render::new();
         render.run_coarse(
@@ -1306,10 +1326,7 @@ impl GoldyRenderer {
         // Submit coarse wave pipeline before recording fine so the GPU can start coarse work
         // while this thread fills fine dispatch — CPU/GPU overlap only (issue #46 discusses
         // deeper GPU coarse+fine concurrency).
-        recorder.flush_mid_frame().map_err(|e| {
-            recorder.abort();
-            e
-        })?;
+        recorder.flush_mid_frame()?;
 
         let t3 = Instant::now();
         render.record_fine(
@@ -1337,10 +1354,7 @@ impl GoldyRenderer {
 
         let t4 = Instant::now();
         recorder.schedule_pipeline_cleanup(pipeline, params.robust);
-        let opt_tv = recorder.finish().map_err(|e| {
-            // finish() already called end_frame_* or aborted; safe to propagate.
-            e
-        })?;
+        let opt_tv = recorder.finish()?;
         if use_pool(device)
             && let Some(allocator) = self.persistent.storage_allocator_mut()
         {
