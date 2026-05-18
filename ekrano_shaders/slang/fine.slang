@@ -811,8 +811,9 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
             for (uint i = 0; i < 4; i++) {
                 float my_d = d + lin.line_x * float(i);
                 float t = extend_mode_normalized(my_d, lin.extend_mode);
-                float2 grad_uv = float2(t, (float(lin.index) + 0.5) * inv_grad.y);
-                float4 fg_rgba = gradients.SampleLevel(linear_clamp, grad_uv, 0);
+                float u = (t * float(grad_w - 1) + 0.5) * inv_grad.x;
+                float2 grad_uv = float2(u, (float(lin.index) + 0.5) * inv_grad.y);
+                float4 fg_rgba = gradients.SampleLevel(nearest_clamp, grad_uv, 0);
                 float4 fg_i = fg_rgba * area[i] * mask_w[i];
                 uint BLEND_DEFAULT = (MIX_NORMAL << 8) | COMPOSE_SRC_OVER;
                 rgba[i] = ((draw_blend & 0x7FFFu) == BLEND_DEFAULT)
@@ -853,8 +854,9 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
                 if (is_valid) {
                     t = extend_mode_normalized(rad.focal_x + t_sign * t, rad.extend_mode);
                     t = is_swapped ? (1.0 - t) : t;
-                    float2 grad_uv = float2(t, (float(rad.index) + 0.5) * inv_grad.y);
-                    float4 fg_rgba = gradients.SampleLevel(linear_clamp, grad_uv, 0);
+                    float u = (t * float(grad_w - 1) + 0.5) * inv_grad.x;
+                    float2 grad_uv = float2(u, (float(rad.index) + 0.5) * inv_grad.y);
+                    float4 fg_rgba = gradients.SampleLevel(nearest_clamp, grad_uv, 0);
                     float4 fg_i = fg_rgba * area[i] * mask_w[i];
                     uint BLEND_DEFAULT_R = (MIX_NORMAL << 8) | COMPOSE_SRC_OVER;
                     rgba[i] = ((draw_blend & 0x7FFFu) == BLEND_DEFAULT_R)
@@ -880,8 +882,9 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
                 if (phi != phi) phi = 0.0;
                 phi = (phi - sweep.t0) * scale;
                 float t = extend_mode_normalized(phi, sweep.extend_mode);
-                float2 grad_uv = float2(t, (float(sweep.index) + 0.5) * inv_grad.y);
-                float4 fg_rgba = gradients.SampleLevel(linear_clamp, grad_uv, 0);
+                float u = (t * float(grad_w - 1) + 0.5) * inv_grad.x;
+                float2 grad_uv = float2(u, (float(sweep.index) + 0.5) * inv_grad.y);
+                float4 fg_rgba = gradients.SampleLevel(nearest_clamp, grad_uv, 0);
                 float4 fg_i = fg_rgba * area[i] * mask_w[i];
                 uint BLEND_DEFAULT_S = (MIX_NORMAL << 8) | COMPOSE_SRC_OVER;
                 rgba[i] = ((draw_blend & 0x7FFFu) == BLEND_DEFAULT_S)
@@ -904,7 +907,7 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
                         float2 atlas_uv = image.xform * my_xy;
                         atlas_uv.x = extend_mode(atlas_uv.x, image.x_extend_mode, image.extents.x);
                         atlas_uv.y = extend_mode(atlas_uv.y, image.y_extend_mode, image.extents.y);
-                        atlas_uv += image.atlas_offset;
+                        atlas_uv = floor(atlas_uv) + image.atlas_offset;
                         float2 norm_uv = clamp((atlas_uv + 0.5) * inv_atlas, norm_min, norm_max);
                         float4 fg_rgba = image_atlas.SampleLevel(nearest_clamp, norm_uv, 0);
                         float4 fg_i = pixel_format(fg_rgba * area[i] * mask_w[i] * image.alpha, image.format);

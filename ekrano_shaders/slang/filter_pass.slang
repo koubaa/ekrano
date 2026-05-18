@@ -69,10 +69,10 @@ float gaussian_weight(int i, float std_dev) {
 [goldy_compute]
 [numthreads(16, 16, 1)]
 void cs_main(BufRO<FilterUniform> uniforms_buf,
-             Interpolated<float4> src_sampled, // SRV slot: hardware-sampled reads for Gaussian
-             DirectSpatial<float4> src,        // UAV slot: direct integer loads for non-Gaussian paths
+             Interpolated<float4> src_sampled,
+             DirectSpatial<float4> src,
              DirectSpatial<float4> dst,
-             Filter linear_clamp,              // linear sampler for Gaussian kernel
+             Filter linear_clamp,
              ThreadId gid) {
     FilterUniform u = uniforms_buf[0];
     uint2 gxy = uint2(gid.x, gid.y);
@@ -84,15 +84,6 @@ void cs_main(BufRO<FilterUniform> uniforms_buf,
     int2 p = int2(int(gid.x), int(gid.y));
 
     if (u.pass_kind == 3u) {
-        // Flood — constrained to clip rect packed in edge_mode / std_dev / dx / dy.
-        // Within the clip rect, writes the flood colour with alpha = src.a * flood.a.
-        // This preserves the source pixel's coverage (anti-aliased star edges, etc.) as
-        // the output alpha, matching vello_sparse semantics where the flood fills the
-        // per-layer buffer and the outer clip composites it at the layer's coverage.
-        // Pixels outside the clip rect are copied from src unchanged.
-        //
-        // Encoding: clip_x0 = edge_mode (uint), clip_y0 = asuint(std_dev),
-        //           clip_x1 = asuint(dx),       clip_y1 = asuint(dy).
         uint cx0 = u.edge_mode;
         uint cy0 = asuint(u.std_dev);
         uint cx1 = asuint(u.dx);
@@ -109,14 +100,11 @@ void cs_main(BufRO<FilterUniform> uniforms_buf,
     }
 
     if (u.pass_kind == 5u) {
-        // copy
         dst[gxy] = src[uint2(p)];
         return;
     }
 
     if (u.pass_kind == 2u) {
-        // Offset: pull from src[p - off] so that content at (x,y) moves to (x+dx, y+dy)
-        // (matches CPU push semantics: positive dx shifts right, positive dy shifts down).
         int2 off = int2(int(floor(u.dx + 0.5)), int(floor(u.dy + 0.5)));
         float4 c = sample_tex(src, p - off, dim, u.edge_mode);
         dst[gxy] = c;
@@ -125,11 +113,8 @@ void cs_main(BufRO<FilterUniform> uniforms_buf,
 
     if (u.pass_kind == 0u || u.pass_kind == 1u) {
         // 1D separable Gaussian using the linear-sampling trick:
-        // pair adjacent taps (i, i+1) → single bilinear sample at the Gaussian-weighted midpoint,
-        // which the hardware blends for free.  ~2× fewer texture ops at any radius >= 2.
-        //
-        // Linear-clamp sampling maps edge coordinates to ClampToEdge (edge_mode 1 / duplicate).
-        // Interior pixels are unaffected by edge handling.
+        // pair adjacent taps (i, i+1) into a single bilinear sample at the
+        // Gaussian-weighted midpoint, which the hardware blends for free.
         float std_dev = max(u.std_dev, 1e-4);
         int r = int(min(64.0, ceil(3.0 * std_dev)));
         float2 inv_dim = 1.0 / float2(float(u.width), float(u.height));
@@ -139,13 +124,10 @@ void cs_main(BufRO<FilterUniform> uniforms_buf,
         float4 acc = float4(0, 0, 0, 0);
         float wsum = 0.0;
 
-        // Centre tap.
         float w_c = gaussian_weight(0, std_dev);
         acc += src_sampled.SampleLevel(linear_clamp, centre_uv, 0) * w_c;
         wsum += w_c;
 
-        // Paired taps: merge (i, i+1) into one bilinear sample at the weight-averaged offset.
-        // When i+1 > r the boundary tap is alone (w1 = 0 ⟹ offset = i, normal point sample).
         for (int i = 1; i <= r; i += 2) {
             float w0 = gaussian_weight(i, std_dev);
             float w1 = (i + 1 <= r) ? gaussian_weight(i + 1, std_dev) : 0.0;
@@ -164,8 +146,6 @@ void cs_main(BufRO<FilterUniform> uniforms_buf,
     }
 
     if (u.pass_kind == 4u) {
-        // drop shadow: blur alpha of offset source, colorize, composite under current pixel.
-        // Use 3-sigma radius to match vello-sparse's reference shadow kernel.
         float std_dev = max(u.std_dev, 1e-4);
         int r = int(min(32.0, ceil(3.0 * std_dev)));
         int2 off = int2(int(floor(u.dx + 0.5)), int(floor(u.dy + 0.5)));
@@ -185,13 +165,11 @@ void cs_main(BufRO<FilterUniform> uniforms_buf,
         float4 sh = unpackUnorm4x8ToFloat(u.color);
         sh *= blur_a;
         float4 fg = src[uint2(p)];
-        // premul over: shadow under fg: out = fg + (1-fg.a)*shadow
         dst[gxy] = fg + (1.0 - fg.a) * sh;
         return;
     }
 
     if (u.pass_kind == 6u) {
-        // Composite premultiplied filtered layer (`src`) over straight-alpha `dst`.
         float4 fg = src[uint2(p)];
         float4 bg_s = dst[gxy];
         float4 bg_pm = float4(bg_s.rgb * bg_s.a, bg_s.a);
@@ -206,29 +184,19 @@ void cs_main(BufRO<FilterUniform> uniforms_buf,
         return;
     }
 
-    // --- Pyramid passes (hardware-sampled bilinear) ---
-
     if (u.pass_kind == 9u) {
-        // 2× downsample: dst dimensions = u.width × u.height, src_sampled is 2× larger.
-        // Sampling at the dst centre UV gives hardware bilinear average of the 2×2 src block.
         float2 uv = (float2(p) + 0.5) / float2(u.width, u.height);
         dst[gxy] = src_sampled.SampleLevel(linear_clamp, uv, 0);
         return;
     }
 
     if (u.pass_kind == 11u) {
-        // 2× upsample: dst is 2× the dimensions of src_sampled.
-        // Sampling at the dst centre UV lets hardware bilinear interpolate between src texels.
         float2 uv = (float2(p) + 0.5) / float2(u.width, u.height);
         dst[gxy] = src_sampled.SampleLevel(linear_clamp, uv, 0);
         return;
     }
 
     if (u.pass_kind == 13u) {
-        // Shadow composite from pre-blurred source.
-        // src_sampled = pre-blurred alpha buffer (result of pyramid blur).
-        // src (UAV) = original unblurred layer (foreground).
-        // Reads blurred alpha at (p - offset), colorises, composites under fg.
         float2 inv_dim = float2(1.0 / float(u.width), 1.0 / float(u.height));
         int2 off = int2(int(floor(u.dx + 0.5)), int(floor(u.dy + 0.5)));
         float2 blur_uv = (float2(p) + 0.5 - float2(off)) * inv_dim;
@@ -241,7 +209,6 @@ void cs_main(BufRO<FilterUniform> uniforms_buf,
     }
 
     if (u.pass_kind == 14u) {
-        // Nested shadow composite from pre-blurred source (shadow only, no fg).
         float2 inv_dim = float2(1.0 / float(u.width), 1.0 / float(u.height));
         int2 off = int2(int(floor(u.dx + 0.5)), int(floor(u.dy + 0.5)));
         float2 blur_uv = (float2(p) + 0.5 - float2(off)) * inv_dim;
@@ -253,10 +220,6 @@ void cs_main(BufRO<FilterUniform> uniforms_buf,
     }
 
     if (u.pass_kind == 8u) {
-        // Drop shadow for a nested layer: produce ONLY the shadow (no foreground pixel).
-        // The inner layer's filtered content is composited on top separately, so including fg
-        // here would overwrite blurred edges produced by the inner filter.
-        // Use 3-sigma radius to match vello-sparse's reference shadow kernel.
         float std_dev = max(u.std_dev, 1e-4);
         int r = int(min(32.0, ceil(3.0 * std_dev)));
         int2 off = int2(int(floor(u.dx + 0.5)), int(floor(u.dy + 0.5)));

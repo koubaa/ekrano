@@ -381,22 +381,26 @@ pub(crate) fn goldy_full_shaders(
         )
         .ok();
 
-    let filter_pass = renderer
-        .add_compute_shader(
-            device,
-            "filter_pass",
-            ekrano_shaders::slang::FILTER_PASS,
-            &[
-                BufReadOnly,           // uniform / FilterUniform
-                ImageRead(ImageFormat::Rgba8), // src_sampled  (SRV — Interpolated<float4>)
-                Image(ImageFormat::Rgba8),     // src (UAV — DirectSpatial<float4>)
-                Image(ImageFormat::Rgba8),     // dst (UAV — DirectSpatial<float4>)
-                Sampler,               // linear_clamp sampler
-            ],
-            &search_paths,
-            &[],
-        )
-        .ok();
+    let filter_pass = match renderer.add_compute_shader(
+        device,
+        "filter_pass",
+        ekrano_shaders::slang::FILTER_PASS,
+        &[
+            BufReadOnly,                   // uniforms_buf (BufRO<FilterUniform>)
+            ImageRead(ImageFormat::Rgba8), // src_sampled (Interpolated<float4>)
+            Image(ImageFormat::Rgba8),     // src (DirectSpatial<float4>)
+            Image(ImageFormat::Rgba8),     // dst (DirectSpatial<float4>)
+            Sampler,                       // linear_clamp (Filter)
+        ],
+        &search_paths,
+        &[],
+    ) {
+        Ok(id) => Some(id),
+        Err(e) => {
+            log::error!("filter_pass shader compilation failed: {e}");
+            None
+        }
+    };
 
     Ok(FullShaders {
         pipeline_setup: Some(pipeline_setup),

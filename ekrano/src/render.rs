@@ -650,6 +650,16 @@ fn premul_srgb_u32(c: PremulColor<Srgb>) -> u32 {
     c.to_rgba8().to_u32()
 }
 
+fn linear_clamp_sampler_index(recorder: &FrameRecorder<'_>) -> u32 {
+    recorder
+        .persistent
+        .linear_clamp_sampler
+        .as_ref()
+        .expect("linear_clamp_sampler must be initialised before filter pass")
+        .bindless_index()
+        .expect("linear_clamp_sampler has no bindless index")
+}
+
 fn filter_dispatch(
     recorder: &mut FrameRecorder<'_>,
     shader: crate::ShaderId,
@@ -658,28 +668,17 @@ fn filter_dispatch(
     src: &Texture,
     dst: &Texture,
 ) {
+    let sampler_idx = linear_clamp_sampler_index(recorder);
     let buf = recorder.upload_typed("ekrano.filter_uniform", uniform);
-    // Resolve the sampled (SRV) index for src. Filter layers are `DirectInterpolated` so they
-    // expose a secondary sampled-texture slot for hardware bilinear reads.
-    let src_sampled_idx = src
-        .bindless_sampled_index()
-        .or_else(|| src.bindless_index())
-        .unwrap_or(0);
-    let linear_sampler_idx = recorder
-        .persistent
-        .linear_clamp_sampler
-        .as_ref()
-        .and_then(|s| s.bindless_index())
-        .unwrap_or(0);
     recorder.dispatch(
         shader,
         wg,
         &[
             GpuBinding::Buf(&buf),
-            GpuBinding::Sampler(src_sampled_idx), // Interpolated<float4> SRV for .Sample()
-            GpuBinding::Tex(src),                 // DirectSpatial<float4> UAV for integer loads
-            GpuBinding::Tex(dst),
-            GpuBinding::Sampler(linear_sampler_idx),
+            GpuBinding::Tex(src),  // src_sampled (Interpolated — SRV)
+            GpuBinding::Tex(src),  // src (DirectSpatial — UAV)
+            GpuBinding::Tex(dst),  // dst (DirectSpatial — UAV)
+            GpuBinding::Sampler(sampler_idx),
         ],
     );
     recorder.defer_owned_buffer(buf, "ekrano.filter_uniform");
@@ -693,30 +692,21 @@ fn filter_dispatch_two_src(
     shader: crate::ShaderId,
     uniform: &FilterUniform,
     wg: (u32, u32, u32),
-    sampled_src: &Texture, // SRV: pre-blurred result for hardware sampling
-    uav_src: &Texture,     // UAV: original unblurred layer
+    sampled_src: &Texture,
+    uav_src: &Texture,
     dst: &Texture,
 ) {
+    let sampler_idx = linear_clamp_sampler_index(recorder);
     let buf = recorder.upload_typed("ekrano.filter_uniform", uniform);
-    let sampled_idx = sampled_src
-        .bindless_sampled_index()
-        .or_else(|| sampled_src.bindless_index())
-        .unwrap_or(0);
-    let linear_sampler_idx = recorder
-        .persistent
-        .linear_clamp_sampler
-        .as_ref()
-        .and_then(|s| s.bindless_index())
-        .unwrap_or(0);
     recorder.dispatch(
         shader,
         wg,
         &[
             GpuBinding::Buf(&buf),
-            GpuBinding::Sampler(sampled_idx),
-            GpuBinding::Tex(uav_src),
-            GpuBinding::Tex(dst),
-            GpuBinding::Sampler(linear_sampler_idx),
+            GpuBinding::Tex(sampled_src), // src_sampled (Interpolated — SRV)
+            GpuBinding::Tex(uav_src),     // src (DirectSpatial — UAV)
+            GpuBinding::Tex(dst),         // dst (DirectSpatial — UAV)
+            GpuBinding::Sampler(sampler_idx),
         ],
     );
     recorder.defer_owned_buffer(buf, "ekrano.filter_uniform");
