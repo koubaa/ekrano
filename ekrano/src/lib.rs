@@ -4,80 +4,41 @@
 //! Ekrano is a 2d graphics rendering engine written in Rust, using Goldy.
 //! It efficiently draws large 2d scenes with interactive or near-interactive performance.
 //!
-//! ![image](https://github.com/linebender/vello/assets/8573618/cc2b742e-2135-4b70-8051-c49aeddb5d19)
-//!
-//!
-//! ## Motivation
-//!
-//! Vello is meant to fill the same place in the graphics stack as other vector graphics renderers like [Skia](https://skia.org/), [Cairo](https://www.cairographics.org/), and its predecessor project [Piet](https://www.cairographics.org/).
-//! On a basic level, that means it provides tools to render shapes, images, gradients, texts, etc, using a PostScript-inspired API, the same that powers SVG files and [the browser `<canvas>` element](https://developer.mozilla.org/en-US/docs/Web/API/CanvasRenderingContext2D).
-//!
-//! Vello's selling point is that it gets better performance than other renderers by better leveraging the GPU.
-//! In traditional PostScript-style renderers, some steps of the render process like sorting and clipping either need to be handled in the CPU or done through the use of intermediary textures.
-//! Vello avoids this by using prefix-scan algorithms to parallelize work that usually needs to happen in sequence, so that work can be offloaded to the GPU with minimal use of temporary buffers.
-//!
-//! This means that Vello needs a GPU with support for compute shaders to run.
-//!
-//!
 //! ## Getting started
 //!
-//! Vello is meant to be integrated deep in UI render stacks.
-//! While drawing in a Vello [`Scene`] is easy, actually rendering that scene to a surface setting up a wgpu context, which is a non-trivial task.
-//!
-//! To use Vello as the renderer for your PDF reader / GUI toolkit / etc, your code will have to look roughly like this:
+//! Ekrano renders scenes to GPU textures via [`GoldyRenderer`]. A typical usage looks like:
 //!
 //! ```ignore
-//! // Initialize wgpu and get handles
-//! let (width, height) = ...;
-//! let device: wgpu::Device = ...;
-//! let queue: wgpu::Queue = ...;
-//! let mut renderer = Renderer::new(
-//!    &device,
-//!    RendererOptions {
-//!       use_cpu: false,
-//!       antialiasing_support: ekrano::AaSupport::all(),
-//!       num_init_threads: NonZeroUsize::new(1),
-//!    },
-//! ).expect("Failed to create renderer");
+//! use ekrano::{GoldyRenderer, Scene, RenderParams, AaConfig};
 //!
-//! // Create scene and draw stuff in it
-//! let mut scene = ekrano::Scene::new();
+//! let device: goldy::Device = /* obtain from Goldy */;
+//! let mut renderer = GoldyRenderer::new(&device).expect("Failed to create renderer");
+//!
+//! let mut scene = Scene::new();
 //! scene.fill(
 //!    ekrano::peniko::Fill::NonZero,
-//!    ekrano::Affine::IDENTITY,
-//!    ekrano::Color::from_rgb8(242, 140, 168),
+//!    ekrano::peniko::kurbo::Affine::IDENTITY,
+//!    ekrano::peniko::Color::from_rgb8(242, 140, 168),
 //!    None,
-//!    &ekrano::Circle::new((420.0, 200.0), 120.0),
+//!    &ekrano::peniko::kurbo::Circle::new((420.0, 200.0), 120.0),
 //! );
 //!
-//! // Draw more stuff
-//! scene.push_layer(...);
-//! scene.fill(...);
-//! scene.stroke(...);
-//! scene.pop_layer(...);
-//!
-//! let texture = device.create_texture(&...);
-//! // Render to a wgpu Texture
+//! let texture: goldy::Texture = /* allocate render target */;
 //! renderer
 //!    .render_to_texture(
 //!       &device,
-//!       &queue,
 //!       &scene,
 //!       &texture,
-//!       &ekrano::RenderParams {
-//!          base_color: palette::css::BLACK, // Background color
-//!          width,
-//!          height,
-//!          antialiasing_method: AaConfig::Msaa16,
+//!       &RenderParams {
+//!          base_color: ekrano::peniko::color::palette::css::BLACK,
+//!          width: 800,
+//!          height: 600,
+//!          antialiasing_method: AaConfig::Area,
 //!          robust: true,
 //!       },
 //!    )
 //!    .expect("Failed to render to a texture");
-//! // Do things with surface texture, such as blitting it to the Surface using
-//! // a texture blitter if presenting to a window.
 //! ```
-//!
-//! See the [`examples/`](https://github.com/linebender/vello/tree/main/examples) folder to see how that code integrates with frameworks like winit.
 
 // LINEBENDER LINT SET - lib.rs - v2
 // See https://linebender.org/wiki/canonical-lints/

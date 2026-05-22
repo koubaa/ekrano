@@ -11,6 +11,7 @@ use crate::{AaConfig, RenderParams};
 
 use std::mem::size_of;
 
+use crate::gpu_resources::BufferLifetime;
 use ekrano_encoding::{
     Encoding, FilterPrimitive, FilterUniform, IndirectCount, WorkgroupCountsGpu, WorkgroupSize,
     make_mask_lut, make_mask_lut_16,
@@ -30,8 +31,6 @@ use ekrano_encoding::{
 pub struct Render {
     fine_wg_count: Option<WorkgroupSize>,
     aa_config: AaConfig,
-    /// MSAA subpixel mask LUT (uploaded once, reused while this [`Render`] lives).
-    mask_lut_buf: Option<Buffer>,
 
     #[cfg(feature = "debug_layers")]
     captured_buffers: Option<CapturedBuffers>,
@@ -86,7 +85,6 @@ impl Render {
         Self {
             fine_wg_count: None,
             aa_config: AaConfig::Area,
-            mask_lut_buf: None,
             #[cfg(feature = "debug_layers")]
             captured_buffers: None,
         }
@@ -95,7 +93,6 @@ impl Render {
     /// Execute the coarse rasterization phase.
     pub(crate) fn run_coarse(
         &mut self,
-        _encoding: &Encoding,
         pipeline: &mut PipelineResources,
         shaders: &FullShaders,
         params: &RenderParams,
@@ -127,13 +124,38 @@ impl Render {
                 .pipeline_setup
                 .expect("pipeline_setup when use_indirect");
             let wg_counts_gpu = WorkgroupCountsGpu::from(wg_counts);
-            let wg_buf = recorder.upload_typed("ekrano.wg_counts", &wg_counts_gpu);
+
+            // Cache hit check: compare before taking ownership.
+            let cache_hit = recorder
+                .persistent
+                .cached_wg_counts
+                .as_ref()
+                .is_some_and(|(v, _)| v == &wg_counts_gpu);
+            log::trace!("wg_counts cache {}", if cache_hit { "HIT" } else { "MISS" });
+
+            // Take the buffer out of the cache (or upload fresh on miss).
+            // Buffer::Drop destroys the GPU resource, so we must NOT drop the cached buffer on
+            // a hit — it will be restored into the cache after the dispatch below.
+            let wg_buf = if cache_hit {
+                recorder.persistent.cached_wg_counts.take().unwrap().1
+            } else {
+                if let Some((_, old_buf)) = recorder.persistent.cached_wg_counts.take() {
+                    // Return evicted buffer to pool so its GPU memory can be reused.
+                    recorder
+                        .persistent
+                        .pool
+                        .return_buf(old_buf, "ekrano.wg_counts");
+                }
+                recorder.upload_typed("ekrano.wg_counts", &wg_counts_gpu)
+            };
+
             let indirect = recorder
                 .alloc_pipeline_buffer_named(
                     buffer_sizes.indirect_count.size_in_bytes().into(),
                     size_of::<IndirectCount>() as u32,
                     "ekrano.indirect_dispatch",
                     BufferFlags::empty(),
+                    BufferLifetime::CoarseOnly,
                 )
                 .expect("indirect buffer");
             recorder.dispatch(
@@ -141,7 +163,10 @@ impl Render {
                 (1, 1, 1),
                 &[GpuBinding::Buf(&wg_buf), indirect.as_binding()],
             );
-            recorder.defer_owned_buffer(wg_buf, "ekrano.wg_counts");
+
+            // Restore buffer to persistent cache; its lifetime is now managed by
+            // PersistentState. Do NOT call defer_owned_buffer here.
+            recorder.persistent.cached_wg_counts = Some((wg_counts_gpu, wg_buf));
             pipeline.indirect = Some(indirect);
         }
 
@@ -570,17 +595,58 @@ impl Render {
                 .expect("shaders not configured to support AA mode: msaa8"),
         };
 
-        if matches!(self.aa_config, AaConfig::Msaa16 | AaConfig::Msaa8)
-            && self.mask_lut_buf.is_none()
-        {
-            let mask_lut = match self.aa_config {
-                AaConfig::Msaa16 => make_mask_lut_16(),
-                AaConfig::Msaa8 => make_mask_lut(),
-                _ => unreachable!(),
+        // Obtain a persistent mask LUT buffer for MSAA modes.  The LUT is static
+        // (does not depend on scene content), so it is uploaded exactly once and
+        // reused across frames without re-recording a WriteBuffer node.  This
+        // keeps the fine command list free of staging-belt CopyBufferRegion
+        // commands, allowing it to be safely retained and resubmitted.
+        //
+        // On first MSAA use: upload the LUT (adds a WriteBuffer node → fine CL
+        // will not be retained this frame due to the `has_write_buffer()` guard).
+        // On subsequent frames: the slot is `Some`, so we skip the upload and
+        // only record the dispatch; the retained CL can then be safely reused.
+        //
+        // The check and upload are separated into two steps to satisfy the borrow
+        // checker: `upload_strided` needs `&mut recorder`, so we cannot hold a
+        // `&mut recorder.persistent.stable_mask_lut_*` across the call.
+        let mask_lut_slot: Option<u32> =
+            if matches!(self.aa_config, AaConfig::Msaa16 | AaConfig::Msaa8) {
+                let needs_upload = match self.aa_config {
+                    AaConfig::Msaa16 => recorder.persistent.stable_mask_lut_msaa16.is_none(),
+                    AaConfig::Msaa8 => recorder.persistent.stable_mask_lut_msaa8.is_none(),
+                    _ => false,
+                };
+                if needs_upload {
+                    let lut_data = match self.aa_config {
+                        AaConfig::Msaa16 => make_mask_lut_16(),
+                        AaConfig::Msaa8 => make_mask_lut(),
+                        _ => unreachable!(),
+                    };
+                    let buf = recorder.upload_strided("ekrano.mask_lut", 4, lut_data);
+                    match self.aa_config {
+                        AaConfig::Msaa16 => recorder.persistent.stable_mask_lut_msaa16 = Some(buf),
+                        AaConfig::Msaa8 => recorder.persistent.stable_mask_lut_msaa8 = Some(buf),
+                        _ => unreachable!(),
+                    }
+                }
+                // Extract the bindless index so we can build `fine_resources` without
+                // holding a live `&Buffer` reference across the `recorder.dispatch()` call.
+                match self.aa_config {
+                    AaConfig::Msaa16 => recorder
+                        .persistent
+                        .stable_mask_lut_msaa16
+                        .as_ref()
+                        .and_then(|b| b.bindless_index()),
+                    AaConfig::Msaa8 => recorder
+                        .persistent
+                        .stable_mask_lut_msaa8
+                        .as_ref()
+                        .and_then(|b| b.bindless_index()),
+                    _ => None,
+                }
+            } else {
+                None
             };
-            let buf = recorder.upload_strided("ekrano.mask_lut", 4, mask_lut);
-            self.mask_lut_buf = Some(buf);
-        }
 
         let mut fine_resources: Vec<GpuBinding<'_>> = vec![
             pipeline.config.as_binding(),
@@ -593,8 +659,10 @@ impl Render {
             GpuBinding::Tex(&pipeline.image_atlas),
             GpuBinding::Tex(&pipeline.mask_atlas),
         ];
-        if let Some(mask) = self.mask_lut_buf.as_ref() {
-            fine_resources.push(GpuBinding::Buf(mask));
+        if let Some(mask_idx) = mask_lut_slot {
+            // Use PersistentBuf to pass the pre-resolved index without holding a
+            // &Buffer reference across the recorder.dispatch() call.
+            fine_resources.push(GpuBinding::PersistentBuf(mask_idx));
         }
         for fl in &pipeline.filter_layers {
             fine_resources.push(GpuBinding::Tex(fl));
@@ -669,7 +737,30 @@ fn filter_dispatch(
     dst: &Texture,
 ) {
     let sampler_idx = linear_clamp_sampler_index(recorder);
-    let buf = recorder.upload_typed("ekrano.filter_uniform", uniform);
+    let slot = recorder.filter_dispatch_slot;
+    recorder.filter_dispatch_slot += 1;
+
+    // Take the cached entry for this slot (leaves None in its place temporarily).
+    let cached = recorder
+        .persistent
+        .cached_filter_uniforms
+        .get_mut(slot)
+        .and_then(|e| e.take());
+
+    // Produce the buffer: reuse cached on hit, upload fresh on miss.
+    let buf = match cached {
+        Some((ref val, buf)) if val == uniform => buf,
+        Some((_, old_buf)) => {
+            // Value changed: return stale buffer to pool, upload fresh.
+            recorder
+                .persistent
+                .pool
+                .return_buf(old_buf, "ekrano.filter_uniform");
+            recorder.upload_typed("ekrano.filter_uniform", uniform)
+        }
+        None => recorder.upload_typed("ekrano.filter_uniform", uniform),
+    };
+
     recorder.dispatch(
         shader,
         wg,
@@ -681,7 +772,17 @@ fn filter_dispatch(
             GpuBinding::Sampler(sampler_idx),
         ],
     );
-    recorder.defer_owned_buffer(buf, "ekrano.filter_uniform");
+
+    // Restore buffer to persistent cache. Do NOT call defer_owned_buffer.
+    let cache = &mut recorder.persistent.cached_filter_uniforms;
+    if slot < cache.len() {
+        cache[slot] = Some((*uniform, buf));
+    } else {
+        while cache.len() < slot {
+            cache.push(None);
+        }
+        cache.push(Some((*uniform, buf)));
+    }
 }
 
 /// Like `filter_dispatch` but uses `sampled_src` for the SRV slot and `uav_src` for the UAV slot.
@@ -697,7 +798,27 @@ fn filter_dispatch_two_src(
     dst: &Texture,
 ) {
     let sampler_idx = linear_clamp_sampler_index(recorder);
-    let buf = recorder.upload_typed("ekrano.filter_uniform", uniform);
+    let slot = recorder.filter_dispatch_slot;
+    recorder.filter_dispatch_slot += 1;
+
+    let cached = recorder
+        .persistent
+        .cached_filter_uniforms
+        .get_mut(slot)
+        .and_then(|e| e.take());
+
+    let buf = match cached {
+        Some((ref val, buf)) if val == uniform => buf,
+        Some((_, old_buf)) => {
+            recorder
+                .persistent
+                .pool
+                .return_buf(old_buf, "ekrano.filter_uniform");
+            recorder.upload_typed("ekrano.filter_uniform", uniform)
+        }
+        None => recorder.upload_typed("ekrano.filter_uniform", uniform),
+    };
+
     recorder.dispatch(
         shader,
         wg,
@@ -709,7 +830,16 @@ fn filter_dispatch_two_src(
             GpuBinding::Sampler(sampler_idx),
         ],
     );
-    recorder.defer_owned_buffer(buf, "ekrano.filter_uniform");
+
+    let cache = &mut recorder.persistent.cached_filter_uniforms;
+    if slot < cache.len() {
+        cache[slot] = Some((*uniform, buf));
+    } else {
+        while cache.len() < slot {
+            cache.push(None);
+        }
+        cache.push(Some((*uniform, buf)));
+    }
 }
 
 /// Apply a 2D pyramid blur on `src`, writing the blurred full-resolution result into `dst`.

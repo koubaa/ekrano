@@ -145,7 +145,7 @@ pub const N_INDIRECT_STAGES: u32 = 20;
 
 /// GPU-uploadable workgroup counts for Phase 1 indirect dispatch.
 /// Layout must match `ekrano_shared.slang` `WorkgroupCountsGpu`.
-#[derive(Clone, Copy, Debug, Default, Zeroable, Pod)]
+#[derive(Clone, Copy, Debug, Default, Zeroable, Pod, PartialEq, Eq)]
 #[repr(C)]
 pub struct WorkgroupCountsGpu {
     pub entries: [[u32; 4]; N_INDIRECT_STAGES as usize],
@@ -155,7 +155,7 @@ pub struct WorkgroupCountsGpu {
 ///
 /// This data structure must be kept in sync with the definition in
 /// `ekrano_shaders/slang/ekrano_shared.slang` (Config).
-#[derive(Clone, Copy, Debug, Default, Zeroable, Pod)]
+#[derive(Clone, Copy, Debug, Default, Zeroable, Pod, PartialEq)]
 #[repr(C)]
 pub struct ConfigUniform {
     /// Width of the scene in tiles.
@@ -440,7 +440,7 @@ impl<T: Sized> PartialOrd for BufferSize<T> {
 }
 
 /// Computed sizes for all buffers.
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct BufferSizes {
     // Known size buffers
     pub path_reduced: BufferSize<PathMonoid>,
