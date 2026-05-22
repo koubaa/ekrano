@@ -70,7 +70,7 @@ pub struct LayerFilterEffect {
 }
 
 /// GPU uniform for simple filter compute passes (matches `filter_*.slang` `FilterUniform`).
-#[derive(Clone, Copy, Debug, Default, Zeroable, Pod)]
+#[derive(Clone, Copy, Debug, Default, Zeroable, Pod, PartialEq)]
 #[repr(C)]
 pub struct FilterUniform {
     /// Image width in pixels.

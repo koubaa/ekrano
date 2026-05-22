@@ -29,6 +29,8 @@ bump_estimate = ["ekrano_encoding/bump_estimate"]
 debug_layers = []
 # Reserved for future Slang hot-reload support (no effect today).
 hot_reload = []
+# Tracy profiler integration (forwarded to goldy).
+tracy = ["goldy/tracy"]
 
 [lints]
 workspace = true

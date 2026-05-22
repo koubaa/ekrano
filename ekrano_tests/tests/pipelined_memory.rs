@@ -28,7 +28,12 @@ fn gpu_test_lock() -> Option<std::sync::MutexGuard<'static, ()>> {
     use std::sync::{Mutex, OnceLock};
     if goldy::backend::dx12::is_debug_mode() {
         static GPU_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        return Some(GPU_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap());
+        return Some(
+            GPU_LOCK
+                .get_or_init(|| Mutex::new(()))
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+        );
     }
     None
 }

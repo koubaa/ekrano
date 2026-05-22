@@ -13,7 +13,7 @@ use crate::image_cache::{ImageCache, Images};
 use crate::ramp_cache::{RampCache, Ramps};
 
 /// Layout of a packed encoding.
-#[derive(Clone, Copy, Debug, Default, Zeroable, Pod)]
+#[derive(Clone, Copy, Debug, Default, Zeroable, Pod, PartialEq)]
 #[repr(C)]
 pub struct Layout {
     /// Number of draw objects.
