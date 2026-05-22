@@ -601,6 +601,9 @@ pub struct GoldyRenderer {
     last_scene_fingerprint: Option<u64>,
     /// Length of the packed scene bytes from the previous frame for quick-reject.
     last_packed_len: Option<usize>,
+    /// Long-lived task graph cleared (not replaced) each frame so the schedule cache
+    /// survives across frames. `FrameRecorder` borrows this mutably per frame.
+    graph: TaskGraph,
 }
 
 // -----------------------------------------------------------------------
@@ -609,7 +612,7 @@ pub struct GoldyRenderer {
 
 pub(crate) struct FrameRecorder<'a> {
     pub(crate) device: &'a Device,
-    graph: TaskGraph,
+    graph: &'a mut TaskGraph,
     frame_pipeline: &'a mut FrameOrchestrator<FrameCleanup>,
     frame_handle: FrameHandle,
     pub(crate) persistent: &'a mut PersistentState,
@@ -645,6 +648,7 @@ pub(crate) struct FrameRecorder<'a> {
 impl<'a> FrameRecorder<'a> {
     fn new(
         device: &'a Device,
+        graph: &'a mut TaskGraph,
         frame_pipeline: &'a mut FrameOrchestrator<FrameCleanup>,
         frame_handle: FrameHandle,
         persistent: &'a mut PersistentState,
@@ -652,7 +656,9 @@ impl<'a> FrameRecorder<'a> {
         surface_frame: Option<&'a Frame>,
     ) -> Self {
         let fuav = force_uav(device);
-        let graph = TaskGraph::new();
+        // Clear the long-lived graph so the schedule cache is preserved but
+        // the node list is empty and ready for this frame's recording.
+        graph.clear();
         // Read capacity hints before persistent is moved into Self.
         let owned_cap = persistent.deferred_owned_cap_hint;
         let pool_cap = persistent.deferred_pool_cap_hint;
@@ -681,7 +687,7 @@ impl<'a> FrameRecorder<'a> {
     }
 
     pub(crate) fn graph_and_persistent(&mut self) -> (&mut TaskGraph, &mut PersistentState) {
-        (&mut self.graph, self.persistent)
+        (&mut *self.graph, self.persistent)
     }
 
     /// Submit the current graph as a command buffer and start a fresh one.
@@ -1188,17 +1194,15 @@ impl<'a> FrameRecorder<'a> {
             cacheable_pipeline: self.cacheable_pipeline.take(),
         };
 
-        let mut graph = mem::replace(&mut self.graph, TaskGraph::new());
-
         if let Some(surface) = self.surface_frame {
             self.frame_pipeline
-                .end_frame_for_surface(self.frame_handle, &mut graph, surface, cleanup)
+                .end_frame_for_surface(self.frame_handle, self.graph, surface, cleanup)
                 .map_err(|e| Error::Shader(e.to_string()))?;
             Ok(None)
         } else {
             let tv = self
                 .frame_pipeline
-                .end_frame_standalone(self.frame_handle, graph, self.last_timeline, cleanup)
+                .end_frame_standalone(self.frame_handle, self.graph, self.last_timeline, cleanup)
                 .map_err(|e| Error::Shader(e.to_string()))?;
             Ok(Some(tv))
         }
@@ -1304,6 +1308,7 @@ impl GoldyRenderer {
             cleanup_frame_counter: 0,
             last_scene_fingerprint: None,
             last_packed_len: None,
+            graph: TaskGraph::new(),
         };
         let shaders = shaders::goldy_full_shaders(&tracked_device, &mut renderer)?;
         renderer.shaders = shaders;
@@ -1646,6 +1651,7 @@ impl GoldyRenderer {
         let t2 = Instant::now();
         let mut recorder = FrameRecorder::new(
             device,
+            &mut self.graph,
             &mut self.frame_pipeline,
             frame_handle,
             &mut self.persistent,
