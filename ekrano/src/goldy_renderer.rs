@@ -712,7 +712,7 @@ impl<'a> FrameRecorder<'a> {
     )]
     pub(crate) fn flush_mid_frame(&mut self) -> Result<()> {
         self.frame_pipeline
-            .flush(self.frame_handle, &mut self.graph, &mut self.last_timeline)
+            .flush(self.frame_handle, self.graph, &mut self.last_timeline)
             .map_err(|e| Error::Shader(e.to_string()))
     }
 
@@ -726,7 +726,7 @@ impl<'a> FrameRecorder<'a> {
     ) -> Result<GpuBuf, Error> {
         crate::gpu_resources::alloc_pipeline_buffer(
             self.device,
-            &mut self.graph,
+            self.graph,
             self.persistent,
             size,
             stride,
@@ -1001,7 +1001,7 @@ impl<'a> FrameRecorder<'a> {
     pub fn upload(&mut self, name: &'static str, data: impl Into<Vec<u8>>) -> Buffer {
         match record_upload_bytes_owned(
             self.device,
-            &mut self.graph,
+            self.graph,
             self.persistent,
             name,
             1,
@@ -1022,7 +1022,7 @@ impl<'a> FrameRecorder<'a> {
     ) -> Buffer {
         match record_upload_bytes_owned(
             self.device,
-            &mut self.graph,
+            self.graph,
             self.persistent,
             name,
             element_stride,
@@ -1040,7 +1040,7 @@ impl<'a> FrameRecorder<'a> {
         use crate::gpu_resources::record_upload_bytes;
         match record_upload_bytes(
             self.device,
-            &mut self.graph,
+            self.graph,
             self.persistent,
             name,
             size_of::<T>() as u32,
