@@ -25,8 +25,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use goldy::task_graph::{NodeAccess, NodeBuilder};
 use goldy::types::{BufferFlags, SpatialAccess, TextureFlags, TextureFormat};
 use goldy::{
-    Buffer, BufferPool, BufferView, ComputePipeline, DataAccess, Device, DeviceType, Frame,
-    FrameHandle, FrameOrchestrator, ShaderModule, TaskGraph, Texture, TexturePool, TimelineValue,
+    Buffer, BufferPool, BufferView, ComputePipeline, DataAccess, Device, DeviceType, FrameHandle,
+    FrameOrchestrator, ShaderModule, TaskGraph, Texture, TexturePool, TimelineValue,
     TransientAllocator, TransientAllocatorConfig, TransientAllocatorStrategy,
 };
 
@@ -272,7 +272,7 @@ fn frame_strategy() -> goldy::FrameStrategy {
             },
         };
     }
-    goldy::FrameStrategy::LowLatency
+    goldy::FrameStrategy::Balanced
 }
 
 // -----------------------------------------------------------------------
@@ -601,6 +601,9 @@ pub struct GoldyRenderer {
     last_scene_fingerprint: Option<u64>,
     /// Length of the packed scene bytes from the previous frame for quick-reject.
     last_packed_len: Option<usize>,
+    /// Long-lived task graph cleared (not replaced) each frame so the schedule cache
+    /// survives across frames. `FrameRecorder` borrows this mutably per frame.
+    graph: TaskGraph,
 }
 
 // -----------------------------------------------------------------------
@@ -609,13 +612,13 @@ pub struct GoldyRenderer {
 
 pub(crate) struct FrameRecorder<'a> {
     pub(crate) device: &'a Device,
-    graph: TaskGraph,
+    graph: &'a mut TaskGraph,
     frame_pipeline: &'a mut FrameOrchestrator<FrameCleanup>,
     frame_handle: FrameHandle,
     pub(crate) persistent: &'a mut PersistentState,
     shaders: &'a [GoldyShader],
     force_uav: bool,
-    surface_frame: Option<&'a Frame>,
+    surface: Option<&'a goldy::Surface>,
     last_timeline: Option<TimelineValue>,
     /// Set to `true` by `finish` or `abort`; the `Drop` impl aborts the open frame
     /// if the recorder is dropped without being properly completed (e.g. on a `?` return).
@@ -645,14 +648,17 @@ pub(crate) struct FrameRecorder<'a> {
 impl<'a> FrameRecorder<'a> {
     fn new(
         device: &'a Device,
+        graph: &'a mut TaskGraph,
         frame_pipeline: &'a mut FrameOrchestrator<FrameCleanup>,
         frame_handle: FrameHandle,
         persistent: &'a mut PersistentState,
         shaders: &'a [GoldyShader],
-        surface_frame: Option<&'a Frame>,
+        surface: Option<&'a goldy::Surface>,
     ) -> Self {
         let fuav = force_uav(device);
-        let graph = TaskGraph::new();
+        // Clear the long-lived graph so the schedule cache is preserved but
+        // the node list is empty and ready for this frame's recording.
+        graph.clear();
         // Read capacity hints before persistent is moved into Self.
         let owned_cap = persistent.deferred_owned_cap_hint;
         let pool_cap = persistent.deferred_pool_cap_hint;
@@ -666,7 +672,7 @@ impl<'a> FrameRecorder<'a> {
             persistent,
             shaders,
             force_uav: fuav,
-            surface_frame,
+            surface,
             last_timeline: None,
             bump_buf_for_readback: None,
             deferred_owned_buffers: Vec::with_capacity(owned_cap),
@@ -681,7 +687,7 @@ impl<'a> FrameRecorder<'a> {
     }
 
     pub(crate) fn graph_and_persistent(&mut self) -> (&mut TaskGraph, &mut PersistentState) {
-        (&mut self.graph, self.persistent)
+        (&mut *self.graph, self.persistent)
     }
 
     /// Submit the current graph as a command buffer and start a fresh one.
@@ -706,7 +712,7 @@ impl<'a> FrameRecorder<'a> {
     )]
     pub(crate) fn flush_mid_frame(&mut self) -> Result<()> {
         self.frame_pipeline
-            .flush(self.frame_handle, &mut self.graph, &mut self.last_timeline)
+            .flush(self.frame_handle, self.graph, &mut self.last_timeline)
             .map_err(|e| Error::Shader(e.to_string()))
     }
 
@@ -720,7 +726,7 @@ impl<'a> FrameRecorder<'a> {
     ) -> Result<GpuBuf, Error> {
         crate::gpu_resources::alloc_pipeline_buffer(
             self.device,
-            &mut self.graph,
+            self.graph,
             self.persistent,
             size,
             stride,
@@ -995,7 +1001,7 @@ impl<'a> FrameRecorder<'a> {
     pub fn upload(&mut self, name: &'static str, data: impl Into<Vec<u8>>) -> Buffer {
         match record_upload_bytes_owned(
             self.device,
-            &mut self.graph,
+            self.graph,
             self.persistent,
             name,
             1,
@@ -1016,7 +1022,7 @@ impl<'a> FrameRecorder<'a> {
     ) -> Buffer {
         match record_upload_bytes_owned(
             self.device,
-            &mut self.graph,
+            self.graph,
             self.persistent,
             name,
             element_stride,
@@ -1034,7 +1040,7 @@ impl<'a> FrameRecorder<'a> {
         use crate::gpu_resources::record_upload_bytes;
         match record_upload_bytes(
             self.device,
-            &mut self.graph,
+            self.graph,
             self.persistent,
             name,
             size_of::<T>() as u32,
@@ -1169,12 +1175,16 @@ impl<'a> FrameRecorder<'a> {
         self.deferred_owned_buffers.push((buf, name));
     }
 
-    /// Finish dispatch: flush the final graph and register a frame slot with the orchestrator.
-    fn finish(mut self) -> Result<Option<TimelineValue>> {
+    /// Finish dispatch: flush the final graph and register a frame slot with
+    /// the orchestrator.
+    ///
+    /// Returns `(timeline, frame)`:
+    /// - Standalone path: `(Some(tv), None)` — TV used for allocator epoch.
+    /// - Surface path: `(None, Some(frame))` — caller presents, then calls
+    ///   `note_presented` with the TV from `frame.present()`.
+    fn finish(mut self) -> Result<(Option<TimelineValue>, Option<goldy::Frame>)> {
         self.finished = true;
 
-        // Record capacity hints before consuming the vecs so the next frame
-        // can pre-allocate the right amount in FrameRecorder::new.
         self.persistent.deferred_owned_cap_hint = self.deferred_owned_buffers.capacity();
         self.persistent.deferred_pool_cap_hint = self.deferred_pool_views.capacity();
         self.persistent.deferred_textures_cap_hint = self.deferred_textures.capacity();
@@ -1188,19 +1198,18 @@ impl<'a> FrameRecorder<'a> {
             cacheable_pipeline: self.cacheable_pipeline.take(),
         };
 
-        let mut graph = mem::replace(&mut self.graph, TaskGraph::new());
-
-        if let Some(surface) = self.surface_frame {
-            self.frame_pipeline
-                .end_frame_for_surface(self.frame_handle, &mut graph, surface, cleanup)
+        if let Some(surface) = self.surface {
+            let frame = self
+                .frame_pipeline
+                .end_frame_for_surface(self.frame_handle, self.graph, surface, cleanup)
                 .map_err(|e| Error::Shader(e.to_string()))?;
-            Ok(None)
+            Ok((None, Some(frame)))
         } else {
             let tv = self
                 .frame_pipeline
-                .end_frame_standalone(self.frame_handle, graph, self.last_timeline, cleanup)
+                .end_frame_standalone(self.frame_handle, self.graph, self.last_timeline, cleanup)
                 .map_err(|e| Error::Shader(e.to_string()))?;
-            Ok(Some(tv))
+            Ok((Some(tv), None))
         }
     }
 }
@@ -1239,6 +1248,7 @@ fn bind_graph_direct<'a>(
             GpuBinding::View(v) => node.bind_buffer_view(v, access),
             GpuBinding::Tex(t) => node.bind_texture(t, access),
             GpuBinding::Transient(id) => node.bind_transient_buffer(*id, access),
+            GpuBinding::SwapchainOutput(h) => node.bind_swapchain_output(*h, access),
             // Samplers and persistent (pre-initialized) buffers are stateless —
             // their slot index flows through push-constants but they need no
             // resource-barrier tracking in the task graph.  Persistent buffers
@@ -1304,6 +1314,7 @@ impl GoldyRenderer {
             cleanup_frame_counter: 0,
             last_scene_fingerprint: None,
             last_packed_len: None,
+            graph: TaskGraph::new(),
         };
         let shaders = shaders::goldy_full_shaders(&tracked_device, &mut renderer)?;
         renderer.shaders = shaders;
@@ -1373,23 +1384,21 @@ impl GoldyRenderer {
         self.run_frame(device, scene, params, Some(texture), None)
     }
 
-    /// Like [`Self::render_to_texture`], but records compute into a swapchain [`Frame`] via
-    /// [`Frame::submit_compute`] instead of standalone [`Device::submit`].
+    /// Render a scene directly to a swapchain [`Surface`](goldy::Surface).
     ///
-    /// After this returns, call [`goldy::Frame::present`] and then [`Self::note_frame_presented`]
-    /// with the returned [`TimelineValue`] before the next `begin` / render call.
-    pub fn render_to_frame(
+    /// Internally records the full graph (coarse + fine) with the swapchain as
+    /// a late-bound output, then hands the graph to [`goldy::Surface::submit_graph`]
+    /// which auto-partitions it, submits early work, acquires the swapchain
+    /// image, and presents.  The caller does **not** need to call `acquire`,
+    /// `present`, or `note_frame_presented` — everything is handled here.
+    pub fn render_to_surface(
         &mut self,
         device: &Device,
         scene: &Scene,
-        frame: &Frame,
+        surface: &goldy::Surface,
         params: &RenderParams,
     ) -> Result<FrameStats> {
-        // Pass `None` as the output texture so that the fine pass always writes
-        // to `pipeline.out_image`. After recording we append a `copy_texture`
-        // node (`out_image → frame.texture()`) so the command list is decoupled
-        // from swapchain rotation — enabling future command-list caching.
-        self.run_frame(device, scene, params, None, Some(frame))
+        self.run_frame(device, scene, params, None, Some(surface))
     }
 
     /// Query the transient allocator's current state for diagnostics or test assertions.
@@ -1482,7 +1491,7 @@ impl GoldyRenderer {
     // =======================================================================
 
     /// Shared implementation for [`render_to_texture`](Self::render_to_texture)
-    /// and [`render_to_frame`](Self::render_to_frame).
+    /// and [`render_to_surface`](Self::render_to_surface).
     ///
     /// Creates a [`FrameRecorder`], runs the full coarse+fine pipeline into it,
     /// then flushes the resulting [`TaskGraph`].
@@ -1492,7 +1501,7 @@ impl GoldyRenderer {
         scene: &Scene,
         params: &RenderParams,
         output_texture: Option<&Texture>,
-        surface_frame: Option<&Frame>,
+        surface: Option<&goldy::Surface>,
     ) -> Result<FrameStats> {
         let _tz = goldy::tracy_zone!("ekrano.run_frame");
         use std::time::Instant;
@@ -1540,8 +1549,11 @@ impl GoldyRenderer {
         } else {
             base_config
         };
-        let mut pool_size = BufferPool::padded_size(&config.buffer_sizes.pool_allocs())
-            .saturating_add(POOL_SIZE_SLACK);
+        let mut pool_size = {
+            let _tz = goldy::tracy_zone!("ekrano.pool_size");
+            BufferPool::padded_size(&config.buffer_sizes.pool_allocs())
+                .saturating_add(POOL_SIZE_SLACK)
+        };
         let t_resolve = t_resolve_start.elapsed();
 
         // --- Reclaim completed frames & open recording bracket ---
@@ -1551,15 +1563,17 @@ impl GoldyRenderer {
         // so it overlaps GPU coarse execution.
         let t_drain_start = Instant::now();
         let mut phase_b: Option<DeferredCleanup> = None;
-        let frame_handle = self
-            .frame_pipeline
-            .begin_frame(|dev, rf| {
-                let deferred =
-                    process_cleanup_phase_a(dev, &mut self.persistent, rf.timeline, rf.data)?;
-                phase_b = Some(deferred);
-                Ok::<(), Error>(())
-            })
-            .map_err(|e| Error::Shader(e.to_string()))?;
+        let frame_handle = {
+            let _tz = goldy::tracy_zone!("ekrano.begin_frame");
+            self.frame_pipeline
+                .begin_frame(|dev, rf| {
+                    let deferred =
+                        process_cleanup_phase_a(dev, &mut self.persistent, rf.timeline, rf.data)?;
+                    phase_b = Some(deferred);
+                    Ok::<(), Error>(())
+                })
+                .map_err(|e| Error::Shader(e.to_string()))?
+        };
         // Rate-limit housekeeping to avoid per-frame cost in steady state.
         // With OwnedShared buffers and cached render targets, the ResourcePool
         // stays small and overflow heaps are rare; scanning every 64 frames is enough.
@@ -1634,30 +1648,39 @@ impl GoldyRenderer {
             self.persistent.nearest_clamp_sampler =
                 Some(goldy::Sampler::nearest(device).map_err(|e| Error::Gpu(e.to_string()))?);
         }
-        if let Err(e) = self.persistent.prepare_storage_pool(device, pool_size) {
-            if let Some(deferred) = phase_b.take() {
-                let _ = process_cleanup_phase_b(device, &mut self.persistent, deferred);
+        {
+            let _tz = goldy::tracy_zone!("ekrano.prepare_pool");
+            if let Err(e) = self.persistent.prepare_storage_pool(device, pool_size) {
+                if let Some(deferred) = phase_b.take() {
+                    let _ = process_cleanup_phase_b(device, &mut self.persistent, deferred);
+                }
+                self.frame_pipeline.abort_frame(frame_handle);
+                return Err(e);
             }
-            self.frame_pipeline.abort_frame(frame_handle);
-            return Err(e);
         }
         let t_pool = t1.elapsed();
 
         let t2 = Instant::now();
         let mut recorder = FrameRecorder::new(
             device,
+            &mut self.graph,
             &mut self.frame_pipeline,
             frame_handle,
             &mut self.persistent,
             &self.engine_shaders,
-            surface_frame,
+            surface,
         );
 
         let (graph, persistent) = recorder.graph_and_persistent();
+        let swapchain_handle = if surface.is_some() {
+            Some(graph.declare_swapchain_output())
+        } else {
+            None
+        };
         let mut pipeline = {
             let _tz = goldy::tracy_zone!("ekrano.prepare");
-            let out_image_format = surface_frame
-                .map(|f| f.texture().format())
+            let out_image_format = surface
+                .map(|s| s.format())
                 .unwrap_or(TextureFormat::Rgba8Unorm);
             let pipeline_result = crate::gpu_resources::PipelineResources::prepare(
                 device,
@@ -1704,12 +1727,12 @@ impl GoldyRenderer {
         {
             let _tz = goldy::tracy_zone!("ekrano.fine");
 
-            let fine_output = surface_frame.map(|f| f.texture()).or(output_texture);
             render.record_fine(
                 encoding,
                 &self.shaders,
                 &pipeline,
-                fine_output,
+                output_texture,
+                swapchain_handle,
                 &mut recorder,
             );
             #[cfg(feature = "debug_layers")]
@@ -1719,14 +1742,14 @@ impl GoldyRenderer {
                 &self.shaders,
                 &mut recorder,
                 &pipeline,
-                fine_output,
+                output_texture,
             );
         }
         let t_fine_record = t3.elapsed();
 
         let t4 = Instant::now();
         recorder.schedule_pipeline_cleanup(pipeline, params.robust);
-        let opt_tv = {
+        let (opt_tv, opt_frame) = {
             let _tz = goldy::tracy_zone!("ekrano.finish");
             recorder.finish()?
             // recorder is consumed here; self.persistent borrow is released.
@@ -1744,8 +1767,16 @@ impl GoldyRenderer {
             let used = allocator.used_this_frame();
             allocator.hint_unused_above(used);
         }
-        // Notify the allocator about the frame's epoch (standalone path).
-        // Surface paths receive `end_frame` from `note_frame_presented`.
+
+        // Surface path: present and notify allocator.
+        if let Some(frame) = opt_frame {
+            let tv = frame.present().map_err(|e| Error::Shader(e.to_string()))?;
+            self.frame_pipeline.note_presented(tv);
+            if let Some(allocator) = self.persistent.storage_allocator_mut() {
+                allocator.end_frame(device, tv);
+            }
+        }
+        // Standalone path: notify the allocator about the frame's epoch.
         if let Some(tv) = opt_tv
             && let Some(allocator) = self.persistent.storage_allocator_mut()
         {
@@ -1754,11 +1785,7 @@ impl GoldyRenderer {
         let t_submit = t4.elapsed();
 
         let frame_num = FRAME_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let label = if surface_frame.is_some() {
-            "surface"
-        } else {
-            ""
-        };
+        let label = if surface.is_some() { "surface" } else { "" };
 
         let (alloc_cap_mb, alloc_used_mb, ring_depth) =
             if let Some(a) = self.persistent.storage_allocator.as_ref() {
