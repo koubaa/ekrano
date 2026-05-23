@@ -1037,12 +1037,11 @@ pub(crate) fn collect_bindless_indices_into(
     out: &mut Vec<u32>,
     bindings: &[GpuBinding<'_>],
     bind_types: &[BindType],
-    force_uav: bool,
     max_slots: usize,
 ) -> Result<(), Error> {
     out.clear();
     for (i, binding) in bindings.iter().enumerate() {
-        let is_read_only = !force_uav && matches!(bind_types.get(i), Some(BindType::BufReadOnly));
+        let is_read_only = matches!(bind_types.get(i), Some(BindType::BufReadOnly));
         let is_sampled_image = matches!(bind_types.get(i), Some(BindType::ImageRead(_)));
         let idx = match binding {
             GpuBinding::Buf(_) | GpuBinding::View(_) => binding.bindless_slot(is_read_only)?,
@@ -1099,7 +1098,7 @@ mod tests {
         let bind_types = [BindType::Sampler, BindType::Buffer, BindType::Sampler];
 
         let mut out = Vec::new();
-        collect_bindless_indices_into(&mut out, &bindings, &bind_types, false, 16).unwrap();
+        collect_bindless_indices_into(&mut out, &bindings, &bind_types, 16).unwrap();
 
         assert_eq!(out, [7, TRANSIENT_SLOT_PLACEHOLDER, 3]);
     }
@@ -1110,7 +1109,7 @@ mod tests {
         let bind_types = [BindType::Sampler];
 
         let mut out = vec![99_u32; 5];
-        collect_bindless_indices_into(&mut out, &bindings, &bind_types, false, 16).unwrap();
+        collect_bindless_indices_into(&mut out, &bindings, &bind_types, 16).unwrap();
 
         assert_eq!(out, [1]);
     }
@@ -1122,7 +1121,7 @@ mod tests {
         for _ in 0..3 {
             let bindings = [sampler_binding(5), sampler_binding(6)];
             let bind_types = [BindType::Sampler, BindType::Sampler];
-            collect_bindless_indices_into(&mut out, &bindings, &bind_types, false, 16).unwrap();
+            collect_bindless_indices_into(&mut out, &bindings, &bind_types, 16).unwrap();
             assert_eq!(out, [5, 6]);
         }
     }
@@ -1133,7 +1132,7 @@ mod tests {
         let bind_types = [BindType::Sampler; 3];
 
         let mut out = Vec::new();
-        let result = collect_bindless_indices_into(&mut out, &bindings, &bind_types, false, 2);
+        let result = collect_bindless_indices_into(&mut out, &bindings, &bind_types, 2);
 
         assert!(
             result.is_err(),
@@ -1144,7 +1143,7 @@ mod tests {
     #[test]
     fn collect_into_empty_bindings() {
         let mut out = vec![99_u32];
-        collect_bindless_indices_into(&mut out, &[], &[], false, 16).unwrap();
+        collect_bindless_indices_into(&mut out, &[], &[], 16).unwrap();
         assert!(out.is_empty());
     }
 }

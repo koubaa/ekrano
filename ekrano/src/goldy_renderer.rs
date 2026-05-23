@@ -147,10 +147,6 @@ fn use_pool(device: &Device) -> bool {
     device.device_type() != DeviceType::Cpu
 }
 
-fn force_uav(device: &Device) -> bool {
-    device.device_type() == DeviceType::Cpu
-}
-
 #[derive(Hash, PartialEq, Eq, Clone)]
 struct BufferKey {
     size: u64,
@@ -617,7 +613,6 @@ pub(crate) struct FrameRecorder<'a> {
     frame_handle: FrameHandle,
     pub(crate) persistent: &'a mut PersistentState,
     shaders: &'a [GoldyShader],
-    force_uav: bool,
     surface: Option<&'a goldy::Surface>,
     last_timeline: Option<TimelineValue>,
     /// Set to `true` by `finish` or `abort`; the `Drop` impl aborts the open frame
@@ -655,7 +650,6 @@ impl<'a> FrameRecorder<'a> {
         shaders: &'a [GoldyShader],
         surface: Option<&'a goldy::Surface>,
     ) -> Self {
-        let fuav = force_uav(device);
         // Clear the long-lived graph so the schedule cache is preserved but
         // the node list is empty and ready for this frame's recording.
         graph.clear();
@@ -671,7 +665,6 @@ impl<'a> FrameRecorder<'a> {
             frame_handle,
             persistent,
             shaders,
-            force_uav: fuav,
             surface,
             last_timeline: None,
             bump_buf_for_readback: None,
@@ -1095,7 +1088,6 @@ impl<'a> FrameRecorder<'a> {
             &mut self.indices_scratch,
             bindings,
             bind_types,
-            self.force_uav,
             MAX_BINDLESS_SLOTS,
         )
         .expect("collect_bindless_indices_into failed in dispatch");
@@ -1136,7 +1128,6 @@ impl<'a> FrameRecorder<'a> {
             &mut self.indices_scratch,
             bindings,
             bind_types,
-            self.force_uav,
             MAX_BINDLESS_SLOTS,
         )
         .expect("collect_bindless_indices_into failed in dispatch_indirect");
