@@ -8,7 +8,8 @@ use std::mem::size_of;
 use goldy::task_graph::{NodeAccess, TransientId};
 use goldy::types::{BufferFlags, SpatialAccess, TextureFlags};
 use goldy::{
-    Buffer, BufferView, DataAccess, Device, DeviceType, TaskGraph, Texture, TextureFormat,
+    Buffer, BufferView, DataAccess, Device, DeviceType, SwapchainOutputHandle,
+    TaskGraph, Texture, TextureFormat, SWAPCHAIN_SLOT_PLACEHOLDER,
 };
 
 /// Sentinel bindless index for transient buffers whose real slot is resolved at
@@ -62,6 +63,10 @@ pub(crate) enum GpuBinding<'a> {
     /// stored in `PersistentState`) and are guaranteed to be GPU-readable on every
     /// frame after their first upload, without any additional `WriteBuffer` nodes.
     PersistentBuf(u32),
+    /// Late-bound swapchain output: the real UAV bindless index is resolved after
+    /// `surface.begin()` inside [`Surface::submit_graph`].  Stores
+    /// [`SWAPCHAIN_SLOT_PLACEHOLDER`] in `resource_slots` until then.
+    SwapchainOutput(SwapchainOutputHandle),
 }
 
 impl<'a> GpuBinding<'a> {
@@ -84,6 +89,7 @@ impl<'a> GpuBinding<'a> {
             GpuBinding::Tex(tex) => tex.bindless_index(),
             GpuBinding::Transient(_) => return Ok(TRANSIENT_SLOT_PLACEHOLDER),
             GpuBinding::Sampler(idx) | GpuBinding::PersistentBuf(idx) => return Ok(*idx),
+            GpuBinding::SwapchainOutput(_) => return Ok(SWAPCHAIN_SLOT_PLACEHOLDER),
         };
         idx.ok_or_else(|| {
             Error::Shader("bindless index missing for shader resource binding".into())
@@ -1050,6 +1056,7 @@ pub(crate) fn collect_bindless_indices_into(
                 })?,
             GpuBinding::Tex(_) => binding.bindless_slot(false)?,
             GpuBinding::Transient(_) => TRANSIENT_SLOT_PLACEHOLDER,
+            GpuBinding::SwapchainOutput(_) => SWAPCHAIN_SLOT_PLACEHOLDER,
             GpuBinding::Sampler(idx) | GpuBinding::PersistentBuf(idx) => *idx,
         };
         out.push(idx);
