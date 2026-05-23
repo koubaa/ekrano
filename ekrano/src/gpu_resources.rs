@@ -64,7 +64,7 @@ pub(crate) enum GpuBinding<'a> {
     /// frame after their first upload, without any additional `WriteBuffer` nodes.
     PersistentBuf(u32),
     /// Late-bound swapchain output: the real UAV bindless index is resolved after
-    /// `surface.begin()` inside [`Surface::submit_graph`].  Stores
+    /// `surface.begin()` inside [`goldy::Surface::submit_graph`].  Stores
     /// [`SWAPCHAIN_SLOT_PLACEHOLDER`] in `resource_slots` until then.
     SwapchainOutput(SwapchainOutputHandle),
 }
