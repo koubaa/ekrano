@@ -494,118 +494,132 @@ impl PipelineResources {
             );
         }
 
-        let gradient = if ramps.height == 0 {
-            acquire_texture_rgba(
-                device,
-                persistent,
-                1,
-                1,
-                SpatialAccess::Interpolated,
-                TextureFlags::COPY_DST,
-            )?
-        } else {
-            let data: &[u8] = bytemuck::cast_slice(ramps.data);
-            record_upload_image(
-                device,
-                graph,
-                persistent,
-                ramps.width,
-                ramps.height,
-                ImageFormat::Rgba8,
-                data,
-            )?
-        };
-
-        let (image_atlas, _) = if images.images.is_empty() {
-            let t = acquire_texture_rgba(
-                device,
-                persistent,
-                1,
-                1,
-                SpatialAccess::Interpolated,
-                TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
-            )?;
-            (t, (1_u32, 1_u32))
-        } else {
-            let t = acquire_texture_rgba(
-                device,
-                persistent,
-                images.width,
-                images.height,
-                SpatialAccess::Interpolated,
-                TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
-            )?;
-            (t, (images.width, images.height))
-        };
-        for image in images.images {
-            write_image_region(graph, &image_atlas, image.1, image.2, &image.0)?;
-        }
-
-        let mask_atlas = match &encoding.coverage_mask {
-            Some(m) => {
-                let mut rgba = Vec::with_capacity(m.data.len() * 4);
-                for &b in m.data.iter() {
-                    rgba.extend_from_slice(&[b, b, b, 255]);
-                }
+        let gradient = {
+            let _tz = goldy::tracy_zone!("ekrano.prepare.gradient");
+            if ramps.height == 0 {
+                acquire_texture_rgba(
+                    device,
+                    persistent,
+                    1,
+                    1,
+                    SpatialAccess::Interpolated,
+                    TextureFlags::COPY_DST,
+                )?
+            } else {
+                let data: &[u8] = bytemuck::cast_slice(ramps.data);
                 record_upload_image(
                     device,
                     graph,
                     persistent,
-                    m.width,
-                    m.height,
+                    ramps.width,
+                    ramps.height,
                     ImageFormat::Rgba8,
-                    &rgba,
+                    data,
                 )?
             }
-            None => record_upload_image(
-                device,
-                graph,
-                persistent,
-                1,
-                1,
-                ImageFormat::Rgba8,
-                &[255, 255, 255, 255],
-            )?,
+        };
+
+        let (image_atlas, _) = {
+            let _tz = goldy::tracy_zone!("ekrano.prepare.image_atlas");
+            if images.images.is_empty() {
+                let t = acquire_texture_rgba(
+                    device,
+                    persistent,
+                    1,
+                    1,
+                    SpatialAccess::Interpolated,
+                    TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
+                )?;
+                (t, (1_u32, 1_u32))
+            } else {
+                let t = acquire_texture_rgba(
+                    device,
+                    persistent,
+                    images.width,
+                    images.height,
+                    SpatialAccess::Interpolated,
+                    TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
+                )?;
+                for image in images.images {
+                    write_image_region(graph, &t, image.1, image.2, &image.0)?;
+                }
+                (t, (images.width, images.height))
+            }
+        };
+
+        let mask_atlas = {
+            let _tz = goldy::tracy_zone!("ekrano.prepare.mask_atlas");
+            match &encoding.coverage_mask {
+                Some(m) => {
+                    let mut rgba = Vec::with_capacity(m.data.len() * 4);
+                    for &b in m.data.iter() {
+                        rgba.extend_from_slice(&[b, b, b, 255]);
+                    }
+                    record_upload_image(
+                        device,
+                        graph,
+                        persistent,
+                        m.width,
+                        m.height,
+                        ImageFormat::Rgba8,
+                        &rgba,
+                    )?
+                }
+                None => record_upload_image(
+                    device,
+                    graph,
+                    persistent,
+                    1,
+                    1,
+                    ImageFormat::Rgba8,
+                    &[255, 255, 255, 255],
+                )?,
+            }
         };
 
         // Move `packed` directly into the graph write node — avoids the redundant
         // `to_vec()` copy that `record_upload_bytes` would perform on a borrow.
-        let scene =
-            record_upload_bytes_owned(device, graph, persistent, "ekrano.scene", 4, packed)?;
+        let scene = {
+            let _tz = goldy::tracy_zone!("ekrano.prepare.scene_upload");
+            record_upload_bytes_owned(device, graph, persistent, "ekrano.scene", 4, packed)?
+        };
 
         let config_uniform_value = cpu_config_owned.gpu;
 
         // Cache check: reuse the previous frame's GPU config buffer when the value is
         // identical (steady state after bump estimates converge). On a cache hit no
         // WriteBuffer node is added to the graph, eliminating a staging-belt round-trip.
-        let cache_hit = persistent
-            .cached_config_uniform
-            .as_ref()
-            .is_some_and(|(v, _)| v == &config_uniform_value);
-        log::trace!(
-            "ConfigUniform cache {}",
-            if cache_hit { "HIT" } else { "MISS" }
-        );
-        let config = if cache_hit {
-            GpuBuf::Owned(persistent.cached_config_uniform.take().unwrap().1)
-        } else if let Some((_, existing_buf)) = persistent.cached_config_uniform.take() {
-            // Buffer size is constant (sizeof ConfigUniform); reuse the allocation
-            // and just overwrite with the new value.
-            graph.write_buffer(
-                &existing_buf,
-                0,
-                bytemuck::bytes_of(&config_uniform_value).to_vec(),
+        let config = {
+            let _tz = goldy::tracy_zone!("ekrano.prepare.config_upload");
+            let cache_hit = persistent
+                .cached_config_uniform
+                .as_ref()
+                .is_some_and(|(v, _)| v == &config_uniform_value);
+            log::trace!(
+                "ConfigUniform cache {}",
+                if cache_hit { "HIT" } else { "MISS" }
             );
-            GpuBuf::Owned(existing_buf)
-        } else {
-            record_upload_bytes(
-                device,
-                graph,
-                persistent,
-                "ekrano.config",
-                size_of::<ekrano_encoding::ConfigUniform>() as u32,
-                bytemuck::bytes_of(&config_uniform_value),
-            )?
+            if cache_hit {
+                GpuBuf::Owned(persistent.cached_config_uniform.take().unwrap().1)
+            } else if let Some((_, existing_buf)) = persistent.cached_config_uniform.take() {
+                // Buffer size is constant (sizeof ConfigUniform); reuse the allocation
+                // and just overwrite with the new value.
+                graph.write_buffer(
+                    &existing_buf,
+                    0,
+                    bytemuck::bytes_of(&config_uniform_value).to_vec(),
+                );
+                GpuBuf::Owned(existing_buf)
+            } else {
+                record_upload_bytes(
+                    device,
+                    graph,
+                    persistent,
+                    "ekrano.config",
+                    size_of::<ekrano_encoding::ConfigUniform>() as u32,
+                    bytemuck::bytes_of(&config_uniform_value),
+                )?
+            }
         };
 
         let buffer_sizes = cpu_config_owned.buffer_sizes;
@@ -639,71 +653,98 @@ impl PipelineResources {
             path: Option<Buffer>,
             seg_counts: Option<Buffer>,
         }
-        let cached = match persistent.cached_pipeline.take() {
-            Some(c) if c.buffer_sizes == buffer_sizes => CachedOwnedBuffers {
-                info_bin_data: Some(c.info_bin_data),
-                tile: Some(c.tile),
-                segments: Some(c.segments),
-                ptcl: Some(c.ptcl),
-                blend_spill: Some(c.blend_spill),
-                fallback_indirect: Some(c.fallback_indirect),
-                reduced: c.reduced,
-                reduced2: c.reduced2,
-                reduced_scan: c.reduced_scan,
-                tagmonoid: c.tagmonoid,
-                path_bbox: c.path_bbox,
-                lines: c.lines,
-                draw_reduced: c.draw_reduced,
-                draw_monoid: c.draw_monoid,
-                clip_inp: c.clip_inp,
-                clip_el: c.clip_el,
-                clip_bic: c.clip_bic,
-                clip_bbox: c.clip_bbox,
-                draw_bbox: c.draw_bbox,
-                bin_header: c.bin_header,
-                path: c.path,
-                seg_counts: c.seg_counts,
-            },
-            Some(c) => {
-                // Sizes changed: return stale buffers to pool before discarding.
-                persistent
-                    .pool
-                    .return_buf(c.info_bin_data, "ekrano.info_bin_data_buf");
-                persistent.pool.return_buf(c.tile, "ekrano.tile_buf");
-                persistent
-                    .pool
-                    .return_buf(c.segments, "ekrano.segments_buf");
-                persistent.pool.return_buf(c.ptcl, "ekrano.ptcl_buf");
-                persistent
-                    .pool
-                    .return_buf(c.blend_spill, "ekrano.blend_spill");
-                persistent
-                    .pool
-                    .return_buf(c.fallback_indirect, "ekrano.indirect_count");
-                macro_rules! return_coarse {
-                    ($field:expr, $name:expr) => {
-                        if let Some(b) = $field {
-                            persistent.pool.return_buf(b, $name);
-                        }
-                    };
+        let cached = {
+            let _tz = goldy::tracy_zone!("ekrano.prepare.pipeline_cache");
+            match persistent.take_cached_pipeline(device) {
+                Some(c) if c.buffer_sizes == buffer_sizes => CachedOwnedBuffers {
+                    info_bin_data: Some(c.info_bin_data),
+                    tile: Some(c.tile),
+                    segments: Some(c.segments),
+                    ptcl: Some(c.ptcl),
+                    blend_spill: Some(c.blend_spill),
+                    fallback_indirect: Some(c.fallback_indirect),
+                    reduced: c.reduced,
+                    reduced2: c.reduced2,
+                    reduced_scan: c.reduced_scan,
+                    tagmonoid: c.tagmonoid,
+                    path_bbox: c.path_bbox,
+                    lines: c.lines,
+                    draw_reduced: c.draw_reduced,
+                    draw_monoid: c.draw_monoid,
+                    clip_inp: c.clip_inp,
+                    clip_el: c.clip_el,
+                    clip_bic: c.clip_bic,
+                    clip_bbox: c.clip_bbox,
+                    draw_bbox: c.draw_bbox,
+                    bin_header: c.bin_header,
+                    path: c.path,
+                    seg_counts: c.seg_counts,
+                },
+                Some(c) => {
+                    // Sizes changed: return stale buffers to pool before discarding.
+                    persistent
+                        .pool
+                        .return_buf(c.info_bin_data, "ekrano.info_bin_data_buf");
+                    persistent.pool.return_buf(c.tile, "ekrano.tile_buf");
+                    persistent
+                        .pool
+                        .return_buf(c.segments, "ekrano.segments_buf");
+                    persistent.pool.return_buf(c.ptcl, "ekrano.ptcl_buf");
+                    persistent
+                        .pool
+                        .return_buf(c.blend_spill, "ekrano.blend_spill");
+                    persistent
+                        .pool
+                        .return_buf(c.fallback_indirect, "ekrano.indirect_count");
+                    macro_rules! return_coarse {
+                        ($field:expr, $name:expr) => {
+                            if let Some(b) = $field {
+                                persistent.pool.return_buf(b, $name);
+                            }
+                        };
+                    }
+                    return_coarse!(c.reduced, "ekrano.reduced_buf");
+                    return_coarse!(c.reduced2, "ekrano.reduced2_buf");
+                    return_coarse!(c.reduced_scan, "ekrano.reduced_scan_buf");
+                    return_coarse!(c.tagmonoid, "ekrano.tagmonoid_buf");
+                    return_coarse!(c.path_bbox, "ekrano.path_bbox_buf");
+                    return_coarse!(c.lines, "ekrano.lines_buf");
+                    return_coarse!(c.draw_reduced, "ekrano.draw_reduced_buf");
+                    return_coarse!(c.draw_monoid, "ekrano.draw_monoid_buf");
+                    return_coarse!(c.clip_inp, "ekrano.clip_inp_buf");
+                    return_coarse!(c.clip_el, "ekrano.clip_el_buf");
+                    return_coarse!(c.clip_bic, "ekrano.clip_bic_buf");
+                    return_coarse!(c.clip_bbox, "ekrano.clip_bbox_buf");
+                    return_coarse!(c.draw_bbox, "ekrano.draw_bbox_buf");
+                    return_coarse!(c.bin_header, "ekrano.bin_header_buf");
+                    return_coarse!(c.path, "ekrano.path_buf");
+                    return_coarse!(c.seg_counts, "ekrano.seg_counts_buf");
+                    CachedOwnedBuffers {
+                        info_bin_data: None,
+                        tile: None,
+                        segments: None,
+                        ptcl: None,
+                        blend_spill: None,
+                        fallback_indirect: None,
+                        reduced: None,
+                        reduced2: None,
+                        reduced_scan: None,
+                        tagmonoid: None,
+                        path_bbox: None,
+                        lines: None,
+                        draw_reduced: None,
+                        draw_monoid: None,
+                        clip_inp: None,
+                        clip_el: None,
+                        clip_bic: None,
+                        clip_bbox: None,
+                        draw_bbox: None,
+                        bin_header: None,
+                        path: None,
+                        seg_counts: None,
+                    }
                 }
-                return_coarse!(c.reduced, "ekrano.reduced_buf");
-                return_coarse!(c.reduced2, "ekrano.reduced2_buf");
-                return_coarse!(c.reduced_scan, "ekrano.reduced_scan_buf");
-                return_coarse!(c.tagmonoid, "ekrano.tagmonoid_buf");
-                return_coarse!(c.path_bbox, "ekrano.path_bbox_buf");
-                return_coarse!(c.lines, "ekrano.lines_buf");
-                return_coarse!(c.draw_reduced, "ekrano.draw_reduced_buf");
-                return_coarse!(c.draw_monoid, "ekrano.draw_monoid_buf");
-                return_coarse!(c.clip_inp, "ekrano.clip_inp_buf");
-                return_coarse!(c.clip_el, "ekrano.clip_el_buf");
-                return_coarse!(c.clip_bic, "ekrano.clip_bic_buf");
-                return_coarse!(c.clip_bbox, "ekrano.clip_bbox_buf");
-                return_coarse!(c.draw_bbox, "ekrano.draw_bbox_buf");
-                return_coarse!(c.bin_header, "ekrano.bin_header_buf");
-                return_coarse!(c.path, "ekrano.path_buf");
-                return_coarse!(c.seg_counts, "ekrano.seg_counts_buf");
-                CachedOwnedBuffers {
+                None => CachedOwnedBuffers {
                     info_bin_data: None,
                     tile: None,
                     segments: None,
@@ -726,35 +767,12 @@ impl PipelineResources {
                     bin_header: None,
                     path: None,
                     seg_counts: None,
-                }
+                },
             }
-            None => CachedOwnedBuffers {
-                info_bin_data: None,
-                tile: None,
-                segments: None,
-                ptcl: None,
-                blend_spill: None,
-                fallback_indirect: None,
-                reduced: None,
-                reduced2: None,
-                reduced_scan: None,
-                tagmonoid: None,
-                path_bbox: None,
-                lines: None,
-                draw_reduced: None,
-                draw_monoid: None,
-                clip_inp: None,
-                clip_el: None,
-                clip_bic: None,
-                clip_bbox: None,
-                draw_bbox: None,
-                bin_header: None,
-                path: None,
-                seg_counts: None,
-            },
-        };
+        }; // end ekrano.prepare.pipeline_cache zone
 
         // fallback_indirect: pool-exempt, must be zeroed before GPU use.
+        let _tz_alloc = goldy::tracy_zone!("ekrano.prepare.alloc_buffers");
         let fallback_indirect = match cached.fallback_indirect {
             Some(buf) => {
                 graph.clear_buffer(&buf, 0, size_of::<IndirectCount>() as u64);
@@ -960,34 +978,38 @@ impl PipelineResources {
 
         // Try to reuse cached render targets from the previous frame (avoids TexturePool
         // round-trips when render dimensions are stable across frames).
-        let (out_image, filter_layers) = if let Some((cached_out, cached_layers)) =
-            persistent.take_cached_render_targets(params.width, params.height, out_image_format)
-        {
-            (cached_out, cached_layers)
-        } else {
-            let out = persistent
-                .tex_pool
-                .acquire(
-                    device,
-                    params.width,
-                    params.height,
-                    out_image_format,
-                    SpatialAccess::Direct,
-                    TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
-                )
-                .map_err(|e| Error::Shader(e.to_string()))?;
-            let layers = std::array::from_fn(|_| {
-                acquire_texture_rgba(
-                    device,
-                    persistent,
-                    params.width,
-                    params.height,
-                    SpatialAccess::DirectInterpolated,
-                    TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
-                )
-                .expect("filter layer")
-            });
-            (out, layers)
+        let (out_image, filter_layers) = {
+            let _tz = goldy::tracy_zone!("ekrano.prepare.render_targets");
+            if let Some((cached_out, cached_layers)) =
+                persistent.take_cached_render_targets(device, params.width, params.height, out_image_format)
+            {
+                (cached_out, cached_layers)
+            } else {
+                let _tz2 = goldy::tracy_zone!("ekrano.prepare.render_targets.ALLOC");
+                let out = persistent
+                    .tex_pool
+                    .acquire(
+                        device,
+                        params.width,
+                        params.height,
+                        out_image_format,
+                        SpatialAccess::Direct,
+                        TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
+                    )
+                    .map_err(|e| Error::Shader(e.to_string()))?;
+                let layers = std::array::from_fn(|_| {
+                    acquire_texture_rgba(
+                        device,
+                        persistent,
+                        params.width,
+                        params.height,
+                        SpatialAccess::DirectInterpolated,
+                        TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
+                    )
+                    .expect("filter layer")
+                });
+                (out, layers)
+            }
         };
 
         Ok(Self {
