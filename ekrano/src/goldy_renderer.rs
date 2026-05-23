@@ -1387,7 +1387,7 @@ impl GoldyRenderer {
     /// Render a scene directly to a swapchain [`Surface`](goldy::Surface).
     ///
     /// Internally records the full graph (coarse + fine) with the swapchain as
-    /// a late-bound output, then hands the graph to [`Surface::submit_graph`]
+    /// a late-bound output, then hands the graph to [`goldy::Surface::submit_graph`]
     /// which auto-partitions it, submits early work, acquires the swapchain
     /// image, and presents.  The caller does **not** need to call `acquire`,
     /// `present`, or `note_frame_presented` — everything is handled here.
