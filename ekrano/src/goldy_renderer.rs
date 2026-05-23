@@ -1545,8 +1545,11 @@ impl GoldyRenderer {
         } else {
             base_config
         };
-        let mut pool_size = BufferPool::padded_size(&config.buffer_sizes.pool_allocs())
-            .saturating_add(POOL_SIZE_SLACK);
+        let mut pool_size = {
+            let _tz = goldy::tracy_zone!("ekrano.pool_size");
+            BufferPool::padded_size(&config.buffer_sizes.pool_allocs())
+                .saturating_add(POOL_SIZE_SLACK)
+        };
         let t_resolve = t_resolve_start.elapsed();
 
         // --- Reclaim completed frames & open recording bracket ---
@@ -1556,15 +1559,17 @@ impl GoldyRenderer {
         // so it overlaps GPU coarse execution.
         let t_drain_start = Instant::now();
         let mut phase_b: Option<DeferredCleanup> = None;
-        let frame_handle = self
-            .frame_pipeline
-            .begin_frame(|dev, rf| {
-                let deferred =
-                    process_cleanup_phase_a(dev, &mut self.persistent, rf.timeline, rf.data)?;
-                phase_b = Some(deferred);
-                Ok::<(), Error>(())
-            })
-            .map_err(|e| Error::Shader(e.to_string()))?;
+        let frame_handle = {
+            let _tz = goldy::tracy_zone!("ekrano.begin_frame");
+            self.frame_pipeline
+                .begin_frame(|dev, rf| {
+                    let deferred =
+                        process_cleanup_phase_a(dev, &mut self.persistent, rf.timeline, rf.data)?;
+                    phase_b = Some(deferred);
+                    Ok::<(), Error>(())
+                })
+                .map_err(|e| Error::Shader(e.to_string()))?
+        };
         // Rate-limit housekeeping to avoid per-frame cost in steady state.
         // With OwnedShared buffers and cached render targets, the ResourcePool
         // stays small and overflow heaps are rare; scanning every 64 frames is enough.
@@ -1639,12 +1644,15 @@ impl GoldyRenderer {
             self.persistent.nearest_clamp_sampler =
                 Some(goldy::Sampler::nearest(device).map_err(|e| Error::Gpu(e.to_string()))?);
         }
-        if let Err(e) = self.persistent.prepare_storage_pool(device, pool_size) {
-            if let Some(deferred) = phase_b.take() {
-                let _ = process_cleanup_phase_b(device, &mut self.persistent, deferred);
+        {
+            let _tz = goldy::tracy_zone!("ekrano.prepare_pool");
+            if let Err(e) = self.persistent.prepare_storage_pool(device, pool_size) {
+                if let Some(deferred) = phase_b.take() {
+                    let _ = process_cleanup_phase_b(device, &mut self.persistent, deferred);
+                }
+                self.frame_pipeline.abort_frame(frame_handle);
+                return Err(e);
             }
-            self.frame_pipeline.abort_frame(frame_handle);
-            return Err(e);
         }
         let t_pool = t1.elapsed();
 
