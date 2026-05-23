@@ -272,7 +272,7 @@ fn frame_strategy() -> goldy::FrameStrategy {
             },
         };
     }
-    goldy::FrameStrategy::LowLatency
+    goldy::FrameStrategy::Balanced
 }
 
 // -----------------------------------------------------------------------
