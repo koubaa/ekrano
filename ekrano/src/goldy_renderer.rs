@@ -1562,14 +1562,14 @@ impl GoldyRenderer {
         // Phase B (pool returns + deferred deletions) is deferred to after flush_mid_frame
         // so it overlaps GPU coarse execution.
         let t_drain_start = Instant::now();
-        let mut phase_b: Option<DeferredCleanup> = None;
+        let mut phase_b: Vec<DeferredCleanup> = Vec::new();
         let frame_handle = {
             let _tz = goldy::tracy_zone!("ekrano.begin_frame");
             self.frame_pipeline
                 .begin_frame(|dev, rf| {
                     let deferred =
                         process_cleanup_phase_a(dev, &mut self.persistent, rf.timeline, rf.data)?;
-                    phase_b = Some(deferred);
+                    phase_b.push(deferred);
                     Ok::<(), Error>(())
                 })
                 .map_err(|e| Error::Shader(e.to_string()))?
@@ -1651,7 +1651,7 @@ impl GoldyRenderer {
         {
             let _tz = goldy::tracy_zone!("ekrano.prepare_pool");
             if let Err(e) = self.persistent.prepare_storage_pool(device, pool_size) {
-                if let Some(deferred) = phase_b.take() {
+                for deferred in phase_b.drain(..) {
                     let _ = process_cleanup_phase_b(device, &mut self.persistent, deferred);
                 }
                 self.frame_pipeline.abort_frame(frame_handle);
@@ -1701,7 +1701,7 @@ impl GoldyRenderer {
                     // Drop recorder first (aborts the frame) so self.persistent is free,
                     // then process deferred cleanup before returning.
                     drop(recorder);
-                    if let Some(deferred) = phase_b.take() {
+                    for deferred in phase_b.drain(..) {
                         let _ = process_cleanup_phase_b(device, &mut self.persistent, deferred);
                     }
                     return Err(e);
@@ -1757,7 +1757,7 @@ impl GoldyRenderer {
 
         // Phase B cleanup: pool returns + deferred deletions. Runs after GPU submit
         // so Phase B overlaps GPU coarse+fine execution rather than blocking begin_frame.
-        if let Some(deferred) = phase_b.take() {
+        for deferred in phase_b.drain(..) {
             process_cleanup_phase_b(device, &mut self.persistent, deferred)?;
         }
 
@@ -1798,8 +1798,10 @@ impl GoldyRenderer {
                 (0.0, 0.0, self.frame_pipeline.pending_frames())
             };
 
+        let (transient_views, transient_textures) = self.device.transient_cache_counts();
+
         log::debug!(
-            "[PERF] frame={} drain={:.2}ms resolve={:.2}ms pool={:.2}ms coarse_record={:.2}ms fine_record={:.2}ms submit={:.2}ms total={:.2}ms alloc={:.1}/{:.1}MB ring={} {label}",
+            "[PERF] frame={} drain={:.2}ms resolve={:.2}ms pool={:.2}ms coarse_record={:.2}ms fine_record={:.2}ms submit={:.2}ms total={:.2}ms alloc={:.1}/{:.1}MB ring={} tv={} tt={} {label}",
             frame_num,
             t_drain.as_secs_f64() * 1000.0,
             t_resolve.as_secs_f64() * 1000.0,
@@ -1811,6 +1813,8 @@ impl GoldyRenderer {
             alloc_used_mb,
             alloc_cap_mb,
             ring_depth,
+            transient_views,
+            transient_textures,
         );
 
         // Update fingerprint after a successful frame.
