@@ -1798,8 +1798,10 @@ impl GoldyRenderer {
                 (0.0, 0.0, self.frame_pipeline.pending_frames())
             };
 
+        let (transient_views, transient_textures) = self.device.transient_cache_counts();
+
         log::debug!(
-            "[PERF] frame={} drain={:.2}ms resolve={:.2}ms pool={:.2}ms coarse_record={:.2}ms fine_record={:.2}ms submit={:.2}ms total={:.2}ms alloc={:.1}/{:.1}MB ring={} {label}",
+            "[PERF] frame={} drain={:.2}ms resolve={:.2}ms pool={:.2}ms coarse_record={:.2}ms fine_record={:.2}ms submit={:.2}ms total={:.2}ms alloc={:.1}/{:.1}MB ring={} tv={} tt={} {label}",
             frame_num,
             t_drain.as_secs_f64() * 1000.0,
             t_resolve.as_secs_f64() * 1000.0,
@@ -1811,6 +1813,8 @@ impl GoldyRenderer {
             alloc_used_mb,
             alloc_cap_mb,
             ring_depth,
+            transient_views,
+            transient_textures,
         );
 
         // Update fingerprint after a successful frame.
