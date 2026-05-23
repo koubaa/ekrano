@@ -25,8 +25,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use goldy::task_graph::{NodeAccess, NodeBuilder};
 use goldy::types::{BufferFlags, SpatialAccess, TextureFlags, TextureFormat};
 use goldy::{
-    Buffer, BufferPool, BufferView, ComputePipeline, DataAccess, Device, DeviceType,
-    FrameHandle, FrameOrchestrator, ShaderModule, TaskGraph, Texture, TexturePool, TimelineValue,
+    Buffer, BufferPool, BufferView, ComputePipeline, DataAccess, Device, DeviceType, FrameHandle,
+    FrameOrchestrator, ShaderModule, TaskGraph, Texture, TexturePool, TimelineValue,
     TransientAllocator, TransientAllocatorConfig, TransientAllocatorStrategy,
 };
 
@@ -1770,9 +1770,7 @@ impl GoldyRenderer {
 
         // Surface path: present and notify allocator.
         if let Some(frame) = opt_frame {
-            let tv = frame
-                .present()
-                .map_err(|e| Error::Shader(e.to_string()))?;
+            let tv = frame.present().map_err(|e| Error::Shader(e.to_string()))?;
             self.frame_pipeline.note_presented(tv);
             if let Some(allocator) = self.persistent.storage_allocator_mut() {
                 allocator.end_frame(device, tv);
@@ -1787,11 +1785,7 @@ impl GoldyRenderer {
         let t_submit = t4.elapsed();
 
         let frame_num = FRAME_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let label = if surface.is_some() {
-            "surface"
-        } else {
-            ""
-        };
+        let label = if surface.is_some() { "surface" } else { "" };
 
         let (alloc_cap_mb, alloc_used_mb, ring_depth) =
             if let Some(a) = self.persistent.storage_allocator.as_ref() {
