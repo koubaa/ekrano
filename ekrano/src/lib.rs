@@ -235,6 +235,9 @@ pub struct RenderParams {
     /// throughput at the cost of silently producing incomplete output if the
     /// bump allocator overflows.
     ///
+    /// Override at runtime with `EKRANO_ROBUST=0` (disable) or `EKRANO_ROBUST=1`
+    /// (force enable) for benchmarking.
+    ///
     /// Defaults to `true`.
     pub robust: bool,
 }

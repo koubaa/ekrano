@@ -8,8 +8,7 @@ use std::mem::size_of;
 use goldy::task_graph::{NodeAccess, TransientId};
 use goldy::types::{BufferFlags, SpatialAccess, TextureFlags};
 use goldy::{
-    Buffer, BufferView, DataAccess, Device, DeviceType, SWAPCHAIN_SLOT_PLACEHOLDER,
-    SwapchainOutputHandle, TaskGraph, Texture, TextureFormat,
+    Buffer, BufferView, DataAccess, Device, DeviceType, TaskGraph, Texture, TextureFormat,
 };
 
 /// Sentinel bindless index for transient buffers whose real slot is resolved at
@@ -63,10 +62,6 @@ pub(crate) enum GpuBinding<'a> {
     /// stored in `PersistentState`) and are guaranteed to be GPU-readable on every
     /// frame after their first upload, without any additional `WriteBuffer` nodes.
     PersistentBuf(u32),
-    /// Late-bound swapchain output: the real UAV bindless index is resolved after
-    /// `surface.begin()` inside [`goldy::Surface::submit_graph`].  Stores
-    /// [`SWAPCHAIN_SLOT_PLACEHOLDER`] in `resource_slots` until then.
-    SwapchainOutput(SwapchainOutputHandle),
 }
 
 impl<'a> GpuBinding<'a> {
@@ -89,7 +84,6 @@ impl<'a> GpuBinding<'a> {
             GpuBinding::Tex(tex) => tex.bindless_index(),
             GpuBinding::Transient(_) => return Ok(TRANSIENT_SLOT_PLACEHOLDER),
             GpuBinding::Sampler(idx) | GpuBinding::PersistentBuf(idx) => return Ok(*idx),
-            GpuBinding::SwapchainOutput(_) => return Ok(SWAPCHAIN_SLOT_PLACEHOLDER),
         };
         idx.ok_or_else(|| {
             Error::Shader("bindless index missing for shader resource binding".into())
@@ -479,6 +473,8 @@ impl PipelineResources {
             packed.resize(size_of::<u32>(), u8::MAX);
         }
 
+        let gpu_progress = device.gpu_progress();
+
         let mut cpu_config_owned = *config;
         if encoding.coverage_mask.is_some() {
             cpu_config_owned.gpu.mask_active = 1;
@@ -655,7 +651,7 @@ impl PipelineResources {
         }
         let cached = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.pipeline_cache");
-            match persistent.take_cached_pipeline(device) {
+            match persistent.take_cached_pipeline(gpu_progress) {
                 Some(c) if c.buffer_sizes == buffer_sizes => CachedOwnedBuffers {
                     info_bin_data: Some(c.info_bin_data),
                     tile: Some(c.tile),
@@ -981,7 +977,12 @@ impl PipelineResources {
         let (out_image, filter_layers) = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.render_targets");
             if let Some((cached_out, cached_layers)) =
-                persistent.take_cached_render_targets(device, params.width, params.height, out_image_format)
+                persistent.take_cached_render_targets(
+                    gpu_progress,
+                    params.width,
+                    params.height,
+                    out_image_format,
+                )
             {
                 (cached_out, cached_layers)
             } else {
@@ -1077,7 +1078,6 @@ pub(crate) fn collect_bindless_indices_into(
                 })?,
             GpuBinding::Tex(_) => binding.bindless_slot(false)?,
             GpuBinding::Transient(_) => TRANSIENT_SLOT_PLACEHOLDER,
-            GpuBinding::SwapchainOutput(_) => SWAPCHAIN_SLOT_PLACEHOLDER,
             GpuBinding::Sampler(idx) | GpuBinding::PersistentBuf(idx) => *idx,
         };
         out.push(idx);
