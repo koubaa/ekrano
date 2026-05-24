@@ -218,33 +218,14 @@ fn sanitize_bump(bump: &BumpAllocators) -> BumpAllocators {
 static FRAME_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 // -----------------------------------------------------------------------
-// FrameCleanup — deferred per-frame work processed after GPU completion
+// Deferred per-frame work
 // -----------------------------------------------------------------------
 //
-// ## Ring elimination (planned, not yet implemented)
-//
-// Today the ring carries bump readback (`FrameRingPayload`).  Render targets,
-// pipeline buffers, pool views, and owned buffers already bypass the ring via
-// timeline-guarded cache slots + [`Device::defer_release`].
-//
-// End state:
-// 1. Bump readback moves to a VramAllocator-deferred token (no CPU work in
-//    [`FrameOrchestrator::begin_frame`]'s retire closure).
-// 2. `FrameOrchestrator<FrameRingPayload>` becomes `FrameOrchestrator<()>`.
-// 3. `drain_ring_with_retire` only enforces depth / timeline — retire is a no-op.
-// 4. `begin_frame` hot path loses `process_cleanup_phase_a` entirely.
-//
-// Until then, `retire_frame_ring_slot` is the single retire entry point so the
-// migration is one call-site change when the payload goes empty.
-
-/// Ring slot payload today; will become `()` once bump readback is deferred.
-type FrameRingPayload = FrameCleanup;
-
-struct FrameCleanup {
-    /// The bump readback buffer (`ekrano.bump_buf`) for `robust=true` frames.
-    /// Read to CPU on cleanup to update bump estimates; `None` for non-robust frames.
-    bump_buf: Option<Buffer>,
-}
+// The `FrameOrchestrator` ring now carries `()` — all resource retirement
+// (render targets, pipeline buffers, pool views, owned buffers, bump readback)
+// bypasses the ring via timeline-guarded cache slots + `Device::defer_release`
+// + `PersistentState::pending_bump_readbacks`.  The ring is a pure scheduling
+// primitive: depth enforcement + timeline tracking only.
 
 /// Token pushed into a [`DeferredPayload`] when pool views are retired.
 ///
@@ -757,36 +738,6 @@ fn read_bump_buffer(device: &Device, persistent: &mut PersistentState, buf: Buff
     Ok(())
 }
 
-/// Phase A: latency-sensitive cleanup that must complete before `PipelineResources::prepare`.
-///
-/// LowLatency keeps bump readback in the ring so the next frame immediately sees
-/// the latest overflow feedback. Pipelined strategies queue bump readbacks outside
-/// the ring and drain them opportunistically when their timeline has completed.
-fn process_cleanup_phase_a(
-    device: &Device,
-    persistent: &mut PersistentState,
-    _timeline: TimelineValue,
-    entry: FrameCleanup,
-) -> Result<()> {
-    let _tz = goldy::tracy_zone!("ekrano.cleanup_phase_a");
-    let FrameCleanup { bump_buf } = entry;
-
-    if let Some(buf) = bump_buf {
-        let _old_path = goldy::tracy_zone!("ekrano.cleanup_phase_a.bump_readback.low_latency");
-        read_bump_buffer(device, persistent, buf)?;
-    }
-
-    Ok(())
-}
-
-/// Retire callback wired into [`FrameOrchestrator::begin_frame`] / [`FrameOrchestrator::drain_all`].
-fn retire_frame_ring_slot(
-    device: &Device,
-    persistent: &mut PersistentState,
-    retired: goldy::RetiredFrame<FrameRingPayload>,
-) -> Result<()> {
-    process_cleanup_phase_a(device, persistent, retired.timeline, retired.data)
-}
 
 // -----------------------------------------------------------------------
 // GoldyRenderer — the merged struct
@@ -802,8 +753,8 @@ pub struct GoldyRenderer {
     engine_shaders: Vec<GoldyShader>,
     /// Cross-frame GPU resources: pools, texture cache, bump readback.
     persistent: PersistentState,
-    /// Pipelined frame cleanup (see `goldy::FrameOrchestrator`).
-    frame_pipeline: FrameOrchestrator<FrameRingPayload>,
+    /// Pipelined frame scheduling: depth enforcement and timeline tracking.
+    frame_pipeline: FrameOrchestrator<()>,
     /// Persistent bump estimates: running max across frames. Used to pre-size
     /// buffers even when no overflow occurs, avoiding the cold-start ramp-up.
     persistent_bump: Option<BumpAllocators>,
@@ -826,7 +777,7 @@ pub struct GoldyRenderer {
 pub(crate) struct FrameRecorder<'a> {
     pub(crate) device: &'a Device,
     graph: &'a mut TaskGraph,
-    frame_pipeline: Option<&'a mut FrameOrchestrator<FrameRingPayload>>,
+    frame_pipeline: Option<&'a mut FrameOrchestrator<()>>,
     frame_handle: Option<FrameHandle>,
     pub(crate) persistent: &'a mut PersistentState,
     shaders: &'a [GoldyShader],
@@ -836,8 +787,8 @@ pub(crate) struct FrameRecorder<'a> {
     /// Set to `true` by `finish` or `abort`; the `Drop` impl aborts the open frame
     /// if the recorder is dropped without being properly completed (e.g. on a `?` return).
     finished: bool,
-    /// The bump readback buffer, separated from the general deferred-buffer list
-    /// so it can be read back to CPU in `process_cleanup_phase_a` without index arithmetic.
+    /// The bump readback buffer for the current frame (`robust=true` only).
+    /// Queued into `PersistentState::pending_bump_readbacks` after GPU submit.
     bump_buf_for_readback: Option<Buffer>,
     deferred_owned_buffers: Vec<(Buffer, &'static str)>,
     deferred_pool_views: Vec<BufferView>,
@@ -856,7 +807,7 @@ impl<'a> FrameRecorder<'a> {
     fn new_orchestrated(
         device: &'a Device,
         graph: &'a mut TaskGraph,
-        frame_pipeline: &'a mut FrameOrchestrator<FrameRingPayload>,
+        frame_pipeline: &'a mut FrameOrchestrator<()>,
         frame_handle: FrameHandle,
         persistent: &'a mut PersistentState,
         shaders: &'a [GoldyShader],
@@ -898,7 +849,7 @@ impl<'a> FrameRecorder<'a> {
     fn new_inner(
         device: &'a Device,
         graph: &'a mut TaskGraph,
-        frame_pipeline: Option<&'a mut FrameOrchestrator<FrameRingPayload>>,
+        frame_pipeline: Option<&'a mut FrameOrchestrator<()>>,
         frame_handle: Option<FrameHandle>,
         persistent: &'a mut PersistentState,
         shaders: &'a [GoldyShader],
@@ -1478,15 +1429,7 @@ impl<'a> FrameRecorder<'a> {
 
         let deferred_pool_views = mem::take(&mut self.deferred_pool_views);
         let deferred_textures = mem::take(&mut self.deferred_textures);
-        let (ring_bump_buf, outcome_bump_buf) =
-            if self.persistent.strategy == goldy::FrameStrategy::LowLatency {
-                (self.bump_buf_for_readback.take(), None)
-            } else {
-                (None, self.bump_buf_for_readback.take())
-            };
-        let cleanup = FrameCleanup {
-            bump_buf: ring_bump_buf,
-        };
+        let bump_readback = self.bump_buf_for_readback.take();
         let recyclable_owned = mem::take(&mut self.deferred_owned_buffers);
 
         if let Some(frame_pipeline) = self.frame_pipeline.as_mut() {
@@ -1501,30 +1444,30 @@ impl<'a> FrameRecorder<'a> {
                             self.graph,
                             surface,
                             frame,
-                            cleanup,
+                            (),
                         )
                         .map_err(|e| Error::Shader(e.to_string()))?
                 } else {
                     frame_pipeline
-                        .end_frame_for_surface(frame_handle, self.graph, surface, cleanup)
+                        .end_frame_for_surface(frame_handle, self.graph, surface, ())
                         .map_err(|e| Error::Shader(e.to_string()))?
                 };
                 return Ok(FrameFinishOutcome {
                     timeline: None,
                     surface_frame: Some(frame),
-                    bump_readback: outcome_bump_buf,
+                    bump_readback,
                     deferred_pool_views,
                     deferred_textures,
                     recyclable_owned,
                 });
             }
             let tv = frame_pipeline
-                .end_frame_standalone(frame_handle, self.graph, self.last_timeline, cleanup)
+                .end_frame_standalone(frame_handle, self.graph, self.last_timeline, ())
                 .map_err(|e| Error::Shader(e.to_string()))?;
             return Ok(FrameFinishOutcome {
                 timeline: Some(tv),
                 surface_frame: None,
-                bump_readback: outcome_bump_buf,
+                bump_readback,
                 deferred_pool_views,
                 deferred_textures,
                 recyclable_owned,
@@ -1550,7 +1493,7 @@ impl<'a> FrameRecorder<'a> {
             Ok(FrameFinishOutcome {
                 timeline: None,
                 surface_frame: Some(frame),
-                bump_readback: outcome_bump_buf,
+                bump_readback,
                 deferred_pool_views,
                 deferred_textures,
                 recyclable_owned,
@@ -1567,7 +1510,7 @@ impl<'a> FrameRecorder<'a> {
             Ok(FrameFinishOutcome {
                 timeline: Some(tv),
                 surface_frame: None,
-                bump_readback: outcome_bump_buf,
+                bump_readback,
                 deferred_pool_views,
                 deferred_textures,
                 recyclable_owned,
@@ -1820,7 +1763,7 @@ impl GoldyRenderer {
         for _attempt in 0..=MAX_BUMP_RETRIES {
             self.render_to_texture(device, scene, &texture, params)?;
             self.frame_pipeline
-                .drain_all(|dev, rf| retire_frame_ring_slot(dev, &mut self.persistent, rf))
+                .drain_all(|_, _| Ok::<(), Error>(()))
                 .map_err(|e| Error::Shader(e.to_string()))?;
             self.persistent.drain_ready_bump_readbacks(device)?;
             self.device.flush_deferred_deletions();
@@ -1936,21 +1879,23 @@ impl GoldyRenderer {
 
         // --- Reclaim completed frames & open recording bracket ---
         // Drain pool returns from prior-frame token drops (cheap; no GPU sync).
+        // Drain any bump readbacks whose GPU timeline has already passed.
         // flush_deferred_deletions runs after submit so reclaim overlaps GPU work.
         self.persistent.drain_pending_returns();
-        if self.persistent.strategy != goldy::FrameStrategy::LowLatency {
-            self.persistent.drain_ready_bump_readbacks(device)?;
-        }
+        self.persistent.drain_ready_bump_readbacks(device)?;
 
         let t_drain_start = Instant::now();
         let use_orchestrator = self.persistent.strategy == goldy::FrameStrategy::LowLatency;
         let frame_handle = if use_orchestrator {
             let _tz = goldy::tracy_zone!("ekrano.begin_frame");
-            Some(
-                self.frame_pipeline
-                    .begin_frame(|dev, rf| retire_frame_ring_slot(dev, &mut self.persistent, rf))
-                    .map_err(|e| Error::Shader(e.to_string()))?,
-            )
+            let h = self
+                .frame_pipeline
+                .begin_frame(|_, _| Ok::<(), Error>(()))
+                .map_err(|e| Error::Shader(e.to_string()))?;
+            // After begin_frame the GPU has completed the previous frame (depth=1
+            // wait), so any queued bump readback is now guaranteed ready.
+            self.persistent.drain_ready_bump_readbacks(device)?;
+            Some(h)
         } else {
             None
         };
