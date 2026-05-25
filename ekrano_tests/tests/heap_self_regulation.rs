@@ -3,7 +3,7 @@
 
 //! Heap self-regulation tests at the ekrano renderer level.
 //!
-//! These tests verify that the Metal buffer heap allocator + ekrano ResourcePool
+//! These tests verify that the Metal buffer heap allocator + ekrano `ResourcePool`
 //! cooperate correctly under realistic rendering workloads:
 //!
 //! - The resource pool replenishes from deferred returns (no unbounded fresh allocations)

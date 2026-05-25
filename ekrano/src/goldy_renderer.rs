@@ -20,8 +20,8 @@ pub const MAX_BINDLESS_SLOTS: usize = 16;
 
 use std::collections::{HashMap, VecDeque};
 use std::mem;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use goldy::task_graph::{NodeAccess, NodeBuilder};
 use goldy::types::{BufferFlags, SpatialAccess, TextureFlags, TextureFormat};
@@ -103,7 +103,7 @@ fn occupied_slots_oldest_first(
 #[inline]
 #[allow(dead_code)]
 fn oldest_ready_cache_slot(
-    timelines: &[TimelineValue; RESOURCE_CACHE_SLOTS],
+    timelines: [TimelineValue; RESOURCE_CACHE_SLOTS],
     occupied: [bool; RESOURCE_CACHE_SLOTS],
     progress: TimelineValue,
 ) -> Option<usize> {
@@ -129,7 +129,7 @@ fn oldest_ready_cache_slot(
 #[inline]
 #[allow(dead_code)]
 fn ready_cache_slots_oldest_first(
-    timelines: &[TimelineValue; RESOURCE_CACHE_SLOTS],
+    timelines: [TimelineValue; RESOURCE_CACHE_SLOTS],
     occupied: [bool; RESOURCE_CACHE_SLOTS],
     progress: TimelineValue,
 ) -> [Option<usize>; RESOURCE_CACHE_SLOTS] {
@@ -240,9 +240,15 @@ static FRAME_COUNTER: AtomicU64 = AtomicU64::new(0);
 ///
 /// Batching all views into one payload avoids per-view `defer_release` overhead on
 /// the hot path (dozens of mutex pushes per frame at 2000+ FPS).
-struct DeferredPoolViewsToken(#[allow(dead_code)] Vec<BufferView>);
+///
+/// [`DeferredPayload`]: goldy::DeferredPayload
+struct DeferredPoolViewsToken(
+    #[allow(dead_code, reason = "views dropped when token is reclaimed")] Vec<BufferView>,
+);
 
 /// Token pushed into a [`DeferredPayload`] when owned pipeline buffers are retired.
+///
+/// [`DeferredPayload`]: goldy::DeferredPayload
 struct DeferredOwnedBuffersToken {
     pending: Arc<Mutex<Vec<(Buffer, &'static str)>>>,
     buffers: Vec<(Buffer, &'static str)>,
@@ -258,9 +264,11 @@ impl Drop for DeferredOwnedBuffersToken {
 
 /// Token pushed into a [`DeferredPayload`] when intermediate textures are retired.
 ///
-/// When the VramAllocator ring drops this token (after `gpu_progress >= epoch`),
+/// When the `VramAllocator` ring drops this token (after `gpu_progress >= epoch`),
 /// it enqueues the textures into `pending_texture_returns`. The next
 /// `run_frame` call drains that queue and returns them to `TexturePool`.
+///
+/// [`DeferredPayload`]: goldy::DeferredPayload
 struct DeferredTextureToken {
     pending: Arc<Mutex<Vec<Texture>>>,
     textures: Vec<Texture>,
@@ -347,22 +355,21 @@ struct BufferKey {
     buffer_flags: BufferFlags,
 }
 
+type PendingOwnedReturns = Arc<Mutex<Vec<(Buffer, &'static str)>>>;
+
 #[derive(Default)]
 pub(crate) struct ResourcePool {
     bufs: HashMap<BufferKey, Vec<Buffer>>,
     /// Reference to the pending returns queue. When a buffer allocation fails
     /// (heap exhausted), the pool flushes deferred deletions, drains this queue
     /// back into itself, and retries before blocking for GPU progress.
-    pending_owned_returns: Option<Arc<Mutex<Vec<(Buffer, &'static str)>>>>,
+    pending_owned_returns: Option<PendingOwnedReturns>,
 }
 
 impl ResourcePool {
     /// Wire the pool to the renderer's `pending_owned_returns` queue so that
     /// pool-misses can self-replenish before triggering a GPU wait.
-    pub(crate) fn set_pending_returns(
-        &mut self,
-        pending: Arc<Mutex<Vec<(Buffer, &'static str)>>>,
-    ) {
+    pub(crate) fn set_pending_returns(&mut self, pending: PendingOwnedReturns) {
         self.pending_owned_returns = Some(pending);
     }
 
@@ -403,7 +410,7 @@ impl ResourcePool {
 
         // Pool miss: try a fresh allocation.
         match device.alloc_buffer(size, access, stride, buffer_flags) {
-            Ok(b) => return Ok(b),
+            Ok(b) => Ok(b),
             Err(_) => {
                 // Attempt 2 (non-blocking): flush deferred deletions so that any GPU
                 // work that completed since the last flush moves buffers from the vram
@@ -543,9 +550,12 @@ fn frame_strategy() -> goldy::FrameStrategy {
 /// `EKRANO_ROBUST=0|false|no|off` disables bump readback (same as `robust: false`).
 /// `EKRANO_ROBUST=1|true|yes|on` forces it on. Unset → use the caller's `RenderParams`.
 fn env_robust_override() -> Option<bool> {
-    std::env::var("EKRANO_ROBUST")
-        .ok()
-        .map(|v| !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"))
+    std::env::var("EKRANO_ROBUST").ok().map(|v| {
+        !matches!(
+            v.to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        )
+    })
 }
 
 // -----------------------------------------------------------------------
@@ -587,7 +597,8 @@ pub(crate) struct PersistentState {
     /// Cached `OwnedShared` + pool-exempt pipeline buffers from previous frames.
     ///
     /// Same two-slot timeline-guard pattern as `cached_render_targets`.
-    pub(crate) cached_pipeline: [Option<crate::gpu_resources::CachedPipeline>; RESOURCE_CACHE_SLOTS],
+    pub(crate) cached_pipeline:
+        [Option<crate::gpu_resources::CachedPipeline>; RESOURCE_CACHE_SLOTS],
     /// Timeline of the frame that last wrote each pipeline cache slot.
     pub(crate) cached_pipeline_timelines: [TimelineValue; RESOURCE_CACHE_SLOTS],
     /// Capacity hints for `FrameRecorder` scratch allocations. Updated after each
@@ -821,7 +832,6 @@ fn read_bump_buffer(device: &Device, persistent: &mut PersistentState, buf: Buff
     }
     Ok(())
 }
-
 
 // -----------------------------------------------------------------------
 // GoldyRenderer — the merged struct
@@ -1665,10 +1675,8 @@ impl GoldyRenderer {
         use goldy::vram_allocator::{DefaultVramAllocator, TrackingVramAllocator};
 
         let budget = 512 * 1024 * 1024; // 512 MiB
-        let tracking = TrackingVramAllocator::with_budget(
-            Arc::new(DefaultVramAllocator::new()),
-            budget,
-        );
+        let tracking =
+            TrackingVramAllocator::with_budget(Arc::new(DefaultVramAllocator::new()), budget);
         let tracked_device = device.with_vram_allocator(Arc::new(tracking));
 
         // FrameOrchestrator uses the original (unbudgeted) device for transient-buffer
@@ -1717,7 +1725,10 @@ impl GoldyRenderer {
         renderer.shaders = shaders;
         // Wire the pool's self-replenishment from the renderer's pending_owned_returns.
         let pending_returns = renderer.persistent.pending_owned_returns.clone();
-        renderer.persistent.pool.set_pending_returns(pending_returns);
+        renderer
+            .persistent
+            .pool
+            .set_pending_returns(pending_returns);
         tracked_device.release_idle_shader_compiler();
         Ok(renderer)
     }
@@ -2191,9 +2202,21 @@ impl GoldyRenderer {
             );
             if let Some(handle) = swapchain_handle {
                 if let Some(surface) = surface {
-                    debug_assert_eq!(pipeline.out_image.width(), surface.width());
-                    debug_assert_eq!(pipeline.out_image.height(), surface.height());
-                    debug_assert_eq!(pipeline.out_image.format(), surface.format());
+                    debug_assert_eq!(
+                        pipeline.out_image.width(),
+                        surface.width(),
+                        "out_image width must match swapchain surface",
+                    );
+                    debug_assert_eq!(
+                        pipeline.out_image.height(),
+                        surface.height(),
+                        "out_image height must match swapchain surface",
+                    );
+                    debug_assert_eq!(
+                        pipeline.out_image.format(),
+                        surface.format(),
+                        "out_image format must match swapchain surface",
+                    );
                 }
                 recorder
                     .graph
