@@ -972,6 +972,17 @@ impl PipelineResources {
             "ekrano.blend_spill"
         );
 
+        // How many filter layer textures must be full-size for this frame.
+        // Layers beyond this count are rendered as 1×1 stubs to save VRAM — the fine
+        // shader still receives all 4 bindings but never samples from unused slots.
+        let needed_filter_layers = encoding
+            .layer_filter_effects
+            .iter()
+            .map(|e| e.layer_index as usize + 1)
+            .max()
+            .unwrap_or(0)
+            .min(4);
+
         // Try to reuse cached render targets from the previous frame (avoids TexturePool
         // round-trips when render dimensions are stable across frames).
         let (out_image, filter_layers) = {
@@ -981,6 +992,7 @@ impl PipelineResources {
                 params.width,
                 params.height,
                 out_image_format,
+                needed_filter_layers,
             ) {
                 (cached_out, cached_layers)
             } else {
@@ -996,16 +1008,23 @@ impl PipelineResources {
                         TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
                     )
                     .map_err(|e| Error::Shader(e.to_string()))?;
-                let layers = std::array::from_fn(|_| {
-                    acquire_texture_rgba(
+                let layers = std::array::from_fn(|i| {
+                    // Allocate full-size only for layers the encoding actually uses;
+                    // unused slots get a 1×1 stub (the fine shader binds but never reads them).
+                    let (w, h) = if i < needed_filter_layers {
+                        (params.width, params.height)
+                    } else {
+                        (1, 1)
+                    };
+                    let result = acquire_texture_rgba(
                         device,
                         persistent,
-                        params.width,
-                        params.height,
+                        w,
+                        h,
                         SpatialAccess::DirectInterpolated,
                         TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
-                    )
-                    .expect("filter layer")
+                    );
+                    result.expect("filter layer")
                 });
                 (out, layers)
             }

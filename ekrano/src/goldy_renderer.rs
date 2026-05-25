@@ -328,21 +328,6 @@ impl ResourcePool {
         self.pending_owned_returns = Some(pending);
     }
 
-    /// Drain `pending_owned_returns` into this pool.
-    fn drain_pending(&mut self) {
-        let Some(ref pending) = self.pending_owned_returns else {
-            return;
-        };
-        let Ok(mut guard) = pending.try_lock() else {
-            return;
-        };
-        let drained: Vec<_> = guard.drain(..).collect();
-        drop(guard);
-        for (buf, name) in drained {
-            self.return_buf(buf, name);
-        }
-    }
-
     pub(crate) fn get_buf_with_stride(
         &mut self,
         device: &Device,
@@ -364,43 +349,63 @@ impl ResourcePool {
         }
 
         // Pool miss: try a fresh allocation.
-        match device.alloc_buffer(size, access, stride, buffer_flags) {
-            Ok(b) => Ok(b),
-            Err(_) => {
-                // Attempt 2 (non-blocking): flush deferred deletions so that any GPU
-                // work that completed since the last flush moves buffers from the vram
-                // allocator ring into pending_owned_returns, then drain pending back into
-                // this pool and retry. This handles the common case where one or more
-                // frames finished between the last run_frame flush and this alloc.
-                device.flush_deferred_deletions();
-                self.drain_pending();
-                if let Some(buf) = self.bufs.entry(key.clone()).or_default().pop() {
-                    return Ok(buf);
-                }
+        let first_err = match device.alloc_buffer(size, access, stride, buffer_flags) {
+            Ok(buf) => return Ok(buf),
+            Err(e) => e,
+        };
 
-                // Attempt 3 (blocking): wait for the oldest in-flight frame to retire,
-                // then flush and drain again. This is the boundary action that limits
-                // CPU-to-GPU skew in tight loops where the GPU lags far behind the CPU.
-                if let Some(oldest_epoch) = device.oldest_deferred_epoch() {
-                    let _tz = goldy::tracy_zone!("ekrano.resource_pool.wait_reclaim");
-                    log::debug!(
-                        "ResourcePool heap pressure for {name} — waiting for GPU epoch \
-                         {oldest_epoch} to reclaim archive",
-                    );
-                    let _ = device.wait_until_timeout(oldest_epoch, 2000);
-                    device.flush_deferred_deletions();
-                    self.drain_pending();
-                    if let Some(buf) = self.bufs.entry(key.clone()).or_default().pop() {
-                        return Ok(buf);
-                    }
-                }
+        // Attempt 2 (non-blocking): flush deferred deletions so that any GPU
+        // work that completed since the last flush moves buffers from the vram
+        // allocator ring into pending_owned_returns, then drain pending back into
+        // this pool and retry. This handles the common case where one or more
+        // frames finished between the last run_frame flush and this alloc.
+        device.flush_deferred_deletions();
+        self.drain_pending_returns();
+        if let Some(buf) = self.bufs.entry(key.clone()).or_default().pop() {
+            return Ok(buf);
+        }
+        if let Ok(buf) = device.alloc_buffer(size, access, stride, buffer_flags) {
+            return Ok(buf);
+        }
 
-                // Final attempt: one more fresh allocation (heap may have space now that
-                // the DeletionQueue was processed inside flush_deferred_deletions).
-                device
-                    .alloc_buffer(size, access, stride, buffer_flags)
-                    .map_err(|e| Error::Shader(e.to_string()))
+        // On heap pressure, drain any GPU-completed buffers that have been returned
+        // asynchronously via DeferredOwnedBuffersToken but haven't been injected into
+        // the pool yet. This is a last-resort path; in normal operation the pipeline
+        // cache eviction in schedule_pipeline_cleanup keeps the heap bounded.
+        let err_str = first_err.to_string();
+        if err_str.contains("heap allocation failed")
+            || err_str.contains("heap is full")
+            || err_str.contains("all heaps exhausted")
+        {
+            // Drain pending returns from async completion handlers.
+            self.drain_pending_returns();
+            if let Some(buf) = self.bufs.entry(key.clone()).or_default().pop() {
+                return Ok(buf);
             }
+            // Retry a fresh allocation from the now-potentially-freed heap.
+            if let Ok(buf) = device.alloc_buffer(size, access, stride, buffer_flags) {
+                return Ok(buf);
+            }
+        }
+
+        Err(Error::Shader(first_err.to_string()))
+    }
+
+    /// Drain buffers from the `pending_owned_returns` queue into the pool.
+    ///
+    /// Called before allocating fresh buffers so that GPU-completed recycled
+    /// buffers are immediately available for reuse.
+    pub(crate) fn drain_pending_returns(&mut self) {
+        let pending = match &self.pending_owned_returns {
+            Some(p) => Arc::clone(p),
+            None => return,
+        };
+        let mut queue = match pending.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        for (buf, name) in queue.drain(..) {
+            self.return_buf(buf, name);
         }
     }
 
@@ -442,23 +447,6 @@ impl ResourcePool {
     }
 }
 
-/// Maximum number of unprocessed `FrameCleanup` entries before we force a
-/// synchronous wait to prevent unbounded growth.
-///
-/// This directly controls the amount of per-frame GPU resources (textures,
-/// owned buffers, pool views) that can be alive simultaneously. Each frame
-/// allocates full-resolution textures (`out_image` + `filter_layers`), so a
-/// depth of N means N * ~5 render-target-sized textures in flight. On a
-/// Retina display, each texture can be >13 MB, so high values cause OOM
-/// when vsync is off and frames outrun the GPU. Kept in sync with the
-/// transient allocator's `max_regions`.
-///
-/// With the Tiger Lottie at Retina resolution, each frame holds ~173 MB of
-/// compute buffers (in an allocator region) plus ~8 full-resolution textures
-/// (~130 MB) plus ~11 owned buffers. Depth N means (N+1) × that footprint
-/// alive simultaneously (ring + current frame). On Apple Silicon with unified
-/// memory, depth >= 2 can exceed the GPU memory budget when vsync is off and
-/// frames are submitted faster than the GPU retires them. Depth 1 forces a
 /// Read the frame strategy from the environment.
 ///
 /// Defaults to `LowLatency` (depth=1). Override via `EKRANO_FRAME_STRATEGY`:
@@ -600,6 +588,7 @@ impl PersistentState {
         width: u32,
         height: u32,
         out_format: TextureFormat,
+        needed_filter_count: usize,
     ) -> Option<(Texture, [Texture; 4])> {
         let occupied = [
             self.cached_render_targets[0].is_some(),
@@ -619,18 +608,28 @@ impl PersistentState {
                 continue;
             };
             if out.width() == width && out.height() == height && out.format() == out_format {
+                // Also verify that any required filter layers are full-size (not stubs from a
+                // previous no-filter frame). If a needed layer is 1×1, this entry is invalid.
+                let filter_ok = (0..needed_filter_count)
+                    .all(|i| layers[i].width() == width && layers[i].height() == height);
+                if filter_ok {
+                    log::debug!(
+                        "[RT-CACHE] HIT slot={i}: progress={progress} timeline={}",
+                        self.cached_rt_timelines[i],
+                    );
+                    return Some((out, layers));
+                }
                 log::debug!(
-                    "[RT-CACHE] HIT slot={i}: progress={progress} timeline={}",
-                    self.cached_rt_timelines[i],
+                    "[RT-CACHE] MISS (filter-layer-size) slot={i}: progress={progress} needed={needed_filter_count}"
                 );
-                return Some((out, layers));
-            }
+            } else {
             log::debug!(
                 "[RT-CACHE] MISS (resize) slot={i}: progress={progress} timeline={} {}x{} fmt={out_format:?}",
                 self.cached_rt_timelines[i],
                 out.width(),
                 out.height(),
             );
+            }
             self.tex_pool.release(out);
             for l in layers {
                 self.tex_pool.release(l);
@@ -1215,14 +1214,83 @@ impl<'a> FrameRecorder<'a> {
                     seg_counts: cacheable_seg_counts,
                     buffer_sizes,
                 };
-                // Install into the first empty slot; defer if both are still aging.
+                // Install into the first empty slot.  When both slots are occupied,
+                // wait for the oldest slot's GPU epoch to retire, return its buffers to the
+                // pool, and reuse the slot.  This caps in-flight pipeline buffer sets at 2
+                // and prevents heap exhaustion in tight render loops (e.g. headless tests or
+                // the Balanced strategy where no explicit wait is issued per frame).
                 if let Some(i) = find_empty_cache_slot(&self.persistent.cached_pipeline) {
                     self.persistent.cached_pipeline[i] = Some(pipeline_cache);
                     outcome.cached_pipeline_slot = Some(i);
                     log::debug!("[PIPE-CACHE] schedule: cached slot={i}");
                 } else {
-                    self.defer_cached_pipeline_owned_buffers(pipeline_cache);
-                    log::debug!("[PIPE-CACHE] schedule: all slots full — deferred current frame");
+                    // Both slots occupied — find the oldest.
+                    let oldest_i = if self.persistent.cached_pipeline_timelines[0]
+                        <= self.persistent.cached_pipeline_timelines[1]
+                    {
+                        0
+                    } else {
+                        1
+                    };
+                    let oldest_tv = self.persistent.cached_pipeline_timelines[oldest_i];
+                    // Wait for the oldest slot to retire.  For small/fast scenes this wait
+                    // is usually already satisfied; for headless pressure tests it bounds
+                    // in-flight memory to two pipeline sets rather than N frames.
+                    let wait_ok = oldest_tv == 0 || self.device.wait_until(oldest_tv).is_ok();
+                    if wait_ok {
+                        // Return the evicted slot's buffers to the pool so the next
+                        // prepare_pipeline can reuse them without a fresh heap allocation.
+                        if let Some(old) = self.persistent.cached_pipeline[oldest_i].take() {
+                            self.persistent
+                                .pool
+                                .return_buf(old.info_bin_data, "ekrano.info_bin_data_buf");
+                            self.persistent.pool.return_buf(old.tile, "ekrano.tile_buf");
+                            self.persistent
+                                .pool
+                                .return_buf(old.segments, "ekrano.segments_buf");
+                            self.persistent.pool.return_buf(old.ptcl, "ekrano.ptcl_buf");
+                            self.persistent
+                                .pool
+                                .return_buf(old.blend_spill, "ekrano.blend_spill");
+                            self.persistent
+                                .pool
+                                .return_buf(old.fallback_indirect, "ekrano.indirect_count");
+                            macro_rules! return_coarse {
+                                ($field:expr, $name:expr) => {
+                                    if let Some(b) = $field {
+                                        self.persistent.pool.return_buf(b, $name);
+                                    }
+                                };
+                            }
+                            return_coarse!(old.reduced, "ekrano.reduced_buf");
+                            return_coarse!(old.reduced2, "ekrano.reduced2_buf");
+                            return_coarse!(old.reduced_scan, "ekrano.reduced_scan_buf");
+                            return_coarse!(old.tagmonoid, "ekrano.tagmonoid_buf");
+                            return_coarse!(old.path_bbox, "ekrano.path_bbox_buf");
+                            return_coarse!(old.lines, "ekrano.lines_buf");
+                            return_coarse!(old.draw_reduced, "ekrano.draw_reduced_buf");
+                            return_coarse!(old.draw_monoid, "ekrano.draw_monoid_buf");
+                            return_coarse!(old.clip_inp, "ekrano.clip_inp_buf");
+                            return_coarse!(old.clip_el, "ekrano.clip_el_buf");
+                            return_coarse!(old.clip_bic, "ekrano.clip_bic_buf");
+                            return_coarse!(old.clip_bbox, "ekrano.clip_bbox_buf");
+                            return_coarse!(old.draw_bbox, "ekrano.draw_bbox_buf");
+                            return_coarse!(old.bin_header, "ekrano.bin_header_buf");
+                            return_coarse!(old.path, "ekrano.path_buf");
+                            return_coarse!(old.seg_counts, "ekrano.seg_counts_buf");
+                        }
+                        self.persistent.cached_pipeline[oldest_i] = Some(pipeline_cache);
+                        outcome.cached_pipeline_slot = Some(oldest_i);
+                        log::debug!(
+                            "[PIPE-CACHE] schedule: evicted+cached slot={oldest_i} (tv={oldest_tv})"
+                        );
+                    } else {
+                        // Wait failed (device lost?) — fall back to deferred.
+                        self.defer_cached_pipeline_owned_buffers(pipeline_cache);
+                        log::debug!(
+                            "[PIPE-CACHE] schedule: all slots full — deferred (wait failed)"
+                        );
+                    }
                 }
             }
             (info_bin_data, tile, segments, ptcl, blend_spill, fallback_indirect) => {
@@ -1631,21 +1699,21 @@ impl GoldyRenderer {
     /// Installs a [`TrackingVramAllocator`](goldy::vram_allocator::TrackingVramAllocator) with a 512 MiB budget on the device
     /// to prevent runaway GPU memory growth under heavy pipelining.
     pub fn new(device: &Device) -> Result<Self> {
+        Self::new_with_vram_budget(device, 512 * 1024 * 1024)
+    }
+
+    /// Like [`Self::new`] but with an explicit VRAM byte budget on the tracked device.
+    pub fn new_with_vram_budget(device: &Device, budget_bytes: u64) -> Result<Self> {
         use goldy::vram_allocator::{DefaultVramAllocator, TrackingVramAllocator};
 
-        let budget = 512 * 1024 * 1024; // 512 MiB
         let tracking =
-            TrackingVramAllocator::with_budget(Arc::new(DefaultVramAllocator::new()), budget);
-        let tracked_device = device.with_vram_allocator(Arc::new(tracking));
+            TrackingVramAllocator::with_budget(Arc::new(DefaultVramAllocator::new()), budget_bytes);
+        // Install the tracking allocator on the device in place — no second DeviceInner,
+        // no split high_water_timeline or placement_heap.
+        device.set_vram_allocator(Arc::new(tracking));
 
-        // FrameOrchestrator uses the original (unbudgeted) device for transient-buffer
-        // submission.  The placement heap for transient allocations must not be
-        // constrained by the 512 MiB TrackingVramAllocator budget, because the heap
-        // size depends on the scene's transient footprint and can legitimately exceed
-        // that figure for large scenes. The tracked device is still used for storage-
-        // pool allocations (via `prepare_storage_pool`).
         let mut renderer = Self {
-            device: tracked_device.clone(),
+            device: device.clone(),
             shaders: FullShaders::empty(),
             resolver: Resolver::new(),
             engine_shaders: Vec::new(),
@@ -1680,7 +1748,7 @@ impl GoldyRenderer {
             last_packed_len: None,
             graph: TaskGraph::new(),
         };
-        let shaders = shaders::goldy_full_shaders(&tracked_device, &mut renderer)?;
+        let shaders = shaders::goldy_full_shaders(device, &mut renderer)?;
         renderer.shaders = shaders;
         // Wire the pool's self-replenishment from the renderer's pending_owned_returns.
         let pending_returns = renderer.persistent.pending_owned_returns.clone();
@@ -1688,7 +1756,7 @@ impl GoldyRenderer {
             .persistent
             .pool
             .set_pending_returns(pending_returns);
-        tracked_device.release_idle_shader_compiler();
+        device.release_idle_shader_compiler();
         Ok(renderer)
     }
 
@@ -1793,11 +1861,6 @@ impl GoldyRenderer {
         }
     }
 
-    /// Number of deferred payload epochs waiting for GPU retirement.
-    pub fn deferred_ring_depth(&self) -> bool {
-        self.device.has_deferred_payloads()
-    }
-
     /// Query the device-owned placement heap's state for diagnostics / tests.
     ///
     /// Delegates to [`Device::placement_heap_stats`](goldy::Device::placement_heap_stats).
@@ -1834,6 +1897,13 @@ impl GoldyRenderer {
             self.render_to_texture(device, scene, &texture, params)?;
             self.frame_pipeline
                 .drain_all(|_, _| Ok::<(), Error>(()))
+                .map_err(|e| Error::Shader(e.to_string()))?;
+            // Buffer renders never call `note_presented`, so `drain_all` has no
+            // ring entries to wait on and `gpu_progress` stays behind the bump
+            // readback timeline.  Explicitly wait so `drain_ready_bump_readbacks`
+            // can see the counters written by the GPU.
+            device
+                .wait_until(device.high_water_timeline())
                 .map_err(|e| Error::Shader(e.to_string()))?;
             self.persistent.drain_ready_bump_readbacks(device)?;
             self.device.flush_deferred_deletions();
@@ -1948,9 +2018,11 @@ impl GoldyRenderer {
         let t_resolve = t_resolve_start.elapsed();
 
         // --- Reclaim completed frames & open recording bracket ---
-        // Drain pool returns from prior-frame token drops (cheap; no GPU sync).
-        // Drain any bump readbacks whose GPU timeline has already passed.
-        // flush_deferred_deletions runs after submit so reclaim overlaps GPU work.
+        // Process any async GPU completion events that fired since the last frame,
+        // advancing boundary_crossed so deferred tokens are dropped into pending_owned_returns.
+        // Then drain those returns into the pool before prepare_pipeline allocates buffers.
+        // This ensures the pool is stocked from completed frames before fresh allocation is needed.
+        self.device.flush_deferred_deletions();
         self.persistent.drain_pending_returns();
         self.persistent.drain_ready_bump_readbacks(device)?;
 

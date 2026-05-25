@@ -502,17 +502,57 @@ impl BufferSizes {
         let n_paths_aligned = align_up(n_paths, 256);
         let paths = BufferSize::new(n_paths_aligned);
 
-        // The following buffer sizes have been hand picked to accommodate the vello test scenes as
-        // well as paris-30k. These should instead get derived from the scene layout using
-        // reasonable heuristics.
-        let bin_data = BufferSize::new(1 << 18);
-        let tiles = BufferSize::new(1 << 21);
-        let lines = BufferSize::new(1 << 21);
-        let seg_counts = BufferSize::new(1 << 21);
-        let segments = BufferSize::new(1 << 21);
-        // 16 * 16 (1 << 8) is one blend spill, so this allows for 4096 spills.
-        let blend_spill = BufferSize::new(1 << 20);
-        let ptcl = BufferSize::new(1 << 23);
+        // Bump-allocated buffer sizes scale with viewport and scene complexity.
+        // Floors are fractions of the legacy paris-30k defaults so small scenes still
+        // render correctly; caps preserve full headroom for large scenes.
+        // `with_bump_estimates` grows on overflow after the first frame.
+        let n_tiles = workgroups.fine.0 * workgroups.fine.1;
+        let flatten_capacity = workgroups.flatten.0.saturating_mul(FLATTEN_WG);
+        let path_data_len = layout.draw_tag_base.saturating_sub(layout.path_data_base);
+        let path_line_estimate = n_paths
+            .saturating_mul(128)
+            .max(n_clips.saturating_mul(32))
+            .max(flatten_capacity)
+            .max(path_data_len.saturating_mul(2));
+        let lines = BufferSize::new(path_line_estimate.clamp(1 << 19, 1 << 21));
+        let seg_counts = BufferSize::new(path_line_estimate.clamp(1 << 18, 1 << 21));
+        let segments = BufferSize::new(path_line_estimate.clamp(1 << 19, 1 << 21));
+        let tiles = BufferSize::new(
+            // tile_alloc.slang uses Morton layout: a path spanning W×H tiles requires
+            // next_pow2(max(W,H))^2 entries. Estimate per-path Morton cost using
+            // next_pow2(isqrt(n_tiles)), and ensure at least one full-viewport allocation fits.
+            {
+                let morton_dim = n_tiles.isqrt().max(1).next_power_of_two();
+                n_paths
+                    .saturating_mul(morton_dim)
+                    .saturating_mul(morton_dim)
+                    .max(morton_dim.saturating_mul(morton_dim))
+                    .clamp(1 << 16, 1 << 21)
+            },
+        );
+        let binning_portion = n_draw_objects.saturating_mul(16).max(4096);
+        let bin_data_len = layout.bin_data_start.saturating_add(binning_portion);
+        let bin_data = BufferSize::new(
+            bin_data_len.clamp((1 << 16).max(layout.bin_data_start), 1 << 18),
+        );
+        // 16 * 16 (1 << 8) is one blend spill; scale with clip depth for blend modes.
+        let blend_spill = BufferSize::new(
+            (n_clips
+                .saturating_mul(256)
+                .max(n_tiles.saturating_mul(8)))
+            .clamp(1 << 16, 1 << 20),
+        );
+        let ptcl_estimate = n_tiles
+            .saturating_mul(64)
+            .max(n_draw_objects.saturating_mul(64))
+            .max(n_clips.saturating_mul(32))
+            .max(path_data_len.saturating_mul(4));
+        let ptcl_floor = if path_data_len > (1 << 15) {
+            1 << 22
+        } else {
+            1 << 20
+        };
+        let ptcl = BufferSize::new(ptcl_estimate.clamp(ptcl_floor, 1 << 23));
         Self {
             path_reduced,
             path_reduced2,
