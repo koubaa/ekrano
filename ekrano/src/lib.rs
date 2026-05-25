@@ -95,7 +95,7 @@ pub use peniko::kurbo;
 
 pub use goldy::placement_heap::PlacementHeapStats;
 pub use goldy::{Frame, TimelineValue};
-pub use goldy_renderer::{AllocatorStats, FrameStats, GoldyRenderer};
+pub use goldy_renderer::{AllocatorStats, FrameStats, GoldyRenderer, ResourcePoolStats};
 
 pub use ekrano_encoding::{Glyph, NormalizedCoord};
 pub use scene::{DrawGlyphs, Scene};
@@ -234,6 +234,9 @@ pub struct RenderParams {
     /// pipelining sync point it imposes, which can significantly improve
     /// throughput at the cost of silently producing incomplete output if the
     /// bump allocator overflows.
+    ///
+    /// Override at runtime with `EKRANO_ROBUST=0` (disable) or `EKRANO_ROBUST=1`
+    /// (force enable) for benchmarking.
     ///
     /// Defaults to `true`.
     pub robust: bool,

@@ -17,7 +17,7 @@ use ekrano_encoding::{
     make_mask_lut, make_mask_lut_16,
 };
 use goldy::types::{BufferFlags, SpatialAccess, TextureFlags};
-use goldy::{Buffer, SwapchainOutputHandle, Texture};
+use goldy::{Buffer, Texture};
 use peniko::color::{PremulColor, Srgb};
 
 use ekrano_encoding::{
@@ -575,13 +575,8 @@ impl Render {
         shaders: &FullShaders,
         pipeline: &PipelineResources,
         output_texture: Option<&Texture>,
-        swapchain_output: Option<SwapchainOutputHandle>,
         recorder: &mut FrameRecorder<'_>,
     ) {
-        debug_assert!(
-            !(output_texture.is_some() && swapchain_output.is_some()),
-            "record_fine: output_texture and swapchain_output are mutually exclusive",
-        );
         let fine_wg_count = self.fine_wg_count.take().expect("fine_wg_count");
         let width_in_tiles = fine_wg_count.0;
         let height_in_tiles = fine_wg_count.1;
@@ -653,17 +648,13 @@ impl Render {
                 None
             };
 
-        let output_binding = match swapchain_output {
-            Some(h) => GpuBinding::SwapchainOutput(h),
-            None => GpuBinding::Tex(out_tex),
-        };
         let mut fine_resources: Vec<GpuBinding<'_>> = vec![
             pipeline.config.as_binding(),
             pipeline.segments.as_binding(),
             pipeline.ptcl.as_binding(),
             pipeline.info_bin_data.as_binding(),
             pipeline.blend_spill.as_binding(),
-            output_binding,
+            GpuBinding::Tex(out_tex),
             GpuBinding::Tex(&pipeline.gradient),
             GpuBinding::Tex(&pipeline.image_atlas),
             GpuBinding::Tex(&pipeline.mask_atlas),
