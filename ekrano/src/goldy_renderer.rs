@@ -136,6 +136,15 @@ pub struct AllocatorStats {
     pub cleanup_ring_depth: usize,
 }
 
+/// Snapshot of the resource pool's state, useful for tests and diagnostics.
+#[derive(Debug, Clone, Copy)]
+pub struct ResourcePoolStats {
+    /// Total number of pooled buffers across all keys.
+    pub total_pooled_buffers: usize,
+    /// Number of distinct `(size, access, name, flags)` keys in the pool.
+    pub distinct_keys: usize,
+}
+
 /// Upper bound applied to observed bump counters before they're fed into
 /// `RenderConfig::with_bump_estimates`. Legitimate scenes need far less than
 /// this (the tiger hits ~13K segments, paris-30k a few hundred thousand),
@@ -296,9 +305,37 @@ struct BufferKey {
 #[derive(Default)]
 pub(crate) struct ResourcePool {
     bufs: HashMap<BufferKey, Vec<Buffer>>,
+    /// Reference to the pending returns queue. When a buffer allocation fails
+    /// (heap exhausted), the pool flushes deferred deletions, drains this queue
+    /// back into itself, and retries before blocking for GPU progress.
+    pending_owned_returns: Option<Arc<Mutex<Vec<(Buffer, &'static str)>>>>,
 }
 
 impl ResourcePool {
+    /// Wire the pool to the renderer's `pending_owned_returns` queue so that
+    /// pool-misses can self-replenish before triggering a GPU wait.
+    pub(crate) fn set_pending_returns(
+        &mut self,
+        pending: Arc<Mutex<Vec<(Buffer, &'static str)>>>,
+    ) {
+        self.pending_owned_returns = Some(pending);
+    }
+
+    /// Drain `pending_owned_returns` into this pool.
+    fn drain_pending(&mut self) {
+        let Some(ref pending) = self.pending_owned_returns else {
+            return;
+        };
+        let Ok(mut guard) = pending.try_lock() else {
+            return;
+        };
+        let drained: Vec<_> = guard.drain(..).collect();
+        drop(guard);
+        for (buf, name) in drained {
+            self.return_buf(buf, name);
+        }
+    }
+
     pub(crate) fn get_buf_with_stride(
         &mut self,
         device: &Device,
@@ -314,13 +351,50 @@ impl ResourcePool {
             name,
             buffer_flags,
         };
-        let pool = self.bufs.entry(key).or_default();
-        if let Some(buf) = pool.pop() {
+        // Fast path: pool hit.
+        if let Some(buf) = self.bufs.entry(key.clone()).or_default().pop() {
             return Ok(buf);
         }
-        device
-            .alloc_buffer(size, access, stride, buffer_flags)
-            .map_err(|e| Error::Shader(e.to_string()))
+
+        // Pool miss: try a fresh allocation.
+        match device.alloc_buffer(size, access, stride, buffer_flags) {
+            Ok(b) => return Ok(b),
+            Err(_) => {
+                // Attempt 2 (non-blocking): flush deferred deletions so that any GPU
+                // work that completed since the last flush moves buffers from the vram
+                // allocator ring into pending_owned_returns, then drain pending back into
+                // this pool and retry. This handles the common case where one or more
+                // frames finished between the last run_frame flush and this alloc.
+                device.flush_deferred_deletions();
+                self.drain_pending();
+                if let Some(buf) = self.bufs.entry(key.clone()).or_default().pop() {
+                    return Ok(buf);
+                }
+
+                // Attempt 3 (blocking): wait for the oldest in-flight frame to retire,
+                // then flush and drain again. This is the boundary action that limits
+                // CPU-to-GPU skew in tight loops where the GPU lags far behind the CPU.
+                if let Some(oldest_epoch) = device.oldest_deferred_epoch() {
+                    let _tz = goldy::tracy_zone!("ekrano.resource_pool.wait_reclaim");
+                    log::debug!(
+                        "ResourcePool heap pressure for {name} — waiting for GPU epoch \
+                         {oldest_epoch} to reclaim archive",
+                    );
+                    let _ = device.wait_until_timeout(oldest_epoch, 2000);
+                    device.flush_deferred_deletions();
+                    self.drain_pending();
+                    if let Some(buf) = self.bufs.entry(key.clone()).or_default().pop() {
+                        return Ok(buf);
+                    }
+                }
+
+                // Final attempt: one more fresh allocation (heap may have space now that
+                // the DeletionQueue was processed inside flush_deferred_deletions).
+                device
+                    .alloc_buffer(size, access, stride, buffer_flags)
+                    .map_err(|e| Error::Shader(e.to_string()))
+            }
+        }
     }
 
     /// Return a buffer to the pool for reuse by a future frame.
@@ -348,6 +422,16 @@ impl ResourcePool {
         for k in empties {
             self.bufs.remove(&k);
         }
+    }
+
+    /// Total number of pooled buffers across all keys.
+    pub(crate) fn total_pooled_buffers(&self) -> usize {
+        self.bufs.values().map(|v| v.len()).sum()
+    }
+
+    /// Number of distinct buffer keys in the pool.
+    pub(crate) fn distinct_keys(&self) -> usize {
+        self.bufs.len()
     }
 }
 
@@ -1591,6 +1675,9 @@ impl GoldyRenderer {
         };
         let shaders = shaders::goldy_full_shaders(&tracked_device, &mut renderer)?;
         renderer.shaders = shaders;
+        // Wire the pool's self-replenishment from the renderer's pending_owned_returns.
+        let pending_returns = renderer.persistent.pending_owned_returns.clone();
+        renderer.persistent.pool.set_pending_returns(pending_returns);
         tracked_device.release_idle_shader_compiler();
         Ok(renderer)
     }
@@ -1686,6 +1773,19 @@ impl GoldyRenderer {
                 used: a.used_this_frame(),
                 cleanup_ring_depth: self.frame_pipeline.pending_frames(),
             })
+    }
+
+    /// Query the resource pool's current state for diagnostics or test assertions.
+    pub fn resource_pool_stats(&self) -> ResourcePoolStats {
+        ResourcePoolStats {
+            total_pooled_buffers: self.persistent.pool.total_pooled_buffers(),
+            distinct_keys: self.persistent.pool.distinct_keys(),
+        }
+    }
+
+    /// Number of deferred payload epochs waiting for GPU retirement.
+    pub fn deferred_ring_depth(&self) -> bool {
+        self.device.has_deferred_payloads()
     }
 
     /// Query the device-owned placement heap's state for diagnostics / tests.
@@ -2291,6 +2391,10 @@ mod tests {
             pending_texture_returns: Arc::new(Mutex::new(Vec::new())),
             pending_owned_returns: Arc::new(Mutex::new(Vec::new())),
         };
+        {
+            let pending = persistent.pending_owned_returns.clone();
+            persistent.pool.set_pending_returns(pending);
+        }
 
         for &expected_format in &[TextureFormat::Bgra8Unorm, TextureFormat::Rgba8Unorm] {
             let mut resolver = Resolver::new();
