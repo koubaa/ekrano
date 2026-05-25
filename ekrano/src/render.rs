@@ -13,8 +13,8 @@ use std::mem::size_of;
 
 use crate::gpu_resources::BufferLifetime;
 use ekrano_encoding::{
-    Encoding, FilterPrimitive, FilterUniform, IndirectCount, WorkgroupCountsGpu, WorkgroupSize,
-    make_mask_lut, make_mask_lut_16,
+    FilterPrimitive, FilterUniform, IndirectCount, LayerFilterEffect, WorkgroupCountsGpu,
+    WorkgroupSize, make_mask_lut, make_mask_lut_16,
 };
 use goldy::types::{BufferFlags, SpatialAccess, TextureFlags};
 use goldy::{Buffer, Texture};
@@ -571,7 +571,7 @@ impl Render {
     /// Run fine rasterization assuming the coarse phase succeeded.
     pub(crate) fn record_fine(
         &mut self,
-        encoding: &Encoding,
+        layer_filter_effects: &[LayerFilterEffect],
         shaders: &FullShaders,
         pipeline: &PipelineResources,
         output_texture: Option<&Texture>,
@@ -689,7 +689,7 @@ impl Render {
 
         let width_px = out_tex.width();
         let height_px = out_tex.height();
-        if !encoding.layer_filter_effects.is_empty() && width_px > 0 && height_px > 0 {
+        if !layer_filter_effects.is_empty() && width_px > 0 && height_px > 0 {
             if let Some(fs) = shaders.filter_pass {
                 let wg = (width_px.div_ceil(16), height_px.div_ceil(16), 1);
                 let u_clear = FilterUniform::clear_transparent(width_px, height_px);
@@ -933,9 +933,9 @@ fn pyramid_blur(
     recorder.defer_texture(bottom_scratch);
 }
 
-/// Per-layer filter chain for [`Encoding::layer_filter_effects`] after fine rasterization.
+/// Per-layer filter chain for layer filter effects after fine rasterization.
 pub(crate) fn record_filter_effects(
-    encoding: &Encoding,
+    layer_filter_effects: &[LayerFilterEffect],
     shaders: &FullShaders,
     recorder: &mut FrameRecorder<'_>,
     pipeline: &PipelineResources,
@@ -948,7 +948,7 @@ pub(crate) fn record_filter_effects(
     if width == 0 || height == 0 {
         return;
     }
-    if encoding.layer_filter_effects.is_empty() {
+    if layer_filter_effects.is_empty() {
         return;
     }
     let Some(shader) = shaders.filter_pass else {
@@ -969,7 +969,7 @@ pub(crate) fn record_filter_effects(
     let wg = (width.div_ceil(16), height.div_ceil(16), 1);
     let filter_layers = &pipeline.filter_layers;
 
-    for effect in &encoding.layer_filter_effects {
+    for effect in layer_filter_effects {
         let idx = (effect.layer_index as usize).min(3);
         let ft = &filter_layers[idx];
         match &effect.primitive {
@@ -1082,17 +1082,13 @@ pub(crate) fn record_filter_effects(
         }
     }
 
-    for effect in encoding.layer_filter_effects.iter().filter(|e| e.is_nested) {
+    for effect in layer_filter_effects.iter().filter(|e| e.is_nested) {
         let idx = (effect.layer_index as usize).min(3);
         let ft = &filter_layers[idx];
         let u_comp = FilterUniform::composite_filtered_layer(width, height, effect.layer_blend);
         filter_dispatch(recorder, shader, &u_comp, wg, ft, dest);
     }
-    for effect in encoding
-        .layer_filter_effects
-        .iter()
-        .filter(|e| !e.is_nested)
-    {
+    for effect in layer_filter_effects.iter().filter(|e| !e.is_nested) {
         let idx = (effect.layer_index as usize).min(3);
         let ft = &filter_layers[idx];
         let u_comp = FilterUniform::composite_filtered_layer(width, height, effect.layer_blend);

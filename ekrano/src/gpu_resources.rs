@@ -18,7 +18,7 @@ pub(crate) const TRANSIENT_SLOT_PLACEHOLDER: u32 = u32::MAX;
 use crate::goldy_renderer::PersistentState;
 use crate::resource_proxy::{BindType, ImageFormat};
 use crate::{Error, RenderParams, Result};
-use ekrano_encoding::{BumpAllocators, Encoding, Images, IndirectCount, Ramps, RenderConfig};
+use ekrano_encoding::{BumpAllocators, CoverageMask, Images, IndirectCount, Ramps, RenderConfig};
 
 pub(crate) enum GpuBuf {
     Owned(Buffer),
@@ -461,7 +461,7 @@ impl PipelineResources {
         device: &Device,
         graph: &mut TaskGraph,
         persistent: &mut PersistentState,
-        encoding: &Encoding,
+        coverage_mask: Option<&CoverageMask>,
         mut packed: Vec<u8>,
         ramps: Ramps<'_>,
         images: Images<'_>,
@@ -476,10 +476,10 @@ impl PipelineResources {
         let gpu_progress = device.gpu_progress();
 
         let mut cpu_config_owned = *config;
-        if encoding.coverage_mask.is_some() {
+        if coverage_mask.is_some() {
             cpu_config_owned.gpu.mask_active = 1;
         }
-        if let Some(ref m) = encoding.coverage_mask {
+        if let Some(m) = coverage_mask {
             assert_eq!(
                 m.width, params.width,
                 "coverage_mask width must match render width"
@@ -545,7 +545,7 @@ impl PipelineResources {
 
         let mask_atlas = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.mask_atlas");
-            match &encoding.coverage_mask {
+            match coverage_mask {
                 Some(m) => {
                     let mut rgba = Vec::with_capacity(m.data.len() * 4);
                     for &b in m.data.iter() {
