@@ -976,14 +976,12 @@ impl PipelineResources {
         // round-trips when render dimensions are stable across frames).
         let (out_image, filter_layers) = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.render_targets");
-            if let Some((cached_out, cached_layers)) =
-                persistent.take_cached_render_targets(
-                    gpu_progress,
-                    params.width,
-                    params.height,
-                    out_image_format,
-                )
-            {
+            if let Some((cached_out, cached_layers)) = persistent.take_cached_render_targets(
+                gpu_progress,
+                params.width,
+                params.height,
+                out_image_format,
+            ) {
                 (cached_out, cached_layers)
             } else {
                 let _tz2 = goldy::tracy_zone!("ekrano.prepare.render_targets.ALLOC");
