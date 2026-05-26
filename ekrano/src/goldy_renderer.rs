@@ -704,7 +704,7 @@ pub(crate) struct PersistentState {
 impl PersistentState {
     pub(crate) fn take_cached_render_targets(
         &mut self,
-        _progress: TimelineValue,
+        progress: TimelineValue,
         width: u32,
         height: u32,
         out_format: TextureFormat,
@@ -713,29 +713,45 @@ impl PersistentState {
             self.cached_render_targets[0].is_some(),
             self.cached_render_targets[1].is_some(),
         ];
-        let order = occupied_slots_oldest_first(self.cached_rt_timelines, occupied);
+        let order = ready_cache_slots_oldest_first(self.cached_rt_timelines, occupied, progress);
+        if order[0].is_none() {
+            log::warn!(
+                "[RT-CACHE] MISS (gpu): progress={progress} timelines={:?} occupied=[{},{}] deltas=[{},{}]",
+                self.cached_rt_timelines,
+                occupied[0], occupied[1],
+                progress as i64 - self.cached_rt_timelines[0] as i64,
+                progress as i64 - self.cached_rt_timelines[1] as i64,
+            );
+            return None;
+        }
         for i in order.into_iter().flatten() {
             let Some((out, layers)) = self.cached_render_targets[i].take() else {
                 continue;
             };
             if out.width() == width && out.height() == height && out.format() == out_format {
                 log::debug!(
-                    "[RT-CACHE] HIT slot={i}: timeline={}",
+                    "[RT-CACHE] HIT slot={i}: progress={progress} timeline={} delta={}",
                     self.cached_rt_timelines[i],
+                    progress as i64 - self.cached_rt_timelines[i] as i64,
                 );
                 return Some((out, layers));
             }
-            log::debug!(
-                "[RT-CACHE] MISS (resize) slot={i}: timeline={} {}x{} fmt={out_format:?}",
+            log::warn!(
+                "[RT-CACHE] MISS (resize) slot={i}: progress={progress} timeline={} {}x{} vs {}x{} fmt={out_format:?}",
                 self.cached_rt_timelines[i],
                 out.width(),
                 out.height(),
+                width,
+                height,
             );
             self.tex_pool.release(out);
             for l in layers {
                 self.tex_pool.release(l);
             }
         }
+        log::warn!("[RT-CACHE] MISS (no match): progress={progress} timelines={:?} occupied=[{},{}]",
+            self.cached_rt_timelines, occupied[0], occupied[1],
+        );
         None
     }
 }
@@ -1880,6 +1896,10 @@ impl GoldyRenderer {
             self.frame_pipeline.note_presented(tv);
 
             if let Some(i) = work.cached_rt_slot {
+                log::debug!(
+                    "[RT-CACHE] stamp slot={i} timeline={tv} (prev={})",
+                    self.persistent.cached_rt_timelines[i],
+                );
                 self.persistent.cached_rt_timelines[i] = tv;
             }
             if let Some(i) = work.cached_pipeline_slot {

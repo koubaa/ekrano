@@ -474,6 +474,7 @@ impl PipelineResources {
         }
 
         let gpu_progress = device.gpu_progress();
+        log::debug!("[RT-CACHE] gpu_progress={gpu_progress} at prepare entry");
 
         let mut cpu_config_owned = *config;
         if coverage_mask.is_some() {
