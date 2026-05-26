@@ -48,58 +48,15 @@ use ekrano_encoding::{BumpAllocators, Layout, Ramps, Images, RenderConfig, Resol
 const MAX_BUMP_RETRIES: usize = 2;
 
 /// Timeline-guarded slots for cross-frame render-target and pipeline-buffer reuse.
-/// Two slots match `FrameStrategy::Balanced` depth=2: while one ages on the GPU,
-/// the other can be claimed or written without evicting the first.
-const RESOURCE_CACHE_SLOTS: usize = 2;
+/// Three slots match Metal/Vulkan `MAX_FRAMES_IN_FLIGHT=3`: the oldest entry can
+/// retire once acquire waits on the slot being reused (~3 frames ago).
+const RESOURCE_CACHE_SLOTS: usize = 3;
 
 fn find_empty_cache_slot<T>(slots: &[Option<T>]) -> Option<usize> {
     slots.iter().position(Option::is_none)
 }
 
-/// Return the oldest occupied cache slot, ignoring GPU progress.
-///
-/// Safe for write-only resources (render targets, pipeline buffers) that are
-/// fully overwritten each frame — the GPU's prior reads don't affect correctness.
-#[inline]
-fn oldest_occupied_cache_slot(
-    timelines: [TimelineValue; RESOURCE_CACHE_SLOTS],
-    occupied: [bool; RESOURCE_CACHE_SLOTS],
-) -> Option<usize> {
-    match (occupied[0], occupied[1]) {
-        (false, false) => None,
-        (true, false) => Some(0),
-        (false, true) => Some(1),
-        (true, true) => {
-            if timelines[0] <= timelines[1] {
-                Some(0)
-            } else {
-                Some(1)
-            }
-        }
-    }
-}
-
-/// Return occupied slot indices in ascending timeline order, ignoring GPU progress.
-#[inline]
-fn occupied_slots_oldest_first(
-    timelines: [TimelineValue; RESOURCE_CACHE_SLOTS],
-    occupied: [bool; RESOURCE_CACHE_SLOTS],
-) -> [Option<usize>; RESOURCE_CACHE_SLOTS] {
-    match (occupied[0], occupied[1]) {
-        (false, false) => [None, None],
-        (true, false) => [Some(0), None],
-        (false, true) => [Some(1), None],
-        (true, true) => {
-            if timelines[0] <= timelines[1] {
-                [Some(0), Some(1)]
-            } else {
-                [Some(1), Some(0)]
-            }
-        }
-    }
-}
-
-/// Return the oldest GPU-ready cache slot index, or `None` if neither slot qualifies.
+/// Return the oldest GPU-ready cache slot index, or `None` if no slot qualifies.
 #[inline]
 #[allow(dead_code, reason = "alternative cache eviction strategies")]
 fn oldest_ready_cache_slot(
@@ -107,25 +64,22 @@ fn oldest_ready_cache_slot(
     occupied: [bool; RESOURCE_CACHE_SLOTS],
     progress: TimelineValue,
 ) -> Option<usize> {
-    let ready = [
-        occupied[0] && progress >= timelines[0],
-        occupied[1] && progress >= timelines[1],
-    ];
-    match (ready[0], ready[1]) {
-        (false, false) => None,
-        (true, false) => Some(0),
-        (false, true) => Some(1),
-        (true, true) => {
-            if timelines[0] <= timelines[1] {
-                Some(0)
-            } else {
-                Some(1)
+    let mut best: Option<(TimelineValue, usize)> = None;
+    for i in 0..RESOURCE_CACHE_SLOTS {
+        if occupied[i] && progress >= timelines[i] {
+            match best {
+                None => best = Some((timelines[i], i)),
+                Some((best_tv, _)) if timelines[i] < best_tv => {
+                    best = Some((timelines[i], i));
+                }
+                _ => {}
             }
         }
     }
+    best.map(|(_, i)| i)
 }
 
-/// Return ready slot indices in ascending timeline order (at most two entries).
+/// Return ready slot indices in ascending timeline order (padded with `None`).
 #[inline]
 #[allow(dead_code, reason = "alternative cache eviction strategies")]
 fn ready_cache_slots_oldest_first(
@@ -133,22 +87,16 @@ fn ready_cache_slots_oldest_first(
     occupied: [bool; RESOURCE_CACHE_SLOTS],
     progress: TimelineValue,
 ) -> [Option<usize>; RESOURCE_CACHE_SLOTS] {
-    let ready = [
-        occupied[0] && progress >= timelines[0],
-        occupied[1] && progress >= timelines[1],
-    ];
-    match (ready[0], ready[1]) {
-        (false, false) => [None, None],
-        (true, false) => [Some(0), None],
-        (false, true) => [Some(1), None],
-        (true, true) => {
-            if timelines[0] <= timelines[1] {
-                [Some(0), Some(1)]
-            } else {
-                [Some(1), Some(0)]
-            }
-        }
+    let mut ready: Vec<(TimelineValue, usize)> = (0..RESOURCE_CACHE_SLOTS)
+        .filter(|&i| occupied[i] && progress >= timelines[i])
+        .map(|i| (timelines[i], i))
+        .collect();
+    ready.sort_by_key(|&(tv, _)| tv);
+    let mut out = [None; RESOURCE_CACHE_SLOTS];
+    for (j, &(_, idx)) in ready.iter().enumerate().take(RESOURCE_CACHE_SLOTS) {
+        out[j] = Some(idx);
     }
+    out
 }
 
 /// Extra space added to the storage pool beyond the exact allocation required.
@@ -661,7 +609,7 @@ pub(crate) struct PersistentState {
     pub(crate) cached_rt_timelines: [TimelineValue; RESOURCE_CACHE_SLOTS],
     /// Cached `OwnedShared` + pool-exempt pipeline buffers from previous frames.
     ///
-    /// Same two-slot timeline-guard pattern as `cached_render_targets`.
+    /// Same timeline-guard pattern as `cached_render_targets`.
     pub(crate) cached_pipeline:
         [Option<crate::gpu_resources::CachedPipeline>; RESOURCE_CACHE_SLOTS],
     /// Timeline of the frame that last wrote each pipeline cache slot.
@@ -702,11 +650,7 @@ pub(crate) struct PersistentState {
     pending_owned_returns: Arc<Mutex<Vec<(Buffer, &'static str)>>>,
 }
 
-/// Two-slot render target cache.
-///
-/// Render targets are fully overwritten each frame, so reuse is safe regardless
-/// of GPU progress — no timeline gating needed. We still prefer the oldest slot
-/// to give the GPU maximum time to finish reads from the other slot's prior use.
+/// Timeline-guarded render target cache.
 impl PersistentState {
     pub(crate) fn take_cached_render_targets(
         &mut self,
@@ -715,18 +659,13 @@ impl PersistentState {
         height: u32,
         out_format: TextureFormat,
     ) -> Option<(Texture, [Texture; 4])> {
-        let occupied = [
-            self.cached_render_targets[0].is_some(),
-            self.cached_render_targets[1].is_some(),
-        ];
+        let occupied = std::array::from_fn(|i| self.cached_render_targets[i].is_some());
         let order = ready_cache_slots_oldest_first(self.cached_rt_timelines, occupied, progress);
         if order[0].is_none() {
             log::warn!(
-                "[RT-CACHE] MISS (gpu): progress={progress} timelines={:?} occupied=[{},{}] deltas=[{},{}]",
+                "[RT-CACHE] MISS (gpu): progress={progress} timelines={:?} occupied={:?}",
                 self.cached_rt_timelines,
-                occupied[0], occupied[1],
-                progress as i64 - self.cached_rt_timelines[0] as i64,
-                progress as i64 - self.cached_rt_timelines[1] as i64,
+                occupied,
             );
             return None;
         }
@@ -755,8 +694,10 @@ impl PersistentState {
                 self.tex_pool.release(l);
             }
         }
-        log::warn!("[RT-CACHE] MISS (no match): progress={progress} timelines={:?} occupied=[{},{}]",
-            self.cached_rt_timelines, occupied[0], occupied[1],
+        log::warn!(
+            "[RT-CACHE] MISS (no match): progress={progress} timelines={:?} occupied={:?}",
+            self.cached_rt_timelines,
+            occupied,
         );
         None
     }
@@ -851,16 +792,15 @@ impl PersistentState {
     /// without waiting for the GPU to finish the prior frame's reads.
     pub(crate) fn take_cached_pipeline(
         &mut self,
-        _progress: TimelineValue,
+        progress: TimelineValue,
     ) -> Option<crate::gpu_resources::CachedPipeline> {
-        let occupied = [
-            self.cached_pipeline[0].is_some(),
-            self.cached_pipeline[1].is_some(),
-        ];
-        let Some(i) = oldest_occupied_cache_slot(self.cached_pipeline_timelines, occupied) else {
+        let occupied = std::array::from_fn(|i| self.cached_pipeline[i].is_some());
+        let Some(i) = oldest_ready_cache_slot(self.cached_pipeline_timelines, occupied, progress)
+        else {
             log::debug!(
-                "[PIPE-CACHE] MISS (empty): timelines={:?}",
+                "[PIPE-CACHE] MISS (gpu): progress={progress} timelines={:?} occupied={:?}",
                 self.cached_pipeline_timelines,
+                occupied,
             );
             return None;
         };
@@ -1791,10 +1731,10 @@ impl GoldyRenderer {
                 pending_bump_readbacks: VecDeque::new(),
                 linear_clamp_sampler: None,
                 nearest_clamp_sampler: None,
-                cached_render_targets: [None, None],
-                cached_rt_timelines: [0, 0],
-                cached_pipeline: [None, None],
-                cached_pipeline_timelines: [0, 0],
+                cached_render_targets: std::array::from_fn(|_| None),
+                cached_rt_timelines: [0; RESOURCE_CACHE_SLOTS],
+                cached_pipeline: std::array::from_fn(|_| None),
+                cached_pipeline_timelines: [0; RESOURCE_CACHE_SLOTS],
                 deferred_owned_cap_hint: 0,
                 deferred_pool_cap_hint: 0,
                 deferred_textures_cap_hint: 0,
@@ -2708,10 +2648,10 @@ mod tests {
             pending_bump_readbacks: VecDeque::new(),
             linear_clamp_sampler: None,
             nearest_clamp_sampler: None,
-            cached_render_targets: [None, None],
-            cached_rt_timelines: [0, 0],
-            cached_pipeline: [None, None],
-            cached_pipeline_timelines: [0, 0],
+            cached_render_targets: std::array::from_fn(|_| None),
+            cached_rt_timelines: [0; RESOURCE_CACHE_SLOTS],
+            cached_pipeline: std::array::from_fn(|_| None),
+            cached_pipeline_timelines: [0; RESOURCE_CACHE_SLOTS],
             deferred_owned_cap_hint: 0,
             deferred_pool_cap_hint: 0,
             deferred_textures_cap_hint: 0,
