@@ -482,20 +482,26 @@ impl ResourcePool {
                     return Ok(buf);
                 }
 
-                // Attempt 3 (blocking): wait for the oldest in-flight frame to retire,
-                // then flush and drain again. This is the boundary action that limits
-                // CPU-to-GPU skew in tight loops where the GPU lags far behind the CPU.
-                if let Some(oldest_epoch) = device.oldest_deferred_epoch() {
+                // Attempt 3 (blocking): wait for deferred epochs to retire one at
+                // a time until a pool hit occurs or the deferred ring is empty.
+                // Early epochs may not contain the needed buffer (e.g. pipeline
+                // cache holds the first frames' buffers), so we loop rather than
+                // trying a single epoch.
+                {
                     let _tz = goldy::tracy_zone!("ekrano.resource_pool.wait_reclaim");
-                    log::debug!(
-                        "ResourcePool heap pressure for {name} — waiting for GPU epoch \
-                         {oldest_epoch} to reclaim archive",
-                    );
-                    let _ = device.wait_until_timeout(oldest_epoch, 2000);
-                    device.flush_deferred_deletions();
-                    self.drain_pending();
-                    if let Some(buf) = self.bufs.entry(key.clone()).or_default().pop() {
-                        return Ok(buf);
+                    while let Some(oldest_epoch) = device.oldest_deferred_epoch() {
+                        log::debug!(
+                            "ResourcePool heap pressure for {name} — waiting for GPU epoch \
+                             {oldest_epoch} to reclaim archive",
+                        );
+                        if device.wait_until_timeout(oldest_epoch, 2000).is_err() {
+                            break;
+                        }
+                        device.flush_deferred_deletions();
+                        self.drain_pending();
+                        if let Some(buf) = self.bufs.entry(key.clone()).or_default().pop() {
+                            return Ok(buf);
+                        }
                     }
                 }
 
