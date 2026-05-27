@@ -249,19 +249,12 @@ struct FrameFinishOutcome {
     recyclable_owned: Vec<(Buffer, &'static str)>,
 }
 
-/// All post-present bookkeeping deferred when [`Frame::present_async`] is used.
+/// Background compositor present from the previous frame.
 ///
-/// Finalized at the start of the next frame via
-/// [`GoldyRenderer::finalize_pending_present`], after the background present
-/// thread has had ~70 µs of OS event-loop time to complete.
+/// GPU compute was already submitted on the render thread; finalize only waits
+/// for the present worker via [`GoldyRenderer::finalize_pending_present`].
 struct PendingPresentWork {
     pending: PendingPresent,
-    cached_rt_slot: Option<usize>,
-    cached_pipeline_slot: Option<usize>,
-    bump_readback: Option<Buffer>,
-    deferred_pool_views: Vec<BufferView>,
-    deferred_textures: Vec<Texture>,
-    recyclable_owned: Vec<(Buffer, &'static str)>,
 }
 
 /// CPU-resolved scene data ready for GPU submission.
@@ -517,6 +510,32 @@ impl ResourcePool {
 /// alive simultaneously (ring + current frame). On Apple Silicon with unified
 /// memory, depth >= 2 can exceed the GPU memory budget when vsync is off and
 /// frames are submitted faster than the GPU retires them. Depth 1 forces a
+/// Application-level frame scheduling hint (not a goldy runtime concept).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FrameStrategy {
+    LowLatency,
+    Balanced,
+    MaxThroughput {
+        max_frames_in_flight: Option<u32>,
+    },
+}
+
+impl FrameStrategy {
+    pub(crate) fn depth(&self) -> usize {
+        match self {
+            FrameStrategy::LowLatency => 1,
+            FrameStrategy::Balanced => 2,
+            FrameStrategy::MaxThroughput {
+                max_frames_in_flight,
+            } => max_frames_in_flight.unwrap_or(3) as usize,
+        }
+    }
+
+    pub(crate) fn use_graph_coloring(&self) -> bool {
+        self.depth() > 1
+    }
+}
+
 /// Read the frame strategy from the environment.
 ///
 /// Defaults to `LowLatency` (depth=1). Override via `EKRANO_FRAME_STRATEGY`:
@@ -525,37 +544,37 @@ impl ResourcePool {
 ///   - `max_throughput` or `max_throughput:<N>`
 ///
 /// Legacy `EKRANO_CLEANUP_DEPTH=<N>` is still accepted as a fallback.
-fn frame_strategy() -> goldy::FrameStrategy {
+fn frame_strategy() -> FrameStrategy {
     if let Ok(val) = std::env::var("EKRANO_FRAME_STRATEGY") {
         return match val.to_ascii_lowercase().as_str() {
-            "low_latency" | "lowlatency" => goldy::FrameStrategy::LowLatency,
-            "balanced" => goldy::FrameStrategy::Balanced,
-            "max_throughput" | "maxthroughput" => goldy::FrameStrategy::MaxThroughput {
+            "low_latency" | "lowlatency" => FrameStrategy::LowLatency,
+            "balanced" => FrameStrategy::Balanced,
+            "max_throughput" | "maxthroughput" => FrameStrategy::MaxThroughput {
                 max_frames_in_flight: None,
             },
             other
                 if other.starts_with("max_throughput:") || other.starts_with("maxthroughput:") =>
             {
                 let n = other.rsplit(':').next().and_then(|s| s.parse::<u32>().ok());
-                goldy::FrameStrategy::MaxThroughput {
+                FrameStrategy::MaxThroughput {
                     max_frames_in_flight: n,
                 }
             }
-            _ => goldy::FrameStrategy::LowLatency,
+            _ => FrameStrategy::LowLatency,
         };
     }
     if let Ok(depth) = std::env::var("EKRANO_CLEANUP_DEPTH")
         && let Ok(d) = depth.parse::<usize>()
     {
         return match d {
-            0 | 1 => goldy::FrameStrategy::LowLatency,
-            2 => goldy::FrameStrategy::Balanced,
-            n => goldy::FrameStrategy::MaxThroughput {
+            0 | 1 => FrameStrategy::LowLatency,
+            2 => FrameStrategy::Balanced,
+            n => FrameStrategy::MaxThroughput {
                 max_frames_in_flight: Some(n as u32),
             },
         };
     }
-    goldy::FrameStrategy::Balanced
+    FrameStrategy::LowLatency
 }
 
 /// Override [`RenderParams::robust`] from the environment for benchmarking.
@@ -641,7 +660,7 @@ pub(crate) struct PersistentState {
     /// Frame scheduling strategy. Used by `alloc_pipeline_buffer` to decide whether
     /// `CoarseOnly` buffers should be graph transients (graph coloring for VRAM reuse)
     /// or persistent owned handles (stable bindless indices for CB retention).
-    pub(crate) strategy: goldy::FrameStrategy,
+    pub(crate) strategy: FrameStrategy,
     /// Textures waiting to be returned to [`Self::tex_pool`] after GPU retirement.
     /// Populated by [`DeferredTextureToken`] drops from [`Device::defer_until`].
     pending_texture_returns: Arc<Mutex<Vec<Texture>>>,
@@ -654,14 +673,39 @@ pub(crate) struct PersistentState {
 impl PersistentState {
     pub(crate) fn take_cached_render_targets(
         &mut self,
+        device: &Device,
         progress: TimelineValue,
         width: u32,
         height: u32,
         out_format: TextureFormat,
     ) -> Option<(Texture, [Texture; 4])> {
         let occupied = std::array::from_fn(|i| self.cached_render_targets[i].is_some());
+        let mut progress = progress;
         let order = ready_cache_slots_oldest_first(self.cached_rt_timelines, occupied, progress);
         if order[0].is_none() {
+            let all_full = occupied.iter().all(|&o| o);
+            if all_full {
+                let oldest = (0..RESOURCE_CACHE_SLOTS)
+                    .filter(|&i| occupied[i])
+                    .map(|i| self.cached_rt_timelines[i])
+                    .min()
+                    .unwrap_or(0);
+                if progress < oldest {
+                    log::debug!(
+                        "[RT-CACHE] backpressure: progress={progress} < oldest={oldest}, waiting"
+                    );
+                    if device.wait_until(oldest).is_ok() {
+                        progress = device.gpu_progress();
+                        let order2 =
+                            ready_cache_slots_oldest_first(self.cached_rt_timelines, occupied, progress);
+                        if order2[0].is_some() {
+                            return self.take_cached_render_targets(
+                                device, progress, width, height, out_format,
+                            );
+                        }
+                    }
+                }
+            }
             log::warn!(
                 "[RT-CACHE] MISS (gpu): progress={progress} timelines={:?} occupied={:?}",
                 self.cached_rt_timelines,
@@ -1537,10 +1581,10 @@ impl<'a> FrameRecorder<'a> {
     /// Finish dispatch: flush the final graph and register a frame slot with
     /// the orchestrator.
     ///
-    /// Returns `(timeline, frame)`:
-    /// - Standalone path: `(Some(tv), None)` — TV used for allocator epoch.
-    /// - Surface path: `(None, Some(frame))` — caller presents, then calls
-    ///   `note_presented` with the TV from `frame.present()`.
+    /// Returns the submit timeline and an optional surface frame awaiting present.
+    ///
+    /// Surface paths call [`goldy::Frame::submit_frame`] before returning so the
+    /// timeline is valid for cache stamping before [`Frame::present_async`].
     fn finish(mut self) -> Result<FrameFinishOutcome> {
         self.finished = true;
 
@@ -1558,7 +1602,7 @@ impl<'a> FrameRecorder<'a> {
                 .frame_handle
                 .expect("orchestrated recorder has a frame handle");
             if let Some(surface) = self.surface {
-                let frame = if let Some(frame) = self.preacquired_frame.take() {
+                let mut frame = if let Some(frame) = self.preacquired_frame.take() {
                     frame_pipeline
                         .end_frame_for_acquired_surface(
                             frame_handle,
@@ -1573,8 +1617,11 @@ impl<'a> FrameRecorder<'a> {
                         .end_frame_for_surface(frame_handle, self.graph, surface, ())
                         .map_err(|e| Error::Shader(e.to_string()))?
                 };
+                let submit_tv = frame
+                    .submit_frame()
+                    .map_err(|e| Error::Shader(e.to_string()))?;
                 return Ok(FrameFinishOutcome {
-                    timeline: None,
+                    timeline: Some(submit_tv),
                     surface_frame: Some(frame),
                     bump_readback,
                     deferred_pool_views,
@@ -1596,7 +1643,7 @@ impl<'a> FrameRecorder<'a> {
         }
 
         if let Some(surface) = self.surface {
-            let frame = if let Some(frame) = self.preacquired_frame.take() {
+            let mut frame = if let Some(frame) = self.preacquired_frame.take() {
                 if self.graph.is_empty() {
                     frame
                 } else {
@@ -1611,8 +1658,11 @@ impl<'a> FrameRecorder<'a> {
                     .submit_graph(self.graph)
                     .map_err(|e| Error::Shader(e.to_string()))?
             };
+            let submit_tv = frame
+                .submit_frame()
+                .map_err(|e| Error::Shader(e.to_string()))?;
             Ok(FrameFinishOutcome {
-                timeline: None,
+                timeline: Some(submit_tv),
                 surface_frame: Some(frame),
                 bump_readback,
                 deferred_pool_views,
@@ -1716,7 +1766,7 @@ impl GoldyRenderer {
         // pool allocations (via `prepare_storage_pool`).
         let frame_pipeline = {
             let _tz = goldy::tracy_zone!("ekrano.GoldyRenderer::new.frame_orchestrator");
-            FrameOrchestrator::with_strategy(device, frame_strategy())
+            FrameOrchestrator::new(device, frame_strategy().depth())
         };
         let mut renderer = Self {
             device: tracked_device.clone(),
@@ -1830,42 +1880,11 @@ impl GoldyRenderer {
             return Ok(());
         };
         let _tz = goldy::tracy_zone!("ekrano.finalize_pending_present");
-        let tv = {
-            let _jz = goldy::tracy_zone!("ekrano.finalize_pending_present.join");
-            work.pending
-                .finish()
-                .map_err(|e| Error::Shader(e.to_string()))?
-        };
-
-        {
-            let _bz = goldy::tracy_zone!("ekrano.finalize_pending_present.bookkeeping");
-            self.frame_pipeline.note_presented(tv);
-
-            if let Some(i) = work.cached_rt_slot {
-                log::debug!(
-                    "[RT-CACHE] stamp slot={i} timeline={tv} (prev={})",
-                    self.persistent.cached_rt_timelines[i],
-                );
-                self.persistent.cached_rt_timelines[i] = tv;
-            }
-            if let Some(i) = work.cached_pipeline_slot {
-                self.persistent.cached_pipeline_timelines[i] = tv;
-            }
-            if let Some(allocator) = self.persistent.storage_allocator_mut() {
-                allocator.end_frame(device, tv);
-            }
-            if let Some(buf) = work.bump_readback {
-                self.persistent.queue_bump_readback(tv, buf);
-            }
-            defer_frame_gpu_resources(
-                device,
-                &self.persistent,
-                tv,
-                work.deferred_pool_views,
-                work.deferred_textures,
-                work.recyclable_owned,
-            );
-        }
+        let _ = device;
+        let _jz = goldy::tracy_zone!("ekrano.finalize_pending_present.join");
+        work.pending
+            .finish()
+            .map_err(|e| Error::Shader(e.to_string()))?;
         Ok(())
     }
 
@@ -2166,6 +2185,7 @@ impl GoldyRenderer {
         // flush_deferred_deletions runs after submit so reclaim overlaps GPU work.
         self.persistent.drain_pending_returns();
         self.persistent.drain_ready_bump_readbacks(device)?;
+        self.device.flush_deferred_deletions();
 
         let t_drain_start = Instant::now();
 
@@ -2179,7 +2199,7 @@ impl GoldyRenderer {
             self.finalize_pending_present(device)?;
         }
 
-        let use_orchestrator = self.persistent.strategy == goldy::FrameStrategy::LowLatency;
+        let use_orchestrator = self.persistent.strategy.depth() == 1;
         let frame_handle = if use_orchestrator {
             let _tz = goldy::tracy_zone!("ekrano.begin_frame");
             let h = self
@@ -2429,33 +2449,12 @@ impl GoldyRenderer {
             allocator.hint_unused_above(used);
         }
 
-        // Surface path: launch present on a background thread so the ~40 µs OS
-        // present call overlaps with the ~70 µs winit PostMessage → RedrawRequested
-        // overhead.  All post-present bookkeeping is deferred to the start of the
-        // next frame via `finalize_pending_present`.
-        //
-        // Non-surface path: tv is available immediately; apply bookkeeping now.
-        //
-        // The two arms are mutually exclusive (FrameFinishOutcome always sets exactly
-        // one of surface_frame / timeline), so using if/else if avoids use-after-move.
-        if let Some(frame) = surface_frame {
-            let pending = {
-                let _pz = goldy::tracy_zone!("ekrano.run_frame.present_async");
-                frame
-                    .present_async()
-                    .map_err(|e| Error::Shader(e.to_string()))?
-            };
-            self.pending_present = Some(PendingPresentWork {
-                pending,
-                cached_rt_slot: cache_outcome.cached_render_targets_slot,
-                cached_pipeline_slot: cache_outcome.cached_pipeline_slot,
-                bump_readback,
-                deferred_pool_views,
-                deferred_textures,
-                recyclable_owned,
-            });
-        } else if let Some(tv) = frame_tv {
+        if let Some(tv) = frame_tv {
             if let Some(i) = cache_outcome.cached_render_targets_slot {
+                log::debug!(
+                    "[RT-CACHE] stamp slot={i} timeline={tv} (prev={})",
+                    self.persistent.cached_rt_timelines[i],
+                );
                 self.persistent.cached_rt_timelines[i] = tv;
             }
             if let Some(i) = cache_outcome.cached_pipeline_slot {
@@ -2475,6 +2474,19 @@ impl GoldyRenderer {
                 deferred_textures,
                 recyclable_owned,
             );
+        }
+
+        if let Some(frame) = surface_frame {
+            let pending = {
+                let _pz = goldy::tracy_zone!("ekrano.run_frame.present_async");
+                frame
+                    .present_async()
+                    .map_err(|e| Error::Shader(e.to_string()))?
+            };
+            if let Some(tv) = frame_tv {
+                self.frame_pipeline.note_presented(tv);
+            }
+            self.pending_present = Some(PendingPresentWork { pending });
         }
         {
             let _tz = goldy::tracy_zone!("ekrano.run_frame.post_present");
@@ -2660,7 +2672,7 @@ mod tests {
             cached_wg_counts: None,
             cached_config_uniform: None,
             cached_filter_uniforms: Vec::new(),
-            strategy: goldy::FrameStrategy::LowLatency,
+            strategy: FrameStrategy::LowLatency,
             pending_texture_returns: Arc::new(Mutex::new(Vec::new())),
             pending_owned_returns: Arc::new(Mutex::new(Vec::new())),
         };

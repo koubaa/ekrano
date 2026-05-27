@@ -978,6 +978,7 @@ impl PipelineResources {
         let (out_image, filter_layers) = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.render_targets");
             if let Some((cached_out, cached_layers)) = persistent.take_cached_render_targets(
+                device,
                 gpu_progress,
                 params.width,
                 params.height,
