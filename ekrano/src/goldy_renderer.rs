@@ -47,6 +47,7 @@ use ekrano_encoding::{BumpAllocators, Layout, Ramps, Images, RenderConfig, Resol
 
 const MAX_BUMP_RETRIES: usize = 2;
 
+
 /// Timeline-guarded slots for cross-frame render-target and pipeline-buffer reuse.
 /// Three slots match Metal/Vulkan `MAX_FRAMES_IN_FLIGHT=3`: the oldest entry can
 /// retire once acquire waits on the slot being reused (~3 frames ago).
@@ -671,6 +672,52 @@ pub(crate) struct PersistentState {
 
 /// Timeline-guarded render target cache.
 impl PersistentState {
+    /// Drop all cached render targets when any occupied slot no longer matches the
+    /// requested dimensions. Waits for the oldest slot timeline so heap-backed textures
+    /// are retired before new allocations during resize.
+    pub(crate) fn purge_render_target_cache_if_mismatch(
+        &mut self,
+        device: &Device,
+        width: u32,
+        height: u32,
+        out_format: TextureFormat,
+    ) -> bool {
+        let mismatch = self.cached_render_targets.iter().any(|slot| {
+            slot.as_ref().is_some_and(|(out, _)| {
+                out.width() != width || out.height() != height || out.format() != out_format
+            })
+        });
+        if !mismatch {
+            return false;
+        }
+
+        let progress = device.gpu_progress();
+        let oldest = (0..RESOURCE_CACHE_SLOTS)
+            .filter(|&i| self.cached_render_targets[i].is_some())
+            .map(|i| self.cached_rt_timelines[i])
+            .min();
+        if let Some(oldest) = oldest {
+            if progress < oldest {
+                let _ = device.wait_until(oldest);
+            }
+        }
+
+        for i in 0..RESOURCE_CACHE_SLOTS {
+            if let Some((out, layers)) = self.cached_render_targets[i].take() {
+                // Drop directly (not via tex_pool.release) so that the Metal heap
+                // allocation is reclaimed immediately. tex_pool.release would keep
+                // the mismatched-size texture in the pool, keeping the heap full and
+                // causing subsequent allocations at the new dimensions to fail.
+                drop(out);
+                for l in layers {
+                    drop(l);
+                }
+                self.cached_rt_timelines[i] = 0;
+            }
+        }
+        true
+    }
+
     pub(crate) fn take_cached_render_targets(
         &mut self,
         device: &Device,
@@ -694,8 +741,9 @@ impl PersistentState {
                     log::debug!(
                         "[RT-CACHE] backpressure: progress={progress} < oldest={oldest}, waiting"
                     );
-                    if device.wait_until(oldest).is_ok() {
-                        progress = device.gpu_progress();
+                    let wait_ok = device.wait_until(oldest).is_ok();
+                    progress = device.gpu_progress();
+                    if wait_ok {
                         let order2 =
                             ready_cache_slots_oldest_first(self.cached_rt_timelines, occupied, progress);
                         if order2[0].is_some() {
@@ -2187,6 +2235,16 @@ impl GoldyRenderer {
         self.persistent.drain_ready_bump_readbacks(device)?;
         self.device.flush_deferred_deletions();
 
+        let out_image_format = surface
+            .map(|s| s.format())
+            .unwrap_or(TextureFormat::Rgba8Unorm);
+        self.persistent.purge_render_target_cache_if_mismatch(
+            device,
+            params.width,
+            params.height,
+            out_image_format,
+        );
+
         let t_drain_start = Instant::now();
 
         // Finalize the background present from the previous surface frame.
@@ -2196,7 +2254,8 @@ impl GoldyRenderer {
         // needs the previous swapchain image returned.
         {
             let _fz = goldy::tracy_zone!("ekrano.run_frame.finalize_present");
-            self.finalize_pending_present(device)?;
+            let fin = self.finalize_pending_present(device);
+            fin?;
         }
 
         let use_orchestrator = self.persistent.strategy.depth() == 1;
@@ -2344,9 +2403,6 @@ impl GoldyRenderer {
         };
         let mut pipeline = {
             let _tz = goldy::tracy_zone!("ekrano.prepare");
-            let out_image_format = surface
-                .map(|s| s.format())
-                .unwrap_or(TextureFormat::Rgba8Unorm);
             let pipeline_result = crate::gpu_resources::PipelineResources::prepare(
                 device,
                 graph,
