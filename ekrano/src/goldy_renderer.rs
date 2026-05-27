@@ -56,8 +56,52 @@ fn find_empty_cache_slot<T>(slots: &[Option<T>]) -> Option<usize> {
     slots.iter().position(Option::is_none)
 }
 
+/// Return the oldest occupied cache slot, ignoring GPU progress.
+///
+/// Safe for write-only resources (render targets, pipeline buffers) that are
+/// fully overwritten each frame — the GPU's prior reads don't affect correctness.
+#[inline]
+fn oldest_occupied_cache_slot(
+    timelines: &[TimelineValue; RESOURCE_CACHE_SLOTS],
+    occupied: [bool; RESOURCE_CACHE_SLOTS],
+) -> Option<usize> {
+    match (occupied[0], occupied[1]) {
+        (false, false) => None,
+        (true, false) => Some(0),
+        (false, true) => Some(1),
+        (true, true) => {
+            if timelines[0] <= timelines[1] {
+                Some(0)
+            } else {
+                Some(1)
+            }
+        }
+    }
+}
+
+/// Return occupied slot indices in ascending timeline order, ignoring GPU progress.
+#[inline]
+fn occupied_slots_oldest_first(
+    timelines: &[TimelineValue; RESOURCE_CACHE_SLOTS],
+    occupied: [bool; RESOURCE_CACHE_SLOTS],
+) -> [Option<usize>; RESOURCE_CACHE_SLOTS] {
+    match (occupied[0], occupied[1]) {
+        (false, false) => [None, None],
+        (true, false) => [Some(0), None],
+        (false, true) => [Some(1), None],
+        (true, true) => {
+            if timelines[0] <= timelines[1] {
+                [Some(0), Some(1)]
+            } else {
+                [Some(1), Some(0)]
+            }
+        }
+    }
+}
+
 /// Return the oldest GPU-ready cache slot index, or `None` if neither slot qualifies.
 #[inline]
+#[allow(dead_code)]
 fn oldest_ready_cache_slot(
     timelines: &[TimelineValue; RESOURCE_CACHE_SLOTS],
     occupied: [bool; RESOURCE_CACHE_SLOTS],
@@ -83,6 +127,7 @@ fn oldest_ready_cache_slot(
 
 /// Return ready slot indices in ascending timeline order (at most two entries).
 #[inline]
+#[allow(dead_code)]
 fn ready_cache_slots_oldest_first(
     timelines: &[TimelineValue; RESOURCE_CACHE_SLOTS],
     occupied: [bool; RESOURCE_CACHE_SLOTS],
@@ -516,11 +561,15 @@ pub(crate) struct PersistentState {
     pending_owned_returns: Arc<Mutex<Vec<(Buffer, &'static str)>>>,
 }
 
-/// Timeline-guarded two-slot render target cache.
+/// Two-slot render target cache.
+///
+/// Render targets are fully overwritten each frame, so reuse is safe regardless
+/// of GPU progress — no timeline gating needed. We still prefer the oldest slot
+/// to give the GPU maximum time to finish reads from the other slot's prior use.
 impl PersistentState {
     pub(crate) fn take_cached_render_targets(
         &mut self,
-        progress: TimelineValue,
+        _progress: TimelineValue,
         width: u32,
         height: u32,
         out_format: TextureFormat,
@@ -529,29 +578,20 @@ impl PersistentState {
             self.cached_render_targets[0].is_some(),
             self.cached_render_targets[1].is_some(),
         ];
-        let order =
-            ready_cache_slots_oldest_first(&self.cached_rt_timelines, occupied, progress);
-        if order[0].is_none() {
-            log::debug!(
-                "[RT-CACHE] MISS (gpu): progress={progress} timelines={:?} occupied={}",
-                self.cached_rt_timelines,
-                occupied[0] as usize + occupied[1] as usize,
-            );
-            return None;
-        }
+        let order = occupied_slots_oldest_first(&self.cached_rt_timelines, occupied);
         for i in order.into_iter().flatten() {
             let Some((out, layers)) = self.cached_render_targets[i].take() else {
                 continue;
             };
             if out.width() == width && out.height() == height && out.format() == out_format {
                 log::debug!(
-                    "[RT-CACHE] HIT slot={i}: progress={progress} timeline={}",
+                    "[RT-CACHE] HIT slot={i}: timeline={}",
                     self.cached_rt_timelines[i],
                 );
                 return Some((out, layers));
             }
             log::debug!(
-                "[RT-CACHE] MISS (resize) slot={i}: progress={progress} timeline={} {}x{} fmt={out_format:?}",
+                "[RT-CACHE] MISS (resize) slot={i}: timeline={} {}x{} fmt={out_format:?}",
                 self.cached_rt_timelines[i],
                 out.width(),
                 out.height(),
@@ -561,7 +601,6 @@ impl PersistentState {
                 self.tex_pool.release(l);
             }
         }
-        log::debug!("[RT-CACHE] MISS (no match): progress={progress}");
         None
     }
 }
@@ -649,32 +688,33 @@ impl PersistentState {
         Ok(())
     }
 
-    /// Claim a pipeline buffer cache slot whose GPU epoch has retired.
+    /// Claim a pipeline buffer cache slot.
+    ///
+    /// Pipeline buffers are fully overwritten each frame, so reuse is safe
+    /// without waiting for the GPU to finish the prior frame's reads.
     pub(crate) fn take_cached_pipeline(
         &mut self,
-        progress: TimelineValue,
+        _progress: TimelineValue,
     ) -> Option<crate::gpu_resources::CachedPipeline> {
         let occupied = [
             self.cached_pipeline[0].is_some(),
             self.cached_pipeline[1].is_some(),
         ];
-        let Some(i) = oldest_ready_cache_slot(&self.cached_pipeline_timelines, occupied, progress)
-        else {
+        let Some(i) = oldest_occupied_cache_slot(&self.cached_pipeline_timelines, occupied) else {
             log::debug!(
-                "[PIPE-CACHE] MISS (gpu): progress={progress} timelines={:?} occupied={}",
+                "[PIPE-CACHE] MISS (empty): timelines={:?}",
                 self.cached_pipeline_timelines,
-                occupied[0] as usize + occupied[1] as usize,
             );
             return None;
         };
         if let Some(c) = self.cached_pipeline[i].take() {
             log::debug!(
-                "[PIPE-CACHE] HIT slot={i}: progress={progress} timeline={}",
+                "[PIPE-CACHE] HIT slot={i}: timeline={}",
                 self.cached_pipeline_timelines[i],
             );
             Some(c)
         } else {
-            log::debug!("[PIPE-CACHE] MISS (empty): progress={progress}");
+            log::debug!("[PIPE-CACHE] MISS (empty)");
             None
         }
     }
