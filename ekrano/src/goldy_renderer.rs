@@ -62,7 +62,7 @@ fn find_empty_cache_slot<T>(slots: &[Option<T>]) -> Option<usize> {
 /// fully overwritten each frame — the GPU's prior reads don't affect correctness.
 #[inline]
 fn oldest_occupied_cache_slot(
-    timelines: &[TimelineValue; RESOURCE_CACHE_SLOTS],
+    timelines: [TimelineValue; RESOURCE_CACHE_SLOTS],
     occupied: [bool; RESOURCE_CACHE_SLOTS],
 ) -> Option<usize> {
     match (occupied[0], occupied[1]) {
@@ -82,7 +82,7 @@ fn oldest_occupied_cache_slot(
 /// Return occupied slot indices in ascending timeline order, ignoring GPU progress.
 #[inline]
 fn occupied_slots_oldest_first(
-    timelines: &[TimelineValue; RESOURCE_CACHE_SLOTS],
+    timelines: [TimelineValue; RESOURCE_CACHE_SLOTS],
     occupied: [bool; RESOURCE_CACHE_SLOTS],
 ) -> [Option<usize>; RESOURCE_CACHE_SLOTS] {
     match (occupied[0], occupied[1]) {
@@ -101,7 +101,7 @@ fn occupied_slots_oldest_first(
 
 /// Return the oldest GPU-ready cache slot index, or `None` if neither slot qualifies.
 #[inline]
-#[allow(dead_code)]
+#[allow(dead_code, reason = "alternative cache eviction strategies")]
 fn oldest_ready_cache_slot(
     timelines: [TimelineValue; RESOURCE_CACHE_SLOTS],
     occupied: [bool; RESOURCE_CACHE_SLOTS],
@@ -127,7 +127,7 @@ fn oldest_ready_cache_slot(
 
 /// Return ready slot indices in ascending timeline order (at most two entries).
 #[inline]
-#[allow(dead_code)]
+#[allow(dead_code, reason = "alternative cache eviction strategies")]
 fn ready_cache_slots_oldest_first(
     timelines: [TimelineValue; RESOURCE_CACHE_SLOTS],
     occupied: [bool; RESOURCE_CACHE_SLOTS],
@@ -654,7 +654,7 @@ impl PersistentState {
             self.cached_render_targets[0].is_some(),
             self.cached_render_targets[1].is_some(),
         ];
-        let order = occupied_slots_oldest_first(&self.cached_rt_timelines, occupied);
+        let order = occupied_slots_oldest_first(self.cached_rt_timelines, occupied);
         for i in order.into_iter().flatten() {
             let Some((out, layers)) = self.cached_render_targets[i].take() else {
                 continue;
@@ -776,7 +776,7 @@ impl PersistentState {
             self.cached_pipeline[0].is_some(),
             self.cached_pipeline[1].is_some(),
         ];
-        let Some(i) = oldest_occupied_cache_slot(&self.cached_pipeline_timelines, occupied) else {
+        let Some(i) = oldest_occupied_cache_slot(self.cached_pipeline_timelines, occupied) else {
             log::debug!(
                 "[PIPE-CACHE] MISS (empty): timelines={:?}",
                 self.cached_pipeline_timelines,
