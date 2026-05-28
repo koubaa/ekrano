@@ -2751,6 +2751,7 @@ mod tests {
             cached_rt_timelines: [0; RESOURCE_CACHE_SLOTS],
             cached_pipeline: std::array::from_fn(|_| None),
             cached_pipeline_timelines: [0; RESOURCE_CACHE_SLOTS],
+            rt_slot_swapchain_image: [None; RESOURCE_CACHE_SLOTS],
             deferred_owned_cap_hint: 0,
             deferred_pool_cap_hint: 0,
             deferred_textures_cap_hint: 0,
