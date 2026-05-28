@@ -27,7 +27,7 @@ use goldy::task_graph::{NodeAccess, NodeBuilder};
 use goldy::types::{BufferFlags, SpatialAccess, TextureFlags, TextureFormat};
 use goldy::{
     Buffer, BufferPool, BufferView, ComputePipeline, DataAccess, Device, DeviceType, FrameHandle,
-    FrameOrchestrator, PendingPresent, ShaderModule, TaskGraph, Texture, TexturePool, TimelineValue,
+    FrameOrchestrator, ShaderModule, TaskGraph, Texture, TexturePool, TimelineValue,
     TransientAllocator, TransientAllocatorConfig, TransientAllocatorStrategy,
 };
 
@@ -251,13 +251,6 @@ struct FrameFinishOutcome {
 }
 
 /// Background compositor present from the previous frame.
-///
-/// GPU compute was already submitted on the render thread; finalize only waits
-/// for the present worker via [`GoldyRenderer::finalize_pending_present`].
-struct PendingPresentWork {
-    pending: PendingPresent,
-}
-
 /// CPU-resolved scene data ready for GPU submission.
 ///
 /// Produced by [`GoldyRenderer::prepare`] (pure CPU — safe to call while the
@@ -424,21 +417,19 @@ impl ResourcePool {
                     return Ok(buf);
                 }
 
-                // Attempt 3 (blocking): wait for deferred epochs to retire one at
-                // a time until a pool hit occurs or the deferred ring is empty.
-                // Early epochs may not contain the needed buffer (e.g. pipeline
-                // cache holds the first frames' buffers), so we loop rather than
-                // trying a single epoch.
+                // Attempt 3 (blocking): the `Oversubscribed` signal was queued by the
+                // allocation failure above; wait for the oldest outstanding GPU work to
+                // retire, which frees one frame's worth of heap. A single wait suffices —
+                // the previous loop logic iterated through deferred epochs one-by-one, but
+                // peek_oldest_in_flight() gives us the exact fence value we need to unblock.
                 {
                     let _tz = goldy::tracy_zone!("ekrano.resource_pool.wait_reclaim");
-                    while let Some(oldest_epoch) = device.oldest_deferred_epoch() {
+                    if let Some(oldest_in_flight) = device.peek_oldest_in_flight() {
                         log::debug!(
                             "ResourcePool heap pressure for {name} — waiting for GPU epoch \
-                             {oldest_epoch} to reclaim archive",
+                             {oldest_in_flight} to reclaim archive",
                         );
-                        if device.wait_until_timeout(oldest_epoch, 2000).is_err() {
-                            break;
-                        }
+                        let _ = device.wait_until_timeout(oldest_in_flight, 2000);
                         device.flush_deferred_deletions();
                         self.drain_pending();
                         if let Some(buf) = self.bufs.entry(key.clone()).or_default().pop() {
@@ -691,14 +682,20 @@ impl PersistentState {
             return false;
         }
 
+        // Fast path: if nothing is in-flight the GPU is completely idle and all
+        // cached slots are safe to drop immediately without any wait.
         let progress = device.gpu_progress();
-        let oldest = (0..RESOURCE_CACHE_SLOTS)
-            .filter(|&i| self.cached_render_targets[i].is_some())
-            .map(|i| self.cached_rt_timelines[i])
-            .min();
-        if let Some(oldest) = oldest {
-            if progress < oldest {
-                let _ = device.wait_until(oldest);
+        if device.peek_oldest_in_flight().is_none() {
+            // GPU idle — skip the timeline scan entirely.
+        } else {
+            let oldest = (0..RESOURCE_CACHE_SLOTS)
+                .filter(|&i| self.cached_render_targets[i].is_some())
+                .map(|i| self.cached_rt_timelines[i])
+                .min();
+            if let Some(oldest) = oldest {
+                if progress < oldest {
+                    let _ = device.wait_until(oldest);
+                }
             }
         }
 
@@ -738,18 +735,24 @@ impl PersistentState {
                     .min()
                     .unwrap_or(0);
                 if progress < oldest {
-                    log::debug!(
-                        "[RT-CACHE] backpressure: progress={progress} < oldest={oldest}, waiting"
-                    );
-                    let wait_ok = device.wait_until(oldest).is_ok();
-                    progress = device.gpu_progress();
-                    if wait_ok {
-                        let order2 =
-                            ready_cache_slots_oldest_first(self.cached_rt_timelines, occupied, progress);
-                        if order2[0].is_some() {
-                            return self.take_cached_render_targets(
-                                device, progress, width, height, out_format,
-                            );
+                    // Fast-path guard: if nothing is in-flight the GPU is idle and all
+                    // cache slots must already be ready — skip the blocking wait.
+                    if device.peek_oldest_in_flight().is_none() {
+                        progress = device.gpu_progress();
+                    } else {
+                        log::debug!(
+                            "[RT-CACHE] backpressure: progress={progress} < oldest={oldest}, waiting"
+                        );
+                        let wait_ok = device.wait_until(oldest).is_ok();
+                        progress = device.gpu_progress();
+                        if wait_ok {
+                            let order2 =
+                                ready_cache_slots_oldest_first(self.cached_rt_timelines, occupied, progress);
+                            if order2[0].is_some() {
+                                return self.take_cached_render_targets(
+                                    device, progress, width, height, out_format,
+                                );
+                            }
                         }
                     }
                 }
@@ -975,12 +978,6 @@ pub struct GoldyRenderer {
     /// Long-lived task graph cleared (not replaced) each frame so the schedule cache
     /// survives across frames. `FrameRecorder` borrows this mutably per frame.
     graph: TaskGraph,
-    /// Deferred present work from the previous surface frame.
-    ///
-    /// Set by `run_frame` when the surface path uses `Frame::present_async`.
-    /// Finalized at the start of the next `run_frame` (and before `drain_all` in
-    /// `render_to_buffer`) via `finalize_pending_present`.
-    pending_present: Option<PendingPresentWork>,
 }
 
 // -----------------------------------------------------------------------
@@ -1632,7 +1629,7 @@ impl<'a> FrameRecorder<'a> {
     /// Returns the submit timeline and an optional surface frame awaiting present.
     ///
     /// Surface paths call [`goldy::Frame::submit_frame`] before returning so the
-    /// timeline is valid for cache stamping before [`Frame::present_async`].
+    /// timeline is valid for cache stamping before [`Frame::present`].
     fn finish(mut self) -> Result<FrameFinishOutcome> {
         self.finished = true;
 
@@ -1851,7 +1848,6 @@ impl GoldyRenderer {
             last_scene_fingerprint: None,
             last_packed_len: None,
             graph: TaskGraph::new(),
-            pending_present: None,
         };
         let shaders = {
             let _tz = goldy::tracy_zone!("ekrano.GoldyRenderer::new.compile_shaders");
@@ -1916,31 +1912,6 @@ impl GoldyRenderer {
     /// Join the background present from the previous surface frame and apply
     /// all deferred post-present bookkeeping.
     ///
-    /// No-op if nothing is pending. [`Self::submit_to_surface`] calls this
-    /// internally before acquiring the swapchain image, but exposing it lets
-    /// callers overlap CPU work with the present wait by calling it earlier
-    /// than submit would.
-    ///
-    /// Must complete before `begin_frame` / `submit_graph` / `drain_all` to
-    /// ensure swapchain ordering and ring-slot stamping are correct.
-    pub fn finalize_pending_present(&mut self, device: &Device) -> Result<()> {
-        let Some(work) = self.pending_present.take() else {
-            return Ok(());
-        };
-        let _tz = goldy::tracy_zone!("ekrano.finalize_pending_present");
-        let _ = device;
-        let _jz = goldy::tracy_zone!("ekrano.finalize_pending_present.join");
-        work.pending
-            .finish()
-            .map_err(|e| Error::Shader(e.to_string()))?;
-        Ok(())
-    }
-
-    /// Returns `true` while the previous frame's present is still in flight.
-    pub fn is_present_pending(&self) -> bool {
-        self.pending_present.is_some()
-    }
-
     ///
     /// **Pipelined:** drains the *previous* frame's GPU work at the start,
     /// then submits the current frame and returns without waiting.  The bump
@@ -2053,10 +2024,9 @@ impl GoldyRenderer {
         })
     }
 
-    /// Phase 2: finalize previous present, record GPU work, and kick off next present.
+    /// Phase 2: record GPU work, present, and return frame stats.
     ///
-    /// Must be called after [`Self::prepare`]. Implicitly calls
-    /// [`Self::finalize_pending_present`] before acquiring the swapchain image.
+    /// Must be called after [`Self::prepare`].
     pub fn submit_to_surface(
         &mut self,
         device: &Device,
@@ -2114,10 +2084,6 @@ impl GoldyRenderer {
         scene: &Scene,
         params: &RenderParams,
     ) -> Result<Vec<u8>> {
-        // Finalize any pending surface present before drain_all so that
-        // note_presented and allocator.end_frame run before the synchronous readback.
-        self.finalize_pending_present(device)?;
-
         let width = params.width;
         let height = params.height;
         let texture = device
@@ -2251,13 +2217,6 @@ impl GoldyRenderer {
         // Placed here (after resolve + config + pool drains) so that ~10–20 µs of
         // CPU-only work overlaps with the ~40 µs OS present on the worker thread.
         // Must complete before begin_frame which acquires the backend mutex and
-        // needs the previous swapchain image returned.
-        {
-            let _fz = goldy::tracy_zone!("ekrano.run_frame.finalize_present");
-            let fin = self.finalize_pending_present(device);
-            fin?;
-        }
-
         let use_orchestrator = self.persistent.strategy.depth() == 1;
         let frame_handle = if use_orchestrator {
             let _tz = goldy::tracy_zone!("ekrano.begin_frame");
@@ -2533,16 +2492,13 @@ impl GoldyRenderer {
         }
 
         if let Some(frame) = surface_frame {
-            let pending = {
-                let _pz = goldy::tracy_zone!("ekrano.run_frame.present_async");
-                frame
-                    .present_async()
-                    .map_err(|e| Error::Shader(e.to_string()))?
-            };
+            let _pz = goldy::tracy_zone!("ekrano.run_frame.present");
+            frame
+                .present()
+                .map_err(|e| Error::Shader(e.to_string()))?;
             if let Some(tv) = frame_tv {
                 self.frame_pipeline.note_presented(tv);
             }
-            self.pending_present = Some(PendingPresentWork { pending });
         }
         {
             let _tz = goldy::tracy_zone!("ekrano.run_frame.post_present");
@@ -2772,13 +2728,3 @@ mod tests {
     }
 }
 
-impl Drop for GoldyRenderer {
-    fn drop(&mut self) {
-        // Finalize any pending background present so GPU resources are properly
-        // released before the device is destroyed.
-        let device = self.device.clone();
-        if let Err(e) = self.finalize_pending_present(&device) {
-            log::warn!("GoldyRenderer::drop: finalize_pending_present failed: {e}");
-        }
-    }
-}
