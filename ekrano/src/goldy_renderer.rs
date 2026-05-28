@@ -1168,8 +1168,6 @@ impl<'a> FrameRecorder<'a> {
             .push((c.ptcl, "ekrano.ptcl_buf"));
         self.deferred_owned_buffers
             .push((c.blend_spill, "ekrano.blend_spill"));
-        self.deferred_owned_buffers
-            .push((c.fallback_indirect, "ekrano.indirect_count"));
         macro_rules! defer_coarse {
             ($field:expr, $name:expr) => {
                 if let Some(b) = $field {
@@ -1207,9 +1205,7 @@ impl<'a> FrameRecorder<'a> {
             mask_atlas,
             scene,
             config,
-            wg_counts,
             indirect,
-            fallback_indirect,
             info_bin_data,
             tile,
             segments,
@@ -1250,9 +1246,6 @@ impl<'a> FrameRecorder<'a> {
             }
             other => self.defer_gpu_buf(other, "ekrano.config"),
         }
-        if let Some(b) = wg_counts {
-            self.defer_gpu_buf(b, "ekrano.wg_counts");
-        }
         if let Some(b) = indirect {
             self.defer_gpu_buf(b, "ekrano.indirect_dispatch");
         }
@@ -1284,13 +1277,6 @@ impl<'a> FrameRecorder<'a> {
             GpuBuf::Owned(b) => Some(b),
             other => {
                 self.defer_gpu_buf(other, "ekrano.ptcl_buf");
-                None
-            }
-        };
-        let cacheable_fallback_indirect = match fallback_indirect {
-            GpuBuf::Owned(b) => Some(b),
-            other => {
-                self.defer_gpu_buf(other, "ekrano.indirect_count");
                 None
             }
         };
@@ -1350,23 +1336,14 @@ impl<'a> FrameRecorder<'a> {
             cacheable_segments,
             cacheable_ptcl,
             cacheable_blend_spill,
-            cacheable_fallback_indirect,
         ) {
-            (
-                Some(info_bin_data),
-                Some(tile),
-                Some(segments),
-                Some(ptcl),
-                Some(blend_spill),
-                Some(fallback_indirect),
-            ) => {
+            (Some(info_bin_data), Some(tile), Some(segments), Some(ptcl), Some(blend_spill)) => {
                 let pipeline_cache = crate::gpu_resources::CachedPipeline {
                     info_bin_data,
                     tile,
                     segments,
                     ptcl,
                     blend_spill,
-                    fallback_indirect,
                     reduced: cacheable_reduced,
                     reduced2: cacheable_reduced2,
                     reduced_scan: cacheable_reduced_scan,
@@ -1395,7 +1372,7 @@ impl<'a> FrameRecorder<'a> {
                     log::debug!("[PIPE-CACHE] schedule: all slots full — deferred current frame");
                 }
             }
-            (info_bin_data, tile, segments, ptcl, blend_spill, fallback_indirect) => {
+            (info_bin_data, tile, segments, ptcl, blend_spill) => {
                 // Partial — couldn't cache all fields; defer any Owned ones to pool.
                 if let Some(b) = info_bin_data {
                     self.deferred_owned_buffers
@@ -1412,10 +1389,6 @@ impl<'a> FrameRecorder<'a> {
                 }
                 if let Some(b) = blend_spill {
                     self.deferred_owned_buffers.push((b, "ekrano.blend_spill"));
-                }
-                if let Some(b) = fallback_indirect {
-                    self.deferred_owned_buffers
-                        .push((b, "ekrano.indirect_count"));
                 }
                 // Defer CoarseOnly owned buffers if present (shouldn't normally happen in this branch).
                 macro_rules! defer_coarse {
@@ -2803,4 +2776,3 @@ mod tests {
         }
     }
 }
-

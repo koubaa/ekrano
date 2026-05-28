@@ -12,8 +12,8 @@ use crate::{
 
 // Shaders for the full pipeline
 pub struct FullShaders {
-    /// Present for indirect dispatch.
-    pub pipeline_setup: Option<ShaderId>,
+    /// Initializes the indirect dispatch buffer.
+    pub pipeline_setup: ShaderId,
     pub pathtag_reduce: ShaderId,
     pub pathtag_reduce2: ShaderId,
     pub pathtag_scan1: ShaderId,
@@ -38,9 +38,6 @@ pub struct FullShaders {
     pub fine_msaa16: Option<ShaderId>,
     /// Full-frame filter chain after fine raster (optional).
     pub filter_pass: Option<ShaderId>,
-    // 2-level dispatch works for CPU pathtag scan even for large
-    // inputs, 3-level is not yet implemented.
-    pub pathtag_is_cpu: bool,
 }
 
 impl FullShaders {
@@ -48,7 +45,7 @@ impl FullShaders {
     /// before shaders are compiled.
     pub(crate) fn empty() -> Self {
         Self {
-            pipeline_setup: None,
+            pipeline_setup: ShaderId(0),
             pathtag_reduce: ShaderId(0),
             pathtag_reduce2: ShaderId(0),
             pathtag_scan1: ShaderId(0),
@@ -72,7 +69,6 @@ impl FullShaders {
             fine_msaa8: None,
             fine_msaa16: None,
             filter_pass: None,
-            pathtag_is_cpu: false,
         }
     }
 }
@@ -403,7 +399,7 @@ pub(crate) fn goldy_full_shaders(
     };
 
     Ok(FullShaders {
-        pipeline_setup: Some(pipeline_setup),
+        pipeline_setup,
         pathtag_reduce,
         pathtag_reduce2,
         pathtag_scan1,
@@ -427,6 +423,5 @@ pub(crate) fn goldy_full_shaders(
         fine_msaa8,
         fine_msaa16,
         filter_pass,
-        pathtag_is_cpu: false,
     })
 }

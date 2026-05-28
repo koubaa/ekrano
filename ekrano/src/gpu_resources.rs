@@ -18,7 +18,7 @@ pub(crate) const TRANSIENT_SLOT_PLACEHOLDER: u32 = u32::MAX;
 use crate::goldy_renderer::PersistentState;
 use crate::resource_proxy::{BindType, ImageFormat};
 use crate::{Error, RenderParams, Result};
-use ekrano_encoding::{BumpAllocators, CoverageMask, Images, IndirectCount, Ramps, RenderConfig};
+use ekrano_encoding::{BumpAllocators, CoverageMask, Images, Ramps, RenderConfig};
 
 pub(crate) enum GpuBuf {
     Owned(Buffer),
@@ -98,7 +98,7 @@ fn use_pool(device: &Device) -> bool {
 fn is_pool_exempt(name: &'static str) -> bool {
     matches!(
         name,
-        "ekrano.bump_buf" | "ekrano.indirect_count" | "ekrano.indirect_dispatch"
+        "ekrano.bump_buf" | "ekrano.indirect_dispatch"
     )
 }
 
@@ -377,8 +377,8 @@ pub(crate) fn clear_gpu_buf(
 /// At `MAX_CLEANUP_DEPTH=1` the previous frame's GPU work is complete by the time
 /// `begin_frame` returns, so these buffers are safe to rebind immediately.
 ///
-/// The six `OwnedShared` buffers (`info_bin_data`, `tile`, `segments`, `ptcl`,
-/// `blend_spill`, `fallback_indirect`) have always lived here.
+/// The five `OwnedShared` buffers (`info_bin_data`, `tile`, `segments`, `ptcl`,
+/// `blend_spill`) have always lived here.
 ///
 /// At `LowLatency` (depth=1), the twelve `CoarseOnly` buffers are also promoted to
 /// persistent owned handles. This eliminates graph-coloring transient IDs and gives
@@ -390,7 +390,6 @@ pub(crate) struct CachedPipeline {
     pub segments: Buffer,
     pub ptcl: Buffer,
     pub blend_spill: Buffer,
-    pub fallback_indirect: Buffer,
     // CoarseOnly (depth=1 only): consumed within the coarse wave; cached for stable bindless indices.
     pub reduced: Option<Buffer>,
     pub reduced2: Option<Buffer>,
@@ -417,9 +416,7 @@ pub(crate) struct PipelineResources {
     pub mask_atlas: Texture,
     pub scene: GpuBuf,
     pub config: GpuBuf,
-    pub wg_counts: Option<GpuBuf>,
     pub indirect: Option<GpuBuf>,
-    pub fallback_indirect: GpuBuf,
     pub info_bin_data: GpuBuf,
     pub tile: GpuBuf,
     pub segments: GpuBuf,
@@ -632,7 +629,6 @@ impl PipelineResources {
             segments: Option<Buffer>,
             ptcl: Option<Buffer>,
             blend_spill: Option<Buffer>,
-            fallback_indirect: Option<Buffer>,
             reduced: Option<Buffer>,
             reduced2: Option<Buffer>,
             reduced_scan: Option<Buffer>,
@@ -659,7 +655,6 @@ impl PipelineResources {
                     segments: Some(c.segments),
                     ptcl: Some(c.ptcl),
                     blend_spill: Some(c.blend_spill),
-                    fallback_indirect: Some(c.fallback_indirect),
                     reduced: c.reduced,
                     reduced2: c.reduced2,
                     reduced_scan: c.reduced_scan,
@@ -690,9 +685,6 @@ impl PipelineResources {
                     persistent
                         .pool
                         .return_buf(c.blend_spill, "ekrano.blend_spill");
-                    persistent
-                        .pool
-                        .return_buf(c.fallback_indirect, "ekrano.indirect_count");
                     macro_rules! return_coarse {
                         ($field:expr, $name:expr) => {
                             if let Some(b) = $field {
@@ -722,7 +714,6 @@ impl PipelineResources {
                         segments: None,
                         ptcl: None,
                         blend_spill: None,
-                        fallback_indirect: None,
                         reduced: None,
                         reduced2: None,
                         reduced_scan: None,
@@ -747,7 +738,6 @@ impl PipelineResources {
                     segments: None,
                     ptcl: None,
                     blend_spill: None,
-                    fallback_indirect: None,
                     reduced: None,
                     reduced2: None,
                     reduced_scan: None,
@@ -768,26 +758,7 @@ impl PipelineResources {
             }
         }; // end ekrano.prepare.pipeline_cache zone
 
-        // fallback_indirect: pool-exempt, must be zeroed before GPU use.
         let _tz_alloc = goldy::tracy_zone!("ekrano.prepare.alloc_buffers");
-        let fallback_indirect = match cached.fallback_indirect {
-            Some(buf) => {
-                graph.clear_buffer(&buf, 0, size_of::<IndirectCount>() as u64);
-                GpuBuf::Owned(buf)
-            }
-            None => alloc_pipeline_buffer(
-                device,
-                graph,
-                persistent,
-                size_of::<IndirectCount>() as u64,
-                size_of::<IndirectCount>() as u32,
-                "ekrano.indirect_count",
-                BufferFlags::empty(),
-                // pool-exempt: always GpuBuf::Owned regardless of lifetime tag
-                BufferLifetime::CoarseOnly,
-            )?,
-        };
-
         // For OwnedShared buffers: reuse from cache when sizes match (no ResourcePool
         // round-trip). These buffers are fully GPU-overwritten before first read.
         macro_rules! al_shared_cached {
@@ -1019,9 +990,7 @@ impl PipelineResources {
             mask_atlas,
             scene,
             config,
-            wg_counts: None,
             indirect: None,
-            fallback_indirect,
             info_bin_data,
             tile,
             segments,
