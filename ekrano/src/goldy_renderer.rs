@@ -552,7 +552,7 @@ fn frame_strategy() -> FrameStrategy {
                     max_frames_in_flight: n,
                 }
             }
-            _ => FrameStrategy::LowLatency,
+            _ => FrameStrategy::Balanced,
         };
     }
     if let Ok(depth) = std::env::var("EKRANO_CLEANUP_DEPTH")
