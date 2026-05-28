@@ -96,10 +96,7 @@ fn use_pool(device: &Device) -> bool {
 }
 
 fn is_pool_exempt(name: &'static str) -> bool {
-    matches!(
-        name,
-        "ekrano.bump_buf" | "ekrano.indirect_dispatch"
-    )
+    matches!(name, "ekrano.bump_buf" | "ekrano.indirect_dispatch")
 }
 
 /// Controls how a pipeline buffer is allocated.

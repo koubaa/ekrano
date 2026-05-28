@@ -43,10 +43,9 @@ use crate::{
     resource_proxy::{BindType, ShaderId},
     shaders::{self, FullShaders},
 };
-use ekrano_encoding::{BumpAllocators, Layout, Ramps, Images, RenderConfig, Resolver};
+use ekrano_encoding::{BumpAllocators, Images, Layout, Ramps, RenderConfig, Resolver};
 
 const MAX_BUMP_RETRIES: usize = 2;
-
 
 /// Timeline-guarded slots for cross-frame render-target and pipeline-buffer reuse.
 /// Three slots match Metal/Vulkan `MAX_FRAMES_IN_FLIGHT=3`: the oldest entry can
@@ -502,23 +501,21 @@ impl ResourcePool {
 pub(crate) enum FrameStrategy {
     LowLatency,
     Balanced,
-    MaxThroughput {
-        max_frames_in_flight: Option<u32>,
-    },
+    MaxThroughput { max_frames_in_flight: Option<u32> },
 }
 
 impl FrameStrategy {
-    pub(crate) fn depth(&self) -> usize {
+    pub(crate) fn depth(self) -> usize {
         match self {
-            FrameStrategy::LowLatency => 1,
-            FrameStrategy::Balanced => 2,
-            FrameStrategy::MaxThroughput {
+            Self::LowLatency => 1,
+            Self::Balanced => 2,
+            Self::MaxThroughput {
                 max_frames_in_flight,
             } => max_frames_in_flight.unwrap_or(3) as usize,
         }
     }
 
-    pub(crate) fn use_graph_coloring(&self) -> bool {
+    pub(crate) fn use_graph_coloring(self) -> bool {
         self.depth() > 1
     }
 }
@@ -690,10 +687,10 @@ impl PersistentState {
                 .filter(|&i| self.cached_render_targets[i].is_some())
                 .map(|i| self.cached_rt_timelines[i])
                 .min();
-            if let Some(oldest) = oldest {
-                if progress < oldest {
-                    let _ = device.wait_until(oldest);
-                }
+            if let Some(oldest) = oldest
+                && progress < oldest
+            {
+                let _ = device.wait_until(oldest);
             }
         }
 
@@ -744,8 +741,11 @@ impl PersistentState {
                         let wait_ok = device.wait_until(oldest).is_ok();
                         progress = device.gpu_progress();
                         if wait_ok {
-                            let order2 =
-                                ready_cache_slots_oldest_first(self.cached_rt_timelines, occupied, progress);
+                            let order2 = ready_cache_slots_oldest_first(
+                                self.cached_rt_timelines,
+                                occupied,
+                                progress,
+                            );
                             if order2[0].is_some() {
                                 return self.take_cached_render_targets(
                                     device, progress, width, height, out_format,
@@ -1615,7 +1615,7 @@ impl<'a> FrameRecorder<'a> {
     /// Returns the submit timeline and an optional surface frame awaiting present.
     ///
     /// Surface paths call [`goldy::Frame::submit_frame`] before returning so the
-    /// timeline is valid for cache stamping before [`Frame::present`].
+    /// timeline is valid for cache stamping before [`goldy::Frame::present`].
     fn finish(mut self) -> Result<FrameFinishOutcome> {
         self.finished = true;
 
@@ -1912,10 +1912,10 @@ impl GoldyRenderer {
                     }
                 }
                 Signal::Oversubscribed { .. } => {
-                    if let Some(oldest) = device.peek_oldest_in_flight() {
-                        if device.wait_until(oldest).is_err() {
-                            break;
-                        }
+                    if let Some(oldest) = device.peek_oldest_in_flight()
+                        && device.wait_until(oldest).is_err()
+                    {
+                        break;
                     }
                     self.device.flush_deferred_deletions();
                     self.persistent.drain_pending_returns();
@@ -1977,11 +1977,7 @@ impl GoldyRenderer {
     ///
     /// Only one [`PreparedFrame`] may exist at a time: it holds the renderer's
     /// [`Resolver`] until consumed by submit.
-    pub fn prepare(
-        &mut self,
-        scene: &Scene,
-        params: &RenderParams,
-    ) -> Result<PreparedFrame> {
+    pub fn prepare(&mut self, scene: &Scene, params: &RenderParams) -> Result<PreparedFrame> {
         let _tz = goldy::tracy_zone!("ekrano.prepare");
         let encoding = scene.encoding();
         let mut params = RenderParams {
@@ -2004,12 +2000,8 @@ impl GoldyRenderer {
 
         let scene_fingerprint: u64 = 0;
         self.last_packed_len = Some(packed.len());
-        let base_config = RenderConfig::new(
-            &layout,
-            params.width,
-            params.height,
-            &params.base_color,
-        );
+        let base_config =
+            RenderConfig::new(&layout, params.width, params.height, &params.base_color);
         let config = if let Some(ref persistent) = self.persistent_bump {
             base_config.with_bump_estimates(persistent)
         } else {
@@ -2017,7 +2009,8 @@ impl GoldyRenderer {
         };
         let pool_size = {
             let _tz = goldy::tracy_zone!("ekrano.pool_size");
-            BufferPool::padded_size(&config.buffer_sizes.pool_allocs()).saturating_add(POOL_SIZE_SLACK)
+            BufferPool::padded_size(&config.buffer_sizes.pool_allocs())
+                .saturating_add(POOL_SIZE_SLACK)
         };
 
         Ok(PreparedFrame {
@@ -2053,9 +2046,7 @@ impl GoldyRenderer {
         let (stats, surface_frame) =
             self.run_frame_from_prepared(device, prepared, None, Some(surface))?;
         if let Some((frame, tv)) = surface_frame {
-            frame
-                .present()
-                .map_err(|e| Error::Shader(e.to_string()))?;
+            frame.present().map_err(|e| Error::Shader(e.to_string()))?;
             self.note_frame_presented(device, tv);
         }
         self.device.flush_deferred_deletions();
@@ -2064,7 +2055,7 @@ impl GoldyRenderer {
 
     /// Submit prepared CPU work to the GPU without presenting.
     ///
-    /// Returns frame stats and the goldy [`Frame`], which the caller must
+    /// Returns frame stats and the goldy [`goldy::Frame`], which the caller must
     /// [`present`](goldy::Frame::present) when ready. Frame retirement is driven
     /// by [`Self::poll_and_reclaim`] (`BoundaryCrossed` signals), not by
     /// [`Self::note_frame_presented`]. Internally drains signals and reclaims
@@ -2199,9 +2190,7 @@ impl GoldyRenderer {
         let (stats, surface_frame) =
             self.run_frame_from_prepared(device, prepared, output_texture, surface)?;
         if let Some((frame, tv)) = surface_frame {
-            frame
-                .present()
-                .map_err(|e| Error::Shader(e.to_string()))?;
+            frame.present().map_err(|e| Error::Shader(e.to_string()))?;
             self.note_frame_presented(device, tv);
         }
         self.device.flush_deferred_deletions();
@@ -2335,13 +2324,9 @@ impl GoldyRenderer {
                     "Previous frame bump overflow (0x{:x}), growing buffers",
                     bump.failed,
                 );
-                config = RenderConfig::new(
-                    &layout,
-                    params.width,
-                    params.height,
-                    &params.base_color,
-                )
-                .with_bump_estimates(&sanitize_bump(bump));
+                config =
+                    RenderConfig::new(&layout, params.width, params.height, &params.base_color)
+                        .with_bump_estimates(&sanitize_bump(bump));
                 pool_size = BufferPool::padded_size(&config.buffer_sizes.pool_allocs())
                     .saturating_add(POOL_SIZE_SLACK);
             }
@@ -2635,7 +2620,7 @@ impl GoldyRenderer {
     pub(crate) fn add_compute_shader_with_options(
         &mut self,
         device: &Device,
-        label: &'static str,
+        _label: &'static str,
         slang_source: &str,
         bindings: &[BindType],
         search_paths: &[&str],
@@ -2643,7 +2628,7 @@ impl GoldyRenderer {
         optimization_level: goldy::OptimizationLevel,
     ) -> Result<ShaderId> {
         let shader_module = {
-            let _tz = goldy::tracy_zone!("ekrano.add_shader.slang", label);
+            let _tz = goldy::tracy_zone!("ekrano.add_shader.slang", _label);
             ShaderModule::from_slang_with_options(
                 device,
                 slang_source,
@@ -2655,7 +2640,7 @@ impl GoldyRenderer {
             .map_err(|e| Error::Shader(format!("{:#}", e)))?
         };
         let pipeline = {
-            let _tz = goldy::tracy_zone!("ekrano.add_shader.pipeline", label);
+            let _tz = goldy::tracy_zone!("ekrano.add_shader.pipeline", _label);
             ComputePipeline::new(device, &shader_module)
                 .map_err(|e| Error::Shader(format!("{:#}", e)))?
         };
