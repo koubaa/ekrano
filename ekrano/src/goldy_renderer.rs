@@ -1890,10 +1890,9 @@ impl GoldyRenderer {
     /// Runs automatically at the start of [`Self::submit_prepared`], but can be
     /// called explicitly for fine-grained control between submit and present.
     pub fn poll_and_reclaim(&mut self, device: &Device) {
-        for signal in device.poll_signals() {
+        for signal in device.poll_signals_and_service() {
             match signal {
                 Signal::BoundaryCrossed { epoch } => {
-                    self.device.flush_deferred_deletions();
                     self.persistent.drain_pending_returns();
                     self.frame_pipeline.note_presented(epoch);
                     if let Some(allocator) = self.persistent.storage_allocator_mut() {
@@ -2033,13 +2032,13 @@ impl GoldyRenderer {
         surface: &goldy::Surface,
     ) -> Result<FrameStats> {
         let _tz = goldy::tracy_zone!("ekrano.submit_to_surface");
+        self.poll_and_reclaim(device);
         let (stats, surface_frame) =
             self.run_frame_from_prepared(device, prepared, None, Some(surface))?;
         if let Some((frame, tv)) = surface_frame {
             frame.present().map_err(|e| Error::Shader(e.to_string()))?;
             self.note_frame_presented(device, tv);
         }
-        self.device.flush_deferred_deletions();
         Ok(stats)
     }
 
@@ -2183,7 +2182,6 @@ impl GoldyRenderer {
             frame.present().map_err(|e| Error::Shader(e.to_string()))?;
             self.note_frame_presented(device, tv);
         }
-        self.device.flush_deferred_deletions();
         Ok(stats)
     }
 
@@ -2231,10 +2229,9 @@ impl GoldyRenderer {
         // --- Reclaim completed frames & open recording bracket ---
         // Drain pool returns from prior-frame token drops (cheap; no GPU sync).
         // Drain any bump readbacks whose GPU timeline has already passed.
-        // flush_deferred_deletions runs after submit so reclaim overlaps GPU work.
+        // BoundaryCrossed signals are serviced by poll_and_reclaim at frame entry.
         self.persistent.drain_pending_returns();
         self.persistent.drain_ready_bump_readbacks(device)?;
-        self.device.flush_deferred_deletions();
 
         let out_image_format = surface
             .map(|s| s.format())
@@ -2519,8 +2516,6 @@ impl GoldyRenderer {
 
         {
             let _tz = goldy::tracy_zone!("ekrano.run_frame.post_submit");
-            // Reclaim completed deferrals while the GPU executes this frame's work.
-            self.device.flush_deferred_deletions();
             let t_submit = t4.elapsed();
 
             let frame_num = FRAME_COUNTER.fetch_add(1, Ordering::Relaxed);
