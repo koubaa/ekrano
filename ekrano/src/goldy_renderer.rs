@@ -2345,6 +2345,13 @@ impl GoldyRenderer {
             self.persistent.nearest_clamp_sampler =
                 Some(goldy::Sampler::nearest(device).map_err(|e| Error::Gpu(e.to_string()))?);
         }
+        // Drain the caller device's backend deletion queue before the transient
+        // allocator's begin_frame. On Vulkan this is where VkBuffer/VkDeviceMemory
+        // destruction runs; without it, resources freed by the prior frame's
+        // post-submit flush accumulate until the next post-submit, and the allocator's
+        // gpu_progress() query / wait_until runs with a stale deletion backlog. The
+        // post-submit flush (after record+encode+submit) is the overlapped counterpart.
+        device.flush_deferred_deletions();
         {
             let _tz = goldy::tracy_zone!("ekrano.prepare_pool");
             if let Err(e) = self.persistent.prepare_storage_pool(device, pool_size) {
