@@ -102,9 +102,12 @@ fn pipelined_allocator_capacity_stable() {
             .render_to_texture(&device, &scene, &texture, &params)
             .unwrap_or_else(|e| panic!("frame {i} failed: {e}"));
 
-        if let Some(stats) = renderer.allocator_stats() {
-            capacities.push(stats.capacity);
-        }
+        capacities.push(
+            renderer
+                .allocator_stats()
+                .expect("allocator must be present after rendering")
+                .capacity,
+        );
     }
 
     // After pipeline saturation the capacity must stop growing. Check the last
@@ -164,9 +167,12 @@ fn pipelined_allocator_used_converges() {
             .render_to_texture(&device, &scene, &texture, &params)
             .unwrap_or_else(|e| panic!("frame {i} failed: {e}"));
 
-        if let Some(stats) = renderer.allocator_stats() {
-            used_samples.push(stats.used);
-        }
+        used_samples.push(
+            renderer
+                .allocator_stats()
+                .expect("allocator must be present after rendering")
+                .used,
+        );
     }
 
     // After warmup the last 50 samples should be bounded: not monotonically
