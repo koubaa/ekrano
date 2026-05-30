@@ -34,7 +34,7 @@
 use std::env;
 use std::io::ErrorKind;
 use std::path::Path;
-use std::sync::{Arc, Mutex, Once, OnceLock};
+use std::sync::{Arc, Mutex, Once, OnceLock, PoisonError};
 
 use log as _;
 
@@ -59,21 +59,51 @@ struct SharedTestContext {
     renderer: Mutex<GoldyRenderer>,
 }
 
-fn shared_context() -> &'static SharedTestContext {
-    static CTX: OnceLock<SharedTestContext> = OnceLock::new();
-    CTX.get_or_init(|| {
-        let instance = Instance::new().expect("Instance::new failed");
-        let device = instance
-            .create_device(DeviceType::DiscreteGpu)
-            .or_else(|_| instance.create_device(DeviceType::IntegratedGpu))
-            .or_else(|_| instance.create_device(DeviceType::Other))
-            .expect("No Goldy device available");
-        let renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new failed");
-        SharedTestContext {
-            device,
-            renderer: Mutex::new(renderer),
-        }
-    })
+static SHARED_CONTEXT: OnceLock<Mutex<Option<SharedTestContext>>> = OnceLock::new();
+static SHARED_CONTEXT_ATEXIT: Once = Once::new();
+
+fn create_shared_context() -> SharedTestContext {
+    let instance = Instance::new().expect("Instance::new failed");
+    let device = instance
+        .create_device(DeviceType::DiscreteGpu)
+        .or_else(|_| instance.create_device(DeviceType::IntegratedGpu))
+        .or_else(|_| instance.create_device(DeviceType::Other))
+        .expect("No Goldy device available");
+    let renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new failed");
+    SharedTestContext {
+        device,
+        renderer: Mutex::new(renderer),
+    }
+}
+
+#[cfg(unix)]
+extern "C" fn shutdown_shared_context() {
+    if let Some(context) = SHARED_CONTEXT.get() {
+        let mut context = context.lock().unwrap_or_else(PoisonError::into_inner);
+        context.take();
+    }
+}
+
+#[cfg(unix)]
+fn register_shared_context_shutdown() {
+    unsafe extern "C" {
+        fn atexit(callback: extern "C" fn()) -> i32;
+    }
+
+    // Register after Vulkan initialization so this teardown runs before driver
+    // atexit handlers that may unload ICD state used by Goldy's fence poller.
+    unsafe {
+        let _ = atexit(shutdown_shared_context);
+    }
+}
+
+#[cfg(not(unix))]
+fn register_shared_context_shutdown() {}
+
+fn shared_context() -> &'static Mutex<Option<SharedTestContext>> {
+    let context = SHARED_CONTEXT.get_or_init(|| Mutex::new(Some(create_shared_context())));
+    SHARED_CONTEXT_ATEXIT.call_once(register_shared_context_shutdown);
+    context
 }
 
 mod snapshot;
@@ -188,11 +218,13 @@ pub fn get_scene_image(params: &TestParams, scene: &Scene) -> Result<ImageData, 
 
     use ekrano::RenderParams;
 
-    let ctx = shared_context();
-    let mut renderer = ctx
-        .renderer
+    let ctx = shared_context()
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+        .unwrap_or_else(PoisonError::into_inner);
+    let ctx = ctx
+        .as_ref()
+        .expect("shared test context should be live while tests are running");
+    let mut renderer = ctx.renderer.lock().unwrap_or_else(PoisonError::into_inner);
 
     let width = params.width;
     let height = params.height;

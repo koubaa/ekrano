@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 use goldy::task_graph::{NodeAccess, NodeBuilder};
 use goldy::types::{BufferFlags, SpatialAccess, TextureFlags, TextureFormat};
 use goldy::{
-    Buffer, BufferPool, BufferView, ComputePipeline, DataAccess, Device, DeviceType, FrameHandle,
+    Buffer, BufferPool, BufferView, ComputePipeline, DataAccess, Device, FrameHandle,
     FrameOrchestrator, ShaderModule, Signal, TaskGraph, Texture, TexturePool, TimelineValue,
     TransientAllocator, TransientAllocatorConfig, TransientAllocatorStrategy,
 };
@@ -2660,7 +2660,7 @@ mod tests {
     use super::*;
     use crate::gpu_resources::PipelineResources;
     use ekrano_encoding::{RenderConfig, Resolver};
-    use goldy::Instance;
+    use goldy::{DeviceType, Instance};
 
     /// Regression test: `PipelineResources::prepare` must create `out_image` with
     /// the format supplied by the caller, not hardcode `Rgba8Unorm`.
