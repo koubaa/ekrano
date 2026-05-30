@@ -2046,9 +2046,9 @@ impl GoldyRenderer {
     ///
     /// Returns frame stats and the goldy [`goldy::Frame`], which the caller must
     /// [`present`](goldy::Frame::present) when ready. Frame retirement is driven
-    /// by [`Self::poll_and_reclaim`] (`BoundaryCrossed` signals), not by
-    /// [`Self::note_frame_presented`]. Internally drains signals and reclaims
-    /// resources before acquire + encode + submit.
+    /// by [`Self::poll_and_reclaim`] (`BoundaryCrossed` signals) and the post-submit
+    /// `flush_deferred_deletions` in [`Self::run_frame`]. Internally drains signals
+    /// and reclaims resources before acquire + encode + submit.
     pub fn submit_prepared(
         &mut self,
         device: &Device,
@@ -2518,6 +2518,16 @@ impl GoldyRenderer {
             let _tz = goldy::tracy_zone!("ekrano.run_frame.post_submit");
             // Keep reclamation keyed to live GPU progress so Vulkan/DX12 are not gated
             // solely by the coarse background fence-poller signal cadence.
+            //
+            // ekrano runs a dual-device split: `device` (the caller's unbudgeted device)
+            // owns the per-frame VRAM ring that `defer_frame_gpu_resources` just pushed
+            // this frame's views/textures into above, while `self.device` is the budgeted
+            // clone used for persistent/storage allocations. Both share the same backend
+            // (and handle), so each call also drains the shared backend deletion queue;
+            // the second drain is an idempotent no-op. We must flush the caller's device
+            // here — it holds this frame's deferrals — otherwise they stay pinned until the
+            // poller-driven `poll_and_reclaim` signal path catches up (the U5 regression).
+            device.flush_deferred_deletions();
             self.device.flush_deferred_deletions();
             let t_submit = t4.elapsed();
 
