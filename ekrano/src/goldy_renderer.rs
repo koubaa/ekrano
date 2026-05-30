@@ -327,12 +327,12 @@ struct GoldyShader {
     bindings: Vec<BindType>,
 }
 
-/// WARP has a bug where SRV descriptors on structured buffers return incorrect
-/// data. This manifests both as `FirstElement` being ignored on pool views and
-/// as broader SRV corruption under heavy clip workloads. Disable pooling on
-/// software adapters and force all buffer bindings to UAV descriptors.
-fn use_pool(device: &Device) -> bool {
-    device.device_type() != DeviceType::Cpu
+/// Pool allocation is enabled on all devices. A previous workaround disabled
+/// pooling on Cpu-type adapters (WARP, lavapipe) due to an unconfirmed SRV
+/// descriptor issue; that restriction is removed until concrete evidence of a
+/// regression is observed.
+fn use_pool(_device: &Device) -> bool {
+    true
 }
 
 #[derive(Hash, PartialEq, Eq, Clone)]
@@ -1944,6 +1944,7 @@ impl GoldyRenderer {
         texture: &Texture,
         params: &RenderParams,
     ) -> Result<FrameStats> {
+        self.poll_and_reclaim(device);
         self.run_frame(device, scene, params, Some(texture), None)
     }
 
