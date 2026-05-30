@@ -327,14 +327,6 @@ struct GoldyShader {
     bindings: Vec<BindType>,
 }
 
-/// Pool allocation is enabled on all devices. A previous workaround disabled
-/// pooling on Cpu-type adapters (WARP, lavapipe) due to an unconfirmed SRV
-/// descriptor issue; that restriction is removed until concrete evidence of a
-/// regression is observed.
-fn use_pool(_device: &Device) -> bool {
-    true
-}
-
 #[derive(Hash, PartialEq, Eq, Clone)]
 struct BufferKey {
     size: u64,
@@ -802,9 +794,6 @@ impl PersistentState {
     /// allocator can reclaim retired regions / wait on the previous epoch / grow as needed.
     fn prepare_storage_pool(&mut self, device: &Device, pool_size: u64) -> Result<()> {
         let _tz = goldy::tracy_zone!("ekrano.prepare_storage_pool");
-        if !use_pool(device) {
-            return Ok(());
-        }
 
         if self.storage_allocator.is_none() {
             device.reset_buffer_heaps();
@@ -2496,9 +2485,7 @@ impl GoldyRenderer {
             recorder.finish()?
         };
 
-        if use_pool(device)
-            && let Some(allocator) = self.persistent.storage_allocator_mut()
-        {
+        if let Some(allocator) = self.persistent.storage_allocator_mut() {
             let used = allocator.used_this_frame();
             allocator.hint_unused_above(used);
         }
