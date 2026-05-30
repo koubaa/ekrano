@@ -2516,6 +2516,9 @@ impl GoldyRenderer {
 
         {
             let _tz = goldy::tracy_zone!("ekrano.run_frame.post_submit");
+            // Keep reclamation keyed to live GPU progress so Vulkan/DX12 are not gated
+            // solely by the coarse background fence-poller signal cadence.
+            self.device.flush_deferred_deletions();
             let t_submit = t4.elapsed();
 
             let frame_num = FRAME_COUNTER.fetch_add(1, Ordering::Relaxed);
