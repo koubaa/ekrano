@@ -1890,10 +1890,9 @@ impl GoldyRenderer {
     /// Runs automatically at the start of [`Self::submit_prepared`], but can be
     /// called explicitly for fine-grained control between submit and present.
     pub fn poll_and_reclaim(&mut self, device: &Device) {
-        for signal in device.poll_signals() {
+        for signal in device.poll_signals_and_service() {
             match signal {
                 Signal::BoundaryCrossed { epoch } => {
-                    self.device.flush_deferred_deletions();
                     self.persistent.drain_pending_returns();
                     self.frame_pipeline.note_presented(epoch);
                     if let Some(allocator) = self.persistent.storage_allocator_mut() {
@@ -2033,13 +2032,13 @@ impl GoldyRenderer {
         surface: &goldy::Surface,
     ) -> Result<FrameStats> {
         let _tz = goldy::tracy_zone!("ekrano.submit_to_surface");
+        self.poll_and_reclaim(device);
         let (stats, surface_frame) =
             self.run_frame_from_prepared(device, prepared, None, Some(surface))?;
         if let Some((frame, tv)) = surface_frame {
             frame.present().map_err(|e| Error::Shader(e.to_string()))?;
             self.note_frame_presented(device, tv);
         }
-        self.device.flush_deferred_deletions();
         Ok(stats)
     }
 
@@ -2047,9 +2046,9 @@ impl GoldyRenderer {
     ///
     /// Returns frame stats and the goldy [`goldy::Frame`], which the caller must
     /// [`present`](goldy::Frame::present) when ready. Frame retirement is driven
-    /// by [`Self::poll_and_reclaim`] (`BoundaryCrossed` signals), not by
-    /// [`Self::note_frame_presented`]. Internally drains signals and reclaims
-    /// resources before acquire + encode + submit.
+    /// by [`Self::poll_and_reclaim`] (`BoundaryCrossed` signals) and the post-submit
+    /// `flush_deferred_deletions` in `Self::run_frame`. Internally drains signals
+    /// and reclaims resources before acquire + encode + submit.
     pub fn submit_prepared(
         &mut self,
         device: &Device,
@@ -2183,7 +2182,6 @@ impl GoldyRenderer {
             frame.present().map_err(|e| Error::Shader(e.to_string()))?;
             self.note_frame_presented(device, tv);
         }
-        self.device.flush_deferred_deletions();
         Ok(stats)
     }
 
@@ -2231,10 +2229,9 @@ impl GoldyRenderer {
         // --- Reclaim completed frames & open recording bracket ---
         // Drain pool returns from prior-frame token drops (cheap; no GPU sync).
         // Drain any bump readbacks whose GPU timeline has already passed.
-        // flush_deferred_deletions runs after submit so reclaim overlaps GPU work.
+        // BoundaryCrossed signals are serviced by poll_and_reclaim at frame entry.
         self.persistent.drain_pending_returns();
         self.persistent.drain_ready_bump_readbacks(device)?;
-        self.device.flush_deferred_deletions();
 
         let out_image_format = surface
             .map(|s| s.format())
@@ -2348,6 +2345,13 @@ impl GoldyRenderer {
             self.persistent.nearest_clamp_sampler =
                 Some(goldy::Sampler::nearest(device).map_err(|e| Error::Gpu(e.to_string()))?);
         }
+        // Drain the caller device's backend deletion queue before the transient
+        // allocator's begin_frame. On Vulkan this is where VkBuffer/VkDeviceMemory
+        // destruction runs; without it, resources freed by the prior frame's
+        // post-submit flush accumulate until the next post-submit, and the allocator's
+        // gpu_progress() query / wait_until runs with a stale deletion backlog. The
+        // post-submit flush (after record+encode+submit) is the overlapped counterpart.
+        device.flush_deferred_deletions();
         {
             let _tz = goldy::tracy_zone!("ekrano.prepare_pool");
             if let Err(e) = self.persistent.prepare_storage_pool(device, pool_size) {
@@ -2519,7 +2523,18 @@ impl GoldyRenderer {
 
         {
             let _tz = goldy::tracy_zone!("ekrano.run_frame.post_submit");
-            // Reclaim completed deferrals while the GPU executes this frame's work.
+            // Keep reclamation keyed to live GPU progress so Vulkan/DX12 are not gated
+            // solely by the coarse background fence-poller signal cadence.
+            //
+            // ekrano runs a dual-device split: `device` (the caller's unbudgeted device)
+            // owns the per-frame VRAM ring that `defer_frame_gpu_resources` just pushed
+            // this frame's views/textures into above, while `self.device` is the budgeted
+            // clone used for persistent/storage allocations. Both share the same backend
+            // (and handle), so each call also drains the shared backend deletion queue;
+            // the second drain is an idempotent no-op. We must flush the caller's device
+            // here — it holds this frame's deferrals — otherwise they stay pinned until the
+            // poller-driven `poll_and_reclaim` signal path catches up (the U5 regression).
+            device.flush_deferred_deletions();
             self.device.flush_deferred_deletions();
             let t_submit = t4.elapsed();
 
