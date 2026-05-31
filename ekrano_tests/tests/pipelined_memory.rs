@@ -15,7 +15,7 @@ use ekrano::kurbo::{Affine, Rect};
 use ekrano::peniko::{Fill, color::palette};
 use ekrano::{AaConfig, GoldyRenderer, RenderParams, Scene};
 use goldy::types::{SpatialAccess, TextureFlags, TextureFormat};
-use goldy::{Device, DeviceType, Instance};
+use goldy::{Device, DeviceDescriptor, Instance, RequestAdapterOptions};
 
 /// Serialize GPU tests when the D3D12 debug layer is active.
 ///
@@ -50,9 +50,9 @@ const HEIGHT: u32 = 64;
 fn make_device() -> Device {
     let instance = Instance::new().expect("Instance::new");
     instance
-        .create_device(DeviceType::DiscreteGpu)
-        .or_else(|_| instance.create_device(DeviceType::IntegratedGpu))
-        .or_else(|_| instance.create_device(DeviceType::Other))
+        .request_adapter(&RequestAdapterOptions::default())
+        .expect("adapter")
+        .request_device(&DeviceDescriptor::default())
         .expect("No Goldy device")
 }
 

@@ -2660,7 +2660,7 @@ mod tests {
     use super::*;
     use crate::gpu_resources::PipelineResources;
     use ekrano_encoding::{RenderConfig, Resolver};
-    use goldy::{DeviceType, Instance};
+    use goldy::Instance;
 
     /// Regression test: `PipelineResources::prepare` must create `out_image` with
     /// the format supplied by the caller, not hardcode `Rgba8Unorm`.
@@ -2680,9 +2680,8 @@ mod tests {
             return;
         };
         let Ok(device) = instance
-            .create_device(DeviceType::DiscreteGpu)
-            .or_else(|_| instance.create_device(DeviceType::IntegratedGpu))
-            .or_else(|_| instance.create_device(DeviceType::Other))
+            .request_adapter(&goldy::RequestAdapterOptions::default())
+            .and_then(|a| a.request_device(&goldy::DeviceDescriptor::default()))
         else {
             return;
         };
