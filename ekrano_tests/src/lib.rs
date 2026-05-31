@@ -43,7 +43,7 @@ use ekrano::kurbo::{Affine, Vec2};
 use ekrano::peniko::{Blob, Color, ImageFormat, color::palette};
 use ekrano::peniko::{ImageAlphaType, ImageData};
 use ekrano::{AaConfig, GoldyRenderer, Scene};
-use goldy::{Device, DeviceType, Instance};
+use goldy::{Device, DeviceDescriptor, Instance, RequestAdapterOptions};
 use image::RgbImage;
 use scenes::{ExampleScene, ImageCache, SceneParams, SimpleText};
 
@@ -65,9 +65,9 @@ static SHARED_CONTEXT_ATEXIT: Once = Once::new();
 fn create_shared_context() -> SharedTestContext {
     let instance = Instance::new().expect("Instance::new failed");
     let device = instance
-        .create_device(DeviceType::DiscreteGpu)
-        .or_else(|_| instance.create_device(DeviceType::IntegratedGpu))
-        .or_else(|_| instance.create_device(DeviceType::Other))
+        .request_adapter(&RequestAdapterOptions::default())
+        .expect("Instance::new failed")
+        .request_device(&DeviceDescriptor::default())
         .expect("No Goldy device available");
     let renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new failed");
     SharedTestContext {
