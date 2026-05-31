@@ -479,8 +479,8 @@ impl ResourcePool {
 /// allocates full-resolution textures (`out_image` + `filter_layers`), so a
 /// depth of N means N * ~5 render-target-sized textures in flight. On a
 /// Retina display, each texture can be >13 MB, so high values cause OOM
-/// when vsync is off and frames outrun the GPU. Kept in sync with the
-/// transient allocator's `max_regions`.
+/// when vsync is off and frames outrun the GPU. Kept in sync with
+/// [`FrameStrategy::depth`].
 ///
 /// With the Tiger Lottie at Retina resolution, each frame holds ~173 MB of
 /// compute buffers (in an allocator region) plus ~8 full-resolution textures
@@ -800,8 +800,6 @@ impl PersistentState {
 
             let config = TransientAllocatorConfig {
                 initial_size: pool_size,
-                min_region_size: pool_size,
-                max_regions: frame_strategy().depth(),
                 alignment: 256,
                 flags: BufferFlags::GPU_ONLY,
             };
@@ -812,7 +810,7 @@ impl PersistentState {
                 .and_then(TransientAllocatorStrategy::parse)
                 .unwrap_or_default();
             log::info!(
-                "[ekrano] transient allocator strategy = {:?} (set EKRANO_TRANSIENT_ALLOCATOR=bump|epoch to override)",
+                "[ekrano] transient allocator strategy = {:?} (set EKRANO_TRANSIENT_ALLOCATOR=bump|heap to override)",
                 strategy
             );
             self.storage_allocator = Some(
