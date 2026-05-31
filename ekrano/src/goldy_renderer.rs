@@ -2047,7 +2047,7 @@ impl GoldyRenderer {
     /// Returns frame stats and the goldy [`goldy::Frame`], which the caller must
     /// [`present`](goldy::Frame::present) when ready. Frame retirement is driven
     /// by [`Self::poll_and_reclaim`] (`BoundaryCrossed` signals) and the post-submit
-    /// `flush_deferred_deletions` in [`Self::run_frame`]. Internally drains signals
+    /// `flush_deferred_deletions` in `Self::run_frame`. Internally drains signals
     /// and reclaims resources before acquire + encode + submit.
     pub fn submit_prepared(
         &mut self,
