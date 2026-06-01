@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 use goldy::task_graph::{NodeAccess, NodeBuilder};
 use goldy::types::{BufferFlags, SpatialAccess, TextureFlags, TextureFormat};
 use goldy::{
-    Buffer, BufferPool, BufferView, ComputePipeline, DataAccess, Device, FrameHandle,
+    Buffer, BufferPool, BufferView, ComputePipeline, Context, DataAccess, Device, FrameHandle,
     FrameOrchestrator, ShaderModule, Signal, TaskGraph, Texture, TexturePool, TimelineValue,
     TransientAllocator, TransientAllocatorConfig, TransientAllocatorStrategy,
 };
@@ -371,6 +371,7 @@ impl ResourcePool {
     pub(crate) fn get_buf_with_stride(
         &mut self,
         device: &Device,
+        ctx: &Context,
         size: u64,
         name: &'static str,
         access: DataAccess,
@@ -410,12 +411,12 @@ impl ResourcePool {
                 // peek_oldest_in_flight() gives us the exact fence value we need to unblock.
                 {
                     let _tz = goldy::tracy_zone!("ekrano.resource_pool.wait_reclaim");
-                    if let Some(oldest_in_flight) = device.peek_oldest_in_flight() {
+                    if let Some(oldest_in_flight) = ctx.peek_oldest_in_flight() {
                         log::debug!(
                             "ResourcePool heap pressure for {name} — waiting for GPU epoch \
                              {oldest_in_flight} to reclaim archive",
                         );
-                        let _ = device.wait_until_timeout(oldest_in_flight, 2000);
+                        let _ = ctx.wait_until_timeout(oldest_in_flight, 2000);
                         device.flush_deferred_deletions();
                         self.drain_pending();
                         if let Some(buf) = self.bufs.entry(key.clone()).or_default().pop() {
@@ -598,7 +599,7 @@ pub(crate) struct PersistentState {
     ///
     /// Two timeline-guarded slots let depth=2 pipelining reuse every frame: one slot
     /// ages while the other is claimed or written.  Written by `schedule_pipeline_cleanup`;
-    /// readable when `device.gpu_progress() >= cached_rt_timelines[i]`.
+    /// readable when `context.gpu_progress() >= cached_rt_timelines[i]`.
     pub(crate) cached_render_targets: [Option<(Texture, [Texture; 4])>; RESOURCE_CACHE_SLOTS],
     /// Timeline of the frame that last wrote each render-target slot. `0` when empty.
     pub(crate) cached_rt_timelines: [TimelineValue; RESOURCE_CACHE_SLOTS],
@@ -655,7 +656,7 @@ impl PersistentState {
     /// are retired before new allocations during resize.
     pub(crate) fn purge_render_target_cache_if_mismatch(
         &mut self,
-        device: &Device,
+        ctx: &Context,
         width: u32,
         height: u32,
         out_format: TextureFormat,
@@ -671,8 +672,8 @@ impl PersistentState {
 
         // Fast path: if nothing is in-flight the GPU is completely idle and all
         // cached slots are safe to drop immediately without any wait.
-        let progress = device.gpu_progress();
-        if device.peek_oldest_in_flight().is_none() {
+        let progress = ctx.gpu_progress();
+        if ctx.peek_oldest_in_flight().is_none() {
             // GPU idle — skip the timeline scan entirely.
         } else {
             let oldest = (0..RESOURCE_CACHE_SLOTS)
@@ -682,7 +683,7 @@ impl PersistentState {
             if let Some(oldest) = oldest
                 && progress < oldest
             {
-                let _ = device.wait_until(oldest);
+                let _ = ctx.wait_until(oldest);
             }
         }
 
@@ -704,7 +705,7 @@ impl PersistentState {
 
     pub(crate) fn take_cached_render_targets(
         &mut self,
-        device: &Device,
+        ctx: &Context,
         progress: TimelineValue,
         width: u32,
         height: u32,
@@ -724,14 +725,14 @@ impl PersistentState {
                 if progress < oldest {
                     // Fast-path guard: if nothing is in-flight the GPU is idle and all
                     // cache slots must already be ready — skip the blocking wait.
-                    if device.peek_oldest_in_flight().is_none() {
-                        progress = device.gpu_progress();
+                    if ctx.peek_oldest_in_flight().is_none() {
+                        progress = ctx.gpu_progress();
                     } else {
                         log::debug!(
                             "[RT-CACHE] backpressure: progress={progress} < oldest={oldest}, waiting"
                         );
-                        let wait_ok = device.wait_until(oldest).is_ok();
-                        progress = device.gpu_progress();
+                        let wait_ok = ctx.wait_until(oldest).is_ok();
+                        progress = ctx.gpu_progress();
                         if wait_ok {
                             let order2 = ready_cache_slots_oldest_first(
                                 self.cached_rt_timelines,
@@ -740,7 +741,7 @@ impl PersistentState {
                             );
                             if order2[0].is_some() {
                                 return self.take_cached_render_targets(
-                                    device, progress, width, height, out_format,
+                                    ctx, progress, width, height, out_format,
                                 );
                             }
                         }
@@ -846,12 +847,12 @@ impl PersistentState {
         self.pending_bump_readbacks.push_back((timeline, buf));
     }
 
-    fn drain_ready_bump_readbacks(&mut self, device: &Device) -> Result<()> {
+    fn drain_ready_bump_readbacks(&mut self, device: &Device, ctx: &Context) -> Result<()> {
         if self.pending_bump_readbacks.is_empty() {
             return Ok(());
         }
         let _tz = goldy::tracy_zone!("ekrano.drain_ready_bump_readbacks");
-        let progress = device.gpu_progress();
+        let progress = ctx.gpu_progress();
         while self
             .pending_bump_readbacks
             .front()
@@ -911,8 +912,8 @@ impl PersistentState {
     }
 
     /// Mark an RT cache slot immediately reusable when its swapchain image returns.
-    pub(crate) fn mark_rt_slot_returned(&mut self, device: &Device, image_index: u32) {
-        let progress = device.gpu_progress();
+    pub(crate) fn mark_rt_slot_returned(&mut self, ctx: &Context, image_index: u32) {
+        let progress = ctx.gpu_progress();
         for (i, entry) in self.rt_slot_swapchain_image.iter_mut().enumerate() {
             if *entry == Some(image_index) {
                 debug_assert!(
@@ -958,6 +959,7 @@ fn read_bump_buffer(device: &Device, persistent: &mut PersistentState, buf: Buff
 /// Renders scenes to textures using the Goldy GPU backend with Slang shaders.
 pub struct GoldyRenderer {
     device: Device,
+    context: Context,
     shaders: FullShaders,
     resolver: Resolver,
     engine_shaders: Vec<GoldyShader>,
@@ -986,6 +988,7 @@ pub struct GoldyRenderer {
 
 pub(crate) struct FrameRecorder<'a> {
     pub(crate) device: &'a Device,
+    pub(crate) context: &'a Context,
     graph: &'a mut TaskGraph,
     frame_pipeline: Option<&'a mut FrameOrchestrator<()>>,
     frame_handle: Option<FrameHandle>,
@@ -1016,6 +1019,7 @@ pub(crate) struct FrameRecorder<'a> {
 impl<'a> FrameRecorder<'a> {
     fn new_orchestrated(
         device: &'a Device,
+        context: &'a Context,
         graph: &'a mut TaskGraph,
         frame_pipeline: &'a mut FrameOrchestrator<()>,
         frame_handle: FrameHandle,
@@ -1026,6 +1030,7 @@ impl<'a> FrameRecorder<'a> {
     ) -> Self {
         Self::new_inner(
             device,
+            context,
             graph,
             Some(frame_pipeline),
             Some(frame_handle),
@@ -1038,6 +1043,7 @@ impl<'a> FrameRecorder<'a> {
 
     fn new_direct(
         device: &'a Device,
+        context: &'a Context,
         graph: &'a mut TaskGraph,
         persistent: &'a mut PersistentState,
         shaders: &'a [GoldyShader],
@@ -1046,6 +1052,7 @@ impl<'a> FrameRecorder<'a> {
     ) -> Self {
         Self::new_inner(
             device,
+            context,
             graph,
             None,
             None,
@@ -1058,6 +1065,7 @@ impl<'a> FrameRecorder<'a> {
 
     fn new_inner(
         device: &'a Device,
+        context: &'a Context,
         graph: &'a mut TaskGraph,
         frame_pipeline: Option<&'a mut FrameOrchestrator<()>>,
         frame_handle: Option<FrameHandle>,
@@ -1076,6 +1084,7 @@ impl<'a> FrameRecorder<'a> {
 
         Self {
             device,
+            context,
             graph,
             frame_pipeline,
             frame_handle,
@@ -1113,6 +1122,7 @@ impl<'a> FrameRecorder<'a> {
     ) -> Result<GpuBuf, Error> {
         crate::gpu_resources::alloc_pipeline_buffer(
             self.device,
+            self.context,
             self.graph,
             self.persistent,
             size,
@@ -1424,6 +1434,7 @@ impl<'a> FrameRecorder<'a> {
     pub fn upload(&mut self, name: &'static str, data: impl Into<Vec<u8>>) -> Buffer {
         match record_upload_bytes_owned(
             self.device,
+            self.context,
             self.graph,
             self.persistent,
             name,
@@ -1445,6 +1456,7 @@ impl<'a> FrameRecorder<'a> {
     ) -> Buffer {
         match record_upload_bytes_owned(
             self.device,
+            self.context,
             self.graph,
             self.persistent,
             name,
@@ -1463,6 +1475,7 @@ impl<'a> FrameRecorder<'a> {
         use crate::gpu_resources::record_upload_bytes;
         match record_upload_bytes(
             self.device,
+            self.context,
             self.graph,
             self.persistent,
             name,
@@ -1690,7 +1703,7 @@ impl<'a> FrameRecorder<'a> {
         } else {
             let tv = if self.graph.is_empty() {
                 self.last_timeline
-                    .unwrap_or_else(|| self.device.gpu_progress())
+                    .unwrap_or_else(|| self.context.gpu_progress())
             } else {
                 self.device
                     .submit_pipelined(self.graph)
@@ -1786,8 +1799,10 @@ impl GoldyRenderer {
             let _tz = goldy::tracy_zone!("ekrano.GoldyRenderer::new.frame_orchestrator");
             FrameOrchestrator::new(device, frame_strategy().depth())
         };
+        let context = tracked_device.create_context();
         let mut renderer = Self {
             device: tracked_device.clone(),
+            context,
             shaders: FullShaders::empty(),
             resolver: Resolver::new(),
             engine_shaders: Vec::new(),
@@ -1898,8 +1913,8 @@ impl GoldyRenderer {
                     }
                 }
                 Signal::Oversubscribed { .. } => {
-                    if let Some(oldest) = device.peek_oldest_in_flight()
-                        && device.wait_until(oldest).is_err()
+                    if let Some(oldest) = self.context.peek_oldest_in_flight()
+                        && self.context.wait_until(oldest).is_err()
                     {
                         break;
                     }
@@ -1907,7 +1922,7 @@ impl GoldyRenderer {
                     self.persistent.drain_pending_returns();
                 }
                 Signal::SwapchainReturned { image_index } => {
-                    self.persistent.mark_rt_slot_returned(device, image_index);
+                    self.persistent.mark_rt_slot_returned(&self.context, image_index);
                 }
                 Signal::SwapchainAcquired { .. } => {}
             }
@@ -2125,7 +2140,8 @@ impl GoldyRenderer {
             self.frame_pipeline
                 .drain_all(|_, _| Ok::<(), Error>(()))
                 .map_err(|e| Error::Shader(e.to_string()))?;
-            self.persistent.drain_ready_bump_readbacks(device)?;
+            self.persistent
+                .drain_ready_bump_readbacks(device, &self.context)?;
             self.device.flush_deferred_deletions();
 
             match self.persistent.last_drained_bump() {
@@ -2229,13 +2245,14 @@ impl GoldyRenderer {
         // Drain any bump readbacks whose GPU timeline has already passed.
         // BoundaryCrossed signals are serviced by poll_and_reclaim at frame entry.
         self.persistent.drain_pending_returns();
-        self.persistent.drain_ready_bump_readbacks(device)?;
+        self.persistent
+            .drain_ready_bump_readbacks(device, &self.context)?;
 
         let out_image_format = surface
             .map(|s| s.format())
             .unwrap_or(TextureFormat::Rgba8Unorm);
         self.persistent.purge_render_target_cache_if_mismatch(
-            device,
+            &self.context,
             params.width,
             params.height,
             out_image_format,
@@ -2252,7 +2269,8 @@ impl GoldyRenderer {
                 .map_err(|e| Error::Shader(e.to_string()))?;
             // After begin_frame the GPU has completed the previous frame (depth=1
             // wait), so any queued bump readback is now guaranteed ready.
-            self.persistent.drain_ready_bump_readbacks(device)?;
+            self.persistent
+                .drain_ready_bump_readbacks(device, &self.context)?;
             Some(h)
         } else {
             None
@@ -2365,6 +2383,7 @@ impl GoldyRenderer {
         let mut recorder = if let Some(frame_handle) = frame_handle {
             FrameRecorder::new_orchestrated(
                 device,
+                &self.context,
                 &mut self.graph,
                 &mut self.frame_pipeline,
                 frame_handle,
@@ -2376,6 +2395,7 @@ impl GoldyRenderer {
         } else {
             FrameRecorder::new_direct(
                 device,
+                &self.context,
                 &mut self.graph,
                 &mut self.persistent,
                 &self.engine_shaders,
@@ -2384,6 +2404,7 @@ impl GoldyRenderer {
             )
         };
 
+        let ctx = recorder.context;
         let (graph, persistent) = recorder.graph_and_persistent();
         let swapchain_handle = if surface.is_some() {
             Some(graph.declare_swapchain_output())
@@ -2394,6 +2415,7 @@ impl GoldyRenderer {
             let _tz = goldy::tracy_zone!("ekrano.prepare");
             let pipeline_result = crate::gpu_resources::PipelineResources::prepare(
                 device,
+                ctx,
                 graph,
                 persistent,
                 coverage_mask.as_ref(),
@@ -2735,8 +2757,10 @@ mod tests {
                 RenderConfig::new(&layout, params.width, params.height, &params.base_color);
             let mut graph = TaskGraph::new();
 
+            let ctx = device.create_context();
             let pipeline = PipelineResources::prepare(
                 &device,
+                &ctx,
                 &mut graph,
                 &mut persistent,
                 encoding.coverage_mask.as_ref(),

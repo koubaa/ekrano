@@ -8,7 +8,8 @@ use std::mem::size_of;
 use goldy::task_graph::{NodeAccess, TransientId};
 use goldy::types::{BufferFlags, SpatialAccess, TextureFlags};
 use goldy::{
-    Buffer, BufferView, DataAccess, Device, DeviceType, TaskGraph, Texture, TextureFormat,
+    Buffer, BufferView, Context, DataAccess, Device, DeviceType, TaskGraph, Texture,
+    TextureFormat,
 };
 
 /// Sentinel bindless index for transient buffers whose real slot is resolved at
@@ -131,6 +132,7 @@ fn image_fmt_goldy(f: ImageFormat) -> TextureFormat {
 
 pub(crate) fn alloc_pipeline_buffer(
     device: &Device,
+    ctx: &Context,
     graph: &mut TaskGraph,
     persistent: &mut PersistentState,
     size: u64,
@@ -164,6 +166,7 @@ pub(crate) fn alloc_pipeline_buffer(
     {
         let buf = persistent.pool.get_buf_with_stride(
             device,
+            ctx,
             size,
             name,
             DataAccess::Scattered,
@@ -193,6 +196,7 @@ pub(crate) fn alloc_pipeline_buffer(
     // CPU / WARP device fallback: Owned buffer, no pooling.
     let buf = persistent.pool.get_buf_with_stride(
         device,
+        ctx,
         size,
         name,
         DataAccess::Scattered,
@@ -205,6 +209,7 @@ pub(crate) fn alloc_pipeline_buffer(
 
 pub(crate) fn record_upload_bytes(
     device: &Device,
+    ctx: &Context,
     graph: &mut TaskGraph,
     persistent: &mut PersistentState,
     name: &'static str,
@@ -213,6 +218,7 @@ pub(crate) fn record_upload_bytes(
 ) -> Result<GpuBuf, Error> {
     let buf = persistent.pool.get_buf_with_stride(
         device,
+        ctx,
         bytes.len() as u64,
         name,
         DataAccess::Scattered,
@@ -227,6 +233,7 @@ pub(crate) fn record_upload_bytes(
 /// the redundant `to_vec()` copy when the caller already holds an owned `Vec<u8>`.
 pub(crate) fn record_upload_bytes_owned(
     device: &Device,
+    ctx: &Context,
     graph: &mut TaskGraph,
     persistent: &mut PersistentState,
     name: &'static str,
@@ -235,6 +242,7 @@ pub(crate) fn record_upload_bytes_owned(
 ) -> Result<GpuBuf, Error> {
     let buf = persistent.pool.get_buf_with_stride(
         device,
+        ctx,
         bytes.len() as u64,
         name,
         DataAccess::Scattered,
@@ -453,6 +461,7 @@ impl PipelineResources {
     )]
     pub(crate) fn prepare(
         device: &Device,
+        ctx: &Context,
         graph: &mut TaskGraph,
         persistent: &mut PersistentState,
         coverage_mask: Option<&CoverageMask>,
@@ -467,7 +476,7 @@ impl PipelineResources {
             packed.resize(size_of::<u32>(), u8::MAX);
         }
 
-        let gpu_progress = device.gpu_progress();
+        let gpu_progress = ctx.gpu_progress();
         log::debug!("[RT-CACHE] gpu_progress={gpu_progress} at prepare entry");
 
         let mut cpu_config_owned = *config;
@@ -572,7 +581,7 @@ impl PipelineResources {
         // `to_vec()` copy that `record_upload_bytes` would perform on a borrow.
         let scene = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.scene_upload");
-            record_upload_bytes_owned(device, graph, persistent, "ekrano.scene", 4, packed)?
+            record_upload_bytes_owned(device, ctx, graph, persistent, "ekrano.scene", 4, packed)?
         };
 
         let config_uniform_value = cpu_config_owned.gpu;
@@ -604,6 +613,7 @@ impl PipelineResources {
             } else {
                 record_upload_bytes(
                     device,
+                    ctx,
                     graph,
                     persistent,
                     "ekrano.config",
@@ -764,6 +774,7 @@ impl PipelineResources {
                     Some(buf) => GpuBuf::Owned(buf),
                     None => alloc_pipeline_buffer(
                         device,
+                        ctx,
                         graph,
                         persistent,
                         $sz,
@@ -784,6 +795,7 @@ impl PipelineResources {
                     Some(buf) => GpuBuf::Owned(buf),
                     None => alloc_pipeline_buffer(
                         device,
+                        ctx,
                         graph,
                         persistent,
                         $sz,
@@ -857,6 +869,7 @@ impl PipelineResources {
         // bump is pool-exempt (CPU_READABLE) → always GpuBuf::Owned.
         let bump = alloc_pipeline_buffer(
             device,
+            ctx,
             graph,
             persistent,
             buffer_sizes.bump_alloc.size_in_bytes().into(),
@@ -946,7 +959,7 @@ impl PipelineResources {
         let (out_image, filter_layers) = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.render_targets");
             if let Some((cached_out, cached_layers)) = persistent.take_cached_render_targets(
-                device,
+                ctx,
                 gpu_progress,
                 params.width,
                 params.height,
