@@ -47,11 +47,7 @@ use goldy::{Device, DeviceDescriptor, Instance, RequestAdapterOptions};
 use image::RgbImage;
 use scenes::{ExampleScene, ImageCache, SceneParams, SimpleText};
 
-/// Per-process GPU device shared across tests. A `Device` has no fence-poller thread;
-/// leaking it at process exit is harmless.
-///
-/// Each render builds a fresh [`GoldyRenderer`] (and its contexts) so pollers are joined
-/// deterministically via RAII when the test returns — no `atexit` teardown.
+/// Per-process GPU `Device` shared across tests. leaking it at process exit is harmless.
 static SHARED_DEVICE: OnceLock<Mutex<Device>> = OnceLock::new();
 
 fn shared_device() -> Device {
