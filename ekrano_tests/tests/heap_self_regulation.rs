@@ -306,8 +306,7 @@ fn overflow_heaps_compact_to_zero_in_steady_state() {
     }
 
     // At this point, flush and compact.
-    let ctx = device.create_context().expect("context");
-    ctx.flush_deferred_deletions();
+    renderer.flush_deferred_deletions();
     device.compact_overflow_heaps();
 
     if let Some(stats) = device.buffer_heap_stats() {
@@ -457,7 +456,7 @@ fn deferred_ring_does_not_grow_unbounded() {
         // The VramAllocator deferred ring should be bounded by pipelining depth.
         // After steady state it shouldn't hold more than ~2-3 frames worth of payloads.
         if i > 20 {
-            let has_deferred = renderer.deferred_ring_depth();
+            let has_deferred = renderer.has_deferred_payloads();
             // It's OK to have deferred payloads (pipelined), but they should flush periodically.
             // After 100 frames, if there are still deferred payloads, the flush mechanism works
             // because we haven't OOM'd.

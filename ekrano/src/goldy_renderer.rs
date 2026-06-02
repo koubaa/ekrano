@@ -2110,9 +2110,15 @@ impl GoldyRenderer {
         }
     }
 
-    /// Number of deferred payload epochs waiting for GPU retirement.
-    pub fn deferred_ring_depth(&self) -> bool {
+    /// `true` if either submission context still holds unreclaimed deferred payloads.
+    pub fn has_deferred_payloads(&self) -> bool {
         self.unbudgeted_context.has_deferred_payloads() || self.context.has_deferred_payloads()
+    }
+
+    /// Pull-side reclamation on both submission contexts (unbudgeted caller device + tracked device).
+    pub fn flush_deferred_deletions(&self) {
+        self.unbudgeted_context.flush_deferred_deletions();
+        self.context.flush_deferred_deletions();
     }
 
     /// Query the device-owned placement heap's state for diagnostics / tests.
