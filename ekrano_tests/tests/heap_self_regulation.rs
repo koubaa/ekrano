@@ -306,7 +306,8 @@ fn overflow_heaps_compact_to_zero_in_steady_state() {
     }
 
     // At this point, flush and compact.
-    device.flush_deferred_deletions();
+    let ctx = device.create_context().expect("context");
+    ctx.flush_deferred_deletions();
     device.compact_overflow_heaps();
 
     if let Some(stats) = device.buffer_heap_stats() {

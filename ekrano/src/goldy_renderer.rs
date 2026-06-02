@@ -294,7 +294,7 @@ impl PreparedFrame {
 /// Uses a single [`Device::defer_release`] per frame (one mutex push) instead of
 /// multiple [`Device::defer_until`] calls.
 fn defer_frame_gpu_resources(
-    device: &Device,
+    ctx: &Context,
     persistent: &PersistentState,
     tv: TimelineValue,
     pool_views: Vec<BufferView>,
@@ -318,7 +318,7 @@ fn defer_frame_gpu_resources(
         });
     }
     if !payload.is_empty() {
-        device.defer_release(tv, payload);
+        ctx.defer_release(tv, payload);
     }
 }
 
@@ -398,7 +398,7 @@ impl ResourcePool {
                 // allocator ring into pending_owned_returns, then drain pending back into
                 // this pool and retry. This handles the common case where one or more
                 // frames finished between the last run_frame flush and this alloc.
-                device.flush_deferred_deletions();
+                ctx.flush_deferred_deletions();
                 self.drain_pending();
                 if let Some(buf) = self.bufs.entry(key.clone()).or_default().pop() {
                     return Ok(buf);
@@ -417,7 +417,7 @@ impl ResourcePool {
                              {oldest_in_flight} to reclaim archive",
                         );
                         let _ = ctx.wait_until_timeout(oldest_in_flight, 2000);
-                        device.flush_deferred_deletions();
+                        ctx.flush_deferred_deletions();
                         self.drain_pending();
                         if let Some(buf) = self.bufs.entry(key.clone()).or_default().pop() {
                             return Ok(buf);
@@ -959,6 +959,8 @@ fn read_bump_buffer(device: &Device, persistent: &mut PersistentState, buf: Buff
 /// Renders scenes to textures using the Goldy GPU backend with Slang shaders.
 pub struct GoldyRenderer {
     device: Device,
+    /// Submission context for the caller's (unbudgeted) device VRAM ring.
+    unbudgeted_context: Context,
     context: Context,
     shaders: FullShaders,
     resolver: Resolver,
@@ -1705,7 +1707,7 @@ impl<'a> FrameRecorder<'a> {
                 self.last_timeline
                     .unwrap_or_else(|| self.context.gpu_progress())
             } else {
-                self.device
+                self.context
                     .submit_pipelined(self.graph)
                     .map_err(|e| Error::Shader(e.to_string()))?
             };
@@ -1795,13 +1797,19 @@ impl GoldyRenderer {
         // size depends on the scene's transient footprint and can legitimately exceed
         // that figure for large scenes. The tracked device is still used for storage-
         // pool allocations (via `prepare_storage_pool`).
+        let unbudgeted_context = device.create_context().map_err(|e| Error::Gpu(e.to_string()))?;
+        let context = tracked_device
+            .create_context()
+            .map_err(|e| Error::Gpu(e.to_string()))?;
         let frame_pipeline = {
             let _tz = goldy::tracy_zone!("ekrano.GoldyRenderer::new.frame_orchestrator");
-            FrameOrchestrator::new(device, frame_strategy().depth())
+            // Transient placement-heap submits must use the unbudgeted device: the tracked
+            // clone carries a 512 MiB VRAM budget that large scenes can exceed.
+            FrameOrchestrator::new(&unbudgeted_context, frame_strategy().depth())
         };
-        let context = tracked_device.create_context();
         let mut renderer = Self {
             device: tracked_device.clone(),
+            unbudgeted_context,
             context,
             shaders: FullShaders::empty(),
             resolver: Resolver::new(),
@@ -1903,7 +1911,7 @@ impl GoldyRenderer {
     /// Runs automatically at the start of [`Self::submit_prepared`], but can be
     /// called explicitly for fine-grained control between submit and present.
     pub fn poll_and_reclaim(&mut self, device: &Device) {
-        for signal in device.poll_signals_and_service() {
+        for signal in self.unbudgeted_context.poll_signals_and_service() {
             match signal {
                 Signal::BoundaryCrossed { epoch } => {
                     self.persistent.drain_pending_returns();
@@ -1913,16 +1921,18 @@ impl GoldyRenderer {
                     }
                 }
                 Signal::Oversubscribed { .. } => {
-                    if let Some(oldest) = self.context.peek_oldest_in_flight()
-                        && self.context.wait_until(oldest).is_err()
+                    if let Some(oldest) = self.unbudgeted_context.peek_oldest_in_flight()
+                        && self.unbudgeted_context.wait_until(oldest).is_err()
                     {
                         break;
                     }
-                    self.device.flush_deferred_deletions();
+                    self.unbudgeted_context.flush_deferred_deletions();
+                    self.context.flush_deferred_deletions();
                     self.persistent.drain_pending_returns();
                 }
                 Signal::SwapchainReturned { image_index } => {
-                    self.persistent.mark_rt_slot_returned(&self.context, image_index);
+                    self.persistent
+                        .mark_rt_slot_returned(&self.unbudgeted_context, image_index);
                 }
                 Signal::SwapchainAcquired { .. } => {}
             }
@@ -2100,7 +2110,8 @@ impl GoldyRenderer {
 
     /// Number of deferred payload epochs waiting for GPU retirement.
     pub fn deferred_ring_depth(&self) -> bool {
-        self.device.has_deferred_payloads()
+        self.unbudgeted_context.has_deferred_payloads()
+            || self.context.has_deferred_payloads()
     }
 
     /// Query the device-owned placement heap's state for diagnostics / tests.
@@ -2141,8 +2152,9 @@ impl GoldyRenderer {
                 .drain_all(|_, _| Ok::<(), Error>(()))
                 .map_err(|e| Error::Shader(e.to_string()))?;
             self.persistent
-                .drain_ready_bump_readbacks(device, &self.context)?;
-            self.device.flush_deferred_deletions();
+                .drain_ready_bump_readbacks(device, &self.unbudgeted_context)?;
+            self.unbudgeted_context.flush_deferred_deletions();
+            self.context.flush_deferred_deletions();
 
             match self.persistent.last_drained_bump() {
                 Some(bump) if bump.failed != 0 => {
@@ -2246,13 +2258,13 @@ impl GoldyRenderer {
         // BoundaryCrossed signals are serviced by poll_and_reclaim at frame entry.
         self.persistent.drain_pending_returns();
         self.persistent
-            .drain_ready_bump_readbacks(device, &self.context)?;
+            .drain_ready_bump_readbacks(device, &self.unbudgeted_context)?;
 
         let out_image_format = surface
             .map(|s| s.format())
             .unwrap_or(TextureFormat::Rgba8Unorm);
         self.persistent.purge_render_target_cache_if_mismatch(
-            &self.context,
+            &self.unbudgeted_context,
             params.width,
             params.height,
             out_image_format,
@@ -2270,7 +2282,7 @@ impl GoldyRenderer {
             // After begin_frame the GPU has completed the previous frame (depth=1
             // wait), so any queued bump readback is now guaranteed ready.
             self.persistent
-                .drain_ready_bump_readbacks(device, &self.context)?;
+                .drain_ready_bump_readbacks(device, &self.unbudgeted_context)?;
             Some(h)
         } else {
             None
@@ -2367,7 +2379,7 @@ impl GoldyRenderer {
         // post-submit flush accumulate until the next post-submit, and the allocator's
         // gpu_progress() query / wait_until runs with a stale deletion backlog. The
         // post-submit flush (after record+encode+submit) is the overlapped counterpart.
-        device.flush_deferred_deletions();
+        self.unbudgeted_context.flush_deferred_deletions();
         {
             let _tz = goldy::tracy_zone!("ekrano.prepare_pool");
             if let Err(e) = self.persistent.prepare_storage_pool(device, pool_size) {
@@ -2383,7 +2395,7 @@ impl GoldyRenderer {
         let mut recorder = if let Some(frame_handle) = frame_handle {
             FrameRecorder::new_orchestrated(
                 device,
-                &self.context,
+                &self.unbudgeted_context,
                 &mut self.graph,
                 &mut self.frame_pipeline,
                 frame_handle,
@@ -2395,7 +2407,7 @@ impl GoldyRenderer {
         } else {
             FrameRecorder::new_direct(
                 device,
-                &self.context,
+                &self.unbudgeted_context,
                 &mut self.graph,
                 &mut self.persistent,
                 &self.engine_shaders,
@@ -2532,7 +2544,7 @@ impl GoldyRenderer {
                 self.persistent.queue_bump_readback(tv, buf);
             }
             defer_frame_gpu_resources(
-                device,
+                &self.unbudgeted_context,
                 &self.persistent,
                 tv,
                 deferred_pool_views,
@@ -2554,8 +2566,8 @@ impl GoldyRenderer {
             // the second drain is an idempotent no-op. We must flush the caller's device
             // here — it holds this frame's deferrals — otherwise they stay pinned until the
             // poller-driven `poll_and_reclaim` signal path catches up (the U5 regression).
-            device.flush_deferred_deletions();
-            self.device.flush_deferred_deletions();
+            self.unbudgeted_context.flush_deferred_deletions();
+            self.context.flush_deferred_deletions();
             let t_submit = t4.elapsed();
 
             let frame_num = FRAME_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -2757,7 +2769,7 @@ mod tests {
                 RenderConfig::new(&layout, params.width, params.height, &params.base_color);
             let mut graph = TaskGraph::new();
 
-            let ctx = device.create_context();
+            let ctx = device.create_context().expect("context");
             let pipeline = PipelineResources::prepare(
                 &device,
                 &ctx,
