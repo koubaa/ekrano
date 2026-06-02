@@ -291,8 +291,8 @@ impl PreparedFrame {
 
 /// Defer pool views, textures, and recyclable owned buffers until `tv` retires on the GPU.
 ///
-/// Uses a single [`Device::defer_release`] per frame (one mutex push) instead of
-/// multiple [`Device::defer_until`] calls.
+/// Uses a single [`Context::defer_release`] per frame (one mutex push) instead of
+/// multiple deferred cleanup calls.
 fn defer_frame_gpu_resources(
     ctx: &Context,
     persistent: &PersistentState,
@@ -642,10 +642,10 @@ pub(crate) struct PersistentState {
     /// or persistent owned handles (stable bindless indices for CB retention).
     pub(crate) strategy: FrameStrategy,
     /// Textures waiting to be returned to [`Self::tex_pool`] after GPU retirement.
-    /// Populated by [`DeferredTextureToken`] drops from [`Device::defer_until`].
+    /// Populated by [`DeferredTextureToken`] drops from [`Context::defer_release`].
     pending_texture_returns: Arc<Mutex<Vec<Texture>>>,
     /// Owned buffers waiting to be returned to [`Self::pool`] after GPU retirement.
-    /// Populated by [`DeferredOwnedBuffersToken`] drops from [`Device::defer_until`].
+    /// Populated by [`DeferredOwnedBuffersToken`] drops from [`Context::defer_release`].
     pending_owned_returns: Arc<Mutex<Vec<(Buffer, &'static str)>>>,
 }
 
@@ -1797,7 +1797,9 @@ impl GoldyRenderer {
         // size depends on the scene's transient footprint and can legitimately exceed
         // that figure for large scenes. The tracked device is still used for storage-
         // pool allocations (via `prepare_storage_pool`).
-        let unbudgeted_context = device.create_context().map_err(|e| Error::Gpu(e.to_string()))?;
+        let unbudgeted_context = device
+            .create_context()
+            .map_err(|e| Error::Gpu(e.to_string()))?;
         let context = tracked_device
             .create_context()
             .map_err(|e| Error::Gpu(e.to_string()))?;
@@ -2110,8 +2112,7 @@ impl GoldyRenderer {
 
     /// Number of deferred payload epochs waiting for GPU retirement.
     pub fn deferred_ring_depth(&self) -> bool {
-        self.unbudgeted_context.has_deferred_payloads()
-            || self.context.has_deferred_payloads()
+        self.unbudgeted_context.has_deferred_payloads() || self.context.has_deferred_payloads()
     }
 
     /// Query the device-owned placement heap's state for diagnostics / tests.
