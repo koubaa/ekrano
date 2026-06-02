@@ -670,8 +670,6 @@ impl PersistentState {
             return false;
         }
 
-        // Fast path: if nothing is in-flight the GPU is completely idle and all
-        // cached slots are safe to drop immediately without any wait.
         let progress = ctx.gpu_progress();
         if ctx.peek_oldest_in_flight().is_none() {
             // GPU idle — skip the timeline scan entirely.
@@ -1894,6 +1892,17 @@ impl GoldyRenderer {
     // =======================================================================
     // Public API
     // =======================================================================
+
+    /// Returns a clone of the renderer's submission [`goldy::Context`].
+    ///
+    /// Pass this context to [`goldy::Surface::new_with_config`] so that the
+    /// surface submits GPU work through the **same** timeline semaphore as the
+    /// renderer. This keeps `gpu_progress()` and the poller's `BoundaryCrossed`
+    /// signals on one consistent clock, enabling correct RT-cache retirement and
+    /// resource reclamation without a device-global fallback.
+    pub fn submission_context(&self) -> Context {
+        self.unbudgeted_context.clone()
+    }
 
     /// Acknowledge a swapchain frame after [`goldy::Frame::present`].
     ///
