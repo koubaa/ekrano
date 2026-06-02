@@ -34,7 +34,7 @@
 use std::env;
 use std::io::ErrorKind;
 use std::path::Path;
-use std::sync::{Arc, Mutex, Once, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, Once, OnceLock};
 
 use log as _;
 
@@ -47,63 +47,27 @@ use goldy::{Device, DeviceDescriptor, Instance, RequestAdapterOptions};
 use image::RgbImage;
 use scenes::{ExampleScene, ImageCache, SceneParams, SimpleText};
 
-/// Per-process GPU context shared across all tests in this binary.
+/// Per-process GPU device shared across tests. A `Device` has no fence-poller thread;
+/// leaking it at process exit is harmless.
 ///
-/// Creating a `Device` and compiling all shaders into a `GoldyRenderer` takes
-/// on the order of a second. With many snapshot tests this dominates total
-/// wall-clock test time. Using a process-wide `OnceLock` initialises once and
-/// re-uses the same renderer for every subsequent test, serialising GPU renders
-/// under a `Mutex` (which is fine — the tests were already sequential).
-struct SharedTestContext {
-    device: Device,
-    renderer: Mutex<GoldyRenderer>,
-}
+/// Each render builds a fresh [`GoldyRenderer`] (and its contexts) so pollers are joined
+/// deterministically via RAII when the test returns — no `atexit` teardown.
+static SHARED_DEVICE: OnceLock<Mutex<Device>> = OnceLock::new();
 
-static SHARED_CONTEXT: OnceLock<Mutex<Option<SharedTestContext>>> = OnceLock::new();
-static SHARED_CONTEXT_ATEXIT: Once = Once::new();
-
-fn create_shared_context() -> SharedTestContext {
-    let instance = Instance::new().expect("Instance::new failed");
-    let device = instance
-        .request_adapter(&RequestAdapterOptions::default())
-        .expect("Instance::new failed")
-        .request_device(&DeviceDescriptor::default())
-        .expect("No Goldy device available");
-    let renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new failed");
-    SharedTestContext {
-        device,
-        renderer: Mutex::new(renderer),
-    }
-}
-
-#[cfg(unix)]
-extern "C" fn shutdown_shared_context() {
-    if let Some(context) = SHARED_CONTEXT.get() {
-        let mut context = context.lock().unwrap_or_else(PoisonError::into_inner);
-        context.take();
-    }
-}
-
-#[cfg(unix)]
-fn register_shared_context_shutdown() {
-    unsafe extern "C" {
-        fn atexit(callback: extern "C" fn()) -> i32;
-    }
-
-    // Register after Vulkan initialization so this teardown runs before driver
-    // atexit handlers that may unload ICD state used by Goldy's fence poller.
-    unsafe {
-        let _ = atexit(shutdown_shared_context);
-    }
-}
-
-#[cfg(not(unix))]
-fn register_shared_context_shutdown() {}
-
-fn shared_context() -> &'static Mutex<Option<SharedTestContext>> {
-    let context = SHARED_CONTEXT.get_or_init(|| Mutex::new(Some(create_shared_context())));
-    SHARED_CONTEXT_ATEXIT.call_once(register_shared_context_shutdown);
-    context
+fn shared_device() -> Device {
+    SHARED_DEVICE
+        .get_or_init(|| {
+            let instance = Instance::new().expect("Instance::new failed");
+            let device = instance
+                .request_adapter(&RequestAdapterOptions::default())
+                .expect("request_adapter failed")
+                .request_device(&DeviceDescriptor::default())
+                .expect("No Goldy device available");
+            Mutex::new(device)
+        })
+        .lock()
+        .expect("shared device mutex poisoned")
+        .clone()
 }
 
 mod snapshot;
@@ -218,13 +182,9 @@ pub fn get_scene_image(params: &TestParams, scene: &Scene) -> Result<ImageData, 
 
     use ekrano::RenderParams;
 
-    let ctx = shared_context()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
-    let ctx = ctx
-        .as_ref()
-        .expect("shared test context should be live while tests are running");
-    let mut renderer = ctx.renderer.lock().unwrap_or_else(PoisonError::into_inner);
+    let device = shared_device();
+    // TODO(#179 follow-up): device-level shader cache so per-test renderer construction is cheap.
+    let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new failed");
 
     let width = params.width;
     let height = params.height;
@@ -239,7 +199,7 @@ pub fn get_scene_image(params: &TestParams, scene: &Scene) -> Result<ImageData, 
         robust: true,
     };
 
-    let pixels = renderer.render_to_buffer(&ctx.device, scene, &render_params)?;
+    let pixels = renderer.render_to_buffer(&device, scene, &render_params)?;
     let data = Blob::new(Arc::new(pixels));
     Ok(ImageData {
         data,
