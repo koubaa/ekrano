@@ -24,9 +24,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use goldy::task_graph::{NodeAccess, NodeBuilder};
-use goldy::types::{BufferFlags, SpatialAccess, TextureFlags, TextureFormat};
+use goldy::types::{BufferFlags, TextureKind, TextureFlags, TextureFormat};
 use goldy::{
-    Buffer, BufferPool, BufferView, ComputePipeline, Context, DataAccess, Device, FrameHandle,
+    Buffer, BufferPool, BufferView, ComputePipeline, Context, BufferKind, Device, FrameHandle,
     FrameOrchestrator, ShaderModule, Signal, TaskGraph, Texture, TexturePool, TimelineValue,
     TransientAllocator, TransientAllocatorConfig, TransientAllocatorStrategy,
 };
@@ -330,7 +330,7 @@ struct GoldyShader {
 #[derive(Hash, PartialEq, Eq, Clone)]
 struct BufferKey {
     size: u64,
-    access: DataAccess,
+    access: BufferKind,
     name: &'static str,
     buffer_flags: BufferFlags,
 }
@@ -374,7 +374,7 @@ impl ResourcePool {
         ctx: &Context,
         size: u64,
         name: &'static str,
-        access: DataAccess,
+        access: BufferKind,
         stride: Option<u32>,
         buffer_flags: BufferFlags,
     ) -> Result<Buffer> {
@@ -2157,7 +2157,7 @@ impl GoldyRenderer {
                 width,
                 height,
                 TextureFormat::Rgba8Unorm,
-                SpatialAccess::Direct,
+                TextureKind::Direct,
                 TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
             )
             .map_err(|e| Error::Gpu(e.to_string()))?;

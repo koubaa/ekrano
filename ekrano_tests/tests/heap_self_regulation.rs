@@ -16,7 +16,7 @@
 use ekrano::kurbo::{Affine, Circle, Line, Rect, Stroke};
 use ekrano::peniko::{Fill, color::palette};
 use ekrano::{AaConfig, GoldyRenderer, RenderParams, Scene};
-use goldy::types::{SpatialAccess, TextureFlags, TextureFormat};
+use goldy::types::{TextureKind, TextureFlags, TextureFormat};
 use goldy::{Device, DeviceDescriptor, Instance, RequestAdapterOptions};
 
 #[cfg(target_os = "windows")]
@@ -97,7 +97,7 @@ fn render_n_frames(
             params.width,
             params.height,
             TextureFormat::Rgba8Unorm,
-            SpatialAccess::Direct,
+            TextureKind::Direct,
             TextureFlags::COPY_DST,
         )
         .expect("alloc_texture");
@@ -227,7 +227,7 @@ fn resource_pool_stabilizes_after_warmup() {
             WIDTH,
             HEIGHT,
             TextureFormat::Rgba8Unorm,
-            SpatialAccess::Direct,
+            TextureKind::Direct,
             TextureFlags::COPY_DST,
         )
         .expect("alloc_texture");
@@ -285,7 +285,7 @@ fn overflow_heaps_compact_to_zero_in_steady_state() {
             WIDTH,
             HEIGHT,
             TextureFormat::Rgba8Unorm,
-            SpatialAccess::Direct,
+            TextureKind::Direct,
             TextureFlags::COPY_DST,
         )
         .expect("alloc_texture");
@@ -334,7 +334,7 @@ fn growing_scene_survives_without_heap_exhaustion() {
             WIDTH,
             HEIGHT,
             TextureFormat::Rgba8Unorm,
-            SpatialAccess::Direct,
+            TextureKind::Direct,
             TextureFlags::COPY_DST,
         )
         .expect("alloc_texture");
@@ -381,7 +381,7 @@ fn shrinking_scene_does_not_leak_buffers() {
             WIDTH,
             HEIGHT,
             TextureFormat::Rgba8Unorm,
-            SpatialAccess::Direct,
+            TextureKind::Direct,
             TextureFlags::COPY_DST,
         )
         .expect("alloc_texture");
@@ -435,7 +435,7 @@ fn deferred_ring_does_not_grow_unbounded() {
             WIDTH,
             HEIGHT,
             TextureFormat::Rgba8Unorm,
-            SpatialAccess::Direct,
+            TextureKind::Direct,
             TextureFlags::COPY_DST,
         )
         .expect("alloc_texture");
@@ -483,7 +483,7 @@ fn large_resolution_survives_50_frames() {
             w,
             h,
             TextureFormat::Rgba8Unorm,
-            SpatialAccess::Direct,
+            TextureKind::Direct,
             TextureFlags::COPY_DST,
         )
         .expect("alloc_texture");
@@ -517,7 +517,7 @@ fn recreate_renderer_after_warmup_survives() {
             WIDTH,
             HEIGHT,
             TextureFormat::Rgba8Unorm,
-            SpatialAccess::Direct,
+            TextureKind::Direct,
             TextureFlags::COPY_DST,
         )
         .expect("alloc_texture");

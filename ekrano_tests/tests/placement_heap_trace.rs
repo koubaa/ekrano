@@ -13,7 +13,7 @@
 use ekrano::kurbo::{Affine, Rect};
 use ekrano::peniko::{Fill, color::palette};
 use ekrano::{AaConfig, GoldyRenderer, RenderParams, Scene};
-use goldy::types::{SpatialAccess, TextureFlags, TextureFormat};
+use goldy::types::{TextureKind, TextureFlags, TextureFormat};
 use goldy::{Device, DeviceDescriptor, Instance, RequestAdapterOptions};
 
 const FRAME_COUNT: usize = 300;
@@ -54,7 +54,7 @@ fn placement_heap_paged_stable() {
             WIDTH,
             HEIGHT,
             TextureFormat::Rgba8Unorm,
-            SpatialAccess::Direct,
+            TextureKind::Direct,
             TextureFlags::COPY_DST,
         )
         .expect("alloc_texture");
@@ -133,7 +133,7 @@ fn placement_heap_capacity_sized_correctly() {
             WIDTH,
             HEIGHT,
             TextureFormat::Rgba8Unorm,
-            SpatialAccess::Direct,
+            TextureKind::Direct,
             TextureFlags::COPY_DST,
         )
         .expect("alloc_texture");

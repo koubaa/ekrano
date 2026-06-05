@@ -6,9 +6,9 @@
 use std::mem::size_of;
 
 use goldy::task_graph::{NodeAccess, TransientId};
-use goldy::types::{BufferFlags, SpatialAccess, TextureFlags};
+use goldy::types::{BufferFlags, ResourceAccess, TextureFlags, TextureKind};
 use goldy::{
-    Buffer, BufferView, Context, DataAccess, Device, DeviceType, TaskGraph, Texture, TextureFormat,
+    Buffer, BufferView, Context, BufferKind, Device, DeviceType, TaskGraph, Texture, TextureFormat,
 };
 
 /// Sentinel bindless index for transient buffers whose real slot is resolved at
@@ -69,19 +69,25 @@ impl<'a> GpuBinding<'a> {
         let idx = match self {
             GpuBinding::Buf(buf) => {
                 if is_read_only {
-                    buf.bindless_srv_index()
+                    buf.resource_index(ResourceAccess::Read)
                 } else {
-                    buf.bindless_index()
+                    buf.resource_index(ResourceAccess::Write)
                 }
             }
             GpuBinding::View(view) => {
                 if is_read_only {
-                    view.bindless_srv_index()
+                    view.resource_index(ResourceAccess::Read)
                 } else {
-                    view.bindless_index()
+                    view.resource_index(ResourceAccess::Write)
                 }
             }
-            GpuBinding::Tex(tex) => tex.bindless_index(),
+            GpuBinding::Tex(tex) => {
+                if is_read_only {
+                    tex.resource_index(ResourceAccess::Read)
+                } else {
+                    tex.resource_index(ResourceAccess::Write)
+                }
+            }
             GpuBinding::Transient(_) => return Ok(TRANSIENT_SLOT_PLACEHOLDER),
             GpuBinding::Sampler(idx) | GpuBinding::PersistentBuf(idx) => return Ok(*idx),
         };
@@ -168,7 +174,7 @@ pub(crate) fn alloc_pipeline_buffer(
             ctx,
             size,
             name,
-            DataAccess::Scattered,
+            BufferKind::Scattered,
             Some(stride),
             flags,
         )?;
@@ -198,7 +204,7 @@ pub(crate) fn alloc_pipeline_buffer(
         ctx,
         size,
         name,
-        DataAccess::Scattered,
+        BufferKind::Scattered,
         Some(stride),
         flags,
     )?;
@@ -220,7 +226,7 @@ pub(crate) fn record_upload_bytes(
         ctx,
         bytes.len() as u64,
         name,
-        DataAccess::Scattered,
+        BufferKind::Scattered,
         Some(element_stride),
         BufferFlags::empty(),
     )?;
@@ -244,7 +250,7 @@ pub(crate) fn record_upload_bytes_owned(
         ctx,
         bytes.len() as u64,
         name,
-        DataAccess::Scattered,
+        BufferKind::Scattered,
         Some(element_stride),
         BufferFlags::empty(),
     )?;
@@ -269,7 +275,7 @@ pub(crate) fn record_upload_image(
             width,
             height,
             format,
-            SpatialAccess::Interpolated,
+            TextureKind::Interpolated,
             TextureFlags::COPY_DST,
         )
         .map_err(|e| Error::Shader(e.to_string()))?;
@@ -340,7 +346,7 @@ pub(crate) fn acquire_texture_rgba(
     persistent: &mut PersistentState,
     width: u32,
     height: u32,
-    access: SpatialAccess,
+    access: TextureKind,
     flags: TextureFlags,
 ) -> Result<Texture, Error> {
     persistent
@@ -501,7 +507,7 @@ impl PipelineResources {
                     persistent,
                     1,
                     1,
-                    SpatialAccess::Interpolated,
+                    TextureKind::Interpolated,
                     TextureFlags::COPY_DST,
                 )?
             } else {
@@ -526,7 +532,7 @@ impl PipelineResources {
                     persistent,
                     1,
                     1,
-                    SpatialAccess::Interpolated,
+                    TextureKind::Interpolated,
                     TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
                 )?;
                 (t, (1_u32, 1_u32))
@@ -536,7 +542,7 @@ impl PipelineResources {
                     persistent,
                     images.width,
                     images.height,
-                    SpatialAccess::Interpolated,
+                    TextureKind::Interpolated,
                     TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
                 )?;
                 for image in images.images {
@@ -974,7 +980,7 @@ impl PipelineResources {
                         params.width,
                         params.height,
                         out_image_format,
-                        SpatialAccess::Direct,
+                        TextureKind::Direct,
                         TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
                     )
                     .map_err(|e| Error::Shader(e.to_string()))?;
@@ -984,7 +990,7 @@ impl PipelineResources {
                         persistent,
                         params.width,
                         params.height,
-                        SpatialAccess::DirectInterpolated,
+                        TextureKind::DirectInterpolated,
                         TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
                     )
                     .expect("filter layer")
@@ -1047,11 +1053,16 @@ pub(crate) fn collect_bindless_indices_into(
         let idx = match binding {
             GpuBinding::Buf(_) | GpuBinding::View(_) => binding.bindless_slot(is_read_only)?,
             GpuBinding::Tex(tex) if is_sampled_image => tex
-                .bindless_sampled_index()
-                .or_else(|| tex.bindless_index())
+                .resource_index(ResourceAccess::Read)
+                .or_else(|| {
+                    // Direct storage images have no separate sampled slot; use the primary
+                    // storage index (legacy bindless_sampled_index().or_else(bindless_index)).
+                    tex.resource_index(ResourceAccess::Write)
+                        .or_else(|| tex.resource_index(ResourceAccess::ReadWrite))
+                })
                 .ok_or_else(|| {
                     Error::Shader(
-                        "bindless sampled index missing for ImageRead texture binding".into(),
+                        "resource sampled index missing for ImageRead texture binding".into(),
                     )
                 })?,
             GpuBinding::Tex(_) => binding.bindless_slot(false)?,

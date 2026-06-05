@@ -14,7 +14,7 @@
 use ekrano::kurbo::{Affine, Rect};
 use ekrano::peniko::{Fill, color::palette};
 use ekrano::{AaConfig, GoldyRenderer, RenderParams, Scene};
-use goldy::types::{SpatialAccess, TextureFlags, TextureFormat};
+use goldy::types::{TextureKind, TextureFlags, TextureFormat};
 use goldy::{Device, DeviceDescriptor, Instance, RequestAdapterOptions};
 
 /// Serialize GPU tests when the D3D12 debug layer is active.
@@ -82,7 +82,7 @@ fn pipelined_allocator_capacity_stable() {
             WIDTH,
             HEIGHT,
             TextureFormat::Rgba8Unorm,
-            SpatialAccess::Direct,
+            TextureKind::Direct,
             TextureFlags::COPY_DST,
         )
         .expect("alloc_texture");
@@ -147,7 +147,7 @@ fn pipelined_allocator_used_converges() {
             WIDTH,
             HEIGHT,
             TextureFormat::Rgba8Unorm,
-            SpatialAccess::Direct,
+            TextureKind::Direct,
             TextureFlags::COPY_DST,
         )
         .expect("alloc_texture");
