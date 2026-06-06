@@ -1,15 +1,11 @@
 // Copyright 2026 the Ekrano Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Multi-frame pipelined memory stress tests.
+//! Single-frame frame-orchestrator stress tests.
 //!
-//! These tests exercise the `HeapTransientAllocator` lifecycle across many
-//! frames using the pipelined `render_to_texture` path (not the synchronous
-//! `render_to_buffer` path used by snapshot tests). They verify that:
-//!
-//! - The allocator capacity stabilises (no unbounded growth).
-//! - `used` bytes return to a per-frame baseline once the cleanup ring drains.
-//! - The cleanup ring depth stays within `MAX_CLEANUP_DEPTH`.
+//! Ekrano uses a fixed depth=1 fire-and-forget model (ekrano issue #71). These
+//! tests verify that many frames through `render_to_texture` keep the
+//! [`FrameOrchestrator`] ring bounded and the resource pool stable.
 
 use ekrano::kurbo::{Affine, Rect};
 use ekrano::peniko::{Fill, color::palette};
@@ -18,11 +14,6 @@ use goldy::types::{TextureFlags, TextureFormat, TextureKind};
 use goldy::{Device, DeviceDescriptor, Instance, RequestAdapterOptions};
 
 /// Serialize GPU tests when the D3D12 debug layer is active.
-///
-/// The debug layer validates resources process-wide. Running two D3D12 devices
-/// simultaneously (via Cargo's default parallel test threads) causes the debug
-/// layer to terminate the process with exit code 2173. When validation is off
-/// the lock is skipped so tests run in parallel at full speed.
 #[cfg(target_os = "windows")]
 fn gpu_test_lock() -> Option<std::sync::MutexGuard<'static, ()>> {
     use std::sync::{Mutex, OnceLock};
@@ -68,10 +59,9 @@ fn tiny_scene() -> Scene {
     scene
 }
 
-/// Render `FRAME_COUNT` frames through the pipelined `render_to_texture` path
-/// and verify that allocator capacity stabilises (no unbounded growth).
+/// Render many frames and verify the frame-orchestrator ring stays at depth=1.
 #[test]
-fn pipelined_allocator_capacity_stable() {
+fn single_frame_ring_depth_bounded() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
 
@@ -95,48 +85,25 @@ fn pipelined_allocator_capacity_stable() {
         robust: false,
     };
 
-    let mut capacities: Vec<u64> = Vec::new();
-
     for i in 0..FRAME_COUNT {
         renderer
             .render_to_texture(&device, &scene, &texture, &params)
             .unwrap_or_else(|e| panic!("frame {i} failed: {e}"));
 
-        capacities.push(
-            renderer
-                .allocator_stats()
-                .expect("allocator must be present after rendering")
-                .capacity,
+        let depth = renderer
+            .allocator_stats()
+            .expect("allocator stats available after first frame")
+            .cleanup_ring_depth;
+        assert!(
+            depth <= 1,
+            "frame {i}: cleanup ring depth {depth} exceeds single-frame limit (1)"
         );
     }
-
-    // After pipeline saturation the capacity must stop growing. Check the last
-    // 50 frames: if capacity is still increasing, the allocator is leaking.
-    let tail = &capacities[capacities.len().saturating_sub(50)..];
-    let max_cap = *tail.iter().max().unwrap();
-    let min_cap = *tail.iter().min().unwrap();
-    assert_eq!(
-        max_cap,
-        min_cap,
-        "allocator capacity is still growing in the last 50 frames: \
-         min={min_cap} max={max_cap} (delta={})",
-        max_cap - min_cap,
-    );
-
-    let stats = renderer
-        .allocator_stats()
-        .expect("allocator should be initialised after rendering");
-    assert!(
-        stats.cleanup_ring_depth <= 3,
-        "cleanup ring depth {} exceeds MAX_CLEANUP_DEPTH (3)",
-        stats.cleanup_ring_depth,
-    );
 }
 
-/// Verify that `used` bytes converge to a per-frame steady state, proving
-/// that freed ranges are actually reclaimed across frames.
+/// Verify the resource pool stabilises after warmup under the single-frame model.
 #[test]
-fn pipelined_allocator_used_converges() {
+fn resource_pool_stable_under_single_frame() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
 
@@ -160,35 +127,26 @@ fn pipelined_allocator_used_converges() {
         robust: false,
     };
 
-    let mut used_samples: Vec<u64> = Vec::new();
-
-    for i in 0..FRAME_COUNT {
+    for i in 0..30 {
         renderer
             .render_to_texture(&device, &scene, &texture, &params)
-            .unwrap_or_else(|e| panic!("frame {i} failed: {e}"));
-
-        used_samples.push(
-            renderer
-                .allocator_stats()
-                .expect("allocator must be present after rendering")
-                .used,
-        );
+            .unwrap_or_else(|e| panic!("warmup frame {i} failed: {e}"));
     }
 
-    // After warmup the last 50 samples should be bounded: not monotonically
-    // increasing, i.e. freeing is working.
-    let tail = &used_samples[used_samples.len().saturating_sub(50)..];
-    let max_tail = *tail.iter().max().unwrap();
-    let min_tail = *tail.iter().min().unwrap();
+    let baseline = renderer.resource_pool_stats();
+    let mut max_pooled = baseline.total_pooled_buffers;
 
-    // The range of used-bytes in steady state should be small (within one
-    // frame's allocation volume). If used keeps growing linearly, max - min
-    // would be ~50 × per_frame_alloc, which is huge.
-    let first_frame_used = used_samples.first().copied().unwrap_or(0);
-    let tolerance = first_frame_used.max(1) * 5;
+    for i in 0..50 {
+        renderer
+            .render_to_texture(&device, &scene, &texture, &params)
+            .unwrap_or_else(|e| panic!("steady frame {i} failed: {e}"));
+        max_pooled = max_pooled.max(renderer.resource_pool_stats().total_pooled_buffers);
+    }
+
+    let growth = max_pooled.saturating_sub(baseline.total_pooled_buffers);
     assert!(
-        max_tail - min_tail <= tolerance,
-        "used bytes did not converge: range [{min_tail}, {max_tail}] over last 50 frames \
-         (first frame used = {first_frame_used}, tolerance = {tolerance})"
+        growth <= baseline.total_pooled_buffers.max(10),
+        "resource pool grew excessively after warmup: baseline={} max_seen={max_pooled} growth={growth}",
+        baseline.total_pooled_buffers,
     );
 }

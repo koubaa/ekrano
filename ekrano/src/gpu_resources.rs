@@ -5,15 +5,11 @@
 
 use std::mem::size_of;
 
-use goldy::task_graph::{NodeAccess, TransientId};
+use goldy::task_graph::NodeAccess;
 use goldy::types::{BufferFlags, ResourceAccess, TextureFlags, TextureKind};
 use goldy::{
-    Buffer, BufferKind, BufferView, Context, Device, DeviceType, TaskGraph, Texture, TextureFormat,
+    Buffer, BufferKind, Context, Device, TaskGraph, Texture, TextureFormat,
 };
-
-/// Sentinel bindless index for transient buffers whose real slot is resolved at
-/// flush time after graph coloring. Must not collide with valid slot indices.
-pub(crate) const TRANSIENT_SLOT_PLACEHOLDER: u32 = u32::MAX;
 
 use crate::goldy_renderer::PersistentState;
 use crate::resource_proxy::{BindType, ImageFormat};
@@ -22,35 +18,25 @@ use ekrano_encoding::{BumpAllocators, CoverageMask, Images, Ramps, RenderConfig}
 
 pub(crate) enum GpuBuf {
     Owned(Buffer),
-    Pooled(BufferView),
-    /// Graph-scoped transient: physical allocation is deferred until graph flush,
-    /// when wave-lifetime coloring packs non-overlapping buffers into the same offset.
-    Transient(TransientId),
 }
 
 impl GpuBuf {
     pub(crate) fn as_indirect_buffer(&self) -> Option<&Buffer> {
         match self {
             Self::Owned(b) => Some(b),
-            Self::Pooled(_) | Self::Transient(_) => None,
         }
     }
 
     pub(crate) fn as_binding(&self) -> GpuBinding<'_> {
         match self {
             Self::Owned(b) => GpuBinding::Buf(b),
-            Self::Pooled(v) => GpuBinding::View(v),
-            Self::Transient(id) => GpuBinding::Transient(*id),
         }
     }
 }
 
 pub(crate) enum GpuBinding<'a> {
     Buf(&'a Buffer),
-    View(&'a BufferView),
     Tex(&'a Texture),
-    /// Deferred: physical allocation happens at graph flush after coloring.
-    Transient(TransientId),
     /// A GPU sampler represented by its pre-resolved bindless index.
     /// We store the index directly (not a reference) so `fine_resources` doesn't
     /// borrow from `recorder.persistent`, which would conflict with `recorder.dispatch()`.
@@ -74,13 +60,6 @@ impl<'a> GpuBinding<'a> {
                     buf.resource_index(ResourceAccess::Write)
                 }
             }
-            GpuBinding::View(view) => {
-                if is_read_only {
-                    view.resource_index(ResourceAccess::Read)
-                } else {
-                    view.resource_index(ResourceAccess::Write)
-                }
-            }
             GpuBinding::Tex(tex) => {
                 if is_read_only {
                     tex.resource_index(ResourceAccess::Read)
@@ -88,7 +67,6 @@ impl<'a> GpuBinding<'a> {
                     tex.resource_index(ResourceAccess::Write)
                 }
             }
-            GpuBinding::Transient(_) => return Ok(TRANSIENT_SLOT_PLACEHOLDER),
             GpuBinding::Sampler(idx) | GpuBinding::PersistentBuf(idx) => return Ok(*idx),
         };
         idx.ok_or_else(|| {
@@ -97,34 +75,19 @@ impl<'a> GpuBinding<'a> {
     }
 }
 
-fn use_pool(device: &Device) -> bool {
-    device.device_type() != DeviceType::Cpu
-}
-
 fn is_pool_exempt(name: &'static str) -> bool {
     matches!(name, "ekrano.bump_buf" | "ekrano.indirect_dispatch")
 }
 
 /// Controls how a pipeline buffer is allocated.
 ///
-/// `CoarseOnly` buffers use graph-transient aliasing (via wave-interval coloring) when
-/// the `FrameStrategy` enables graph coloring (depth > 1), enabling inter-frame VRAM
-/// reuse across pipelined frames. At `LowLatency` (depth=1) they are promoted to
-/// persistent `ResourcePool` buffers so their bindless indices are stable — a
-/// prerequisite for command buffer retention.
-/// `Shared`/`OwnedShared` buffers are always real GPU handles since they span coarse→fine.
+/// Ekrano uses a single-frame model (depth=1): all pipeline buffers are persistent
+/// `ResourcePool` handles so bindless indices stay stable for command-buffer retention.
 #[derive(Clone, Copy)]
 pub(crate) enum BufferLifetime {
-    /// Consumed entirely within the coarse wave. May alias with other coarse transients
-    /// via placement-heap interval coloring.
+    /// Consumed entirely within the coarse wave.
     CoarseOnly,
-    /// Written by coarse, read by fine. Allocated as a `BufferView` sub-range from the
-    /// `TransientAllocator` — cheap per-frame, but requires per-frame descriptor writes.
-    Shared,
-    /// Like `Shared`, but always backed by a real `Buffer` from the `ResourcePool`.
-    /// Avoids per-frame `BufferView::create_view` (Metal argument-buffer writes) at the
-    /// cost of a separate GPU allocation per buffer. Preferred at `MAX_CLEANUP_DEPTH=1`
-    /// where transient-allocator packing provides no benefit.
+    /// Written by coarse, read by fine.
     OwnedShared,
 }
 
@@ -146,24 +109,7 @@ pub(crate) fn alloc_pipeline_buffer(
     flags: BufferFlags,
     lifetime: BufferLifetime,
 ) -> Result<GpuBuf, Error> {
-    let use_graph_coloring = use_pool(device) && !is_pool_exempt(name);
-
-    // CoarseOnly → graph transient (wave-interval coloring) when graph coloring
-    // is active per the FrameStrategy. At LowLatency (depth=1) all CoarseOnly
-    // buffers are promoted to persistent OwnedShared so their bindless indices are
-    // stable — a prerequisite for command buffer retention.
-    if use_graph_coloring
-        && persistent.strategy.use_graph_coloring()
-        && matches!(lifetime, BufferLifetime::CoarseOnly)
-    {
-        let tid = graph.transient_buffer_with_stride(size, stride);
-        return Ok(GpuBuf::Transient(tid));
-    }
-
-    // OwnedShared → ResourcePool (avoids per-frame BufferView::create_view /
-    // Metal argument-buffer writes; preferable at MAX_CLEANUP_DEPTH=1).
-    // Also used for pool-exempt names (bump, indirect, etc.) regardless of lifetime.
-    // CoarseOnly at depth=1: promoted to this path for stable bindless indices.
+    // All pipeline buffers use the ResourcePool for stable bindless indices.
     if matches!(
         lifetime,
         BufferLifetime::OwnedShared | BufferLifetime::CoarseOnly
@@ -187,29 +133,7 @@ pub(crate) fn alloc_pipeline_buffer(
         return Ok(GpuBuf::Owned(buf));
     }
 
-    // Shared → TransientAllocator sub-range (BufferView into a pooled backing buffer).
-    if use_pool(device) {
-        let allocator = persistent
-            .storage_allocator_mut()
-            .ok_or_else(|| Error::Shader("storage allocator not prepared".into()))?;
-        let view = allocator
-            .alloc(device, size, Some(stride))
-            .map_err(|e| Error::Shader(e.to_string()))?;
-        return Ok(GpuBuf::Pooled(view));
-    }
-
-    // CPU / WARP device fallback: Owned buffer, no pooling.
-    let buf = persistent.pool.get_buf_with_stride(
-        device,
-        ctx,
-        size,
-        name,
-        BufferKind::Scattered,
-        Some(stride),
-        flags,
-    )?;
-    graph.clear_buffer(&buf, 0, size);
-    Ok(GpuBuf::Owned(buf))
+    unreachable!("all BufferLifetime variants route through the ResourcePool");
 }
 
 pub(crate) fn record_upload_bytes(
@@ -373,11 +297,6 @@ pub(crate) fn clear_gpu_buf(
             let sz = size.unwrap_or_else(|| b.size().saturating_sub(off));
             graph.clear_buffer(b, off, sz);
         }
-        GpuBuf::Pooled(v) => {
-            let sz = size.unwrap_or_else(|| v.size().saturating_sub(off));
-            graph.clear_buffer_view(v, off, sz);
-        }
-        GpuBuf::Transient(_) => {}
     }
     Ok(())
 }
@@ -881,7 +800,7 @@ impl PipelineResources {
             size_of::<BumpAllocators>() as u32,
             "ekrano.bump_buf",
             BufferFlags::CPU_READABLE,
-            BufferLifetime::Shared,
+            BufferLifetime::OwnedShared,
         )?;
         clear_gpu_buf(graph, &bump, 0, None)?;
         let lines = al_coarse_cached!(
@@ -1051,7 +970,7 @@ pub(crate) fn collect_bindless_indices_into(
         let is_read_only = matches!(bind_types.get(i), Some(BindType::BufReadOnly));
         let is_sampled_image = matches!(bind_types.get(i), Some(BindType::ImageRead(_)));
         let idx = match binding {
-            GpuBinding::Buf(_) | GpuBinding::View(_) => binding.bindless_slot(is_read_only)?,
+            GpuBinding::Buf(_) => binding.bindless_slot(is_read_only)?,
             GpuBinding::Tex(tex) if is_sampled_image => tex
                 .resource_index(ResourceAccess::Read)
                 .or_else(|| {
@@ -1066,7 +985,6 @@ pub(crate) fn collect_bindless_indices_into(
                     )
                 })?,
             GpuBinding::Tex(_) => binding.bindless_slot(false)?,
-            GpuBinding::Transient(_) => TRANSIENT_SLOT_PLACEHOLDER,
             GpuBinding::Sampler(idx) | GpuBinding::PersistentBuf(idx) => *idx,
         };
         out.push(idx);
@@ -1098,20 +1016,15 @@ mod tests {
         GpuBinding::Sampler(idx)
     }
 
-    fn transient_binding() -> GpuBinding<'static> {
-        use goldy::task_graph::TransientId;
-        GpuBinding::Transient(TransientId(42))
-    }
-
     #[test]
-    fn collect_into_sampler_and_transient() {
-        let bindings = [sampler_binding(7), transient_binding(), sampler_binding(3)];
-        let bind_types = [BindType::Sampler, BindType::Buffer, BindType::Sampler];
+    fn collect_into_sampler_indices() {
+        let bindings = [sampler_binding(7), sampler_binding(3)];
+        let bind_types = [BindType::Sampler, BindType::Sampler];
 
         let mut out = Vec::new();
         collect_bindless_indices_into(&mut out, &bindings, &bind_types, 16).unwrap();
 
-        assert_eq!(out, [7, TRANSIENT_SLOT_PLACEHOLDER, 3]);
+        assert_eq!(out, [7, 3]);
     }
 
     #[test]
