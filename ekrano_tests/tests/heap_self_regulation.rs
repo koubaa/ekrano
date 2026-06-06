@@ -8,7 +8,7 @@
 //!
 //! - The resource pool replenishes from deferred returns (no unbounded fresh allocations)
 //! - Overflow heaps compact after steady-state is reached
-//! - Different `FrameStrategy` values (`LowLatency`, `Balanced`, `MaxThroughput`) all survive
+//! - Single-frame scheduling (depth=1) survives sustained rendering
 //! - Varying scene complexity (warmup pressure) doesn't exhaust the heap
 //! - The `robust` mode flag doesn't alter memory lifecycle correctness
 //! - Multiple AA configs work without heap exhaustion
@@ -110,7 +110,7 @@ fn render_n_frames(
 }
 
 // ===========================================================================
-// Survival tests: default strategy (Balanced) survives many frames
+// Survival tests: single-frame model survives many frames
 // ===========================================================================
 
 #[test]
