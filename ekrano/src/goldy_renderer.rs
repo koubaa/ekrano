@@ -24,9 +24,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use goldy::task_graph::{NodeAccess, NodeBuilder};
-use goldy::types::{BufferFlags, SpatialAccess, TextureFlags, TextureFormat};
+use goldy::types::{BufferFlags, TextureFlags, TextureFormat, TextureKind};
 use goldy::{
-    Buffer, BufferPool, BufferView, ComputePipeline, Context, DataAccess, Device, FrameHandle,
+    Buffer, BufferKind, BufferPool, BufferView, ComputePipeline, Context, Device, FrameHandle,
     FrameOrchestrator, ShaderModule, Signal, TaskGraph, Texture, TexturePool, TimelineValue,
     TransientAllocator, TransientAllocatorConfig, TransientAllocatorStrategy,
 };
@@ -330,7 +330,7 @@ struct GoldyShader {
 #[derive(Hash, PartialEq, Eq, Clone)]
 struct BufferKey {
     size: u64,
-    access: DataAccess,
+    access: BufferKind,
     name: &'static str,
     buffer_flags: BufferFlags,
 }
@@ -374,7 +374,7 @@ impl ResourcePool {
         ctx: &Context,
         size: u64,
         name: &'static str,
-        access: DataAccess,
+        access: BufferKind,
         stride: Option<u32>,
         buffer_flags: BufferFlags,
     ) -> Result<Buffer> {
@@ -2130,12 +2130,12 @@ impl GoldyRenderer {
         self.context.flush_deferred_deletions();
     }
 
-    /// Query the device-owned placement heap's state for diagnostics / tests.
+    /// Query the render context's placement heap state for diagnostics / tests.
     ///
-    /// Delegates to [`Device::placement_heap_stats`](goldy::Device::placement_heap_stats).
+    /// Delegates to [`Context::placement_heap_stats`](goldy::Context::placement_heap_stats).
     /// Returns `None` if no transient-buffer graphs have been submitted yet.
     pub fn placement_heap_stats(&self) -> Option<goldy::placement_heap::PlacementHeapStats> {
-        self.device.placement_heap_stats()
+        self.context.placement_heap_stats()
     }
 
     /// Render a scene and return the pixel data as RGBA bytes.
@@ -2157,7 +2157,7 @@ impl GoldyRenderer {
                 width,
                 height,
                 TextureFormat::Rgba8Unorm,
-                SpatialAccess::Direct,
+                TextureKind::Direct,
                 TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
             )
             .map_err(|e| Error::Gpu(e.to_string()))?;
@@ -2600,7 +2600,7 @@ impl GoldyRenderer {
                     (0.0, 0.0, self.frame_pipeline.pending_frames())
                 };
 
-            let (transient_views, transient_textures) = self.device.transient_cache_counts();
+            let (transient_views, transient_textures) = self.context.transient_cache_counts();
             let rt_slots = self
                 .persistent
                 .cached_render_targets

@@ -34,7 +34,7 @@
 use std::env;
 use std::io::ErrorKind;
 use std::path::Path;
-use std::sync::{Arc, Mutex, Once, OnceLock};
+use std::sync::{Arc, Once};
 
 use log as _;
 
@@ -47,23 +47,27 @@ use goldy::{Device, DeviceDescriptor, Instance, RequestAdapterOptions};
 use image::RgbImage;
 use scenes::{ExampleScene, ImageCache, SceneParams, SimpleText};
 
-/// Per-process GPU `Device` shared across tests. leaking it at process exit is harmless.
-static SHARED_DEVICE: OnceLock<Mutex<Device>> = OnceLock::new();
-
-fn shared_device() -> Device {
-    SHARED_DEVICE
-        .get_or_init(|| {
-            let instance = Instance::new().expect("Instance::new failed");
-            let device = instance
-                .request_adapter(&RequestAdapterOptions::default())
-                .expect("request_adapter failed")
-                .request_device(&DeviceDescriptor::default())
-                .expect("No Goldy device available");
-            Mutex::new(device)
-        })
-        .lock()
-        .expect("shared device mutex poisoned")
-        .clone()
+/// A fresh, independent GPU `Device` for a single test render.
+///
+/// Tests run concurrently (cargo's default thread pool). A `Device` owns device-global
+/// GPU state — most importantly the bindless descriptor heap and resource registry —
+/// that is not safe to mutate from multiple concurrent renders: index allocation/free/
+/// reuse on one thread can rewrite a descriptor slot while another thread's submitted
+/// GPU work still references it, producing intermittent, partial (tiled) corruption.
+///
+/// Giving each test its own device makes tests truly independent (no shared device-global
+/// state), which eliminates that race and, as a bonus, removes the device-lock contention
+/// that serialized concurrent renders.
+///
+/// TODO: this papers over a legitimate problem with ekrano - each test should have its
+/// own context and therefore never race if the runtime is implemented correctly.
+fn test_device() -> Device {
+    let instance = Instance::new().expect("Instance::new failed");
+    instance
+        .request_adapter(&RequestAdapterOptions::default())
+        .expect("request_adapter failed")
+        .request_device(&DeviceDescriptor::default())
+        .expect("No Goldy device available")
 }
 
 mod snapshot;
@@ -178,7 +182,7 @@ pub fn get_scene_image(params: &TestParams, scene: &Scene) -> Result<ImageData, 
 
     use ekrano::RenderParams;
 
-    let device = shared_device();
+    let device = test_device();
     // TODO(#179 follow-up): device-level shader cache so per-test renderer construction is cheap.
     let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new failed");
 

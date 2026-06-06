@@ -16,7 +16,7 @@ use ekrano_encoding::{
     FilterPrimitive, FilterUniform, IndirectCount, LayerFilterEffect, WorkgroupCountsGpu,
     WorkgroupSize, make_mask_lut, make_mask_lut_16,
 };
-use goldy::types::{BufferFlags, SpatialAccess, TextureFlags};
+use goldy::types::{BufferFlags, ResourceAccess, TextureFlags, TextureKind};
 use goldy::{Buffer, Texture};
 use peniko::color::{PremulColor, Srgb};
 
@@ -527,12 +527,12 @@ impl Render {
                         .persistent
                         .stable_mask_lut_msaa16
                         .as_ref()
-                        .and_then(|b| b.bindless_index()),
+                        .and_then(|b| b.resource_index(ResourceAccess::Read)),
                     AaConfig::Msaa8 => recorder
                         .persistent
                         .stable_mask_lut_msaa8
                         .as_ref()
-                        .and_then(|b| b.bindless_index()),
+                        .and_then(|b| b.resource_index(ResourceAccess::Read)),
                     _ => None,
                 }
             } else {
@@ -565,7 +565,7 @@ impl Render {
                 .linear_clamp_sampler
                 .as_ref()
                 .expect("linear_clamp_sampler must be initialised before fine pass")
-                .bindless_index()
+                .resource_index(ResourceAccess::Read)
                 .expect("linear_clamp_sampler has no bindless index"),
         ));
         fine_resources.push(GpuBinding::Sampler(
@@ -574,7 +574,7 @@ impl Render {
                 .nearest_clamp_sampler
                 .as_ref()
                 .expect("nearest_clamp_sampler must be initialised before fine pass")
-                .bindless_index()
+                .resource_index(ResourceAccess::Read)
                 .expect("nearest_clamp_sampler has no bindless index"),
         ));
 
@@ -615,8 +615,8 @@ fn linear_clamp_sampler_index(recorder: &FrameRecorder<'_>) -> u32 {
         .linear_clamp_sampler
         .as_ref()
         .expect("linear_clamp_sampler must be initialised before filter pass")
-        .bindless_index()
-        .expect("linear_clamp_sampler has no bindless index")
+        .resource_index(ResourceAccess::Read)
+        .expect("linear_clamp_sampler has no resource index")
 }
 
 fn filter_dispatch(
@@ -765,7 +765,7 @@ fn pyramid_blur(
                 recorder.persistent,
                 lw,
                 lh,
-                SpatialAccess::DirectInterpolated,
+                TextureKind::DirectInterpolated,
                 TextureFlags::empty(),
             )
             .expect("pyramid level texture")
@@ -795,7 +795,7 @@ fn pyramid_blur(
         recorder.persistent,
         bw,
         bh,
-        SpatialAccess::DirectInterpolated,
+        TextureKind::DirectInterpolated,
         TextureFlags::empty(),
     )
     .expect("pyramid bottom scratch");
@@ -852,7 +852,7 @@ pub(crate) fn record_filter_effects(
         recorder.persistent,
         width,
         height,
-        SpatialAccess::DirectInterpolated,
+        TextureKind::DirectInterpolated,
         TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
     )
     .expect("filter scratch texture");
@@ -899,7 +899,7 @@ pub(crate) fn record_filter_effects(
                         recorder.persistent,
                         width,
                         height,
-                        SpatialAccess::DirectInterpolated,
+                        TextureKind::DirectInterpolated,
                         TextureFlags::empty(),
                     )
                     .expect("pyramid blur_dst");
