@@ -1961,7 +1961,6 @@ impl GoldyRenderer {
                 transient_views,
                 transient_textures,
             );
-
         }
 
         let surface_frame = surface_frame.map(|frame| (frame, frame_tv));
