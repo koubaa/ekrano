@@ -24,9 +24,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use goldy::task_graph::{NodeAccess, NodeBuilder};
-use goldy::types::{BufferFlags, TextureKind, TextureFlags, TextureFormat};
+use goldy::types::{BufferFlags, TextureFlags, TextureFormat, TextureKind};
 use goldy::{
-    Buffer, BufferPool, BufferView, ComputePipeline, Context, BufferKind, Device, FrameHandle,
+    Buffer, BufferKind, BufferPool, BufferView, ComputePipeline, Context, Device, FrameHandle,
     FrameOrchestrator, ShaderModule, Signal, TaskGraph, Texture, TexturePool, TimelineValue,
     TransientAllocator, TransientAllocatorConfig, TransientAllocatorStrategy,
 };

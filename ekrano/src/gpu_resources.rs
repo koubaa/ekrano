@@ -8,7 +8,7 @@ use std::mem::size_of;
 use goldy::task_graph::{NodeAccess, TransientId};
 use goldy::types::{BufferFlags, ResourceAccess, TextureFlags, TextureKind};
 use goldy::{
-    Buffer, BufferView, Context, BufferKind, Device, DeviceType, TaskGraph, Texture, TextureFormat,
+    Buffer, BufferKind, BufferView, Context, Device, DeviceType, TaskGraph, Texture, TextureFormat,
 };
 
 /// Sentinel bindless index for transient buffers whose real slot is resolved at

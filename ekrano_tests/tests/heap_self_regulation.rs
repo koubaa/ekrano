@@ -16,7 +16,7 @@
 use ekrano::kurbo::{Affine, Circle, Line, Rect, Stroke};
 use ekrano::peniko::{Fill, color::palette};
 use ekrano::{AaConfig, GoldyRenderer, RenderParams, Scene};
-use goldy::types::{TextureKind, TextureFlags, TextureFormat};
+use goldy::types::{TextureFlags, TextureFormat, TextureKind};
 use goldy::{Device, DeviceDescriptor, Instance, RequestAdapterOptions};
 
 #[cfg(target_os = "windows")]

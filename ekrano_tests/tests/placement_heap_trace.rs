@@ -13,7 +13,7 @@
 use ekrano::kurbo::{Affine, Rect};
 use ekrano::peniko::{Fill, color::palette};
 use ekrano::{AaConfig, GoldyRenderer, RenderParams, Scene};
-use goldy::types::{TextureKind, TextureFlags, TextureFormat};
+use goldy::types::{TextureFlags, TextureFormat, TextureKind};
 use goldy::{Device, DeviceDescriptor, Instance, RequestAdapterOptions};
 
 const FRAME_COUNT: usize = 300;

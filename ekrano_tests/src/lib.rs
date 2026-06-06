@@ -47,20 +47,6 @@ use goldy::{Device, DeviceDescriptor, Instance, RequestAdapterOptions};
 use image::RgbImage;
 use scenes::{ExampleScene, ImageCache, SceneParams, SimpleText};
 
-/// Serialize rendering on the shared GPU device.
-///
-/// All snapshot tests reuse [`shared_device`], which clones the same backend handle.
-/// Parallel test threads must not submit frames concurrently or texture dimensions /
-/// readback buffers can be corrupted (observed as multi-GB allocation failures).
-static GPU_RENDER_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-fn gpu_render_guard() -> std::sync::MutexGuard<'static, ()> {
-    GPU_RENDER_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-}
-
 /// Per-process GPU `Device` shared across tests. leaking it at process exit is harmless.
 static SHARED_DEVICE: OnceLock<Mutex<Device>> = OnceLock::new();
 
@@ -185,7 +171,6 @@ pub fn render_then_debug(scene: &Scene, params: &TestParams) -> Result<ImageData
 }
 
 pub fn get_scene_image(params: &TestParams, scene: &Scene) -> Result<ImageData, anyhow::Error> {
-    let _gpu_guard = gpu_render_guard();
     static INIT_LOGGER: Once = Once::new();
     INIT_LOGGER.call_once(|| {
         env_logger::init();
