@@ -16,21 +16,14 @@ use crate::resource_proxy::{BindType, ImageFormat};
 use crate::{Error, RenderParams, Result};
 use ekrano_encoding::{BumpAllocators, CoverageMask, Images, Ramps, RenderConfig};
 
-pub(crate) enum GpuBuf {
-    Owned(Buffer),
+/// Shader binding helper for pipeline [`Buffer`] handles.
+pub(crate) trait PipelineBuffer {
+    fn as_binding(&self) -> GpuBinding<'_>;
 }
 
-impl GpuBuf {
-    pub(crate) fn as_indirect_buffer(&self) -> Option<&Buffer> {
-        match self {
-            Self::Owned(b) => Some(b),
-        }
-    }
-
-    pub(crate) fn as_binding(&self) -> GpuBinding<'_> {
-        match self {
-            Self::Owned(b) => GpuBinding::Buf(b),
-        }
+impl PipelineBuffer for Buffer {
+    fn as_binding(&self) -> GpuBinding<'_> {
+        GpuBinding::Buf(self)
     }
 }
 
@@ -79,18 +72,6 @@ fn is_pool_exempt(name: &'static str) -> bool {
     matches!(name, "ekrano.bump_buf" | "ekrano.indirect_dispatch")
 }
 
-/// Controls how a pipeline buffer is allocated.
-///
-/// Ekrano uses a single-frame model (depth=1): all pipeline buffers are persistent
-/// `ResourcePool` handles so bindless indices stay stable for command-buffer retention.
-#[derive(Clone, Copy)]
-pub(crate) enum BufferLifetime {
-    /// Consumed entirely within the coarse wave.
-    CoarseOnly,
-    /// Written by coarse, read by fine.
-    OwnedShared,
-}
-
 fn image_fmt_goldy(f: ImageFormat) -> TextureFormat {
     match f {
         ImageFormat::Rgba8 => TextureFormat::Rgba8Unorm,
@@ -107,33 +88,23 @@ pub(crate) fn alloc_pipeline_buffer(
     stride: u32,
     name: &'static str,
     flags: BufferFlags,
-    lifetime: BufferLifetime,
-) -> Result<GpuBuf, Error> {
-    // All pipeline buffers use the ResourcePool for stable bindless indices.
-    if matches!(
-        lifetime,
-        BufferLifetime::OwnedShared | BufferLifetime::CoarseOnly
-    ) || is_pool_exempt(name)
-    {
-        let buf = persistent.pool.get_buf_with_stride(
-            device,
-            ctx,
-            size,
-            name,
-            BufferKind::Scattered,
-            Some(stride),
-            flags,
-        )?;
-        // Pre-clear pool-exempt buffers (bump needs zeroing each frame; indirect
-        // dispatch counts must be 0 before GPU pipelines them). OwnedShared buffers
-        // are always overwritten by GPU dispatches before first read, so skip the clear.
-        if is_pool_exempt(name) {
-            graph.clear_buffer(&buf, 0, size);
-        }
-        return Ok(GpuBuf::Owned(buf));
+) -> Result<Buffer, Error> {
+    let buf = persistent.pool.get_buf_with_stride(
+        device,
+        ctx,
+        size,
+        name,
+        BufferKind::Scattered,
+        Some(stride),
+        flags,
+    )?;
+    // Pre-clear pool-exempt buffers (bump needs zeroing each frame; indirect
+    // dispatch counts must be 0 before GPU pipelines them). Other pipeline
+    // buffers are always overwritten by GPU dispatches before first read.
+    if is_pool_exempt(name) {
+        graph.clear_buffer(&buf, 0, size);
     }
-
-    unreachable!("all BufferLifetime variants route through the ResourcePool");
+    Ok(buf)
 }
 
 pub(crate) fn record_upload_bytes(
@@ -144,7 +115,7 @@ pub(crate) fn record_upload_bytes(
     name: &'static str,
     element_stride: u32,
     bytes: &[u8],
-) -> Result<GpuBuf, Error> {
+) -> Result<Buffer, Error> {
     let buf = persistent.pool.get_buf_with_stride(
         device,
         ctx,
@@ -155,7 +126,7 @@ pub(crate) fn record_upload_bytes(
         BufferFlags::empty(),
     )?;
     graph.write_buffer(&buf, 0, bytes.to_vec());
-    Ok(GpuBuf::Owned(buf))
+    Ok(buf)
 }
 
 /// Like [`record_upload_bytes`] but takes ownership of the byte vector, avoiding
@@ -168,7 +139,7 @@ pub(crate) fn record_upload_bytes_owned(
     name: &'static str,
     element_stride: u32,
     bytes: Vec<u8>,
-) -> Result<GpuBuf, Error> {
+) -> Result<Buffer, Error> {
     let buf = persistent.pool.get_buf_with_stride(
         device,
         ctx,
@@ -179,7 +150,7 @@ pub(crate) fn record_upload_bytes_owned(
         BufferFlags::empty(),
     )?;
     graph.write_buffer(&buf, 0, bytes);
-    Ok(GpuBuf::Owned(buf))
+    Ok(buf)
 }
 
 pub(crate) fn record_upload_image(
@@ -288,16 +259,12 @@ pub(crate) fn acquire_texture_rgba(
 
 pub(crate) fn clear_gpu_buf(
     graph: &mut TaskGraph,
-    buf: &GpuBuf,
+    buf: &Buffer,
     off: u64,
     size: Option<u64>,
 ) -> Result<(), Error> {
-    match buf {
-        GpuBuf::Owned(b) => {
-            let sz = size.unwrap_or_else(|| b.size().saturating_sub(off));
-            graph.clear_buffer(b, off, sz);
-        }
-    }
+    let sz = size.unwrap_or_else(|| buf.size().saturating_sub(off));
+    graph.clear_buffer(buf, off, sz);
     Ok(())
 }
 
@@ -343,31 +310,31 @@ pub(crate) struct PipelineResources {
     pub gradient: Texture,
     pub image_atlas: Texture,
     pub mask_atlas: Texture,
-    pub scene: GpuBuf,
-    pub config: GpuBuf,
-    pub indirect: Option<GpuBuf>,
-    pub info_bin_data: GpuBuf,
-    pub tile: GpuBuf,
-    pub segments: GpuBuf,
-    pub ptcl: GpuBuf,
-    pub reduced: GpuBuf,
-    pub reduced2: GpuBuf,
-    pub reduced_scan: GpuBuf,
-    pub tagmonoid: GpuBuf,
-    pub path_bbox: GpuBuf,
-    pub bump: GpuBuf,
-    pub lines: GpuBuf,
-    pub draw_reduced: GpuBuf,
-    pub draw_monoid: GpuBuf,
-    pub clip_inp: GpuBuf,
-    pub clip_el: GpuBuf,
-    pub clip_bic: GpuBuf,
-    pub clip_bbox: GpuBuf,
-    pub draw_bbox: GpuBuf,
-    pub bin_header: GpuBuf,
-    pub path: GpuBuf,
-    pub seg_counts: GpuBuf,
-    pub blend_spill: GpuBuf,
+    pub scene: Buffer,
+    pub config: Buffer,
+    pub indirect: Option<Buffer>,
+    pub info_bin_data: Buffer,
+    pub tile: Buffer,
+    pub segments: Buffer,
+    pub ptcl: Buffer,
+    pub reduced: Buffer,
+    pub reduced2: Buffer,
+    pub reduced_scan: Buffer,
+    pub tagmonoid: Buffer,
+    pub path_bbox: Buffer,
+    pub bump: Buffer,
+    pub lines: Buffer,
+    pub draw_reduced: Buffer,
+    pub draw_monoid: Buffer,
+    pub clip_inp: Buffer,
+    pub clip_el: Buffer,
+    pub clip_bic: Buffer,
+    pub clip_bbox: Buffer,
+    pub draw_bbox: Buffer,
+    pub bin_header: Buffer,
+    pub path: Buffer,
+    pub seg_counts: Buffer,
+    pub blend_spill: Buffer,
     pub out_image: Texture,
     pub filter_layers: [Texture; 4],
     /// Buffer sizes used this frame, stored for cache-key comparison next frame.
@@ -524,7 +491,7 @@ impl PipelineResources {
                 if cache_hit { "HIT" } else { "MISS" }
             );
             if cache_hit {
-                GpuBuf::Owned(persistent.cached_config_uniform.take().unwrap().1)
+                persistent.cached_config_uniform.take().unwrap().1
             } else if let Some((_, existing_buf)) = persistent.cached_config_uniform.take() {
                 // Buffer size is constant (sizeof ConfigUniform); reuse the allocation
                 // and just overwrite with the new value.
@@ -533,7 +500,7 @@ impl PipelineResources {
                     0,
                     bytemuck::bytes_of(&config_uniform_value).to_vec(),
                 );
-                GpuBuf::Owned(existing_buf)
+                existing_buf
             } else {
                 record_upload_bytes(
                     device,
@@ -692,10 +659,10 @@ impl PipelineResources {
         let _tz_alloc = goldy::tracy_zone!("ekrano.prepare.alloc_buffers");
         // For OwnedShared buffers: reuse from cache when sizes match (no ResourcePool
         // round-trip). These buffers are fully GPU-overwritten before first read.
-        macro_rules! al_shared_cached {
+        macro_rules! al_cached {
             ($cached_opt:expr, $sz:expr, $stride:expr, $name:expr) => {
                 match $cached_opt {
-                    Some(buf) => GpuBuf::Owned(buf),
+                    Some(buf) => buf,
                     None => alloc_pipeline_buffer(
                         device,
                         ctx,
@@ -705,92 +672,66 @@ impl PipelineResources {
                         $stride,
                         $name,
                         BufferFlags::empty(),
-                        BufferLifetime::OwnedShared,
-                    )?,
-                }
-            };
-        }
-
-        // For CoarseOnly buffers: reuse from cache when available (depth=1 promoted path),
-        // otherwise allocate with CoarseOnly lifetime (graph transient at depth>1, owned at depth=1).
-        macro_rules! al_coarse_cached {
-            ($cached_opt:expr, $sz:expr, $stride:expr, $name:expr) => {
-                match $cached_opt {
-                    Some(buf) => GpuBuf::Owned(buf),
-                    None => alloc_pipeline_buffer(
-                        device,
-                        ctx,
-                        graph,
-                        persistent,
-                        $sz,
-                        $stride,
-                        $name,
-                        BufferFlags::empty(),
-                        BufferLifetime::CoarseOnly,
                     )?,
                 }
             };
         }
 
         // Shared: written by coarse, read by fine.
-        let info_bin_data = al_shared_cached!(
+        let info_bin_data = al_cached!(
             cached.info_bin_data,
             buffer_sizes.bin_data.size_in_bytes() as u64,
             4,
             "ekrano.info_bin_data_buf"
         );
-        let tile = al_shared_cached!(
+        let tile = al_cached!(
             cached.tile,
             buffer_sizes.tiles.size_in_bytes().into(),
             8,
             "ekrano.tile_buf"
         );
-        let segments = al_shared_cached!(
+        let segments = al_cached!(
             cached.segments,
             buffer_sizes.segments.size_in_bytes().into(),
             24,
             "ekrano.segments_buf"
         );
-        let ptcl = al_shared_cached!(
+        let ptcl = al_cached!(
             cached.ptcl,
             buffer_sizes.ptcl.size_in_bytes().into(),
             4,
             "ekrano.ptcl_buf"
         );
-        // CoarseOnly: consumed entirely within the coarse wave.
-        // At LowLatency these are promoted to OwnedShared (stable bindless indices);
-        // at higher depths they remain graph transients (wave-interval coloring for VRAM).
-        let reduced = al_coarse_cached!(
+        let reduced = al_cached!(
             cached.reduced,
             buffer_sizes.path_reduced.size_in_bytes().into(),
             20,
             "ekrano.reduced_buf"
         );
-        let reduced2 = al_coarse_cached!(
+        let reduced2 = al_cached!(
             cached.reduced2,
             buffer_sizes.path_reduced2.size_in_bytes().into(),
             20,
             "ekrano.reduced2_buf"
         );
-        let reduced_scan = al_coarse_cached!(
+        let reduced_scan = al_cached!(
             cached.reduced_scan,
             buffer_sizes.path_reduced_scan.size_in_bytes().into(),
             20,
             "ekrano.reduced_scan_buf"
         );
-        let tagmonoid = al_coarse_cached!(
+        let tagmonoid = al_cached!(
             cached.tagmonoid,
             buffer_sizes.path_monoids.size_in_bytes().into(),
             20,
             "ekrano.tagmonoid_buf"
         );
-        let path_bbox = al_coarse_cached!(
+        let path_bbox = al_cached!(
             cached.path_bbox,
             buffer_sizes.path_bboxes.size_in_bytes().into(),
             24,
             "ekrano.path_bbox_buf"
         );
-        // bump is pool-exempt (CPU_READABLE) → always GpuBuf::Owned.
         let bump = alloc_pipeline_buffer(
             device,
             ctx,
@@ -800,70 +741,69 @@ impl PipelineResources {
             size_of::<BumpAllocators>() as u32,
             "ekrano.bump_buf",
             BufferFlags::CPU_READABLE,
-            BufferLifetime::OwnedShared,
         )?;
         clear_gpu_buf(graph, &bump, 0, None)?;
-        let lines = al_coarse_cached!(
+        let lines = al_cached!(
             cached.lines,
             buffer_sizes.lines.size_in_bytes().into(),
             24,
             "ekrano.lines_buf"
         );
-        let draw_reduced = al_coarse_cached!(
+        let draw_reduced = al_cached!(
             cached.draw_reduced,
             buffer_sizes.draw_reduced.size_in_bytes().into(),
             16,
             "ekrano.draw_reduced_buf"
         );
-        let draw_monoid = al_coarse_cached!(
+        let draw_monoid = al_cached!(
             cached.draw_monoid,
             buffer_sizes.draw_monoids.size_in_bytes().into(),
             16,
             "ekrano.draw_monoid_buf"
         );
-        let clip_inp = al_coarse_cached!(
+        let clip_inp = al_cached!(
             cached.clip_inp,
             buffer_sizes.clip_inps.size_in_bytes().into(),
             8,
             "ekrano.clip_inp_buf"
         );
-        let clip_el = al_coarse_cached!(
+        let clip_el = al_cached!(
             cached.clip_el,
             buffer_sizes.clip_els.size_in_bytes().into(),
             32,
             "ekrano.clip_el_buf"
         );
-        let clip_bic = al_coarse_cached!(
+        let clip_bic = al_cached!(
             cached.clip_bic,
             buffer_sizes.clip_bics.size_in_bytes().into(),
             8,
             "ekrano.clip_bic_buf"
         );
-        let clip_bbox = al_coarse_cached!(
+        let clip_bbox = al_cached!(
             cached.clip_bbox,
             buffer_sizes.clip_bboxes.size_in_bytes().into(),
             16,
             "ekrano.clip_bbox_buf"
         );
-        let draw_bbox = al_coarse_cached!(
+        let draw_bbox = al_cached!(
             cached.draw_bbox,
             buffer_sizes.draw_bboxes.size_in_bytes().into(),
             16,
             "ekrano.draw_bbox_buf"
         );
-        let bin_header = al_coarse_cached!(
+        let bin_header = al_cached!(
             cached.bin_header,
             buffer_sizes.bin_headers.size_in_bytes().into(),
             8,
             "ekrano.bin_header_buf"
         );
-        let path = al_coarse_cached!(
+        let path = al_cached!(
             cached.path,
             buffer_sizes.paths.size_in_bytes().into(),
             32,
             "ekrano.path_buf"
         );
-        let seg_counts = al_coarse_cached!(
+        let seg_counts = al_cached!(
             cached.seg_counts,
             buffer_sizes.seg_counts.size_in_bytes().into(),
             8,
@@ -871,7 +811,7 @@ impl PipelineResources {
         );
         // blend_spill is used only by fine, but allocating it as Shared (pre-flush)
         // avoids the need to split prepare() into two phases.
-        let blend_spill = al_shared_cached!(
+        let blend_spill = al_cached!(
             cached.blend_spill,
             buffer_sizes.blend_spill.size_in_bytes().into(),
             size_of::<u32>() as u32,
@@ -883,7 +823,6 @@ impl PipelineResources {
         let (out_image, filter_layers) = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.render_targets");
             if let Some((cached_out, cached_layers)) = persistent.take_cached_render_targets(
-                ctx,
                 gpu_progress,
                 params.width,
                 params.height,

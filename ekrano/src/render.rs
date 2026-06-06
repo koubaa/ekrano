@@ -5,13 +5,12 @@
 //! Take an encoded scene and create a graph to render it
 
 use crate::goldy_renderer::FrameRecorder;
-use crate::gpu_resources::{GpuBinding, PipelineResources};
+use crate::gpu_resources::{GpuBinding, PipelineBuffer, PipelineResources};
 use crate::shaders::FullShaders;
 use crate::{AaConfig, RenderParams};
 
 use std::mem::size_of;
 
-use crate::gpu_resources::BufferLifetime;
 use ekrano_encoding::{
     FilterPrimitive, FilterUniform, IndirectCount, LayerFilterEffect, WorkgroupCountsGpu,
     WorkgroupSize, make_mask_lut, make_mask_lut_16,
@@ -144,7 +143,6 @@ impl Render {
                 size_of::<IndirectCount>() as u32,
                 "ekrano.indirect_dispatch",
                 BufferFlags::empty(),
-                BufferLifetime::CoarseOnly,
             )
             .expect("indirect buffer");
         recorder.dispatch(
@@ -161,11 +159,7 @@ impl Render {
         let indirect_buf = pipeline
             .indirect
             .as_ref()
-            .expect("pipeline_setup must produce an indirect dispatch buffer")
-            .as_indirect_buffer()
-            .expect("indirect buffer must be a `Buffer` for dispatch_indirect");
-        // Decouple the borrow: `indirect` is not freed mid-pipeline.
-        let indirect_buf: &Buffer = unsafe { &*(indirect_buf as *const Buffer) };
+            .expect("pipeline_setup must produce an indirect dispatch buffer");
 
         dispatch_stage(
             recorder,
