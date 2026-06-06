@@ -59,7 +59,7 @@ use scenes::{ExampleScene, ImageCache, SceneParams, SimpleText};
 /// state), which eliminates that race and, as a bonus, removes the device-lock contention
 /// that serialized concurrent renders.
 ///
-/// TODO: this papers over a legimitate problem with ekrano - each test should have its
+/// TODO: this papers over a legitimate problem with ekrano - each test should have its
 /// own context and therefore never race if the runtime is implemented correctly.
 fn test_device() -> Device {
     let instance = Instance::new().expect("Instance::new failed");
