@@ -38,8 +38,8 @@ use mem::size_of;
 use crate::{
     Error, RenderParams, Result, Scene,
     gpu_resources::{
-        GpuBinding, bind_type_to_node_access, collect_bindless_indices_into,
-        record_upload_bytes, record_upload_bytes_owned,
+        GpuBinding, bind_type_to_node_access, collect_bindless_indices_into, record_upload_bytes,
+        record_upload_bytes_owned,
     },
     render::Render,
     resource_proxy::{BindType, ShaderId},
@@ -172,12 +172,12 @@ impl Drop for DeferredTextureToken {
     }
 }
 
-/// Which persistent cache slots received new entries during
+/// Which caches received new entries during
 /// [`FrameRecorder::schedule_pipeline_cleanup`].
 #[derive(Debug, Default)]
 pub(crate) struct CacheScheduleOutcome {
     cached_render_targets_slot: Option<usize>,
-    cached_pipeline_slot: Option<usize>,
+    cached_pipeline_installed: bool,
 }
 
 /// Outcome of [`FrameRecorder::finish`]: orchestrator submit result plus resources
@@ -451,13 +451,11 @@ pub(crate) struct PersistentState {
     pub(crate) cached_render_targets: [Option<(Texture, [Texture; 4])>; RESOURCE_CACHE_SLOTS],
     /// Timeline of the frame that last wrote each render-target slot. `0` when empty.
     pub(crate) cached_rt_timelines: [TimelineValue; RESOURCE_CACHE_SLOTS],
-    /// Cached pipeline buffers from previous frames.
-    ///
-    /// Same timeline-guard pattern as `cached_render_targets`.
-    pub(crate) cached_pipeline:
-        [Option<crate::gpu_resources::CachedPipeline>; RESOURCE_CACHE_SLOTS],
-    /// Timeline of the frame that last wrote each pipeline cache slot.
-    pub(crate) cached_pipeline_timelines: [TimelineValue; RESOURCE_CACHE_SLOTS],
+    /// Cached pipeline buffers from the previous frame. At depth=1 only one
+    /// entry exists at a time: take-then-install within a single `run_frame`.
+    pub(crate) cached_pipeline: Option<crate::gpu_resources::CachedPipeline>,
+    /// Timeline of the frame that produced `cached_pipeline`. `0` when empty.
+    pub(crate) cached_pipeline_timeline: TimelineValue,
     /// Maps RT cache slot index → swapchain image index of the last frame that
     /// used that slot, so [`Self::mark_rt_slot_returned`] can mark it reusable.
     pub(crate) rt_slot_swapchain_image: [Option<u32>; RESOURCE_CACHE_SLOTS],
@@ -615,17 +613,15 @@ impl PersistentState {
         &mut self,
         progress: TimelineValue,
     ) -> Option<crate::gpu_resources::CachedPipeline> {
-        for i in 0..RESOURCE_CACHE_SLOTS {
-            if progress < self.cached_pipeline_timelines[i] {
-                continue;
-            }
-            if let Some(c) = self.cached_pipeline[i].take() {
-                log::debug!(
-                    "[PIPE-CACHE] HIT slot={i}: timeline={}",
-                    self.cached_pipeline_timelines[i],
-                );
-                return Some(c);
-            }
+        if progress < self.cached_pipeline_timeline {
+            return None;
+        }
+        if let Some(c) = self.cached_pipeline.take() {
+            log::debug!(
+                "[PIPE-CACHE] HIT timeline={}",
+                self.cached_pipeline_timeline
+            );
+            return Some(c);
         }
         None
     }
@@ -915,8 +911,7 @@ impl<'a> FrameRecorder<'a> {
         self.defer_texture(image_atlas);
         self.defer_texture(mask_atlas);
         self.defer_owned_buffer_named(scene, "ekrano.scene");
-        self.persistent
-            .cached_config_uniform = Some((config_uniform_value, config));
+        self.persistent.cached_config_uniform = Some((config_uniform_value, config));
         if let Some(b) = indirect {
             self.defer_owned_buffer_named(b, "ekrano.indirect_dispatch");
         }
@@ -949,13 +944,13 @@ impl<'a> FrameRecorder<'a> {
             seg_counts,
             buffer_sizes,
         };
-        if let Some(i) = find_empty_cache_slot(&self.persistent.cached_pipeline) {
-            self.persistent.cached_pipeline[i] = Some(pipeline_cache);
-            outcome.cached_pipeline_slot = Some(i);
-            log::debug!("[PIPE-CACHE] schedule: cached slot={i}");
+        if self.persistent.cached_pipeline.is_none() {
+            self.persistent.cached_pipeline = Some(pipeline_cache);
+            outcome.cached_pipeline_installed = true;
+            log::debug!("[PIPE-CACHE] schedule: cached");
         } else {
             self.defer_cached_pipeline_owned_buffers(pipeline_cache);
-            log::debug!("[PIPE-CACHE] schedule: all slots full — deferred current frame");
+            log::debug!("[PIPE-CACHE] schedule: slot occupied — deferred current frame");
         }
         if let Some(i) = find_empty_cache_slot(&self.persistent.cached_render_targets) {
             self.persistent.cached_render_targets[i] = Some((out_image, filter_layers));
@@ -1160,13 +1155,7 @@ impl<'a> FrameRecorder<'a> {
         if let Some(surface) = self.surface {
             let mut frame = if let Some(frame) = self.preacquired_frame.take() {
                 self.frame_pipeline
-                    .end_frame_for_acquired_surface(
-                        frame_handle,
-                        self.graph,
-                        surface,
-                        frame,
-                        (),
-                    )
+                    .end_frame_for_acquired_surface(frame_handle, self.graph, surface, frame, ())
                     .map_err(|e| Error::Shader(e.to_string()))?
             } else {
                 self.frame_pipeline
@@ -1287,8 +1276,8 @@ impl GoldyRenderer {
                 nearest_clamp_sampler: None,
                 cached_render_targets: std::array::from_fn(|_| None),
                 cached_rt_timelines: [0; RESOURCE_CACHE_SLOTS],
-                cached_pipeline: std::array::from_fn(|_| None),
-                cached_pipeline_timelines: [0; RESOURCE_CACHE_SLOTS],
+                cached_pipeline: None,
+                cached_pipeline_timeline: 0,
                 rt_slot_swapchain_image: [None; RESOURCE_CACHE_SLOTS],
                 deferred_owned_cap_hint: 0,
                 deferred_textures_cap_hint: 0,
@@ -1952,8 +1941,8 @@ impl GoldyRenderer {
                     self.persistent.rt_slot_swapchain_image[i] = Some(idx);
                 }
             }
-            if let Some(i) = cache_outcome.cached_pipeline_slot {
-                self.persistent.cached_pipeline_timelines[i] = tv;
+            if cache_outcome.cached_pipeline_installed {
+                self.persistent.cached_pipeline_timeline = tv;
             }
             if let Some(buf) = bump_readback {
                 self.persistent.queue_bump_readback(tv, buf);
@@ -1996,12 +1985,7 @@ impl GoldyRenderer {
                 .iter()
                 .filter(|s| s.is_some())
                 .count();
-            let pipe_slots = self
-                .persistent
-                .cached_pipeline
-                .iter()
-                .filter(|s| s.is_some())
-                .count();
+            let pipe_slots = self.persistent.cached_pipeline.is_some() as usize;
 
             log::debug!(
                 "[PERF] frame={} drain={:.2}ms resolve={:.2}ms pool={:.2}ms coarse_record={:.2}ms fine_record={:.2}ms submit={:.2}ms total={:.2}ms ring={} rt_slots={rt_slots} pipe_slots={pipe_slots} tv={} tt={} {label}",
@@ -2143,8 +2127,8 @@ mod tests {
             nearest_clamp_sampler: None,
             cached_render_targets: std::array::from_fn(|_| None),
             cached_rt_timelines: [0; RESOURCE_CACHE_SLOTS],
-            cached_pipeline: std::array::from_fn(|_| None),
-            cached_pipeline_timelines: [0; RESOURCE_CACHE_SLOTS],
+            cached_pipeline: None,
+            cached_pipeline_timeline: 0,
             rt_slot_swapchain_image: [None; RESOURCE_CACHE_SLOTS],
             deferred_owned_cap_hint: 0,
             deferred_textures_cap_hint: 0,

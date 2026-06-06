@@ -7,9 +7,7 @@ use std::mem::size_of;
 
 use goldy::task_graph::NodeAccess;
 use goldy::types::{BufferFlags, ResourceAccess, TextureFlags, TextureKind};
-use goldy::{
-    Buffer, BufferKind, Context, Device, TaskGraph, Texture, TextureFormat,
-};
+use goldy::{Buffer, BufferKind, Context, Device, TaskGraph, Texture, TextureFormat};
 
 use crate::goldy_renderer::PersistentState;
 use crate::resource_proxy::{BindType, ImageFormat};
@@ -574,21 +572,45 @@ impl PipelineResources {
                         .pool
                         .return_buf(c.blend_spill, "ekrano.blend_spill");
                     persistent.pool.return_buf(c.reduced, "ekrano.reduced_buf");
-                    persistent.pool.return_buf(c.reduced2, "ekrano.reduced2_buf");
-                    persistent.pool.return_buf(c.reduced_scan, "ekrano.reduced_scan_buf");
-                    persistent.pool.return_buf(c.tagmonoid, "ekrano.tagmonoid_buf");
-                    persistent.pool.return_buf(c.path_bbox, "ekrano.path_bbox_buf");
+                    persistent
+                        .pool
+                        .return_buf(c.reduced2, "ekrano.reduced2_buf");
+                    persistent
+                        .pool
+                        .return_buf(c.reduced_scan, "ekrano.reduced_scan_buf");
+                    persistent
+                        .pool
+                        .return_buf(c.tagmonoid, "ekrano.tagmonoid_buf");
+                    persistent
+                        .pool
+                        .return_buf(c.path_bbox, "ekrano.path_bbox_buf");
                     persistent.pool.return_buf(c.lines, "ekrano.lines_buf");
-                    persistent.pool.return_buf(c.draw_reduced, "ekrano.draw_reduced_buf");
-                    persistent.pool.return_buf(c.draw_monoid, "ekrano.draw_monoid_buf");
-                    persistent.pool.return_buf(c.clip_inp, "ekrano.clip_inp_buf");
+                    persistent
+                        .pool
+                        .return_buf(c.draw_reduced, "ekrano.draw_reduced_buf");
+                    persistent
+                        .pool
+                        .return_buf(c.draw_monoid, "ekrano.draw_monoid_buf");
+                    persistent
+                        .pool
+                        .return_buf(c.clip_inp, "ekrano.clip_inp_buf");
                     persistent.pool.return_buf(c.clip_el, "ekrano.clip_el_buf");
-                    persistent.pool.return_buf(c.clip_bic, "ekrano.clip_bic_buf");
-                    persistent.pool.return_buf(c.clip_bbox, "ekrano.clip_bbox_buf");
-                    persistent.pool.return_buf(c.draw_bbox, "ekrano.draw_bbox_buf");
-                    persistent.pool.return_buf(c.bin_header, "ekrano.bin_header_buf");
+                    persistent
+                        .pool
+                        .return_buf(c.clip_bic, "ekrano.clip_bic_buf");
+                    persistent
+                        .pool
+                        .return_buf(c.clip_bbox, "ekrano.clip_bbox_buf");
+                    persistent
+                        .pool
+                        .return_buf(c.draw_bbox, "ekrano.draw_bbox_buf");
+                    persistent
+                        .pool
+                        .return_buf(c.bin_header, "ekrano.bin_header_buf");
                     persistent.pool.return_buf(c.path, "ekrano.path_buf");
-                    persistent.pool.return_buf(c.seg_counts, "ekrano.seg_counts_buf");
+                    persistent
+                        .pool
+                        .return_buf(c.seg_counts, "ekrano.seg_counts_buf");
                     CachedOwnedBuffers {
                         info_bin_data: None,
                         tile: None,
