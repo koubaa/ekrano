@@ -90,10 +90,7 @@ fn single_frame_ring_depth_bounded() {
             .render_to_texture(&device, &scene, &texture, &params)
             .unwrap_or_else(|e| panic!("frame {i} failed: {e}"));
 
-        let depth = renderer
-            .allocator_stats()
-            .expect("allocator stats available after first frame")
-            .cleanup_ring_depth;
+        let depth = renderer.allocator_stats().cleanup_ring_depth;
         assert!(
             depth <= 1,
             "frame {i}: cleanup ring depth {depth} exceeds single-frame limit (1)"

@@ -4,17 +4,11 @@
 
 //! Goldy-based renderer for offscreen and texture rendering.
 //!
-//! Use this when building with `--no-default-features --features goldy`.
-//!
-//! ## Phase 3c Option 1A: Bindless descriptor model
 //!
 //! We use Goldy's bindless descriptor indexing (global arrays of up to 16K
 //! descriptors per type) rather than actual buffer device addresses (BDA).
 //! Push constants carry bindless indices per dispatch via Slang `uniform`
-//! entry-point parameters. This is simpler than wgpu's per-pipeline bind group
-//! layouts and satisfies the "simplify the binding model" goal. BDA would only
-//! be needed for GPU-side pointer chasing (e.g. buffer pools); we defer that
-//! unless required.
+//! entry-point parameters.
 
 pub const MAX_BINDLESS_SLOTS: usize = 16;
 
@@ -30,7 +24,7 @@ use goldy::{
     ShaderModule, Signal, TaskGraph, Texture, TexturePool, TimelineValue,
 };
 
-/// Ekrano uses a single-frame fire-and-forget model (vello #71 baseline).
+/// Ekrano uses a single-frame fire-and-forget model
 const FRAME_PIPELINE_DEPTH: usize = 1;
 
 use mem::size_of;
@@ -73,10 +67,6 @@ pub struct FrameStats {
 /// Snapshot of frame-scheduling state, useful for tests and diagnostics.
 #[derive(Debug, Clone, Copy)]
 pub struct AllocatorStats {
-    /// Reserved for API compatibility (ekrano no longer uses a transient allocator).
-    pub capacity: u64,
-    /// Reserved for API compatibility (ekrano no longer uses a transient allocator).
-    pub used: u64,
     /// Number of frames waiting in the [`FrameOrchestrator`] ring (always ≤ 1).
     pub cleanup_ring_depth: usize,
 }
@@ -183,7 +173,7 @@ pub(crate) struct CacheScheduleOutcome {
 /// Outcome of [`FrameRecorder::finish`]: orchestrator submit result plus resources
 /// that bypass the ring and are deferred via [`Device::defer_release`].
 struct FrameFinishOutcome {
-    timeline: Option<TimelineValue>,
+    timeline: TimelineValue,
     surface_frame: Option<goldy::Frame>,
     bump_readback: Option<Buffer>,
     deferred_textures: Vec<Texture>,
@@ -208,7 +198,6 @@ pub struct PreparedFrame {
     image_entries: Vec<(peniko::ImageData, u32, u32)>,
     config: RenderConfig,
     params: RenderParams,
-    scene_fingerprint: u64,
     resolver: Resolver,
     /// Owned copy of `Encoding::coverage_mask` — used by `PipelineResources::prepare`.
     coverage_mask: Option<ekrano_encoding::CoverageMask>,
@@ -229,7 +218,7 @@ impl PreparedFrame {
     }
 }
 
-/// Defer pool views, textures, and recyclable owned buffers until `tv` retires on the GPU.
+/// Defer textures and recyclable owned buffers until `tv` retires on the GPU.
 ///
 /// Uses a single [`Context::defer_release`] per frame (one mutex push) instead of
 /// multiple deferred cleanup calls.
@@ -703,11 +692,6 @@ pub struct GoldyRenderer {
     persistent_bump: Option<BumpAllocators>,
     /// Frame counter for rate-limiting housekeeping operations.
     cleanup_frame_counter: u64,
-    /// Fingerprint of the last rendered scene (hash of packed bytes + params).
-    /// Used to detect scene changes for command-list caching.
-    last_scene_fingerprint: Option<u64>,
-    /// Length of the packed scene bytes from the previous frame for quick-reject.
-    last_packed_len: Option<usize>,
     /// Long-lived task graph cleared (not replaced) each frame so the schedule cache
     /// survives across frames. `FrameRecorder` borrows this mutably per frame.
     graph: TaskGraph,
@@ -813,10 +797,6 @@ impl<'a> FrameRecorder<'a> {
         )
     }
 
-    pub(crate) fn defer_owned_buffer_named(&mut self, buf: Buffer, name: &'static str) {
-        self.deferred_owned_buffers.push((buf, name));
-    }
-
     pub(crate) fn defer_texture(&mut self, tex: Texture) {
         self.deferred_textures.push(tex);
     }
@@ -910,15 +890,15 @@ impl<'a> FrameRecorder<'a> {
         self.defer_texture(gradient);
         self.defer_texture(image_atlas);
         self.defer_texture(mask_atlas);
-        self.defer_owned_buffer_named(scene, "ekrano.scene");
+        self.defer_owned_buffer(scene, "ekrano.scene");
         self.persistent.cached_config_uniform = Some((config_uniform_value, config));
         if let Some(b) = indirect {
-            self.defer_owned_buffer_named(b, "ekrano.indirect_dispatch");
+            self.defer_owned_buffer(b, "ekrano.indirect_dispatch");
         }
         if bump_readback {
             self.bump_buf_for_readback = Some(bump);
         } else {
-            self.defer_owned_buffer_named(bump, "ekrano.bump_buf");
+            self.defer_owned_buffer(bump, "ekrano.bump_buf");
         }
         let pipeline_cache = crate::gpu_resources::CachedPipeline {
             info_bin_data,
@@ -1129,7 +1109,6 @@ impl<'a> FrameRecorder<'a> {
         }
     }
 
-    #[cfg_attr(not(feature = "debug_layers"), allow(dead_code))]
     pub(crate) fn defer_owned_buffer(&mut self, buf: Buffer, name: &'static str) {
         self.deferred_owned_buffers.push((buf, name));
     }
@@ -1166,7 +1145,7 @@ impl<'a> FrameRecorder<'a> {
                 .submit_frame()
                 .map_err(|e| Error::Shader(e.to_string()))?;
             Ok(FrameFinishOutcome {
-                timeline: Some(submit_tv),
+                timeline: submit_tv,
                 surface_frame: Some(frame),
                 bump_readback,
                 deferred_textures,
@@ -1178,7 +1157,7 @@ impl<'a> FrameRecorder<'a> {
                 .end_frame_standalone(frame_handle, self.graph, self.last_timeline, ())
                 .map_err(|e| Error::Shader(e.to_string()))?;
             Ok(FrameFinishOutcome {
-                timeline: Some(tv),
+                timeline: tv,
                 surface_frame: None,
                 bump_readback,
                 deferred_textures,
@@ -1292,8 +1271,6 @@ impl GoldyRenderer {
             frame_pipeline,
             persistent_bump: None,
             cleanup_frame_counter: 0,
-            last_scene_fingerprint: None,
-            last_packed_len: None,
             graph: TaskGraph::new(),
         };
         let shaders = {
@@ -1356,10 +1333,8 @@ impl GoldyRenderer {
 
     /// Acknowledge a swapchain frame after [`goldy::Frame::present`].
     ///
-    /// Fills in the timeline on the most recent `FrameCleanup` entry (the one
-    /// pushed by `FrameRecorder::finish` for the surface path where the
-    /// timeline isn't known until after present) and informs the transient
-    /// allocator so it can retire this frame's regions with the correct epoch.
+    /// Records the present timeline on the frame orchestrator after
+    /// [`goldy::Frame::present`].
     pub fn note_frame_presented(&mut self, _device: &Device, tv: TimelineValue) {
         self.frame_pipeline.note_presented(tv);
     }
@@ -1394,12 +1369,8 @@ impl GoldyRenderer {
         }
     }
 
-    /// **Pipelined:** drains the *previous* frame's GPU work at the start,
-    /// then submits the current frame and returns without waiting.  The bump
-    /// allocator check uses the previous frame's data — if it overflowed,
-    /// buffers are grown for the current frame.  This gives one frame of
-    /// CPU/GPU overlap and eliminates the per-frame synchronization stall
-    /// that previously bottlenecked throughput.
+    /// Renders a scene to a texture. At depth=1, `begin_frame` waits for the
+    /// previous frame's GPU work before recording the next one.
     ///
     /// Returns [`FrameStats`] on success. Check [`FrameStats::bump_retries`] to detect
     /// scenes that required buffer reallocation (e.g. to print a warning to stdout).
@@ -1465,8 +1436,6 @@ impl GoldyRenderer {
             resolver.resolve(encoding, &mut packed)
         };
 
-        let scene_fingerprint: u64 = 0;
-        self.last_packed_len = Some(packed.len());
         let base_config =
             RenderConfig::new(&layout, params.width, params.height, &params.base_color);
         let config = if let Some(ref persistent) = self.persistent_bump {
@@ -1485,7 +1454,6 @@ impl GoldyRenderer {
             image_entries: images.images.to_vec(),
             config,
             params,
-            scene_fingerprint,
             resolver,
             coverage_mask: encoding.coverage_mask.clone(),
             layer_filter_effects: encoding.layer_filter_effects.clone(),
@@ -1535,12 +1503,10 @@ impl GoldyRenderer {
     }
 
     /// Query frame-scheduling state for diagnostics or test assertions.
-    pub fn allocator_stats(&self) -> Option<AllocatorStats> {
-        Some(AllocatorStats {
-            capacity: 0,
-            used: 0,
+    pub fn allocator_stats(&self) -> AllocatorStats {
+        AllocatorStats {
             cleanup_ring_depth: self.frame_pipeline.pending_frames(),
-        })
+        }
     }
 
     /// Query the resource pool's current state for diagnostics or test assertions.
@@ -1682,7 +1648,6 @@ impl GoldyRenderer {
         let image_entries = prepared.image_entries;
         let mut config = prepared.config;
         let params = prepared.params;
-        let scene_fingerprint = prepared.scene_fingerprint;
         let resolver = prepared.resolver;
         let coverage_mask = prepared.coverage_mask;
         let layer_filter_effects = prepared.layer_filter_effects;
@@ -1701,11 +1666,8 @@ impl GoldyRenderer {
 
         // --- Reclaim completed frames & open recording bracket ---
         // Drain pool returns from prior-frame token drops (cheap; no GPU sync).
-        // Drain any bump readbacks whose GPU timeline has already passed.
         // BoundaryCrossed signals are serviced by poll_and_reclaim at frame entry.
         self.persistent.drain_pending_returns();
-        self.persistent
-            .drain_ready_bump_readbacks(device, &self.unbudgeted_context)?;
 
         let out_image_format = surface
             .map(|s| s.format())
@@ -1930,31 +1892,29 @@ impl GoldyRenderer {
             recorder.finish()?
         };
 
-        if let Some(tv) = frame_tv {
-            if let Some(i) = cache_outcome.cached_render_targets_slot {
-                log::debug!(
-                    "[RT-CACHE] stamp slot={i} timeline={tv} (prev={})",
-                    self.persistent.cached_rt_timelines[i],
-                );
-                self.persistent.cached_rt_timelines[i] = tv;
-                if let Some(idx) = acquired_image_index {
-                    self.persistent.rt_slot_swapchain_image[i] = Some(idx);
-                }
-            }
-            if cache_outcome.cached_pipeline_installed {
-                self.persistent.cached_pipeline_timeline = tv;
-            }
-            if let Some(buf) = bump_readback {
-                self.persistent.queue_bump_readback(tv, buf);
-            }
-            defer_frame_gpu_resources(
-                &self.unbudgeted_context,
-                &self.persistent,
-                tv,
-                deferred_textures,
-                recyclable_owned,
+        if let Some(i) = cache_outcome.cached_render_targets_slot {
+            log::debug!(
+                "[RT-CACHE] stamp slot={i} timeline={frame_tv} (prev={})",
+                self.persistent.cached_rt_timelines[i],
             );
+            self.persistent.cached_rt_timelines[i] = frame_tv;
+            if let Some(idx) = acquired_image_index {
+                self.persistent.rt_slot_swapchain_image[i] = Some(idx);
+            }
         }
+        if cache_outcome.cached_pipeline_installed {
+            self.persistent.cached_pipeline_timeline = frame_tv;
+        }
+        if let Some(buf) = bump_readback {
+            self.persistent.queue_bump_readback(frame_tv, buf);
+        }
+        defer_frame_gpu_resources(
+            &self.unbudgeted_context,
+            &self.persistent,
+            frame_tv,
+            deferred_textures,
+            recyclable_owned,
+        );
 
         {
             let _tz = goldy::tracy_zone!("ekrano.run_frame.post_submit");
@@ -2002,14 +1962,9 @@ impl GoldyRenderer {
                 transient_textures,
             );
 
-            // Update fingerprint after a successful frame.
-            self.last_scene_fingerprint = Some(scene_fingerprint);
         }
 
-        let surface_frame = match (surface_frame, frame_tv) {
-            (Some(frame), Some(tv)) => Some((frame, tv)),
-            _ => None,
-        };
+        let surface_frame = surface_frame.map(|frame| (frame, frame_tv));
         Ok((stats, surface_frame))
     }
 
