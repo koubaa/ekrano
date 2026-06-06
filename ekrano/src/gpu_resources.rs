@@ -270,39 +270,31 @@ pub(crate) fn clear_gpu_buf(
 
 /// Cached GPU buffers that survive across frames when `buffer_sizes` is stable.
 ///
-/// At `MAX_CLEANUP_DEPTH=1` the previous frame's GPU work is complete by the time
-/// `begin_frame` returns, so these buffers are safe to rebind immediately.
-///
-/// The five `OwnedShared` buffers (`info_bin_data`, `tile`, `segments`, `ptcl`,
-/// `blend_spill`) have always lived here.
-///
-/// At `LowLatency` (depth=1), the twelve `CoarseOnly` buffers are also promoted to
-/// persistent owned handles. This eliminates graph-coloring transient IDs and gives
-/// them stable bindless indices — a prerequisite for command buffer retention.
+/// At depth=1 the previous frame's GPU work is complete by the time `begin_frame`
+/// returns, so these buffers are safe to rebind immediately. All handles are
+/// persistent `ResourcePool` allocations with stable bindless indices.
 pub(crate) struct CachedPipeline {
-    // OwnedShared: written coarse, read fine.
     pub info_bin_data: Buffer,
     pub tile: Buffer,
     pub segments: Buffer,
     pub ptcl: Buffer,
     pub blend_spill: Buffer,
-    // CoarseOnly (depth=1 only): consumed within the coarse wave; cached for stable bindless indices.
-    pub reduced: Option<Buffer>,
-    pub reduced2: Option<Buffer>,
-    pub reduced_scan: Option<Buffer>,
-    pub tagmonoid: Option<Buffer>,
-    pub path_bbox: Option<Buffer>,
-    pub lines: Option<Buffer>,
-    pub draw_reduced: Option<Buffer>,
-    pub draw_monoid: Option<Buffer>,
-    pub clip_inp: Option<Buffer>,
-    pub clip_el: Option<Buffer>,
-    pub clip_bic: Option<Buffer>,
-    pub clip_bbox: Option<Buffer>,
-    pub draw_bbox: Option<Buffer>,
-    pub bin_header: Option<Buffer>,
-    pub path: Option<Buffer>,
-    pub seg_counts: Option<Buffer>,
+    pub reduced: Buffer,
+    pub reduced2: Buffer,
+    pub reduced_scan: Buffer,
+    pub tagmonoid: Buffer,
+    pub path_bbox: Buffer,
+    pub lines: Buffer,
+    pub draw_reduced: Buffer,
+    pub draw_monoid: Buffer,
+    pub clip_inp: Buffer,
+    pub clip_el: Buffer,
+    pub clip_bic: Buffer,
+    pub clip_bbox: Buffer,
+    pub draw_bbox: Buffer,
+    pub bin_header: Buffer,
+    pub path: Buffer,
+    pub seg_counts: Buffer,
     pub buffer_sizes: ekrano_encoding::BufferSizes,
 }
 
@@ -516,11 +508,9 @@ impl PipelineResources {
 
         let buffer_sizes = cpu_config_owned.buffer_sizes;
 
-        // Try to reuse cached OwnedShared + CoarseOnly buffers from the previous frame.
-        // At MAX_CLEANUP_DEPTH=1, begin_frame blocks until the previous frame's GPU work
-        // is complete, so these buffers are safe to rebind immediately without any fence check.
-        // Cache hit eliminates ResourcePool HashMap lookups and (at depth=1) graph-coloring
-        // transient IDs — keeping bindless indices stable for command buffer retention.
+        // Try to reuse cached pipeline buffers from the previous frame.
+        // At depth=1, begin_frame blocks until the previous frame's GPU work is complete,
+        // so these buffers are safe to rebind immediately without any fence check.
         struct CachedOwnedBuffers {
             info_bin_data: Option<Buffer>,
             tile: Option<Buffer>,
@@ -553,22 +543,22 @@ impl PipelineResources {
                     segments: Some(c.segments),
                     ptcl: Some(c.ptcl),
                     blend_spill: Some(c.blend_spill),
-                    reduced: c.reduced,
-                    reduced2: c.reduced2,
-                    reduced_scan: c.reduced_scan,
-                    tagmonoid: c.tagmonoid,
-                    path_bbox: c.path_bbox,
-                    lines: c.lines,
-                    draw_reduced: c.draw_reduced,
-                    draw_monoid: c.draw_monoid,
-                    clip_inp: c.clip_inp,
-                    clip_el: c.clip_el,
-                    clip_bic: c.clip_bic,
-                    clip_bbox: c.clip_bbox,
-                    draw_bbox: c.draw_bbox,
-                    bin_header: c.bin_header,
-                    path: c.path,
-                    seg_counts: c.seg_counts,
+                    reduced: Some(c.reduced),
+                    reduced2: Some(c.reduced2),
+                    reduced_scan: Some(c.reduced_scan),
+                    tagmonoid: Some(c.tagmonoid),
+                    path_bbox: Some(c.path_bbox),
+                    lines: Some(c.lines),
+                    draw_reduced: Some(c.draw_reduced),
+                    draw_monoid: Some(c.draw_monoid),
+                    clip_inp: Some(c.clip_inp),
+                    clip_el: Some(c.clip_el),
+                    clip_bic: Some(c.clip_bic),
+                    clip_bbox: Some(c.clip_bbox),
+                    draw_bbox: Some(c.draw_bbox),
+                    bin_header: Some(c.bin_header),
+                    path: Some(c.path),
+                    seg_counts: Some(c.seg_counts),
                 },
                 Some(c) => {
                     // Sizes changed: return stale buffers to pool before discarding.
@@ -583,29 +573,22 @@ impl PipelineResources {
                     persistent
                         .pool
                         .return_buf(c.blend_spill, "ekrano.blend_spill");
-                    macro_rules! return_coarse {
-                        ($field:expr, $name:expr) => {
-                            if let Some(b) = $field {
-                                persistent.pool.return_buf(b, $name);
-                            }
-                        };
-                    }
-                    return_coarse!(c.reduced, "ekrano.reduced_buf");
-                    return_coarse!(c.reduced2, "ekrano.reduced2_buf");
-                    return_coarse!(c.reduced_scan, "ekrano.reduced_scan_buf");
-                    return_coarse!(c.tagmonoid, "ekrano.tagmonoid_buf");
-                    return_coarse!(c.path_bbox, "ekrano.path_bbox_buf");
-                    return_coarse!(c.lines, "ekrano.lines_buf");
-                    return_coarse!(c.draw_reduced, "ekrano.draw_reduced_buf");
-                    return_coarse!(c.draw_monoid, "ekrano.draw_monoid_buf");
-                    return_coarse!(c.clip_inp, "ekrano.clip_inp_buf");
-                    return_coarse!(c.clip_el, "ekrano.clip_el_buf");
-                    return_coarse!(c.clip_bic, "ekrano.clip_bic_buf");
-                    return_coarse!(c.clip_bbox, "ekrano.clip_bbox_buf");
-                    return_coarse!(c.draw_bbox, "ekrano.draw_bbox_buf");
-                    return_coarse!(c.bin_header, "ekrano.bin_header_buf");
-                    return_coarse!(c.path, "ekrano.path_buf");
-                    return_coarse!(c.seg_counts, "ekrano.seg_counts_buf");
+                    persistent.pool.return_buf(c.reduced, "ekrano.reduced_buf");
+                    persistent.pool.return_buf(c.reduced2, "ekrano.reduced2_buf");
+                    persistent.pool.return_buf(c.reduced_scan, "ekrano.reduced_scan_buf");
+                    persistent.pool.return_buf(c.tagmonoid, "ekrano.tagmonoid_buf");
+                    persistent.pool.return_buf(c.path_bbox, "ekrano.path_bbox_buf");
+                    persistent.pool.return_buf(c.lines, "ekrano.lines_buf");
+                    persistent.pool.return_buf(c.draw_reduced, "ekrano.draw_reduced_buf");
+                    persistent.pool.return_buf(c.draw_monoid, "ekrano.draw_monoid_buf");
+                    persistent.pool.return_buf(c.clip_inp, "ekrano.clip_inp_buf");
+                    persistent.pool.return_buf(c.clip_el, "ekrano.clip_el_buf");
+                    persistent.pool.return_buf(c.clip_bic, "ekrano.clip_bic_buf");
+                    persistent.pool.return_buf(c.clip_bbox, "ekrano.clip_bbox_buf");
+                    persistent.pool.return_buf(c.draw_bbox, "ekrano.draw_bbox_buf");
+                    persistent.pool.return_buf(c.bin_header, "ekrano.bin_header_buf");
+                    persistent.pool.return_buf(c.path, "ekrano.path_buf");
+                    persistent.pool.return_buf(c.seg_counts, "ekrano.seg_counts_buf");
                     CachedOwnedBuffers {
                         info_bin_data: None,
                         tile: None,
@@ -657,8 +640,8 @@ impl PipelineResources {
         }; // end ekrano.prepare.pipeline_cache zone
 
         let _tz_alloc = goldy::tracy_zone!("ekrano.prepare.alloc_buffers");
-        // For OwnedShared buffers: reuse from cache when sizes match (no ResourcePool
-        // round-trip). These buffers are fully GPU-overwritten before first read.
+        // Reuse from cache when sizes match (no ResourcePool round-trip). These buffers
+        // are fully GPU-overwritten before first read.
         macro_rules! al_cached {
             ($cached_opt:expr, $sz:expr, $stride:expr, $name:expr) => {
                 match $cached_opt {

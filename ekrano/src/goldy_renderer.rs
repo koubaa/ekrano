@@ -18,7 +18,7 @@
 
 pub const MAX_BINDLESS_SLOTS: usize = 16;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::mem;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -131,9 +131,9 @@ static FRAME_COUNTER: AtomicU64 = AtomicU64::new(0);
 // -----------------------------------------------------------------------
 //
 // The `FrameOrchestrator` ring now carries `()` — all resource retirement
-// (render targets, pipeline buffers, pool views, owned buffers, bump readback)
-// bypasses the ring via timeline-guarded cache slots + `Device::defer_release`
-// + `PersistentState::pending_bump_readbacks`.  The ring is a pure scheduling
+// (render targets, pipeline buffers, owned buffers, bump readback) bypasses
+// the ring via timeline-guarded cache slots + `Device::defer_release`
+// + `PersistentState::pending_bump_readback`.  The ring is a pure scheduling
 // primitive: depth enforcement + timeline tracking only.
 
 /// Token pushed into a [`DeferredPayload`] when owned pipeline buffers are retired.
@@ -435,11 +435,10 @@ pub(crate) struct PersistentState {
     /// Bump allocator counters from the most recently drained frame.
     /// `None` until the first GPU readback completes.
     last_drained_bump: Option<BumpAllocators>,
-    /// Bump readback buffers whose GPU timelines are not yet complete.
+    /// Bump readback buffer whose GPU timeline is not yet complete.
     ///
-    /// Used for pipelined strategies so bump readback does not force
-    /// [`FrameOrchestrator::begin_frame`] to wait before admitting a frame.
-    pending_bump_readbacks: VecDeque<(TimelineValue, Buffer)>,
+    /// At depth=1 at most one readback is outstanding between frames.
+    pending_bump_readback: Option<(TimelineValue, Buffer)>,
     /// Persistent linear-filter + clamp-to-edge sampler for hardware-filtered texture reads
     /// (gradient ramps, image atlas bilinear). Lazily created on first render.
     pub(crate) linear_clamp_sampler: Option<goldy::Sampler>,
@@ -452,7 +451,7 @@ pub(crate) struct PersistentState {
     pub(crate) cached_render_targets: [Option<(Texture, [Texture; 4])>; RESOURCE_CACHE_SLOTS],
     /// Timeline of the frame that last wrote each render-target slot. `0` when empty.
     pub(crate) cached_rt_timelines: [TimelineValue; RESOURCE_CACHE_SLOTS],
-    /// Cached `OwnedShared` + pool-exempt pipeline buffers from previous frames.
+    /// Cached pipeline buffers from previous frames.
     ///
     /// Same timeline-guard pattern as `cached_render_targets`.
     pub(crate) cached_pipeline:
@@ -593,27 +592,19 @@ impl PersistentState {
     }
 
     fn queue_bump_readback(&mut self, timeline: TimelineValue, buf: Buffer) {
-        self.pending_bump_readbacks.push_back((timeline, buf));
+        self.pending_bump_readback = Some((timeline, buf));
     }
 
     fn drain_ready_bump_readbacks(&mut self, device: &Device, ctx: &Context) -> Result<()> {
-        if self.pending_bump_readbacks.is_empty() {
+        let Some((timeline, buf)) = self.pending_bump_readback.take() else {
+            return Ok(());
+        };
+        if timeline > ctx.gpu_progress() {
+            self.pending_bump_readback = Some((timeline, buf));
             return Ok(());
         }
         let _tz = goldy::tracy_zone!("ekrano.drain_ready_bump_readbacks");
-        let progress = ctx.gpu_progress();
-        while self
-            .pending_bump_readbacks
-            .front()
-            .is_some_and(|(timeline, _)| *timeline <= progress)
-        {
-            let (_, buf) = self
-                .pending_bump_readbacks
-                .pop_front()
-                .expect("front existed");
-            read_bump_buffer(device, self, buf)?;
-        }
-        Ok(())
+        read_bump_buffer(device, self, buf)
     }
 
     /// Claim a pipeline buffer cache slot.
@@ -745,7 +736,7 @@ pub(crate) struct FrameRecorder<'a> {
     /// if the recorder is dropped without being properly completed (e.g. on a `?` return).
     finished: bool,
     /// The bump readback buffer for the current frame (`robust=true` only).
-    /// Queued into `PersistentState::pending_bump_readbacks` after GPU submit.
+    /// Queued into `PersistentState::pending_bump_readback` after GPU submit.
     bump_buf_for_readback: Option<Buffer>,
     deferred_owned_buffers: Vec<(Buffer, &'static str)>,
     deferred_textures: Vec<Texture>,
@@ -845,29 +836,38 @@ impl<'a> FrameRecorder<'a> {
             .push((c.ptcl, "ekrano.ptcl_buf"));
         self.deferred_owned_buffers
             .push((c.blend_spill, "ekrano.blend_spill"));
-        macro_rules! defer_coarse {
-            ($field:expr, $name:expr) => {
-                if let Some(b) = $field {
-                    self.deferred_owned_buffers.push((b, $name));
-                }
-            };
-        }
-        defer_coarse!(c.reduced, "ekrano.reduced_buf");
-        defer_coarse!(c.reduced2, "ekrano.reduced2_buf");
-        defer_coarse!(c.reduced_scan, "ekrano.reduced_scan_buf");
-        defer_coarse!(c.tagmonoid, "ekrano.tagmonoid_buf");
-        defer_coarse!(c.path_bbox, "ekrano.path_bbox_buf");
-        defer_coarse!(c.lines, "ekrano.lines_buf");
-        defer_coarse!(c.draw_reduced, "ekrano.draw_reduced_buf");
-        defer_coarse!(c.draw_monoid, "ekrano.draw_monoid_buf");
-        defer_coarse!(c.clip_inp, "ekrano.clip_inp_buf");
-        defer_coarse!(c.clip_el, "ekrano.clip_el_buf");
-        defer_coarse!(c.clip_bic, "ekrano.clip_bic_buf");
-        defer_coarse!(c.clip_bbox, "ekrano.clip_bbox_buf");
-        defer_coarse!(c.draw_bbox, "ekrano.draw_bbox_buf");
-        defer_coarse!(c.bin_header, "ekrano.bin_header_buf");
-        defer_coarse!(c.path, "ekrano.path_buf");
-        defer_coarse!(c.seg_counts, "ekrano.seg_counts_buf");
+        self.deferred_owned_buffers
+            .push((c.reduced, "ekrano.reduced_buf"));
+        self.deferred_owned_buffers
+            .push((c.reduced2, "ekrano.reduced2_buf"));
+        self.deferred_owned_buffers
+            .push((c.reduced_scan, "ekrano.reduced_scan_buf"));
+        self.deferred_owned_buffers
+            .push((c.tagmonoid, "ekrano.tagmonoid_buf"));
+        self.deferred_owned_buffers
+            .push((c.path_bbox, "ekrano.path_bbox_buf"));
+        self.deferred_owned_buffers
+            .push((c.lines, "ekrano.lines_buf"));
+        self.deferred_owned_buffers
+            .push((c.draw_reduced, "ekrano.draw_reduced_buf"));
+        self.deferred_owned_buffers
+            .push((c.draw_monoid, "ekrano.draw_monoid_buf"));
+        self.deferred_owned_buffers
+            .push((c.clip_inp, "ekrano.clip_inp_buf"));
+        self.deferred_owned_buffers
+            .push((c.clip_el, "ekrano.clip_el_buf"));
+        self.deferred_owned_buffers
+            .push((c.clip_bic, "ekrano.clip_bic_buf"));
+        self.deferred_owned_buffers
+            .push((c.clip_bbox, "ekrano.clip_bbox_buf"));
+        self.deferred_owned_buffers
+            .push((c.draw_bbox, "ekrano.draw_bbox_buf"));
+        self.deferred_owned_buffers
+            .push((c.bin_header, "ekrano.bin_header_buf"));
+        self.deferred_owned_buffers
+            .push((c.path, "ekrano.path_buf"));
+        self.deferred_owned_buffers
+            .push((c.seg_counts, "ekrano.seg_counts_buf"));
     }
 
     pub(crate) fn schedule_pipeline_cleanup(
@@ -931,22 +931,22 @@ impl<'a> FrameRecorder<'a> {
             segments,
             ptcl,
             blend_spill,
-            reduced: Some(reduced),
-            reduced2: Some(reduced2),
-            reduced_scan: Some(reduced_scan),
-            tagmonoid: Some(tagmonoid),
-            path_bbox: Some(path_bbox),
-            lines: Some(lines),
-            draw_reduced: Some(draw_reduced),
-            draw_monoid: Some(draw_monoid),
-            clip_inp: Some(clip_inp),
-            clip_el: Some(clip_el),
-            clip_bic: Some(clip_bic),
-            clip_bbox: Some(clip_bbox),
-            draw_bbox: Some(draw_bbox),
-            bin_header: Some(bin_header),
-            path: Some(path),
-            seg_counts: Some(seg_counts),
+            reduced,
+            reduced2,
+            reduced_scan,
+            tagmonoid,
+            path_bbox,
+            lines,
+            draw_reduced,
+            draw_monoid,
+            clip_inp,
+            clip_el,
+            clip_bic,
+            clip_bbox,
+            draw_bbox,
+            bin_header,
+            path,
+            seg_counts,
             buffer_sizes,
         };
         if let Some(i) = find_empty_cache_slot(&self.persistent.cached_pipeline) {
@@ -1282,7 +1282,7 @@ impl GoldyRenderer {
                 pool: ResourcePool::default(),
                 tex_pool: TexturePool::default(),
                 last_drained_bump: None,
-                pending_bump_readbacks: VecDeque::new(),
+                pending_bump_readback: None,
                 linear_clamp_sampler: None,
                 nearest_clamp_sampler: None,
                 cached_render_targets: std::array::from_fn(|_| None),
@@ -1740,7 +1740,7 @@ impl GoldyRenderer {
         self.persistent
             .drain_ready_bump_readbacks(device, &self.unbudgeted_context)?;
         // Rate-limit housekeeping to avoid per-frame cost in steady state.
-        // With OwnedShared buffers and cached render targets, the ResourcePool
+        // With cached pipeline buffers and render targets, the ResourcePool
         // stays small and overflow heaps are rare; scanning every 64 frames is enough.
         self.cleanup_frame_counter = self.cleanup_frame_counter.wrapping_add(1);
         if self.cleanup_frame_counter.is_multiple_of(64) {
@@ -2138,7 +2138,7 @@ mod tests {
             pool: ResourcePool::default(),
             tex_pool: TexturePool::default(),
             last_drained_bump: None,
-            pending_bump_readbacks: VecDeque::new(),
+            pending_bump_readback: None,
             linear_clamp_sampler: None,
             nearest_clamp_sampler: None,
             cached_render_targets: std::array::from_fn(|_| None),
