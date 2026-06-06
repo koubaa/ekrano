@@ -58,7 +58,7 @@ use scenes::{ExampleScene, ImageCache, SceneParams, SimpleText};
 /// Giving each test its own device makes tests truly independent (no shared device-global
 /// state), which eliminates that race and, as a bonus, removes the device-lock contention
 /// that serialized concurrent renders.
-/// 
+///
 /// TODO: this papers over a legimitate problem with ekrano - each test should have its
 /// own context and therefore never race if the runtime is implemented correctly.
 fn test_device() -> Device {
