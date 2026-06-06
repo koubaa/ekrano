@@ -2130,12 +2130,12 @@ impl GoldyRenderer {
         self.context.flush_deferred_deletions();
     }
 
-    /// Query the device-owned placement heap's state for diagnostics / tests.
+    /// Query the render context's placement heap state for diagnostics / tests.
     ///
-    /// Delegates to [`Device::placement_heap_stats`](goldy::Device::placement_heap_stats).
+    /// Delegates to [`Context::placement_heap_stats`](goldy::Context::placement_heap_stats).
     /// Returns `None` if no transient-buffer graphs have been submitted yet.
     pub fn placement_heap_stats(&self) -> Option<goldy::placement_heap::PlacementHeapStats> {
-        self.device.placement_heap_stats()
+        self.context.placement_heap_stats()
     }
 
     /// Render a scene and return the pixel data as RGBA bytes.
@@ -2600,7 +2600,7 @@ impl GoldyRenderer {
                     (0.0, 0.0, self.frame_pipeline.pending_frames())
                 };
 
-            let (transient_views, transient_textures) = self.device.transient_cache_counts();
+            let (transient_views, transient_textures) = self.context.transient_cache_counts();
             let rt_slots = self
                 .persistent
                 .cached_render_targets
