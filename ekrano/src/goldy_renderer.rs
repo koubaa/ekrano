@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use goldy::task_graph::{NodeAccess, NodeBuilder};
 use goldy::types::{BufferFlags, TextureFlags, TextureFormat, TextureKind};
 use goldy::{
-    Buffer, BufferKind, BudgetPolicy, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator, ShaderModule,
+    BudgetPolicy, Buffer, BufferKind, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator, ShaderModule,
     Signal, TaskGraph, Texture, TexturePool, TimelineValue,
 };
 
