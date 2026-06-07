@@ -24,10 +24,6 @@ impl CoverageMask {
         if data.len() != expected {
             return None;
         }
-        Some(Self {
-            width,
-            height,
-            data,
-        })
+        Some(Self { width, height, data })
     }
 }

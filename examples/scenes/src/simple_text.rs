@@ -19,10 +19,8 @@ use skrifa::{
 // On Windows, can set this to "c:\\Windows\\Fonts\\seguiemj.ttf" to get color emoji
 const ROBOTO_FONT: &[u8] = include_bytes!("../../assets/roboto/Roboto-Regular.ttf");
 const INCONSOLATA_FONT: &[u8] = include_bytes!("../../assets/inconsolata/Inconsolata.ttf");
-const NOTO_EMOJI_CBTF_SUBSET: &[u8] =
-    include_bytes!("../../assets/noto_color_emoji/NotoColorEmoji-CBTF-Subset.ttf");
-const NOTO_EMOJI_COLR_SUBSET: &[u8] =
-    include_bytes!("../../assets/noto_color_emoji/NotoColorEmoji-Subset.ttf");
+const NOTO_EMOJI_CBTF_SUBSET: &[u8] = include_bytes!("../../assets/noto_color_emoji/NotoColorEmoji-CBTF-Subset.ttf");
+const NOTO_EMOJI_COLR_SUBSET: &[u8] = include_bytes!("../../assets/noto_color_emoji/NotoColorEmoji-Subset.ttf");
 
 pub struct SimpleText {
     roboto: FontData,
@@ -209,16 +207,7 @@ impl SimpleText {
         text: &str,
     ) {
         let brush = brush.unwrap_or(&Brush::Solid(palette::css::WHITE));
-        self.add_run(
-            scene,
-            font,
-            size,
-            brush,
-            transform,
-            None,
-            Fill::NonZero,
-            text,
-        );
+        self.add_run(scene, font, size, brush, transform, None, Fill::NonZero, text);
     }
 }
 

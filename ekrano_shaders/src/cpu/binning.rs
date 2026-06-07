@@ -14,12 +14,7 @@ const SX: f32 = 1.0 / ((N_TILE_X * TILE_WIDTH) as f32);
 const SY: f32 = 1.0 / ((N_TILE_Y * TILE_HEIGHT) as f32);
 
 fn bbox_intersect(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
-    [
-        a[0].max(b[0]),
-        a[1].max(b[1]),
-        a[2].min(b[2]),
-        a[3].min(b[3]),
-    ]
+    [a[0].max(b[0]), a[1].max(b[1]), a[2].min(b[2]), a[3].min(b[3])]
 }
 
 fn binning_main(

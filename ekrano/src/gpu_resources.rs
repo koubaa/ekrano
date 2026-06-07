@@ -60,9 +60,7 @@ impl<'a> GpuBinding<'a> {
             }
             GpuBinding::Sampler(idx) | GpuBinding::PersistentBuf(idx) => return Ok(*idx),
         };
-        idx.ok_or_else(|| {
-            Error::Shader("bindless index missing for shader resource binding".into())
-        })
+        idx.ok_or_else(|| Error::Shader("bindless index missing for shader resource binding".into()))
     }
 }
 
@@ -117,9 +115,7 @@ pub(crate) fn record_upload_bytes(
         Some(element_stride),
         BufferFlags::empty(),
     )?;
-    recorder
-        .graph()
-        .write_buffer(&buf, 0, bytes.to_vec());
+    recorder.graph().write_buffer(&buf, 0, bytes.to_vec());
     Ok(buf)
 }
 
@@ -202,14 +198,7 @@ pub(crate) fn write_image_region(
 
     recorder
         .graph()
-        .write_texture_region(
-            tex,
-            x,
-            y,
-            image_data.width,
-            image_data.height,
-            bytes.to_vec(),
-        )
+        .write_texture_region(tex, x, y, image_data.width, image_data.height, bytes.to_vec())
         .map_err(|e| Error::Shader(e.to_string()))?;
     Ok(())
 }
@@ -352,35 +341,17 @@ impl PipelineResources {
             cpu_config_owned.gpu.mask_active = 1;
         }
         if let Some(m) = coverage_mask {
-            assert_eq!(
-                m.width, params.width,
-                "coverage_mask width must match render width"
-            );
-            assert_eq!(
-                m.height, params.height,
-                "coverage_mask height must match render height"
-            );
+            assert_eq!(m.width, params.width, "coverage_mask width must match render width");
+            assert_eq!(m.height, params.height, "coverage_mask height must match render height");
         }
 
         let gradient = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.gradient");
             if ramps.height == 0 {
-                acquire_texture_rgba(
-                    recorder,
-                    1,
-                    1,
-                    TextureKind::Interpolated,
-                    TextureFlags::COPY_DST,
-                )?
+                acquire_texture_rgba(recorder, 1, 1, TextureKind::Interpolated, TextureFlags::COPY_DST)?
             } else {
                 let data: &[u8] = bytemuck::cast_slice(ramps.data);
-                record_upload_image(
-                    recorder,
-                    ramps.width,
-                    ramps.height,
-                    ImageFormat::Rgba8,
-                    data,
-                )?
+                record_upload_image(recorder, ramps.width, ramps.height, ImageFormat::Rgba8, data)?
             }
         };
 
@@ -418,21 +389,9 @@ impl PipelineResources {
                     for &b in m.data.iter() {
                         rgba.extend_from_slice(&[b, b, b, 255]);
                     }
-                    record_upload_image(
-                        recorder,
-                        m.width,
-                        m.height,
-                        ImageFormat::Rgba8,
-                        &rgba,
-                    )?
+                    record_upload_image(recorder, m.width, m.height, ImageFormat::Rgba8, &rgba)?
                 }
-                None => record_upload_image(
-                    recorder,
-                    1,
-                    1,
-                    ImageFormat::Rgba8,
-                    &[255, 255, 255, 255],
-                )?,
+                None => record_upload_image(recorder, 1, 1, ImageFormat::Rgba8, &[255, 255, 255, 255])?,
             }
         };
 
@@ -455,22 +414,15 @@ impl PipelineResources {
                 .cached_config_uniform
                 .as_ref()
                 .is_some_and(|(v, _)| v == &config_uniform_value);
-            log::trace!(
-                "ConfigUniform cache {}",
-                if cache_hit { "HIT" } else { "MISS" }
-            );
+            log::trace!("ConfigUniform cache {}", if cache_hit { "HIT" } else { "MISS" });
             if cache_hit {
                 recorder.persistent.cached_config_uniform.take().unwrap().1
-            } else if let Some((_, existing_buf)) =
-                recorder.persistent.cached_config_uniform.take()
-            {
+            } else if let Some((_, existing_buf)) = recorder.persistent.cached_config_uniform.take() {
                 // Buffer size is constant (sizeof ConfigUniform); reuse the allocation
                 // and just overwrite with the new value.
-                recorder.graph().write_buffer(
-                    &existing_buf,
-                    0,
-                    bytemuck::bytes_of(&config_uniform_value).to_vec(),
-                );
+                recorder
+                    .graph()
+                    .write_buffer(&existing_buf, 0, bytemuck::bytes_of(&config_uniform_value).to_vec());
                 existing_buf
             } else {
                 record_upload_bytes(
@@ -543,32 +495,17 @@ impl PipelineResources {
                         .pool
                         .return_buf(c.info_bin_data, "ekrano.info_bin_data_buf");
                     recorder.persistent.pool.return_buf(c.tile, "ekrano.tile_buf");
-                    recorder
-                        .persistent
-                        .pool
-                        .return_buf(c.segments, "ekrano.segments_buf");
+                    recorder.persistent.pool.return_buf(c.segments, "ekrano.segments_buf");
                     recorder.persistent.pool.return_buf(c.ptcl, "ekrano.ptcl_buf");
-                    recorder
-                        .persistent
-                        .pool
-                        .return_buf(c.blend_spill, "ekrano.blend_spill");
+                    recorder.persistent.pool.return_buf(c.blend_spill, "ekrano.blend_spill");
                     recorder.persistent.pool.return_buf(c.reduced, "ekrano.reduced_buf");
-                    recorder
-                        .persistent
-                        .pool
-                        .return_buf(c.reduced2, "ekrano.reduced2_buf");
+                    recorder.persistent.pool.return_buf(c.reduced2, "ekrano.reduced2_buf");
                     recorder
                         .persistent
                         .pool
                         .return_buf(c.reduced_scan, "ekrano.reduced_scan_buf");
-                    recorder
-                        .persistent
-                        .pool
-                        .return_buf(c.tagmonoid, "ekrano.tagmonoid_buf");
-                    recorder
-                        .persistent
-                        .pool
-                        .return_buf(c.path_bbox, "ekrano.path_bbox_buf");
+                    recorder.persistent.pool.return_buf(c.tagmonoid, "ekrano.tagmonoid_buf");
+                    recorder.persistent.pool.return_buf(c.path_bbox, "ekrano.path_bbox_buf");
                     recorder.persistent.pool.return_buf(c.lines, "ekrano.lines_buf");
                     recorder
                         .persistent
@@ -578,23 +515,11 @@ impl PipelineResources {
                         .persistent
                         .pool
                         .return_buf(c.draw_monoid, "ekrano.draw_monoid_buf");
-                    recorder
-                        .persistent
-                        .pool
-                        .return_buf(c.clip_inp, "ekrano.clip_inp_buf");
+                    recorder.persistent.pool.return_buf(c.clip_inp, "ekrano.clip_inp_buf");
                     recorder.persistent.pool.return_buf(c.clip_el, "ekrano.clip_el_buf");
-                    recorder
-                        .persistent
-                        .pool
-                        .return_buf(c.clip_bic, "ekrano.clip_bic_buf");
-                    recorder
-                        .persistent
-                        .pool
-                        .return_buf(c.clip_bbox, "ekrano.clip_bbox_buf");
-                    recorder
-                        .persistent
-                        .pool
-                        .return_buf(c.draw_bbox, "ekrano.draw_bbox_buf");
+                    recorder.persistent.pool.return_buf(c.clip_bic, "ekrano.clip_bic_buf");
+                    recorder.persistent.pool.return_buf(c.clip_bbox, "ekrano.clip_bbox_buf");
+                    recorder.persistent.pool.return_buf(c.draw_bbox, "ekrano.draw_bbox_buf");
                     recorder
                         .persistent
                         .pool
@@ -661,13 +586,7 @@ impl PipelineResources {
             ($cached_opt:expr, $sz:expr, $stride:expr, $name:expr) => {
                 match $cached_opt {
                     Some(buf) => buf,
-                    None => alloc_pipeline_buffer(
-                        recorder,
-                        $sz,
-                        $stride,
-                        $name,
-                        BufferFlags::empty(),
-                    )?,
+                    None => alloc_pipeline_buffer(recorder, $sz, $stride, $name, BufferFlags::empty())?,
                 }
             };
         }
@@ -910,11 +829,7 @@ pub(crate) fn collect_bindless_indices_into(
                     tex.resource_index(ResourceAccess::Write)
                         .or_else(|| tex.resource_index(ResourceAccess::ReadWrite))
                 })
-                .ok_or_else(|| {
-                    Error::Shader(
-                        "resource sampled index missing for ImageRead texture binding".into(),
-                    )
-                })?,
+                .ok_or_else(|| Error::Shader("resource sampled index missing for ImageRead texture binding".into()))?,
             GpuBinding::Tex(_) => binding.bindless_slot(false)?,
             GpuBinding::Sampler(idx) | GpuBinding::PersistentBuf(idx) => *idx,
         };
@@ -989,10 +904,7 @@ mod tests {
         let mut out = Vec::new();
         let result = collect_bindless_indices_into(&mut out, &bindings, &bind_types, 2);
 
-        assert!(
-            result.is_err(),
-            "expected Err when bindings exceed max_slots"
-        );
+        assert!(result.is_err(), "expected Err when bindings exceed max_slots");
     }
 
     #[test]

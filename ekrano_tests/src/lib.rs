@@ -78,20 +78,10 @@ mod snapshot;
 /// tests that compare against Goldy-generated references.  Passing `[255, 255, 255]`
 /// is appropriate when comparing against `vello_sparse` references, which are
 /// rendered onto an opaque-white surface.
-pub(crate) fn rgba_straight_composite_to_rgb(
-    width: u32,
-    height: u32,
-    rgba: &[u8],
-    bg: [u8; 3],
-) -> Result<RgbImage> {
+pub(crate) fn rgba_straight_composite_to_rgb(width: u32, height: u32, rgba: &[u8], bg: [u8; 3]) -> Result<RgbImage> {
     let expected_len = width as usize * height as usize * 4;
     if rgba.len() != expected_len {
-        bail!(
-            "RGBA buffer length {} != {}x{}x4",
-            rgba.len(),
-            width,
-            height
-        );
+        bail!("RGBA buffer length {} != {}x{}x4", rgba.len(), width, height);
     }
     let [bg_r, bg_g, bg_b] = [bg[0] as u32, bg[1] as u32, bg[2] as u32];
     let mut rgb_buf = Vec::with_capacity(width as usize * height as usize * 3);
@@ -107,17 +97,11 @@ pub(crate) fn rgba_straight_composite_to_rgb(
 }
 
 /// Convenience wrapper: composite over black (legacy behaviour).
-pub(crate) fn rgba_straight_composite_black_to_rgb(
-    width: u32,
-    height: u32,
-    rgba: &[u8],
-) -> Result<RgbImage> {
+pub(crate) fn rgba_straight_composite_black_to_rgb(width: u32, height: u32, rgba: &[u8]) -> Result<RgbImage> {
     rgba_straight_composite_to_rgb(width, height, rgba, [0, 0, 0])
 }
 
-pub use snapshot::{
-    Snapshot, SnapshotDirectory, smoke_snapshot_test_sync, snapshot_test, snapshot_test_sync,
-};
+pub use snapshot::{Snapshot, SnapshotDirectory, smoke_snapshot_test_sync, snapshot_test, snapshot_test_sync};
 
 pub struct TestParams {
     pub width: u32,
@@ -239,9 +223,7 @@ pub fn write_png_to_file(
     let size = data.len();
     std::fs::write(out_path, &data)?;
     let oversized_path = out_path.with_extension("oversized.png");
-    if max_size_in_bytes
-        .is_some_and(|max_size_in_bytes| u64::try_from(size).unwrap() > max_size_in_bytes)
-    {
+    if max_size_in_bytes.is_some_and(|max_size_in_bytes| u64::try_from(size).unwrap() > max_size_in_bytes) {
         std::fs::rename(out_path, &oversized_path)?;
         bail!(
             "File was oversized, expected {} bytes, got {size} bytes. New file written to {to}",
@@ -286,9 +268,7 @@ pub fn encode_test_scene(mut test_scene: ExampleScene, test_params: &mut TestPar
         resolution: None,
         text: &mut text,
     };
-    test_scene
-        .function
-        .render(&mut inner_scene, &mut scene_params);
+    test_scene.function.render(&mut inner_scene, &mut scene_params);
     if test_params.base_color.is_none() {
         test_params.base_color = scene_params.base_color;
     }

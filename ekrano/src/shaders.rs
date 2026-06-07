@@ -134,14 +134,7 @@ pub(crate) fn goldy_full_shaders(renderer: &mut GoldyRenderer) -> Result<FullSha
     let flatten = renderer.add_compute_shader(
         "flatten",
         ekrano_shaders::slang::FLATTEN,
-        &[
-            BufReadOnly,
-            BufReadOnly,
-            BufReadOnly,
-            Buffer,
-            Buffer,
-            Buffer,
-        ],
+        &[BufReadOnly, BufReadOnly, BufReadOnly, Buffer, Buffer, Buffer],
         &search_paths,
         &[],
     )?;
@@ -209,14 +202,7 @@ pub(crate) fn goldy_full_shaders(renderer: &mut GoldyRenderer) -> Result<FullSha
     let tile_alloc = renderer.add_compute_shader(
         "tile_alloc",
         ekrano_shaders::slang::TILE_ALLOC,
-        &[
-            BufReadOnly,
-            BufReadOnly,
-            BufReadOnly,
-            Buffer,
-            Buffer,
-            Buffer,
-        ],
+        &[BufReadOnly, BufReadOnly, BufReadOnly, Buffer, Buffer, Buffer],
         &search_paths,
         &[],
     )?;
@@ -230,14 +216,7 @@ pub(crate) fn goldy_full_shaders(renderer: &mut GoldyRenderer) -> Result<FullSha
     let path_count = renderer.add_compute_shader(
         "path_count",
         ekrano_shaders::slang::PATH_COUNT,
-        &[
-            BufReadOnly,
-            Buffer,
-            BufReadOnly,
-            BufReadOnly,
-            Buffer,
-            Buffer,
-        ],
+        &[BufReadOnly, Buffer, BufReadOnly, BufReadOnly, Buffer, Buffer],
         &search_paths,
         &[],
     )?;
@@ -276,14 +255,7 @@ pub(crate) fn goldy_full_shaders(renderer: &mut GoldyRenderer) -> Result<FullSha
     let path_tiling = renderer.add_compute_shader(
         "path_tiling",
         ekrano_shaders::slang::PATH_TILING,
-        &[
-            Buffer,
-            BufReadOnly,
-            BufReadOnly,
-            BufReadOnly,
-            BufReadOnly,
-            Buffer,
-        ],
+        &[Buffer, BufReadOnly, BufReadOnly, BufReadOnly, BufReadOnly, Buffer],
         &search_paths,
         &[],
     )?;

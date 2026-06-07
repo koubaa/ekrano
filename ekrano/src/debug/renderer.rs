@@ -70,17 +70,13 @@ impl DebugRenderer {
         }
 
         let (unpaired_pts_len, unpaired_pts_buf) = if layers.contains(DebugLayers::VALIDATION) {
-            let unpaired_pts: Vec<LineEndpoint> =
-                validate_line_soup(bytemuck::cast_slice(downloads.lines));
+            let unpaired_pts: Vec<LineEndpoint> = validate_line_soup(bytemuck::cast_slice(downloads.lines));
             if unpaired_pts.is_empty() {
                 (0, None)
             } else {
                 (
                     unpaired_pts.len(),
-                    Some(recorder.upload(
-                        "ekrano.debug.unpaired_points",
-                        bytemuck::cast_slice(&unpaired_pts[..]),
-                    )),
+                    Some(recorder.upload("ekrano.debug.unpaired_points", bytemuck::cast_slice(&unpaired_pts[..]))),
                 )
             }
         } else {
@@ -91,10 +87,7 @@ impl DebugRenderer {
             width: params.width,
             height: params.height,
         };
-        let uniforms_buf = recorder.upload(
-            "ekrano.debug_uniforms",
-            bytemuck::bytes_of(&uniforms).to_vec(),
-        );
+        let uniforms_buf = recorder.upload("ekrano.debug_uniforms", bytemuck::bytes_of(&uniforms).to_vec());
 
         let linepoints_uniforms = [
             LinepointsUniforms::new(palette::css::DARK_CYAN.discard_alpha(), 10.),

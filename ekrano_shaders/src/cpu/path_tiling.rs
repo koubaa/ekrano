@@ -59,14 +59,8 @@ fn path_tiling_main(
 
         let path = paths[line.path_ix as usize];
         let bbox = path.bbox;
-        let bbox = [
-            bbox[0] as i32,
-            bbox[1] as i32,
-            bbox[2] as i32,
-            bbox[3] as i32,
-        ];
-        let tile_ix =
-            path.tiles as i32 + morton_encode_2d((x - bbox[0]) as u32, (y - bbox[1]) as u32) as i32;
+        let bbox = [bbox[0] as i32, bbox[1] as i32, bbox[2] as i32, bbox[3] as i32];
+        let tile_ix = path.tiles as i32 + morton_encode_2d((x - bbox[0]) as u32, (y - bbox[1]) as u32) as i32;
         let tile = tiles[tile_ix as usize];
         let seg_start = !tile.segment_count_or_ix;
         if (seg_start as i32) < 0 {
@@ -84,11 +78,7 @@ fn path_tiling_main(
                 xy0 = Vec2::new(xt, tile_xy.y);
             } else {
                 // If is_positive_slope, left edge is clipped, otherwise right
-                let x_clip = if is_positive_slope {
-                    tile_xy.x
-                } else {
-                    tile_xy1.x
-                };
+                let x_clip = if is_positive_slope { tile_xy.x } else { tile_xy1.x };
                 let mut yt = xy0.y + (xy1.y - xy0.y) * (x_clip - xy0.x) / (xy1.x - xy0.x);
                 yt = yt.clamp(tile_xy.y + 1e-3, tile_xy1.y);
                 xy0 = Vec2::new(x_clip, yt);
@@ -103,11 +93,7 @@ fn path_tiling_main(
                 xy1 = Vec2::new(xt, tile_xy1.y);
             } else {
                 // If is_positive_slope, right edge is clipped, otherwise left
-                let x_clip = if is_positive_slope {
-                    tile_xy1.x
-                } else {
-                    tile_xy.x
-                };
+                let x_clip = if is_positive_slope { tile_xy1.x } else { tile_xy.x };
                 let mut yt = xy0.y + (xy1.y - xy0.y) * (x_clip - xy0.x) / (xy1.x - xy0.x);
                 yt = yt.clamp(tile_xy.y + 1e-3, tile_xy1.y);
                 xy1 = Vec2::new(x_clip, yt);
@@ -172,12 +158,5 @@ pub fn path_tiling(_n_wg: u32, resources: &[CpuBinding<'_>]) {
     let paths = resources[3].as_slice();
     let tiles = resources[4].as_slice();
     let mut segments = resources[5].as_slice_mut();
-    path_tiling_main(
-        &mut bump,
-        &seg_counts,
-        &lines,
-        &paths,
-        &tiles,
-        &mut segments,
-    );
+    path_tiling_main(&mut bump, &seg_counts, &lines, &paths, &tiles, &mut segments);
 }

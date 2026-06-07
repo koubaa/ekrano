@@ -16,9 +16,7 @@ fn main() {
             }
             "no" | "n" | "0" => {}
             _ => {
-                println!(
-                    "cargo:cargo:warning=EKRANO_CI_SKIP_SLOW should be set to yes/y/1 or no/n/0"
-                );
+                println!("cargo:cargo:warning=EKRANO_CI_SKIP_SLOW should be set to yes/y/1 or no/n/0");
             }
         }
     }

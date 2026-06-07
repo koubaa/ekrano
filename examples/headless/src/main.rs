@@ -6,10 +6,7 @@
 // The following lints are part of the Linebender standard set,
 // but resolving them has been deferred for now.
 // Feel free to send a PR that solves one or more of these.
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::allow_attributes_without_reason
-)]
+#![allow(clippy::cast_possible_truncation, clippy::allow_attributes_without_reason)]
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -31,9 +28,7 @@ fn main() -> Result<()> {
         for (idx, scene) in scenes.scenes.iter().enumerate() {
             if scene.config.name.eq_ignore_ascii_case(&args.scene) {
                 if let Some(scene_idx) = scene_idx {
-                    eprintln!(
-                        "Scene names conflict, skipping scene {idx} (instead rendering {scene_idx})"
-                    );
+                    eprintln!("Scene names conflict, skipping scene {idx} (instead rendering {scene_idx})");
                 } else {
                     scene_idx = Some(idx);
                 }
@@ -51,10 +46,7 @@ fn main() -> Result<()> {
                     if scenes.scenes.is_empty() {
                         bail!("Cannot select a scene, as there are no scenes")
                     }
-                    bail!(
-                        "{parsed} doesn't fit in scenes (len {})",
-                        scenes.scenes.len()
-                    );
+                    bail!("{parsed} doesn't fit in scenes (len {})", scenes.scenes.len());
                 }
                 parsed
             }
@@ -66,11 +58,7 @@ fn main() -> Result<()> {
                 println!(
                     "{idx}: {}{}{}",
                     scene.config.name,
-                    if scene.config.animated {
-                        " (animated)"
-                    } else {
-                        ""
-                    },
+                    if scene.config.animated { " (animated)" } else { "" },
                     if scene_idx == idx { " (selected)" } else { "" }
                 );
             }
@@ -106,9 +94,7 @@ fn render(mut scenes: SceneSet, index: usize, args: &Args) -> Result<()> {
         interactive: false,
         complexity: 0,
     };
-    example_scene
-        .function
-        .render(&mut fragment, &mut scene_params);
+    example_scene.function.render(&mut fragment, &mut scene_params);
     let mut transform = Affine::IDENTITY;
     let (width, height) = if let Some(resolution) = scene_params.resolution {
         let ratio = resolution.x / resolution.y;

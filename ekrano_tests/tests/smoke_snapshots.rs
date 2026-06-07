@@ -47,14 +47,7 @@ fn filled_circle() {
 fn two_emoji() {
     let mut scene = Scene::new();
     let mut text = SimpleText::new();
-    text.add_colr_emoji_run(
-        &mut scene,
-        24.,
-        Affine::translate((0., 24.)),
-        None,
-        Fill::NonZero,
-        "🤠",
-    );
+    text.add_colr_emoji_run(&mut scene, 24., Affine::translate((0., 24.)), None, Fill::NonZero, "🤠");
     text.add_bitmap_emoji_run(
         &mut scene,
         24.,

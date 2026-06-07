@@ -151,12 +151,7 @@ impl Transform {
     pub(crate) fn inverse(&self) -> Self {
         let z = self.0;
         let inv_det = (z[0] * z[3] - z[1] * z[2]).recip();
-        let inv_mat = [
-            z[3] * inv_det,
-            -z[1] * inv_det,
-            -z[2] * inv_det,
-            z[0] * inv_det,
-        ];
+        let inv_mat = [z[3] * inv_det, -z[1] * inv_det, -z[2] * inv_det, z[0] * inv_det];
         Self([
             inv_mat[0],
             inv_mat[1],
@@ -256,10 +251,7 @@ pub(crate) fn morton_encode_2d(x: u32, y: u32) -> u32 {
 }
 
 /// Decode a Z-curve (Morton) index back to (x, y).
-#[allow(
-    dead_code,
-    reason = "only referenced from #[cfg(test)] round-trip tests"
-)]
+#[allow(dead_code, reason = "only referenced from #[cfg(test)] round-trip tests")]
 #[inline(always)]
 pub(crate) fn morton_decode_2d(z: u32) -> (u32, u32) {
     (morton_compact(z), morton_compact(z >> 1))
@@ -344,16 +336,7 @@ mod morton_tests {
 
     #[test]
     fn encode_decode_roundtrip() {
-        let cases = [
-            (0, 0),
-            (1, 0),
-            (0, 1),
-            (1, 1),
-            (3, 5),
-            (15, 12),
-            (63, 42),
-            (255, 255),
-        ];
+        let cases = [(0, 0), (1, 0), (0, 1), (1, 1), (3, 5), (15, 12), (63, 42), (255, 255)];
         for (x, y) in cases {
             let z = morton_encode_2d(x, y);
             let (dx, dy) = morton_decode_2d(z);

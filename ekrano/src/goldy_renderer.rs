@@ -20,8 +20,8 @@ use std::sync::{Arc, Mutex};
 use goldy::task_graph::{NodeAccess, NodeBuilder};
 use goldy::types::{BufferFlags, TextureFlags, TextureFormat, TextureKind};
 use goldy::{
-    Buffer, BufferKind, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator,
-    ShaderModule, Signal, TaskGraph, Texture, TexturePool, TimelineValue,
+    Buffer, BufferKind, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator, ShaderModule, Signal,
+    TaskGraph, Texture, TexturePool, TimelineValue,
 };
 
 /// Ekrano uses a single-frame fire-and-forget model
@@ -32,8 +32,8 @@ use mem::size_of;
 use crate::{
     Error, RenderParams, Result, Scene,
     gpu_resources::{
-        GpuBinding, alloc_pipeline_buffer, bind_type_to_node_access, collect_bindless_indices_into,
-        acquire_texture_rgba, record_upload_bytes, record_upload_bytes_owned,
+        GpuBinding, acquire_texture_rgba, alloc_pipeline_buffer, bind_type_to_node_access,
+        collect_bindless_indices_into, record_upload_bytes, record_upload_bytes_owned,
     },
     render::Render,
     resource_proxy::{BindType, ShaderId},
@@ -402,12 +402,9 @@ impl ResourcePool {
 /// `EKRANO_ROBUST=0|false|no|off` disables bump readback (same as `robust: false`).
 /// `EKRANO_ROBUST=1|true|yes|on` forces it on. Unset → use the caller's `RenderParams`.
 fn env_robust_override() -> Option<bool> {
-    std::env::var("EKRANO_ROBUST").ok().map(|v| {
-        !matches!(
-            v.to_ascii_lowercase().as_str(),
-            "0" | "false" | "no" | "off"
-        )
-    })
+    std::env::var("EKRANO_ROBUST")
+        .ok()
+        .map(|v| !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"))
 }
 
 // -----------------------------------------------------------------------
@@ -492,9 +489,8 @@ impl PersistentState {
         out_format: TextureFormat,
     ) -> bool {
         let mismatch = self.cached_render_targets.iter().any(|slot| {
-            slot.as_ref().is_some_and(|(out, _)| {
-                out.width() != width || out.height() != height || out.format() != out_format
-            })
+            slot.as_ref()
+                .is_some_and(|(out, _)| out.width() != width || out.height() != height || out.format() != out_format)
         });
         if !mismatch {
             return false;
@@ -606,10 +602,7 @@ impl PersistentState {
             return None;
         }
         if let Some(c) = self.cached_pipeline.take() {
-            log::debug!(
-                "[PIPE-CACHE] HIT timeline={}",
-                self.cached_pipeline_timeline
-            );
+            log::debug!("[PIPE-CACHE] HIT timeline={}", self.cached_pipeline_timeline);
             return Some(c);
         }
         None
@@ -833,44 +826,29 @@ impl<'a> FrameRecorder<'a> {
     fn defer_cached_pipeline_owned_buffers(&mut self, c: crate::gpu_resources::CachedPipeline) {
         self.deferred_owned_buffers
             .push((c.info_bin_data, "ekrano.info_bin_data_buf"));
-        self.deferred_owned_buffers
-            .push((c.tile, "ekrano.tile_buf"));
-        self.deferred_owned_buffers
-            .push((c.segments, "ekrano.segments_buf"));
-        self.deferred_owned_buffers
-            .push((c.ptcl, "ekrano.ptcl_buf"));
-        self.deferred_owned_buffers
-            .push((c.blend_spill, "ekrano.blend_spill"));
-        self.deferred_owned_buffers
-            .push((c.reduced, "ekrano.reduced_buf"));
-        self.deferred_owned_buffers
-            .push((c.reduced2, "ekrano.reduced2_buf"));
+        self.deferred_owned_buffers.push((c.tile, "ekrano.tile_buf"));
+        self.deferred_owned_buffers.push((c.segments, "ekrano.segments_buf"));
+        self.deferred_owned_buffers.push((c.ptcl, "ekrano.ptcl_buf"));
+        self.deferred_owned_buffers.push((c.blend_spill, "ekrano.blend_spill"));
+        self.deferred_owned_buffers.push((c.reduced, "ekrano.reduced_buf"));
+        self.deferred_owned_buffers.push((c.reduced2, "ekrano.reduced2_buf"));
         self.deferred_owned_buffers
             .push((c.reduced_scan, "ekrano.reduced_scan_buf"));
-        self.deferred_owned_buffers
-            .push((c.tagmonoid, "ekrano.tagmonoid_buf"));
-        self.deferred_owned_buffers
-            .push((c.path_bbox, "ekrano.path_bbox_buf"));
-        self.deferred_owned_buffers
-            .push((c.lines, "ekrano.lines_buf"));
+        self.deferred_owned_buffers.push((c.tagmonoid, "ekrano.tagmonoid_buf"));
+        self.deferred_owned_buffers.push((c.path_bbox, "ekrano.path_bbox_buf"));
+        self.deferred_owned_buffers.push((c.lines, "ekrano.lines_buf"));
         self.deferred_owned_buffers
             .push((c.draw_reduced, "ekrano.draw_reduced_buf"));
         self.deferred_owned_buffers
             .push((c.draw_monoid, "ekrano.draw_monoid_buf"));
-        self.deferred_owned_buffers
-            .push((c.clip_inp, "ekrano.clip_inp_buf"));
-        self.deferred_owned_buffers
-            .push((c.clip_el, "ekrano.clip_el_buf"));
-        self.deferred_owned_buffers
-            .push((c.clip_bic, "ekrano.clip_bic_buf"));
-        self.deferred_owned_buffers
-            .push((c.clip_bbox, "ekrano.clip_bbox_buf"));
-        self.deferred_owned_buffers
-            .push((c.draw_bbox, "ekrano.draw_bbox_buf"));
+        self.deferred_owned_buffers.push((c.clip_inp, "ekrano.clip_inp_buf"));
+        self.deferred_owned_buffers.push((c.clip_el, "ekrano.clip_el_buf"));
+        self.deferred_owned_buffers.push((c.clip_bic, "ekrano.clip_bic_buf"));
+        self.deferred_owned_buffers.push((c.clip_bbox, "ekrano.clip_bbox_buf"));
+        self.deferred_owned_buffers.push((c.draw_bbox, "ekrano.draw_bbox_buf"));
         self.deferred_owned_buffers
             .push((c.bin_header, "ekrano.bin_header_buf"));
-        self.deferred_owned_buffers
-            .push((c.path, "ekrano.path_buf"));
+        self.deferred_owned_buffers.push((c.path, "ekrano.path_buf"));
         self.deferred_owned_buffers
             .push((c.seg_counts, "ekrano.seg_counts_buf"));
     }
@@ -983,27 +961,15 @@ impl<'a> FrameRecorder<'a> {
         record_upload_bytes_owned(self, name, 1, data.into()).expect("upload failed")
     }
 
-    pub fn upload_strided(
-        &mut self,
-        name: &'static str,
-        element_stride: u32,
-        data: impl Into<Vec<u8>>,
-    ) -> Buffer {
-        record_upload_bytes_owned(self, name, element_stride, data.into())
-            .expect("upload_strided failed")
+    pub fn upload_strided(&mut self, name: &'static str, element_stride: u32, data: impl Into<Vec<u8>>) -> Buffer {
+        record_upload_bytes_owned(self, name, element_stride, data.into()).expect("upload_strided failed")
     }
 
     pub fn upload_typed<T: bytemuck::Pod>(&mut self, name: &'static str, data: &T) -> Buffer {
-        record_upload_bytes(self, name, size_of::<T>() as u32, bytemuck::bytes_of(data))
-            .expect("upload_typed failed")
+        record_upload_bytes(self, name, size_of::<T>() as u32, bytemuck::bytes_of(data)).expect("upload_typed failed")
     }
 
-    pub fn dispatch(
-        &mut self,
-        shader: ShaderId,
-        wg_size: (u32, u32, u32),
-        bindings: &[GpuBinding<'_>],
-    ) {
+    pub fn dispatch(&mut self, shader: ShaderId, wg_size: (u32, u32, u32), bindings: &[GpuBinding<'_>]) {
         self.dispatch_inner(shader, wg_size, bindings, &[]);
     }
 
@@ -1036,21 +1002,11 @@ impl<'a> FrameRecorder<'a> {
         // Fill the scratch vec in-place (reusing its allocation), then swap it out
         // so the graph node takes ownership of the collected indices. Replace with a
         // fresh fixed-capacity scratch for the next dispatch in this frame.
-        collect_bindless_indices_into(
-            &mut self.indices_scratch,
-            bindings,
-            bind_types,
-            MAX_BINDLESS_SLOTS,
-        )
-        .expect("collect_bindless_indices_into failed in dispatch");
-        let indices = mem::replace(
-            &mut self.indices_scratch,
-            Vec::with_capacity(MAX_BINDLESS_SLOTS),
-        );
+        collect_bindless_indices_into(&mut self.indices_scratch, bindings, bind_types, MAX_BINDLESS_SLOTS)
+            .expect("collect_bindless_indices_into failed in dispatch");
+        let indices = mem::replace(&mut self.indices_scratch, Vec::with_capacity(MAX_BINDLESS_SLOTS));
 
-        let mut node = self
-            .graph
-            .node("dispatch", &self.shaders[shader_id.0].pipeline);
+        let mut node = self.graph.node("dispatch", &self.shaders[shader_id.0].pipeline);
         node = bind_graph_direct(node, bindings, bind_types);
         if !indices.is_empty() || !push_tail.is_empty() {
             node = node.bind_resources_raw_with_user(indices, push_tail);
@@ -1076,17 +1032,9 @@ impl<'a> FrameRecorder<'a> {
         bindings: &[GpuBinding<'_>],
     ) {
         let bind_types = &self.shaders[shader_id.0].bindings;
-        collect_bindless_indices_into(
-            &mut self.indices_scratch,
-            bindings,
-            bind_types,
-            MAX_BINDLESS_SLOTS,
-        )
-        .expect("collect_bindless_indices_into failed in dispatch_indirect");
-        let indices = mem::replace(
-            &mut self.indices_scratch,
-            Vec::with_capacity(MAX_BINDLESS_SLOTS),
-        );
+        collect_bindless_indices_into(&mut self.indices_scratch, bindings, bind_types, MAX_BINDLESS_SLOTS)
+            .expect("collect_bindless_indices_into failed in dispatch_indirect");
+        let indices = mem::replace(&mut self.indices_scratch, Vec::with_capacity(MAX_BINDLESS_SLOTS));
 
         let mut node = self
             .graph
@@ -1145,9 +1093,7 @@ impl<'a> FrameRecorder<'a> {
                     .end_frame_for_surface(frame_handle, self.graph, surface, ())
                     .map_err(|e| Error::Shader(e.to_string()))?
             };
-            let submit_tv = frame
-                .submit_frame()
-                .map_err(|e| Error::Shader(e.to_string()))?;
+            let submit_tv = frame.submit_frame().map_err(|e| Error::Shader(e.to_string()))?;
             Ok(FrameFinishOutcome {
                 timeline: submit_tv,
                 surface_frame: Some(frame),
@@ -1231,9 +1177,7 @@ impl GoldyRenderer {
         let tracking = TrackingVramAllocator::new(Arc::new(DefaultVramAllocator::new()));
         let tracked_device = device.with_vram_allocator(Arc::new(tracking));
 
-        let context = tracked_device
-            .create_context()
-            .map_err(|e| Error::Gpu(e.to_string()))?;
+        let context = tracked_device.create_context().map_err(|e| Error::Gpu(e.to_string()))?;
         let frame_pipeline = {
             let _tz = goldy::tracy_zone!("ekrano.GoldyRenderer::new.frame_orchestrator");
             FrameOrchestrator::new(&context, FRAME_PIPELINE_DEPTH)
@@ -1278,10 +1222,7 @@ impl GoldyRenderer {
         renderer.shaders = shaders;
         // Wire the pool's self-replenishment from the renderer's pending_owned_returns.
         let pending_returns = renderer.persistent.pending_owned_returns.clone();
-        renderer
-            .persistent
-            .pool
-            .set_pending_returns(pending_returns);
+        renderer.persistent.pool.set_pending_returns(pending_returns);
         {
             let _tz = goldy::tracy_zone!("ekrano.GoldyRenderer::new.release_compiler");
             tracked_device.release_idle_shader_compiler();
@@ -1358,8 +1299,7 @@ impl GoldyRenderer {
                     self.persistent.drain_pending_returns();
                 }
                 Signal::SwapchainReturned { image_index } => {
-                    self.persistent
-                        .mark_rt_slot_returned(&self.context, image_index);
+                    self.persistent.mark_rt_slot_returned(&self.context, image_index);
                 }
                 Signal::SwapchainAcquired { .. } => {}
             }
@@ -1371,12 +1311,7 @@ impl GoldyRenderer {
     ///
     /// Returns [`FrameStats`] on success. Check [`FrameStats::bump_retries`] to detect
     /// scenes that required buffer reallocation (e.g. to print a warning to stdout).
-    pub fn render_to_texture(
-        &mut self,
-        scene: &Scene,
-        texture: &Texture,
-        params: &RenderParams,
-    ) -> Result<FrameStats> {
+    pub fn render_to_texture(&mut self, scene: &Scene, texture: &Texture, params: &RenderParams) -> Result<FrameStats> {
         self.poll_and_reclaim();
         self.run_frame(scene, params, Some(texture), None)
     }
@@ -1431,8 +1366,7 @@ impl GoldyRenderer {
             resolver.resolve(encoding, &mut packed)
         };
 
-        let base_config =
-            RenderConfig::new(&layout, params.width, params.height, &params.base_color);
+        let base_config = RenderConfig::new(&layout, params.width, params.height, &params.base_color);
         let config = if let Some(ref persistent) = self.persistent_bump {
             base_config.with_bump_estimates(persistent)
         } else {
@@ -1459,15 +1393,10 @@ impl GoldyRenderer {
     ///
     /// Must be called after [`Self::prepare`]. Convenience wrapper around
     /// [`Self::submit_prepared`] that also presents the returned frame.
-    pub fn submit_to_surface(
-        &mut self,
-        prepared: PreparedFrame,
-        surface: &goldy::Surface,
-    ) -> Result<FrameStats> {
+    pub fn submit_to_surface(&mut self, prepared: PreparedFrame, surface: &goldy::Surface) -> Result<FrameStats> {
         let _tz = goldy::tracy_zone!("ekrano.submit_to_surface");
         self.poll_and_reclaim();
-        let (stats, surface_frame) =
-            self.run_frame_from_prepared(prepared, None, Some(surface))?;
+        let (stats, surface_frame) = self.run_frame_from_prepared(prepared, None, Some(surface))?;
         if let Some((frame, tv)) = surface_frame {
             frame.present().map_err(|e| Error::Shader(e.to_string()))?;
             self.note_frame_presented(tv);
@@ -1489,8 +1418,7 @@ impl GoldyRenderer {
     ) -> Result<(FrameStats, goldy::Frame)> {
         let _tz = goldy::tracy_zone!("ekrano.submit_prepared");
         self.poll_and_reclaim();
-        let (stats, surface_frame) =
-            self.run_frame_from_prepared(prepared, None, Some(surface))?;
+        let (stats, surface_frame) = self.run_frame_from_prepared(prepared, None, Some(surface))?;
         let (frame, _tv) = surface_frame.ok_or_else(|| Error::Shader("no surface frame".into()))?;
         Ok((stats, frame))
     }
@@ -1534,11 +1462,7 @@ impl GoldyRenderer {
     /// **synchronous**: it waits for GPU completion and retries on bump
     /// overflow to guarantee correct output for screenshots / headless
     /// rendering.
-    pub fn render_to_buffer(
-        &mut self,
-        scene: &Scene,
-        params: &RenderParams,
-    ) -> Result<Vec<u8>> {
+    pub fn render_to_buffer(&mut self, scene: &Scene, params: &RenderParams) -> Result<Vec<u8>> {
         let width = params.width;
         let height = params.height;
         let texture = self
@@ -1562,10 +1486,7 @@ impl GoldyRenderer {
 
             match self.persistent.last_drained_bump() {
                 Some(bump) if bump.failed != 0 => {
-                    log::info!(
-                        "Bump overflow in render_to_buffer (0x{:x}), retrying",
-                        bump.failed,
-                    );
+                    log::info!("Bump overflow in render_to_buffer (0x{:x}), retrying", bump.failed,);
                 }
                 _ => break,
             }
@@ -1590,8 +1511,7 @@ impl GoldyRenderer {
     }
 
     fn drain_ready_bump_readbacks(&mut self) -> Result<()> {
-        self.persistent
-            .drain_ready_bump_readbacks(&self.device, &self.context)
+        self.persistent.drain_ready_bump_readbacks(&self.device, &self.context)
     }
 
     // =======================================================================
@@ -1610,8 +1530,7 @@ impl GoldyRenderer {
         surface: Option<&goldy::Surface>,
     ) -> Result<FrameStats> {
         let prepared = self.prepare(scene, params)?;
-        let (stats, surface_frame) =
-            self.run_frame_from_prepared(prepared, output_texture, surface)?;
+        let (stats, surface_frame) = self.run_frame_from_prepared(prepared, output_texture, surface)?;
         if let Some((frame, tv)) = surface_frame {
             frame.present().map_err(|e| Error::Shader(e.to_string()))?;
             self.frame_pipeline.note_presented(tv);
@@ -1662,9 +1581,7 @@ impl GoldyRenderer {
         // BoundaryCrossed signals are serviced by poll_and_reclaim at frame entry.
         self.persistent.drain_pending_returns();
 
-        let out_image_format = surface
-            .map(|s| s.format())
-            .unwrap_or(TextureFormat::Rgba8Unorm);
+        let out_image_format = surface.map(|s| s.format()).unwrap_or(TextureFormat::Rgba8Unorm);
         self.persistent.purge_render_target_cache_if_mismatch(
             &self.context,
             params.width,
@@ -1730,13 +1647,9 @@ impl GoldyRenderer {
             // Rare in steady state; persistent_bump normally already covers the needed sizes.
             if bump.failed != 0 {
                 stats.bump_retries += 1;
-                log::info!(
-                    "Previous frame bump overflow (0x{:x}), growing buffers",
-                    bump.failed,
-                );
-                config =
-                    RenderConfig::new(&layout, params.width, params.height, &params.base_color)
-                        .with_bump_estimates(&sanitize_bump(bump));
+                log::info!("Previous frame bump overflow (0x{:x}), growing buffers", bump.failed,);
+                config = RenderConfig::new(&layout, params.width, params.height, &params.base_color)
+                    .with_bump_estimates(&sanitize_bump(bump));
             }
         }
 
@@ -1858,9 +1771,7 @@ impl GoldyRenderer {
                         "out_image format must match swapchain surface",
                     );
                 }
-                recorder
-                    .graph
-                    .copy_texture_to_swapchain(&pipeline.out_image, handle);
+                recorder.graph.copy_texture_to_swapchain(&pipeline.out_image, handle);
             }
         }
         let t_fine_record = t3.elapsed();
@@ -1992,8 +1903,7 @@ impl GoldyRenderer {
         };
         let pipeline = {
             let _tz = goldy::tracy_zone!("ekrano.add_shader.pipeline", _label);
-            ComputePipeline::new(&self.device, &shader_module)
-                .map_err(|e| Error::Shader(format!("{:#}", e)))?
+            ComputePipeline::new(&self.device, &shader_module).map_err(|e| Error::Shader(format!("{:#}", e)))?
         };
 
         let id = ShaderId(self.engine_shaders.len());
@@ -2078,8 +1988,7 @@ mod tests {
             let mut resolver = Resolver::new();
             let mut packed = Vec::new();
             let (layout, ramps, images) = resolver.resolve(encoding, &mut packed);
-            let config =
-                RenderConfig::new(&layout, params.width, params.height, &params.base_color);
+            let config = RenderConfig::new(&layout, params.width, params.height, &params.base_color);
             let mut graph = TaskGraph::new();
 
             let ctx = device.create_context().expect("context");
@@ -2109,9 +2018,7 @@ mod tests {
                     &config,
                     expected_format,
                 )
-                .unwrap_or_else(|e| {
-                    panic!("PipelineResources::prepare({expected_format:?}) failed: {e}")
-                })
+                .unwrap_or_else(|e| panic!("PipelineResources::prepare({expected_format:?}) failed: {e}"))
             };
 
             assert_eq!(

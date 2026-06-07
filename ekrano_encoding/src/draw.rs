@@ -100,11 +100,7 @@ impl<CS: ColorSpace> From<AlphaColor<CS>> for DrawColor {
 impl From<DynamicColor> for DrawColor {
     fn from(color: DynamicColor) -> Self {
         Self {
-            rgba: color
-                .to_alpha_color::<Srgb>()
-                .premultiply()
-                .to_rgba8()
-                .to_u32(),
+            rgba: color.to_alpha_color::<Srgb>().premultiply().to_rgba8().to_u32(),
         }
     }
 }
@@ -112,12 +108,7 @@ impl From<DynamicColor> for DrawColor {
 impl<CS: ColorSpace> From<OpaqueColor<CS>> for DrawColor {
     fn from(color: OpaqueColor<CS>) -> Self {
         Self {
-            rgba: color
-                .convert::<Srgb>()
-                .with_alpha(1.)
-                .premultiply()
-                .to_rgba8()
-                .to_u32(),
+            rgba: color.convert::<Srgb>().with_alpha(1.).premultiply().to_rgba8().to_u32(),
         }
     }
 }
@@ -303,10 +294,7 @@ mod tests {
         //
         // If this changes intentionally, the `DrawColor` docs also need updating.
         let c = Color::from_rgba8(0x00, 0xca, 0xfe, 0xff);
-        assert_eq!(
-            bytemuck::bytes_of(&DrawColor::from(c)),
-            [0x00, 0xca, 0xfe, 0xff]
-        );
+        assert_eq!(bytemuck::bytes_of(&DrawColor::from(c)), [0x00, 0xca, 0xfe, 0xff]);
     }
 
     #[test]

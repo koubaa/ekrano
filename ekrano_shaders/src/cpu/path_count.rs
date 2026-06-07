@@ -53,18 +53,9 @@ fn path_count_main(
 
         let path = paths[line.path_ix as usize];
         let bbox = path.bbox;
-        let bbox = [
-            bbox[0] as i32,
-            bbox[1] as i32,
-            bbox[2] as i32,
-            bbox[3] as i32,
-        ];
+        let bbox = [bbox[0] as i32, bbox[1] as i32, bbox[2] as i32, bbox[3] as i32];
         let xmin = s0.x.min(s1.x);
-        if s0.y >= bbox[3] as f32
-            || s1.y < bbox[1] as f32
-            || xmin >= bbox[2] as f32
-            || bbox[0] >= bbox[2]
-        {
+        if s0.y >= bbox[3] as f32 || s1.y < bbox[1] as f32 || xmin >= bbox[2] as f32 || bbox[0] >= bbox[2] {
             continue;
         }
         // Clip line to bounding box. Clipping is done in "i" space.
@@ -144,8 +135,7 @@ fn path_count_main(
             let top_edge = if i == 0 { y0 == s0.y } else { last_z == z };
             if top_edge && x + 1 < bbox[2] {
                 let x_bump = (x + 1).max(bbox[0]) as u32;
-                let ix =
-                    (tile_base + morton_encode_2d(x_bump - bbox[0] as u32, py) as i32) as usize;
+                let ix = (tile_base + morton_encode_2d(x_bump - bbox[0] as u32, py) as i32) as usize;
                 tile[ix].backdrop += delta;
             }
             let tile_ix = (tile_base + morton_encode_2d(px, py) as i32) as usize;

@@ -27,12 +27,7 @@ use crate::{
 /// Setting `params.base_color = Some(WHITE)` for those tests makes both the
 /// reference and rendered images composite over white, so the white
 /// "background" regions match each other.
-fn composite_bg(
-    params: &TestParams,
-    width: u32,
-    height: u32,
-    rgba: &[u8],
-) -> Result<image::RgbImage> {
+fn composite_bg(params: &TestParams, width: u32, height: u32, rgba: &[u8]) -> Result<image::RgbImage> {
     if let Some(color) = params.base_color {
         let u = color.premultiply().to_rgba8().to_u32();
         let r = ((u >> 24) & 0xFF) as u8;
@@ -94,10 +89,8 @@ impl Snapshot<'_> {
             let mean = stats.mean();
             eprintln!("[SNAP] {} mean={mean}", self.params.name);
             if mean > value {
-                self.handle_failure(format_args!(
-                    "Expected mean to be less than {value}, got {mean}"
-                ))
-                .unwrap();
+                self.handle_failure(format_args!("Expected mean to be less than {value}, got {mean}"))
+                    .unwrap();
             }
         } else {
             // The result image was newly created, and so we know the test will pass
@@ -127,13 +120,7 @@ impl Snapshot<'_> {
                 self.params.name, &self.reference_path
             );
         } else {
-            write_png_to_file(
-                self.params,
-                &self.update_path,
-                &self.raw_rendered,
-                None,
-                false,
-            )?;
+            write_png_to_file(self.params, &self.update_path, &self.raw_rendered, None, false)?;
             // Export FLIP error map as a perceptual diff image (magma LUT: dark=identical, bright=diff)
             if let Some(em) = self.error_map.take() {
                 let diff_path = self
@@ -145,11 +132,9 @@ impl Snapshot<'_> {
                             .with_file_name(format!("{}_diff.png", self.params.name))
                     });
                 let visualized = em.apply_color_lut(&nv_flip::magma_lut());
-                if let Some(rgb) = image::RgbImage::from_raw(
-                    visualized.width(),
-                    visualized.height(),
-                    visualized.to_vec(),
-                ) {
+                if let Some(rgb) =
+                    image::RgbImage::from_raw(visualized.width(), visualized.height(), visualized.to_vec())
+                {
                     let _ = rgb.save(&diff_path);
                     eprintln!("Wrote perceptual diff to {:?}", diff_path);
                 }
@@ -208,11 +193,7 @@ pub fn smoke_snapshot_test_sync(scene: Scene, params: &TestParams) -> Result<Sna
 /// Run an snapshot test of the given scene.
 ///
 /// In most cases, you should use [`snapshot_test_sync`] or [`smoke_snapshot_test_sync`].
-pub async fn snapshot_test(
-    scene: Scene,
-    params: &TestParams,
-    directory: SnapshotDirectory,
-) -> Result<Snapshot<'_>> {
+pub async fn snapshot_test(scene: Scene, params: &TestParams, directory: SnapshotDirectory) -> Result<Snapshot<'_>> {
     let raw_rendered = render_then_debug(&scene, params)?;
     snapshot_test_image(raw_rendered, params, directory)
 }
@@ -230,9 +211,7 @@ pub fn snapshot_test_image(
     std::fs::create_dir_all(&c_dir)?;
     let update_path = c_dir.join(&params.name).with_extension("png");
 
-    let reference_path = snapshot_dir(directory)
-        .join(&params.name)
-        .with_extension("png");
+    let reference_path = snapshot_dir(directory).join(&params.name).with_extension("png");
 
     if env::var("EKRANO_TEST_GENERATE_ALL").is_ok() {
         write_png_to_file(
@@ -272,10 +251,7 @@ pub fn snapshot_test_image(
                     Some(directory.max_size_in_bytes()),
                     true,
                 )?;
-                eprintln!(
-                    "Wrote result for new test {} to {:?}",
-                    params.name, &reference_path
-                );
+                eprintln!("Wrote result for new test {} to {:?}", params.name, &reference_path);
                 return Ok(Snapshot {
                     statistics: None,
                     error_map: None,
@@ -327,8 +303,7 @@ pub fn snapshot_test_image(
         Err(e) => return Err(e.into()),
     };
 
-    if expected_data.width() != raw_rendered.width || expected_data.height() != raw_rendered.height
-    {
+    if expected_data.width() != raw_rendered.width || expected_data.height() != raw_rendered.height {
         let mut snapshot = Snapshot {
             statistics: None,
             error_map: None,
@@ -355,16 +330,8 @@ pub fn snapshot_test_image(
         raw_rendered.height,
         raw_rendered.data.as_ref(),
     )?;
-    let expected = nv_flip::FlipImageRgb8::with_data(
-        expected_data.width(),
-        expected_data.height(),
-        &expected_data,
-    );
-    let rendered = nv_flip::FlipImageRgb8::with_data(
-        rendered_data.width(),
-        rendered_data.height(),
-        &rendered_data,
-    );
+    let expected = nv_flip::FlipImageRgb8::with_data(expected_data.width(), expected_data.height(), &expected_data);
+    let rendered = nv_flip::FlipImageRgb8::with_data(rendered_data.width(), rendered_data.height(), &rendered_data);
 
     let error_map = nv_flip::flip(expected, rendered, nv_flip::DEFAULT_PIXELS_PER_DEGREE);
 

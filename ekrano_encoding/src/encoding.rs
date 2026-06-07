@@ -4,16 +4,15 @@
 use crate::{DrawBeginClip, FilterPrimitive, LayerFilterEffect};
 
 use super::{
-    CoverageMask, DrawBlurRoundedRect, DrawColor, DrawImage, DrawLinearGradient,
-    DrawRadialGradient, DrawSweepGradient, DrawTag, Glyph, GlyphRun, NormalizedCoord, Patch,
-    PathEncoder, PathTag, Style, Transform,
+    CoverageMask, DrawBlurRoundedRect, DrawColor, DrawImage, DrawLinearGradient, DrawRadialGradient, DrawSweepGradient,
+    DrawTag, Glyph, GlyphRun, NormalizedCoord, Patch, PathEncoder, PathTag, Style, Transform,
 };
 
 use peniko::color::{DynamicColor, palette};
 use peniko::kurbo::{Shape, Stroke};
 use peniko::{
-    BlendMode, BrushRef, ColorStop, Extend, Fill, GradientKind, ImageBrushRef, ImageSampler,
-    LinearGradientPosition, RadialGradientPosition, SweepGradientPosition,
+    BlendMode, BrushRef, ColorStop, Extend, Fill, GradientKind, ImageBrushRef, ImageSampler, LinearGradientPosition,
+    RadialGradientPosition, SweepGradientPosition,
 };
 
 /// Encoded data streams for a scene.
@@ -121,9 +120,7 @@ impl Encoding {
             let glyph_runs_base = self.resources.glyph_runs.len();
             let glyphs_base = self.resources.glyphs.len();
             let coords_base = self.resources.normalized_coords.len();
-            self.resources
-                .glyphs
-                .extend_from_slice(&other.resources.glyphs);
+            self.resources.glyphs.extend_from_slice(&other.resources.glyphs);
             self.resources
                 .normalized_coords
                 .extend_from_slice(&other.resources.normalized_coords);
@@ -186,15 +183,11 @@ impl Encoding {
             self.coverage_mask = other.coverage_mask.clone();
         }
         self.pending_layer_filter = other.pending_layer_filter.clone();
-        self.clip_filter_stack
-            .extend_from_slice(&other.clip_filter_stack);
-        self.begin_clip_stack
-            .extend_from_slice(&other.begin_clip_stack);
-        self.layer_filter_effects
-            .extend_from_slice(&other.layer_filter_effects);
+        self.clip_filter_stack.extend_from_slice(&other.clip_filter_stack);
+        self.begin_clip_stack.extend_from_slice(&other.begin_clip_stack);
+        self.layer_filter_effects.extend_from_slice(&other.layer_filter_effects);
         if let Some(transform) = *transform {
-            self.transforms
-                .extend(other.transforms.iter().map(|x| transform * *x));
+            self.transforms.extend(other.transforms.iter().map(|x| transform * *x));
             for run in &mut self.resources.glyph_runs[glyph_runs_base..] {
                 run.transform = transform * run.transform;
             }
@@ -248,9 +241,7 @@ impl Encoding {
     /// If the given transform is different from the current one, encodes it and
     /// returns true. Otherwise, encodes nothing and returns false.
     pub fn encode_transform(&mut self, transform: Transform) -> bool {
-        if self.flags & Self::FORCE_NEXT_TRANSFORM != 0
-            || self.transforms.last() != Some(&transform)
-        {
+        if self.flags & Self::FORCE_NEXT_TRANSFORM != 0 || self.transforms.last() != Some(&transform) {
             self.path_tags.push(PathTag::TRANSFORM);
             self.transforms.push(transform);
             self.flags &= !Self::FORCE_NEXT_TRANSFORM;
@@ -293,11 +284,7 @@ impl Encoding {
 
     /// Encodes a path element iterator. If `is_fill` is true, all subpaths will be automatically
     /// closed. Returns `true` if a non-zero number of segments were encoded.
-    pub fn encode_path_elements(
-        &mut self,
-        path: impl Iterator<Item = peniko::kurbo::PathEl>,
-        is_fill: bool,
-    ) -> bool {
+    pub fn encode_path_elements(&mut self, path: impl Iterator<Item = peniko::kurbo::PathEl>, is_fill: bool) -> bool {
         let mut encoder = self.encode_path(is_fill);
         encoder.path_elements(path);
         encoder.finish(true) != 0
@@ -512,21 +499,18 @@ impl Encoding {
     ) {
         self.draw_tags.push(DrawTag::BLUR_RECT);
         self.draw_data
-            .extend_from_slice(bytemuck::cast_slice(bytemuck::bytes_of(
-                &DrawBlurRoundedRect {
-                    color: color.into(),
-                    width,
-                    height,
-                    radius,
-                    std_dev,
-                },
-            )));
+            .extend_from_slice(bytemuck::cast_slice(bytemuck::bytes_of(&DrawBlurRoundedRect {
+                color: color.into(),
+                width,
+                height,
+                radius,
+                std_dev,
+            })));
     }
 
     /// Encodes a begin clip command.
     pub fn encode_begin_clip(&mut self, parameters: DrawBeginClip) {
-        self.clip_filter_stack
-            .push(self.pending_layer_filter.take());
+        self.clip_filter_stack.push(self.pending_layer_filter.take());
         self.draw_tags.push(DrawTag::BEGIN_CLIP);
         self.draw_data
             .extend_from_slice(bytemuck::cast_slice(bytemuck::bytes_of(&parameters)));
@@ -614,12 +598,7 @@ impl Encoding {
         self.path_tags.swap(len - 1, len - 2);
     }
 
-    fn add_ramp(
-        &mut self,
-        color_stops: impl Iterator<Item = ColorStop>,
-        alpha: f32,
-        extend: Extend,
-    ) -> RampStops {
+    fn add_ramp(&mut self, color_stops: impl Iterator<Item = ColorStop>, alpha: f32, extend: Extend) -> RampStops {
         let offset = self.draw_data.len();
         let stops_start = self.resources.color_stops.len();
         if alpha != 1.0 {

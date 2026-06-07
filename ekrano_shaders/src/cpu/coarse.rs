@@ -5,15 +5,13 @@
 use std::cmp::max;
 
 use ekrano_encoding::{
-    BinHeader, BumpAllocators, ConfigUniform, DRAW_INFO_FLAGS_FILL_RULE_BIT, DrawMonoid, DrawTag,
-    Path, Tile,
+    BinHeader, BumpAllocators, ConfigUniform, DRAW_INFO_FLAGS_FILL_RULE_BIT, DrawMonoid, DrawTag, Path, Tile,
 };
 
 use super::util::morton_encode_2d;
 use super::{
-    CMD_BEGIN_CLIP, CMD_BLUR_RECT, CMD_COLOR, CMD_END, CMD_END_CLIP, CMD_FILL, CMD_IMAGE, CMD_JUMP,
-    CMD_LIN_GRAD, CMD_RAD_GRAD, CMD_SET_BLEND_MODE, CMD_SOLID, CMD_SWEEP_GRAD, CpuBinding,
-    PTCL_INITIAL_ALLOC,
+    CMD_BEGIN_CLIP, CMD_BLUR_RECT, CMD_COLOR, CMD_END, CMD_END_CLIP, CMD_FILL, CMD_IMAGE, CMD_JUMP, CMD_LIN_GRAD,
+    CMD_RAD_GRAD, CMD_SET_BLEND_MODE, CMD_SOLID, CMD_SWEEP_GRAD, CpuBinding, PTCL_INITIAL_ALLOC,
 };
 
 // Tiles per bin
@@ -41,24 +39,14 @@ impl TileState {
     fn new(tile_ix: u32) -> Self {
         let cmd_offset = tile_ix * PTCL_INITIAL_ALLOC;
         let cmd_limit = cmd_offset + (PTCL_INITIAL_ALLOC - PTCL_HEADROOM);
-        Self {
-            cmd_offset,
-            cmd_limit,
-        }
+        Self { cmd_offset, cmd_limit }
     }
 
-    fn alloc_cmd(
-        &mut self,
-        size: u32,
-        config: &ConfigUniform,
-        bump: &mut BumpAllocators,
-        ptcl: &mut [u32],
-    ) {
+    fn alloc_cmd(&mut self, size: u32, config: &ConfigUniform, bump: &mut BumpAllocators, ptcl: &mut [u32]) {
         // GPU `alloc_cmd` keeps per-thread PTCL bumps (issue #46 wave batching would need
         // reconvergent wave masks; divergent bitmap-driven PTCL writes make that unsafe).
         if self.cmd_offset + size >= self.cmd_limit {
-            let ptcl_dyn_start =
-                config.width_in_tiles * config.height_in_tiles * PTCL_INITIAL_ALLOC;
+            let ptcl_dyn_start = config.width_in_tiles * config.height_in_tiles * PTCL_INITIAL_ALLOC;
             let chunk_size = PTCL_INCREMENT.max(size + PTCL_HEADROOM);
             let new_cmd = ptcl_dyn_start + bump.ptcl;
             bump.ptcl += chunk_size;
@@ -101,26 +89,14 @@ impl TileState {
         }
     }
 
-    fn write_color(
-        &mut self,
-        config: &ConfigUniform,
-        bump: &mut BumpAllocators,
-        ptcl: &mut [u32],
-        rgba_color: u32,
-    ) {
+    fn write_color(&mut self, config: &ConfigUniform, bump: &mut BumpAllocators, ptcl: &mut [u32], rgba_color: u32) {
         self.alloc_cmd(2, config, bump, ptcl);
         self.write(ptcl, 0, CMD_COLOR);
         self.write(ptcl, 1, rgba_color);
         self.cmd_offset += 2;
     }
 
-    fn write_image(
-        &mut self,
-        config: &ConfigUniform,
-        bump: &mut BumpAllocators,
-        ptcl: &mut [u32],
-        info_offset: u32,
-    ) {
+    fn write_image(&mut self, config: &ConfigUniform, bump: &mut BumpAllocators, ptcl: &mut [u32], info_offset: u32) {
         self.alloc_cmd(2, config, bump, ptcl);
         self.write(ptcl, 0, CMD_IMAGE);
         self.write(ptcl, 1, info_offset);
@@ -158,12 +134,7 @@ impl TileState {
         self.cmd_offset += 3;
     }
 
-    fn write_begin_clip(
-        &mut self,
-        config: &ConfigUniform,
-        bump: &mut BumpAllocators,
-        ptcl: &mut [u32],
-    ) {
+    fn write_begin_clip(&mut self, config: &ConfigUniform, bump: &mut BumpAllocators, ptcl: &mut [u32]) {
         self.alloc_cmd(1, config, bump, ptcl);
         self.write(ptcl, 0, CMD_BEGIN_CLIP);
         self.cmd_offset += 1;
@@ -316,38 +287,17 @@ fn coarse_main(
                             DrawTag::LINEAR_GRADIENT => {
                                 tile_state.write_path(config, bump, ptcl, tile, draw_flags);
                                 let index = scene[dd as usize];
-                                tile_state.write_grad(
-                                    config,
-                                    bump,
-                                    ptcl,
-                                    CMD_LIN_GRAD,
-                                    index,
-                                    di + 1,
-                                );
+                                tile_state.write_grad(config, bump, ptcl, CMD_LIN_GRAD, index, di + 1);
                             }
                             DrawTag::RADIAL_GRADIENT => {
                                 tile_state.write_path(config, bump, ptcl, tile, draw_flags);
                                 let index = scene[dd as usize];
-                                tile_state.write_grad(
-                                    config,
-                                    bump,
-                                    ptcl,
-                                    CMD_RAD_GRAD,
-                                    index,
-                                    di + 1,
-                                );
+                                tile_state.write_grad(config, bump, ptcl, CMD_RAD_GRAD, index, di + 1);
                             }
                             DrawTag::SWEEP_GRADIENT => {
                                 tile_state.write_path(config, bump, ptcl, tile, draw_flags);
                                 let index = scene[dd as usize];
-                                tile_state.write_grad(
-                                    config,
-                                    bump,
-                                    ptcl,
-                                    CMD_SWEEP_GRAD,
-                                    index,
-                                    di + 1,
-                                );
+                                tile_state.write_grad(config, bump, ptcl, CMD_SWEEP_GRAD, index, di + 1);
                             }
                             DrawTag::BLUR_RECT => {
                                 tile_state.write_path(config, bump, ptcl, tile, draw_flags);
@@ -405,8 +355,7 @@ fn coarse_main(
 
             if bin_tile_x + tile_x < width_in_tiles && bin_tile_y + tile_y < height_in_tiles {
                 ptcl[tile_state.cmd_offset as usize] = CMD_END;
-                let scratch_size =
-                    (max_blend_depth.saturating_sub(BLEND_STACK_SPLIT)) * TILE_WIDTH * TILE_HEIGHT;
+                let scratch_size = (max_blend_depth.saturating_sub(BLEND_STACK_SPLIT)) * TILE_WIDTH * TILE_HEIGHT;
                 ptcl[blend_offset as usize] = bump.blend;
                 bump.blend += scratch_size;
             }

@@ -29,8 +29,7 @@ impl RampCache {
     pub(crate) fn maintain(&mut self) {
         self.epoch += 1;
         if self.map.len() > RETAINED_COUNT {
-            self.map
-                .retain(|_key, value| value.0 < RETAINED_COUNT as u32);
+            self.map.retain(|_key, value| value.0 < RETAINED_COUNT as u32);
             self.data.truncate(RETAINED_COUNT * N_SAMPLES);
         }
     }
@@ -55,10 +54,7 @@ impl RampCache {
             if let Some((old_stops, id)) = reuse {
                 self.map.remove(&old_stops);
                 let start = id as usize * N_SAMPLES;
-                for (dst, src) in self.data[start..start + N_SAMPLES]
-                    .iter_mut()
-                    .zip(make_ramp(stops))
-                {
+                for (dst, src) in self.data[start..start + N_SAMPLES].iter_mut().zip(make_ramp(stops)) {
                     *dst = src;
                 }
                 self.map.insert(CacheKey(stops.into()), (id, self.epoch));

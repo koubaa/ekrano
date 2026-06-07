@@ -47,10 +47,7 @@ impl fmt::Debug for LineEndpoint {
 pub(crate) fn validate_line_soup(lines: &[LineSoup]) -> Vec<LineEndpoint> {
     let mut points = BTreeSet::new();
     for line in lines {
-        let pts = [
-            LineEndpoint::new(line, true),
-            LineEndpoint::new(line, false),
-        ];
+        let pts = [LineEndpoint::new(line, true), LineEndpoint::new(line, false)];
         for p in pts {
             if !points.remove(&p) {
                 points.insert(p);

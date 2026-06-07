@@ -189,12 +189,7 @@ fn filter_transparent_shapes() {
         edge_mode: FilterEdgeMode::None,
     });
 
-    scene.push_filter_layer(
-        filter.clone(),
-        Fill::NonZero,
-        Affine::IDENTITY,
-        &vp(100.0, 100.0),
-    );
+    scene.push_filter_layer(filter.clone(), Fill::NonZero, Affine::IDENTITY, &vp(100.0, 100.0));
     scene.fill(
         Fill::NonZero,
         Affine::IDENTITY,
@@ -308,13 +303,7 @@ fn filter_flood() {
     // The filter layer clip IS drawn_rect — push_filter_layer computes its bounding box
     // and stores it in FilterPrimitive::Flood::clip_rect for the shader.
     scene.push_filter_layer(filter, Fill::NonZero, Affine::IDENTITY, &drawn_rect);
-    scene.fill(
-        Fill::NonZero,
-        Affine::IDENTITY,
-        REBECCA_PURPLE,
-        None,
-        &drawn_rect,
-    );
+    scene.fill(Fill::NonZero, Affine::IDENTITY, REBECCA_PURPLE, None, &drawn_rect);
     scene.pop_layer();
     let mut params = TestParams::new("filter_flood", 256, 40);
     params.base_color = Some(WHITE);
@@ -336,13 +325,7 @@ fn filter_flood_star() {
     let star_path = circular_star(Point::new(50.0, 50.0), 5, 20.0, 40.0);
 
     scene.push_filter_layer(filter, Fill::NonZero, Affine::IDENTITY, &vp(100.0, 100.0));
-    scene.fill(
-        Fill::NonZero,
-        Affine::IDENTITY,
-        REBECCA_PURPLE,
-        None,
-        &star_path,
-    );
+    scene.fill(Fill::NonZero, Affine::IDENTITY, REBECCA_PURPLE, None, &star_path);
     scene.pop_layer();
 
     let mut params = TestParams::new("filter_flood_star", 100, 100);
@@ -420,10 +403,7 @@ fn filter_drop_shadow_zero_offset() {
 #[test]
 fn filter_offset() {
     let mut scene = Scene::new();
-    let filter = Filter(FilterPrimitive::Offset {
-        dx: 18.0,
-        dy: -12.0,
-    });
+    let filter = Filter(FilterPrimitive::Offset { dx: 18.0, dy: -12.0 });
     let star_path = circular_star(Point::new(50.0, 50.0), 7, 10.0, 22.0);
     let marker = Rect::new(49.0, 27.0, 53.0, 31.0);
 
@@ -434,13 +414,7 @@ fn filter_offset() {
         edge_mode: FilterEdgeMode::None,
     });
     scene.push_filter_layer(identity, Fill::NonZero, Affine::IDENTITY, &vp(100.0, 100.0));
-    scene.stroke(
-        &Stroke::new(1.5),
-        Affine::IDENTITY,
-        ROYAL_BLUE,
-        None,
-        &star_path,
-    );
+    scene.stroke(&Stroke::new(1.5), Affine::IDENTITY, ROYAL_BLUE, None, &star_path);
     scene.fill(Fill::NonZero, Affine::IDENTITY, SEA_GREEN, None, &marker);
     scene.pop_layer();
 
@@ -532,18 +506,8 @@ fn filter_empty_layers() {
         edge_mode: FilterEdgeMode::None,
     });
 
-    scene.push_filter_layer(
-        filter.clone(),
-        Fill::NonZero,
-        Affine::IDENTITY,
-        &vp(100.0, 100.0),
-    );
-    scene.push_filter_layer(
-        filter.clone(),
-        Fill::NonZero,
-        Affine::IDENTITY,
-        &vp(100.0, 100.0),
-    );
+    scene.push_filter_layer(filter.clone(), Fill::NonZero, Affine::IDENTITY, &vp(100.0, 100.0));
+    scene.push_filter_layer(filter.clone(), Fill::NonZero, Affine::IDENTITY, &vp(100.0, 100.0));
     scene.push_filter_layer(filter, Fill::NonZero, Affine::IDENTITY, &vp(100.0, 100.0));
     // Draw nothing.
     scene.pop_layer();

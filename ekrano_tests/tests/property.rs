@@ -6,10 +6,7 @@
 // The following lints are part of the Linebender standard set,
 // but resolving them has been deferred for now.
 // Feel free to send a PR that solves one or more of these.
-#![allow(
-    clippy::missing_assert_message,
-    clippy::allow_attributes_without_reason
-)]
+#![allow(clippy::missing_assert_message, clippy::allow_attributes_without_reason)]
 
 use ekrano::Scene;
 use ekrano::kurbo::{Affine, Rect};
@@ -97,10 +94,7 @@ fn tiny_red_2x2_test() {
             eprintln!("pixel: [{r}, {g}, {b}, {a}]");
         }
     }
-    assert_eq!(
-        red_count, 4,
-        "expected 4 red pixels in 2x2, got {red_count}"
-    );
+    assert_eq!(red_count, 4, "expected 4 red pixels in 2x2, got {red_count}");
 }
 
 #[test]
@@ -138,8 +132,7 @@ fn bgra_image() {
         },
     };
     scene.draw_image(&image, Affine::IDENTITY);
-    let scene_image =
-        ekrano_tests::render_then_debug_sync(&scene, &TestParams::new("bgra", 2, 2)).unwrap();
+    let scene_image = ekrano_tests::render_then_debug_sync(&scene, &TestParams::new("bgra", 2, 2)).unwrap();
     assert_eq!(scene_image.format, ImageFormat::Rgba8);
     for (i, pixel) in scene_image.data.data().chunks_exact(4).enumerate() {
         let &[r, g, b, a] = pixel else { unreachable!() };
@@ -160,10 +153,7 @@ fn premultiplied_image() {
         palette::css::LIME.with_alpha(0.5).premultiply(),
         palette::css::WHITE.with_alpha(0.5).premultiply(),
     ];
-    let blob: Vec<u8> = colors
-        .iter()
-        .flat_map(|c| c.to_rgba8().to_u8_array())
-        .collect();
+    let blob: Vec<u8> = colors.iter().flat_map(|c| c.to_rgba8().to_u8_array()).collect();
     let image = ekrano::peniko::ImageBrush {
         image: ImageData {
             data: blob.into(),
@@ -270,10 +260,7 @@ fn fully_opaque_straight_alpha_unchanged() {
         palette::css::LIME,
         palette::css::WHITE,
     ];
-    let blob: Vec<u8> = colors
-        .iter()
-        .flat_map(|c| c.to_rgba8().to_u8_array())
-        .collect();
+    let blob: Vec<u8> = colors.iter().flat_map(|c| c.to_rgba8().to_u8_array()).collect();
     let image = ekrano::peniko::ImageBrush {
         image: ImageData {
             data: blob.into(),
@@ -289,11 +276,7 @@ fn fully_opaque_straight_alpha_unchanged() {
     };
     let mut scene = Scene::new();
     scene.draw_image(&image, Affine::IDENTITY);
-    let result = ekrano_tests::render_then_debug_sync(
-        &scene,
-        &TestParams::new("fully_opaque_straight", 2, 2),
-    )
-    .unwrap();
+    let result = ekrano_tests::render_then_debug_sync(&scene, &TestParams::new("fully_opaque_straight", 2, 2)).unwrap();
     assert_eq!(result.format, ImageFormat::Rgba8);
     for (i, pixel) in result.data.data().chunks_exact(4).enumerate() {
         let &[r, g, b, a] = pixel else { unreachable!() };

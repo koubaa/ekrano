@@ -194,11 +194,7 @@ fn test_data_image_roundtrip_extend_reflect() {
         .with_quality(ImageQuality::Low)
         .with_extend(Extend::Reflect);
     scene.draw_image(&image, Affine::IDENTITY);
-    let mut params = TestParams::new(
-        "data_image_roundtrip",
-        image.image.width,
-        image.image.height,
-    );
+    let mut params = TestParams::new("data_image_roundtrip", image.image.width, image.image.height);
     params.anti_aliasing = AaConfig::Area;
     smoke_snapshot_test_sync(scene, &params)
         .unwrap()
@@ -218,11 +214,7 @@ fn test_data_image_roundtrip_extend_repeat() {
         .with_quality(ImageQuality::Low)
         .with_extend(Extend::Repeat);
     scene.draw_image(&image, Affine::IDENTITY);
-    let mut params = TestParams::new(
-        "data_image_roundtrip",
-        image.image.width,
-        image.image.height,
-    );
+    let mut params = TestParams::new("data_image_roundtrip", image.image.width, image.image.height);
     params.anti_aliasing = AaConfig::Area;
     smoke_snapshot_test_sync(scene, &params)
         .unwrap()
@@ -271,11 +263,7 @@ fn clip_blends() {
         &Rect::from_origin_size((0., 0.), (100., 100.)),
     );
     let layer_shape = Triangle::from_coords((50., 0.), (0., 100.), (100., 100.));
-    scene.push_clip_layer(
-        ekrano::peniko::Fill::NonZero,
-        Affine::IDENTITY,
-        &layer_shape,
-    );
+    scene.push_clip_layer(ekrano::peniko::Fill::NonZero, Affine::IDENTITY, &layer_shape);
     scene.push_layer(
         ekrano::peniko::Fill::NonZero,
         Mix::Multiply,
@@ -294,9 +282,7 @@ fn clip_blends() {
     scene.pop_layer();
 
     let params = TestParams::new("clip_blends", 100, 100);
-    snapshot_test_sync(scene, &params)
-        .unwrap()
-        .assert_mean_less_than(0.001);
+    snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.001);
 }
 
 // ---------------------------------------------------------------------------
@@ -449,9 +435,7 @@ fn repeated_many_bins() {
 
         let mut red_count = 0_u32;
         for pixel in image.data.data().chunks_exact(4) {
-            let &[r, g, b, _a] = pixel else {
-                unreachable!()
-            };
+            let &[r, g, b, _a] = pixel else { unreachable!() };
             if r == 255 && g == 0 && b == 0 {
                 red_count += 1;
             }

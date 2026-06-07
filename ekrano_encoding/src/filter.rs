@@ -102,13 +102,7 @@ impl FilterEdgeMode {
 
 impl FilterUniform {
     /// Builds params for a separable Gaussian blur pass (`pass_kind` 0 or 1).
-    pub fn gaussian_blur(
-        width: u32,
-        height: u32,
-        horizontal: bool,
-        std_dev: f32,
-        edge: FilterEdgeMode,
-    ) -> Self {
+    pub fn gaussian_blur(width: u32, height: u32, horizontal: bool, std_dev: f32, edge: FilterEdgeMode) -> Self {
         Self {
             width,
             height,
@@ -293,13 +287,7 @@ impl FilterUniform {
     /// `shadow_rgba`, and composites the shadow under the unblurred foreground from `src` (UAV).
     ///
     /// Used for the pyramid drop-shadow where the blur and composite are separated.
-    pub fn shadow_composite_preblurred(
-        width: u32,
-        height: u32,
-        dx: f32,
-        dy: f32,
-        shadow_rgba: u32,
-    ) -> Self {
+    pub fn shadow_composite_preblurred(width: u32, height: u32, dx: f32, dy: f32, shadow_rgba: u32) -> Self {
         Self {
             width,
             height,
@@ -315,13 +303,7 @@ impl FilterUniform {
 
     /// Nested shadow composite from a pre-blurred source — shadow only, no foreground
     /// (`pass_kind` 14).
-    pub fn shadow_composite_preblurred_nested(
-        width: u32,
-        height: u32,
-        dx: f32,
-        dy: f32,
-        shadow_rgba: u32,
-    ) -> Self {
+    pub fn shadow_composite_preblurred_nested(width: u32, height: u32, dx: f32, dy: f32, shadow_rgba: u32) -> Self {
         Self {
             width,
             height,

@@ -12,18 +12,17 @@ use crate::{AaConfig, RenderParams};
 use std::mem::size_of;
 
 use ekrano_encoding::{
-    FilterPrimitive, FilterUniform, IndirectCount, LayerFilterEffect, WorkgroupCountsGpu,
-    WorkgroupSize, make_mask_lut, make_mask_lut_16,
+    FilterPrimitive, FilterUniform, IndirectCount, LayerFilterEffect, WorkgroupCountsGpu, WorkgroupSize, make_mask_lut,
+    make_mask_lut_16,
 };
 use goldy::types::{BufferFlags, ResourceAccess, TextureFlags, TextureKind};
 use goldy::{Buffer, Texture};
 use peniko::color::{PremulColor, Srgb};
 
 use ekrano_encoding::{
-    STAGE_BACKDROP, STAGE_BBOX_CLEAR, STAGE_BINNING, STAGE_CLIP_LEAF, STAGE_CLIP_REDUCE,
-    STAGE_COARSE, STAGE_DRAW_LEAF, STAGE_DRAW_REDUCE, STAGE_FLATTEN, STAGE_PATH_COUNT,
-    STAGE_PATH_TILING, STAGE_PATHTAG_REDUCE, STAGE_PATHTAG_REDUCE2, STAGE_PATHTAG_SCAN,
-    STAGE_PATHTAG_SCAN_LARGE, STAGE_PATHTAG_SCAN1, STAGE_TILE_ALLOC,
+    STAGE_BACKDROP, STAGE_BBOX_CLEAR, STAGE_BINNING, STAGE_CLIP_LEAF, STAGE_CLIP_REDUCE, STAGE_COARSE, STAGE_DRAW_LEAF,
+    STAGE_DRAW_REDUCE, STAGE_FLATTEN, STAGE_PATH_COUNT, STAGE_PATH_TILING, STAGE_PATHTAG_REDUCE, STAGE_PATHTAG_REDUCE2,
+    STAGE_PATHTAG_SCAN, STAGE_PATHTAG_SCAN_LARGE, STAGE_PATHTAG_SCAN1, STAGE_TILE_ALLOC,
 };
 
 /// State for a render in progress.
@@ -94,9 +93,7 @@ impl Render {
         recorder: &mut FrameRecorder<'_>,
     ) {
         // HACK: The coarse workgroup counts is the number of active bins.
-        if (config.workgroup_counts.coarse.0
-            * config.workgroup_counts.coarse.1
-            * config.workgroup_counts.coarse.2)
+        if (config.workgroup_counts.coarse.0 * config.workgroup_counts.coarse.1 * config.workgroup_counts.coarse.2)
             > 256
         {
             log::warn!(
@@ -129,10 +126,7 @@ impl Render {
         } else {
             if let Some((_, old_buf)) = recorder.persistent.cached_wg_counts.take() {
                 // Return evicted buffer to pool so its GPU memory can be reused.
-                recorder
-                    .persistent
-                    .pool
-                    .return_buf(old_buf, "ekrano.wg_counts");
+                recorder.persistent.pool.return_buf(old_buf, "ekrano.wg_counts");
             }
             recorder.upload_typed("ekrano.wg_counts", &wg_counts_gpu)
         };
@@ -179,10 +173,7 @@ impl Render {
             shaders.pathtag_reduce2,
             STAGE_PATHTAG_REDUCE2,
             INDIRECT_STRIDE,
-            &[
-                pipeline.reduced.as_binding(),
-                pipeline.reduced2.as_binding(),
-            ],
+            &[pipeline.reduced.as_binding(), pipeline.reduced2.as_binding()],
         );
         dispatch_stage(
             recorder,
@@ -229,10 +220,7 @@ impl Render {
             shaders.bbox_clear,
             STAGE_BBOX_CLEAR,
             INDIRECT_STRIDE,
-            &[
-                pipeline.config.as_binding(),
-                pipeline.path_bbox.as_binding(),
-            ],
+            &[pipeline.config.as_binding(), pipeline.path_bbox.as_binding()],
         );
 
         let flatten_bindings = [
@@ -249,12 +237,7 @@ impl Render {
             while base_wg < flat_wg_x {
                 let chunk = (flat_wg_x - base_wg).min(MAX_FLATTEN_WG_PER_SUBMIT);
                 let thread_base = base_wg * FLATTEN_THREADS_PER_GROUP;
-                recorder.dispatch_with_push_tail(
-                    shaders.flatten,
-                    (chunk, 1, 1),
-                    &flatten_bindings,
-                    &[thread_base],
-                );
+                recorder.dispatch_with_push_tail(shaders.flatten, (chunk, 1, 1), &flatten_bindings, &[thread_base]);
                 base_wg += chunk;
             }
         } else {
@@ -494,44 +477,43 @@ impl Render {
         // The check and upload are separated into two steps to satisfy the borrow
         // checker: `upload_strided` needs `&mut recorder`, so we cannot hold a
         // `&mut recorder.persistent.stable_mask_lut_*` across the call.
-        let mask_lut_slot: Option<u32> =
-            if matches!(self.aa_config, AaConfig::Msaa16 | AaConfig::Msaa8) {
-                let needs_upload = match self.aa_config {
-                    AaConfig::Msaa16 => recorder.persistent.stable_mask_lut_msaa16.is_none(),
-                    AaConfig::Msaa8 => recorder.persistent.stable_mask_lut_msaa8.is_none(),
-                    _ => false,
-                };
-                if needs_upload {
-                    let lut_data = match self.aa_config {
-                        AaConfig::Msaa16 => make_mask_lut_16(),
-                        AaConfig::Msaa8 => make_mask_lut(),
-                        _ => unreachable!(),
-                    };
-                    let buf = recorder.upload_strided("ekrano.mask_lut", 4, lut_data);
-                    match self.aa_config {
-                        AaConfig::Msaa16 => recorder.persistent.stable_mask_lut_msaa16 = Some(buf),
-                        AaConfig::Msaa8 => recorder.persistent.stable_mask_lut_msaa8 = Some(buf),
-                        _ => unreachable!(),
-                    }
-                }
-                // Extract the bindless index so we can build `fine_resources` without
-                // holding a live `&Buffer` reference across the `recorder.dispatch()` call.
-                match self.aa_config {
-                    AaConfig::Msaa16 => recorder
-                        .persistent
-                        .stable_mask_lut_msaa16
-                        .as_ref()
-                        .and_then(|b| b.resource_index(ResourceAccess::Read)),
-                    AaConfig::Msaa8 => recorder
-                        .persistent
-                        .stable_mask_lut_msaa8
-                        .as_ref()
-                        .and_then(|b| b.resource_index(ResourceAccess::Read)),
-                    _ => None,
-                }
-            } else {
-                None
+        let mask_lut_slot: Option<u32> = if matches!(self.aa_config, AaConfig::Msaa16 | AaConfig::Msaa8) {
+            let needs_upload = match self.aa_config {
+                AaConfig::Msaa16 => recorder.persistent.stable_mask_lut_msaa16.is_none(),
+                AaConfig::Msaa8 => recorder.persistent.stable_mask_lut_msaa8.is_none(),
+                _ => false,
             };
+            if needs_upload {
+                let lut_data = match self.aa_config {
+                    AaConfig::Msaa16 => make_mask_lut_16(),
+                    AaConfig::Msaa8 => make_mask_lut(),
+                    _ => unreachable!(),
+                };
+                let buf = recorder.upload_strided("ekrano.mask_lut", 4, lut_data);
+                match self.aa_config {
+                    AaConfig::Msaa16 => recorder.persistent.stable_mask_lut_msaa16 = Some(buf),
+                    AaConfig::Msaa8 => recorder.persistent.stable_mask_lut_msaa8 = Some(buf),
+                    _ => unreachable!(),
+                }
+            }
+            // Extract the bindless index so we can build `fine_resources` without
+            // holding a live `&Buffer` reference across the `recorder.dispatch()` call.
+            match self.aa_config {
+                AaConfig::Msaa16 => recorder
+                    .persistent
+                    .stable_mask_lut_msaa16
+                    .as_ref()
+                    .and_then(|b| b.resource_index(ResourceAccess::Read)),
+                AaConfig::Msaa8 => recorder
+                    .persistent
+                    .stable_mask_lut_msaa8
+                    .as_ref()
+                    .and_then(|b| b.resource_index(ResourceAccess::Read)),
+                _ => None,
+            }
+        } else {
+            None
+        };
 
         let mut fine_resources: Vec<GpuBinding<'_>> = vec![
             pipeline.config.as_binding(),
@@ -586,11 +568,7 @@ impl Render {
             }
         }
 
-        recorder.dispatch(
-            shader,
-            (width_in_tiles, height_in_tiles, 1),
-            &fine_resources,
-        );
+        recorder.dispatch(shader, (width_in_tiles, height_in_tiles, 1), &fine_resources);
     }
 
     #[cfg(feature = "debug_layers")]
@@ -637,10 +615,7 @@ fn filter_dispatch(
         Some((ref val, buf)) if val == uniform => buf,
         Some((_, old_buf)) => {
             // Value changed: return stale buffer to pool, upload fresh.
-            recorder
-                .persistent
-                .pool
-                .return_buf(old_buf, "ekrano.filter_uniform");
+            recorder.persistent.pool.return_buf(old_buf, "ekrano.filter_uniform");
             recorder.upload_typed("ekrano.filter_uniform", uniform)
         }
         None => recorder.upload_typed("ekrano.filter_uniform", uniform),
@@ -695,10 +670,7 @@ fn filter_dispatch_two_src(
     let buf = match cached {
         Some((ref val, buf)) if val == uniform => buf,
         Some((_, old_buf)) => {
-            recorder
-                .persistent
-                .pool
-                .return_buf(old_buf, "ekrano.filter_uniform");
+            recorder.persistent.pool.return_buf(old_buf, "ekrano.filter_uniform");
             recorder.upload_typed("ekrano.filter_uniform", uniform)
         }
         None => recorder.upload_typed("ekrano.filter_uniform", uniform),
@@ -755,13 +727,8 @@ fn pyramid_blur(
             let lw = (width >> (l + 1)).max(1);
             let lh = (height >> (l + 1)).max(1);
             recorder
-                .acquire_texture_rgba(
-                    lw,
-                    lh,
-                    TextureKind::DirectInterpolated,
-                    TextureFlags::empty(),
-                )
-            .expect("pyramid level texture")
+                .acquire_texture_rgba(lw, lh, TextureKind::DirectInterpolated, TextureFlags::empty())
+                .expect("pyramid level texture")
         })
         .collect();
 
@@ -784,13 +751,8 @@ fn pyramid_blur(
 
     // Allocate a transient scratch for the H-blur result at the bottom level.
     let bottom_scratch = recorder
-        .acquire_texture_rgba(
-            bw,
-            bh,
-            TextureKind::DirectInterpolated,
-            TextureFlags::empty(),
-        )
-    .expect("pyramid bottom scratch");
+        .acquire_texture_rgba(bw, bh, TextureKind::DirectInterpolated, TextureFlags::empty())
+        .expect("pyramid bottom scratch");
 
     let u_h = FilterUniform::gaussian_blur(bw, bh, true, sigma_residual, edge_mode);
     filter_dispatch(recorder, shader, &u_h, wg_b, bottom, &bottom_scratch);
@@ -846,7 +808,7 @@ pub(crate) fn record_filter_effects(
             TextureKind::DirectInterpolated,
             TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
         )
-    .expect("filter scratch texture");
+        .expect("filter scratch texture");
 
     let wg = (width.div_ceil(16), height.div_ceil(16), 1);
     let filter_layers = &pipeline.filter_layers;
@@ -886,20 +848,14 @@ pub(crate) fn record_filter_effects(
                 if *std_dev > PYRAMID_THRESHOLD {
                     // Allocate a full-res DirectInterpolated scratch for the blurred alpha.
                     let blur_dst = recorder
-                        .acquire_texture_rgba(
-                            width,
-                            height,
-                            TextureKind::DirectInterpolated,
-                            TextureFlags::empty(),
-                        )
-                    .expect("pyramid blur_dst");
+                        .acquire_texture_rgba(width, height, TextureKind::DirectInterpolated, TextureFlags::empty())
+                        .expect("pyramid blur_dst");
 
                     if effect.is_nested {
                         let inner_idx = (effect.layer_index as usize).saturating_sub(1).min(3);
                         let inner_ft = &filter_layers[inner_idx];
                         pyramid_blur(
-                            shader, recorder, inner_ft, &blur_dst, *std_dev, *edge_mode, width,
-                            height,
+                            shader, recorder, inner_ft, &blur_dst, *std_dev, *edge_mode, width, height,
                         );
                         let u_comp = FilterUniform::shadow_composite_preblurred_nested(
                             width,
@@ -908,13 +864,9 @@ pub(crate) fn record_filter_effects(
                             *dy,
                             premul_srgb_u32(*color),
                         );
-                        filter_dispatch_two_src(
-                            recorder, shader, &u_comp, wg, &blur_dst, inner_ft, ft,
-                        );
+                        filter_dispatch_two_src(recorder, shader, &u_comp, wg, &blur_dst, inner_ft, ft);
                     } else {
-                        pyramid_blur(
-                            shader, recorder, ft, &blur_dst, *std_dev, *edge_mode, width, height,
-                        );
+                        pyramid_blur(shader, recorder, ft, &blur_dst, *std_dev, *edge_mode, width, height);
                         let u_comp = FilterUniform::shadow_composite_preblurred(
                             width,
                             height,
@@ -922,9 +874,7 @@ pub(crate) fn record_filter_effects(
                             *dy,
                             premul_srgb_u32(*color),
                         );
-                        filter_dispatch_two_src(
-                            recorder, shader, &u_comp, wg, &blur_dst, ft, &scratch,
-                        );
+                        filter_dispatch_two_src(recorder, shader, &u_comp, wg, &blur_dst, ft, &scratch);
                         let u_copy = FilterUniform::copy(width, height);
                         filter_dispatch(recorder, shader, &u_copy, wg, &scratch, ft);
                     }

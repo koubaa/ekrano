@@ -5,15 +5,13 @@ use std::f32::consts::FRAC_1_SQRT_2;
 
 use super::{
     CpuBinding,
-    euler::{
-        CubicParams, EulerParams, EulerSeg, TANGENT_THRESH, espc_int_approx, espc_int_inv_approx,
-    },
+    euler::{CubicParams, EulerParams, EulerSeg, TANGENT_THRESH, espc_int_approx, espc_int_inv_approx},
     util::{ROBUST_EPSILON, Transform, Vec2},
 };
 use ekrano_encoding::math::f16_to_f32;
 use ekrano_encoding::{
-    BumpAllocators, ConfigUniform, DRAW_INFO_FLAGS_FILL_RULE_BIT, LineSoup, Monoid, PathBbox,
-    PathMonoid, PathTag, Style,
+    BumpAllocators, ConfigUniform, DRAW_INFO_FLAGS_FILL_RULE_BIT, LineSoup, Monoid, PathBbox, PathMonoid, PathTag,
+    Style,
 };
 
 // TODO: remove this
@@ -73,18 +71,8 @@ fn cubic_end_tangent(p0: Vec2, p1: Vec2, p2: Vec2, p3: Vec2) -> Vec2 {
     }
 }
 
-fn write_line(
-    line_ix: usize,
-    path_ix: u32,
-    p0: Vec2,
-    p1: Vec2,
-    bbox: &mut IntBbox,
-    lines: &mut [LineSoup],
-) {
-    assert!(
-        !p0.is_nan() && !p1.is_nan(),
-        "wrote NaNs: p0: {p0:?}, p1: {p1:?}"
-    );
+fn write_line(line_ix: usize, path_ix: u32, p0: Vec2, p1: Vec2, bbox: &mut IntBbox, lines: &mut [LineSoup]) {
+    assert!(!p0.is_nan() && !p1.is_nan(), "wrote NaNs: p0: {p0:?}, p1: {p1:?}");
     bbox.add_pt(p0);
     bbox.add_pt(p1);
     lines[line_ix] = LineSoup {
@@ -104,24 +92,10 @@ fn write_line_with_transform(
     bbox: &mut IntBbox,
     lines: &mut [LineSoup],
 ) {
-    write_line(
-        line_ix,
-        path_ix,
-        transform.apply(p0),
-        transform.apply(p1),
-        bbox,
-        lines,
-    );
+    write_line(line_ix, path_ix, transform.apply(p0), transform.apply(p1), bbox, lines);
 }
 
-fn output_line(
-    path_ix: u32,
-    p0: Vec2,
-    p1: Vec2,
-    line_ix: &mut usize,
-    bbox: &mut IntBbox,
-    lines: &mut [LineSoup],
-) {
+fn output_line(path_ix: u32, p0: Vec2, p1: Vec2, line_ix: &mut usize, bbox: &mut IntBbox, lines: &mut [LineSoup]) {
     write_line(*line_ix, path_ix, p0, p1, bbox, lines);
     *line_ix += 1;
 }
@@ -223,23 +197,10 @@ fn flatten_euler(
         )
     } else {
         let t = local_to_device.0;
-        let scale = 0.5
-            * (Vec2::new(t[0] + t[3], t[1] - t[2]).length()
-                + Vec2::new(t[0] - t[3], t[1] + t[2]).length());
-        (
-            cubic.p0,
-            cubic.p1,
-            cubic.p2,
-            cubic.p3,
-            scale,
-            local_to_device.clone(),
-        )
+        let scale = 0.5 * (Vec2::new(t[0] + t[3], t[1] - t[2]).length() + Vec2::new(t[0] - t[3], t[1] + t[2]).length());
+        (cubic.p0, cubic.p1, cubic.p2, cubic.p3, scale, local_to_device.clone())
     };
-    let (t_start, t_end) = if offset == 0.0 {
-        (p0, p3)
-    } else {
-        (start_p, end_p)
-    };
+    let (t_start, t_end) = if offset == 0.0 { (p0, p3) } else { (start_p, end_p) };
 
     // Drop zero length lines. This is an exact equality test because dropping very short
     // line segments may result in loss of watertightness. The parallel curves of zero
@@ -282,8 +243,7 @@ fn flatten_euler(
             }
         }
         let actual_dt = t1 - last_t;
-        let cubic_params =
-            CubicParams::from_points_derivs(this_p0, this_p1, this_q0, this_q1, actual_dt);
+        let cubic_params = CubicParams::from_points_derivs(this_p0, this_p1, this_q0, this_q1, actual_dt);
         log!(
             "@@@   loop: p0={this_p0:?} p1={this_p1:?} q0={this_q0:?} q1={this_q1:?} {cubic_params:?} t0: {t0}, t1: {t1}, dt: {dt}"
         );
@@ -298,9 +258,7 @@ fn flatten_euler(
             let normalized_offset = offset / cubic_params.chord_len;
             let dist_scaled = normalized_offset * es.params.ch;
             // The number of subdivisions for curvature = 1
-            let scale_multiplier = 0.5
-                * FRAC_1_SQRT_2
-                * (scale * cubic_params.chord_len / (es.params.ch * tol)).sqrt();
+            let scale_multiplier = 0.5 * FRAC_1_SQRT_2 * (scale * cubic_params.chord_len / (es.params.ch * tol)).sqrt();
             // TODO: tune these thresholds
             const K1_THRESH: f32 = 1e-3;
             const DIST_THRESH: f32 = 1e-3;
@@ -448,18 +406,14 @@ fn draw_join(
     match style_flags & Style::FLAGS_JOIN_MASK {
         Style::FLAGS_JOIN_BITS_BEVEL => {
             if front0 != front1 && back0 != back1 {
-                output_two_lines_with_transform(
-                    path_ix, front0, front1, back0, back1, transform, line_ix, lines, bbox,
-                );
+                output_two_lines_with_transform(path_ix, front0, front1, back0, back1, transform, line_ix, lines, bbox);
             }
         }
         Style::FLAGS_JOIN_BITS_MITER => {
             let hypot = cr.hypot(d);
             let miter_limit = f16_to_f32((style_flags & Style::MITER_LIMIT_MASK) as u16);
 
-            if 2. * hypot < (hypot + d) * miter_limit * miter_limit
-                && cr.abs() > TANGENT_THRESH.powi(2)
-            {
+            if 2. * hypot < (hypot + d) * miter_limit * miter_limit && cr.abs() > TANGENT_THRESH.powi(2) {
                 let is_backside = cr > 0.;
                 let fp_last = if is_backside { back1 } else { front0 };
                 let fp_this = if is_backside { back0 } else { front1 };
@@ -477,9 +431,7 @@ fn draw_join(
                     front0 = miter_pt;
                 }
             }
-            output_two_lines_with_transform(
-                path_ix, front0, front1, back0, back1, transform, line_ix, lines, bbox,
-            );
+            output_two_lines_with_transform(path_ix, front0, front1, back0, back1, transform, line_ix, lines, bbox);
         }
         Style::FLAGS_JOIN_BITS_ROUND => {
             let (arc0, arc1, other0, other1) = if cr > 0. {
@@ -564,10 +516,7 @@ fn compute_tag_monoid(ix: usize, pathtags: &[u32], tag_monoids: &[PathMonoid]) -
     // (when we add style_base)
     tm.trans_ix = tm.trans_ix.wrapping_sub(1);
     tm.style_ix = tm.style_ix.wrapping_sub(size_of::<Style>() as u32 / 4);
-    PathTagData {
-        tag_byte,
-        monoid: tm,
-    }
+    PathTagData { tag_byte, monoid: tm }
 }
 
 #[derive(Debug)]
@@ -700,8 +649,7 @@ fn flatten_main(
             let pts = read_path_segment(&tag, is_stroke, pathdata);
 
             if is_stroke {
-                let linewidth =
-                    f32::from_bits(scene[(config.layout.style_base + style_ix + 1) as usize]);
+                let linewidth = f32::from_bits(scene[(config.layout.style_base + style_ix + 1) as usize]);
                 let offset = 0.5 * linewidth;
 
                 let is_open = seg_type != PATH_TAG_LINETO;
@@ -729,8 +677,7 @@ fn flatten_main(
                     }
                 } else {
                     // Read the neighboring segment.
-                    let neighbor =
-                        read_neighboring_segment(ix + 1, pathtags, pathdata, tag_monoids);
+                    let neighbor = read_neighboring_segment(ix + 1, pathtags, pathdata, tag_monoids);
                     let tan_prev = cubic_end_tangent(pts.p0, pts.p1, pts.p2, pts.p3);
                     let tan_next = neighbor.tangent;
                     let tan_start = cubic_start_tangent(pts.p0, pts.p1, pts.p2, pts.p3);

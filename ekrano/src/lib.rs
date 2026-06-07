@@ -54,11 +54,7 @@
 // Feel free to send a PR that solves one or more of these.
 // Need to allow instead of expect until Rust 1.83 https://github.com/rust-lang/rust/pull/130025
 #![allow(missing_docs, reason = "We have many as-yet undocumented items.")]
-#![expect(
-    missing_debug_implementations,
-    clippy::cast_possible_truncation,
-    reason = "Deferred"
-)]
+#![expect(missing_debug_implementations, clippy::cast_possible_truncation, reason = "Deferred")]
 #![allow(
     clippy::todo,
     unreachable_pub,
@@ -94,9 +90,7 @@ pub use peniko::kurbo;
 
 pub use goldy::placement_heap::PlacementHeapStats;
 pub use goldy::{Frame, TimelineValue};
-pub use goldy_renderer::{
-    AllocatorStats, FrameStats, GoldyRenderer, PreparedFrame, ResourcePoolStats,
-};
+pub use goldy_renderer::{AllocatorStats, FrameStats, GoldyRenderer, PreparedFrame, ResourcePoolStats};
 
 pub use ekrano_encoding::{Glyph, NormalizedCoord};
 pub use scene::{DrawGlyphs, Scene};

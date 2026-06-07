@@ -61,12 +61,8 @@ impl Mul for Transform {
                 self.matrix[1] * other.matrix[2] + self.matrix[3] * other.matrix[3],
             ],
             translation: [
-                self.matrix[0] * other.translation[0]
-                    + self.matrix[2] * other.translation[1]
-                    + self.translation[0],
-                self.matrix[1] * other.translation[0]
-                    + self.matrix[3] * other.translation[1]
-                    + self.translation[1],
+                self.matrix[0] * other.translation[0] + self.matrix[2] * other.translation[1] + self.translation[0],
+                self.matrix[1] * other.translation[0] + self.matrix[3] * other.translation[1] + self.translation[1],
             ],
         }
     }

@@ -83,10 +83,7 @@ fn placement_heap_paged_stable() {
             capacities.push(stats.capacity);
 
             if i < 10 || i % 50 == 0 || i == FRAME_COUNT - 1 {
-                eprintln!(
-                    "{i:>6}  {:>10.2}",
-                    stats.capacity as f64 / (1024.0 * 1024.0),
-                );
+                eprintln!("{i:>6}  {:>10.2}", stats.capacity as f64 / (1024.0 * 1024.0),);
             }
         }
     }

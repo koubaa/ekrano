@@ -3,10 +3,7 @@
 
 //! Utility functions for Euler Spiral based stroke expansion.
 
-#![expect(
-    clippy::excessive_precision,
-    reason = "Uses the same constants as the f64 version"
-)]
+#![expect(clippy::excessive_precision, reason = "Uses the same constants as the f64 version")]
 
 use super::util::Vec2;
 use std::f32::consts::FRAC_PI_4;
@@ -89,16 +86,10 @@ impl CubicParams {
             };
         }
         let scale = dt / chord_squared;
-        let h0 = Vec2::new(
-            q0.x * chord.x + q0.y * chord.y,
-            q0.y * chord.x - q0.x * chord.y,
-        );
+        let h0 = Vec2::new(q0.x * chord.x + q0.y * chord.y, q0.y * chord.x - q0.x * chord.y);
         let th0 = h0.atan2();
         let d0 = h0.length() * scale;
-        let h1 = Vec2::new(
-            q1.x * chord.x + q1.y * chord.y,
-            q1.x * chord.y - q1.y * chord.x,
-        );
+        let h1 = Vec2::new(q1.x * chord.x + q1.y * chord.y, q1.x * chord.y - q1.y * chord.x);
         let th1 = h1.atan2();
         let d1 = h1.length() * scale;
         // Robustness note: we may want to clamp the magnitude of the angles to

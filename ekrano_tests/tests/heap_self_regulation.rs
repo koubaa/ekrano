@@ -85,13 +85,7 @@ fn complex_scene() -> Scene {
     scene
 }
 
-fn render_n_frames(
-    device: &Device,
-    renderer: &mut GoldyRenderer,
-    scene: &Scene,
-    params: &RenderParams,
-    n: usize,
-) {
+fn render_n_frames(device: &Device, renderer: &mut GoldyRenderer, scene: &Scene, params: &RenderParams, n: usize) {
     let texture = device
         .alloc_texture(
             params.width,
