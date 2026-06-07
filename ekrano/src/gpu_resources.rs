@@ -249,23 +249,96 @@ pub(crate) fn clear_gpu_buf(
     Ok(())
 }
 
-/// Cached GPU buffers that survive across frames when `buffer_sizes` is stable.
-///
-/// At depth=1 the previous frame's GPU work is complete by the time `begin_frame`
-/// returns, so these buffers are safe to rebind immediately. All handles are
-/// persistent `ResourcePool` allocations with stable bindless indices.
-pub(crate) struct CachedPipeline {
+/// Reuse a cached buffer if one is available, or allocate a fresh one from the pool.
+fn al_cached_opt(
+    recorder: &mut FrameRecorder<'_>,
+    cached: Option<Buffer>,
+    size: u64,
+    stride: u32,
+    name: &'static str,
+) -> Result<Buffer, Error> {
+    match cached {
+        Some(buf) => Ok(buf),
+        None => alloc_pipeline_buffer(recorder, size, stride, name, BufferFlags::empty()),
+    }
+}
+
+/// The seven large pipeline buffers whose sizes are fixed or change only on coarse
+/// config changes — "retained-shaped": allocate once, reuse in place across frames.
+/// See `resource-pool.md §1` for the rationale behind this split from [`ScratchPipelineBuffers`].
+pub(crate) struct StablePipelineBuffers {
     pub info_bin_data: Buffer,
     pub tile: Buffer,
     pub segments: Buffer,
     pub ptcl: Buffer,
+    /// Used only by fine, but allocated in the shared pre-flush phase to avoid
+    /// splitting `prepare` into two phases.
     pub blend_spill: Buffer,
+    pub lines: Buffer,
+    pub seg_counts: Buffer,
+}
+
+impl StablePipelineBuffers {
+    fn alloc(
+        recorder: &mut FrameRecorder<'_>,
+        cached: Option<Self>,
+        bs: &ekrano_encoding::BufferSizes,
+    ) -> Result<Self, Error> {
+        let (c_ibd, c_tile, c_seg, c_ptcl, c_bs, c_lines, c_sc) = match cached {
+            Some(c) => (
+                Some(c.info_bin_data),
+                Some(c.tile),
+                Some(c.segments),
+                Some(c.ptcl),
+                Some(c.blend_spill),
+                Some(c.lines),
+                Some(c.seg_counts),
+            ),
+            None => (None, None, None, None, None, None, None),
+        };
+        Ok(Self {
+            info_bin_data: al_cached_opt(recorder, c_ibd, bs.bin_data.size_in_bytes() as u64, 4, "ekrano.info_bin_data_buf")?,
+            tile: al_cached_opt(recorder, c_tile, bs.tiles.size_in_bytes().into(), 8, "ekrano.tile_buf")?,
+            segments: al_cached_opt(recorder, c_seg, bs.segments.size_in_bytes().into(), 24, "ekrano.segments_buf")?,
+            ptcl: al_cached_opt(recorder, c_ptcl, bs.ptcl.size_in_bytes().into(), 4, "ekrano.ptcl_buf")?,
+            blend_spill: al_cached_opt(recorder, c_bs, bs.blend_spill.size_in_bytes().into(), size_of::<u32>() as u32, "ekrano.blend_spill")?,
+            lines: al_cached_opt(recorder, c_lines, bs.lines.size_in_bytes().into(), 24, "ekrano.lines_buf")?,
+            seg_counts: al_cached_opt(recorder, c_sc, bs.seg_counts.size_in_bytes().into(), 8, "ekrano.seg_counts_buf")?,
+        })
+    }
+
+    fn return_to_pool(self, recorder: &mut FrameRecorder<'_>) {
+        let pool = &mut recorder.persistent.pool;
+        pool.return_buf(self.info_bin_data, "ekrano.info_bin_data_buf");
+        pool.return_buf(self.tile, "ekrano.tile_buf");
+        pool.return_buf(self.segments, "ekrano.segments_buf");
+        pool.return_buf(self.ptcl, "ekrano.ptcl_buf");
+        pool.return_buf(self.blend_spill, "ekrano.blend_spill");
+        pool.return_buf(self.lines, "ekrano.lines_buf");
+        pool.return_buf(self.seg_counts, "ekrano.seg_counts_buf");
+    }
+
+    pub(crate) fn defer_to(self, recorder: &mut FrameRecorder<'_>) {
+        recorder.defer_owned_buffer(self.info_bin_data, "ekrano.info_bin_data_buf");
+        recorder.defer_owned_buffer(self.tile, "ekrano.tile_buf");
+        recorder.defer_owned_buffer(self.segments, "ekrano.segments_buf");
+        recorder.defer_owned_buffer(self.ptcl, "ekrano.ptcl_buf");
+        recorder.defer_owned_buffer(self.blend_spill, "ekrano.blend_spill");
+        recorder.defer_owned_buffer(self.lines, "ekrano.lines_buf");
+        recorder.defer_owned_buffer(self.seg_counts, "ekrano.seg_counts_buf");
+    }
+}
+
+/// The fourteen count-derived scratch buffers whose sizes track scene complexity.
+/// These stay in [`crate::goldy_renderer::ResourcePool`], recycled by
+/// `{size, access, name, flags}`.
+/// See `resource-pool.md §1` for the rationale behind this split from [`StablePipelineBuffers`].
+pub(crate) struct ScratchPipelineBuffers {
     pub reduced: Buffer,
     pub reduced2: Buffer,
     pub reduced_scan: Buffer,
     pub tagmonoid: Buffer,
     pub path_bbox: Buffer,
-    pub lines: Buffer,
     pub draw_reduced: Buffer,
     pub draw_monoid: Buffer,
     pub clip_inp: Buffer,
@@ -275,7 +348,92 @@ pub(crate) struct CachedPipeline {
     pub draw_bbox: Buffer,
     pub bin_header: Buffer,
     pub path: Buffer,
-    pub seg_counts: Buffer,
+}
+
+impl ScratchPipelineBuffers {
+    fn alloc(
+        recorder: &mut FrameRecorder<'_>,
+        cached: Option<Self>,
+        bs: &ekrano_encoding::BufferSizes,
+    ) -> Result<Self, Error> {
+        let (
+            c_red, c_red2, c_reds, c_tag, c_pbbox,
+            c_dred, c_dmon, c_ci, c_ce, c_cb,
+            c_cbb, c_db, c_bh, c_path,
+        ) = match cached {
+            Some(c) => (
+                Some(c.reduced), Some(c.reduced2), Some(c.reduced_scan), Some(c.tagmonoid),
+                Some(c.path_bbox), Some(c.draw_reduced), Some(c.draw_monoid),
+                Some(c.clip_inp), Some(c.clip_el), Some(c.clip_bic),
+                Some(c.clip_bbox), Some(c.draw_bbox), Some(c.bin_header), Some(c.path),
+            ),
+            None => (
+                None, None, None, None, None, None, None,
+                None, None, None, None, None, None, None,
+            ),
+        };
+        Ok(Self {
+            reduced: al_cached_opt(recorder, c_red, bs.path_reduced.size_in_bytes().into(), 20, "ekrano.reduced_buf")?,
+            reduced2: al_cached_opt(recorder, c_red2, bs.path_reduced2.size_in_bytes().into(), 20, "ekrano.reduced2_buf")?,
+            reduced_scan: al_cached_opt(recorder, c_reds, bs.path_reduced_scan.size_in_bytes().into(), 20, "ekrano.reduced_scan_buf")?,
+            tagmonoid: al_cached_opt(recorder, c_tag, bs.path_monoids.size_in_bytes().into(), 20, "ekrano.tagmonoid_buf")?,
+            path_bbox: al_cached_opt(recorder, c_pbbox, bs.path_bboxes.size_in_bytes().into(), 24, "ekrano.path_bbox_buf")?,
+            draw_reduced: al_cached_opt(recorder, c_dred, bs.draw_reduced.size_in_bytes().into(), 16, "ekrano.draw_reduced_buf")?,
+            draw_monoid: al_cached_opt(recorder, c_dmon, bs.draw_monoids.size_in_bytes().into(), 16, "ekrano.draw_monoid_buf")?,
+            clip_inp: al_cached_opt(recorder, c_ci, bs.clip_inps.size_in_bytes().into(), 8, "ekrano.clip_inp_buf")?,
+            clip_el: al_cached_opt(recorder, c_ce, bs.clip_els.size_in_bytes().into(), 32, "ekrano.clip_el_buf")?,
+            clip_bic: al_cached_opt(recorder, c_cb, bs.clip_bics.size_in_bytes().into(), 8, "ekrano.clip_bic_buf")?,
+            clip_bbox: al_cached_opt(recorder, c_cbb, bs.clip_bboxes.size_in_bytes().into(), 16, "ekrano.clip_bbox_buf")?,
+            draw_bbox: al_cached_opt(recorder, c_db, bs.draw_bboxes.size_in_bytes().into(), 16, "ekrano.draw_bbox_buf")?,
+            bin_header: al_cached_opt(recorder, c_bh, bs.bin_headers.size_in_bytes().into(), 8, "ekrano.bin_header_buf")?,
+            path: al_cached_opt(recorder, c_path, bs.paths.size_in_bytes().into(), 32, "ekrano.path_buf")?,
+        })
+    }
+
+    fn return_to_pool(self, recorder: &mut FrameRecorder<'_>) {
+        let pool = &mut recorder.persistent.pool;
+        pool.return_buf(self.reduced, "ekrano.reduced_buf");
+        pool.return_buf(self.reduced2, "ekrano.reduced2_buf");
+        pool.return_buf(self.reduced_scan, "ekrano.reduced_scan_buf");
+        pool.return_buf(self.tagmonoid, "ekrano.tagmonoid_buf");
+        pool.return_buf(self.path_bbox, "ekrano.path_bbox_buf");
+        pool.return_buf(self.draw_reduced, "ekrano.draw_reduced_buf");
+        pool.return_buf(self.draw_monoid, "ekrano.draw_monoid_buf");
+        pool.return_buf(self.clip_inp, "ekrano.clip_inp_buf");
+        pool.return_buf(self.clip_el, "ekrano.clip_el_buf");
+        pool.return_buf(self.clip_bic, "ekrano.clip_bic_buf");
+        pool.return_buf(self.clip_bbox, "ekrano.clip_bbox_buf");
+        pool.return_buf(self.draw_bbox, "ekrano.draw_bbox_buf");
+        pool.return_buf(self.bin_header, "ekrano.bin_header_buf");
+        pool.return_buf(self.path, "ekrano.path_buf");
+    }
+
+    pub(crate) fn defer_to(self, recorder: &mut FrameRecorder<'_>) {
+        recorder.defer_owned_buffer(self.reduced, "ekrano.reduced_buf");
+        recorder.defer_owned_buffer(self.reduced2, "ekrano.reduced2_buf");
+        recorder.defer_owned_buffer(self.reduced_scan, "ekrano.reduced_scan_buf");
+        recorder.defer_owned_buffer(self.tagmonoid, "ekrano.tagmonoid_buf");
+        recorder.defer_owned_buffer(self.path_bbox, "ekrano.path_bbox_buf");
+        recorder.defer_owned_buffer(self.draw_reduced, "ekrano.draw_reduced_buf");
+        recorder.defer_owned_buffer(self.draw_monoid, "ekrano.draw_monoid_buf");
+        recorder.defer_owned_buffer(self.clip_inp, "ekrano.clip_inp_buf");
+        recorder.defer_owned_buffer(self.clip_el, "ekrano.clip_el_buf");
+        recorder.defer_owned_buffer(self.clip_bic, "ekrano.clip_bic_buf");
+        recorder.defer_owned_buffer(self.clip_bbox, "ekrano.clip_bbox_buf");
+        recorder.defer_owned_buffer(self.draw_bbox, "ekrano.draw_bbox_buf");
+        recorder.defer_owned_buffer(self.bin_header, "ekrano.bin_header_buf");
+        recorder.defer_owned_buffer(self.path, "ekrano.path_buf");
+    }
+}
+
+/// Cached GPU buffers that survive across frames when `buffer_sizes` is stable.
+///
+/// At depth=1 the previous frame's GPU work is complete by the time `begin_frame`
+/// returns, so these buffers are safe to rebind immediately. All handles are
+/// persistent `ResourcePool` allocations with stable bindless indices.
+pub(crate) struct CachedPipeline {
+    pub stable: StablePipelineBuffers,
+    pub scratch: ScratchPipelineBuffers,
     pub buffer_sizes: ekrano_encoding::BufferSizes,
 }
 
@@ -286,28 +444,9 @@ pub(crate) struct PipelineResources {
     pub scene: Buffer,
     pub config: Buffer,
     pub indirect: Option<Buffer>,
-    pub info_bin_data: Buffer,
-    pub tile: Buffer,
-    pub segments: Buffer,
-    pub ptcl: Buffer,
-    pub reduced: Buffer,
-    pub reduced2: Buffer,
-    pub reduced_scan: Buffer,
-    pub tagmonoid: Buffer,
-    pub path_bbox: Buffer,
+    pub stable: StablePipelineBuffers,
+    pub scratch: ScratchPipelineBuffers,
     pub bump: Buffer,
-    pub lines: Buffer,
-    pub draw_reduced: Buffer,
-    pub draw_monoid: Buffer,
-    pub clip_inp: Buffer,
-    pub clip_el: Buffer,
-    pub clip_bic: Buffer,
-    pub clip_bbox: Buffer,
-    pub draw_bbox: Buffer,
-    pub bin_header: Buffer,
-    pub path: Buffer,
-    pub seg_counts: Buffer,
-    pub blend_spill: Buffer,
     pub out_image: Texture,
     pub filter_layers: [Texture; 4],
     /// Buffer sizes used this frame, stored for cache-key comparison next frame.
@@ -439,213 +578,26 @@ impl PipelineResources {
         // Try to reuse cached pipeline buffers from the previous frame.
         // At depth=1, begin_frame blocks until the previous frame's GPU work is complete,
         // so these buffers are safe to rebind immediately without any fence check.
-        struct CachedOwnedBuffers {
-            info_bin_data: Option<Buffer>,
-            tile: Option<Buffer>,
-            segments: Option<Buffer>,
-            ptcl: Option<Buffer>,
-            blend_spill: Option<Buffer>,
-            reduced: Option<Buffer>,
-            reduced2: Option<Buffer>,
-            reduced_scan: Option<Buffer>,
-            tagmonoid: Option<Buffer>,
-            path_bbox: Option<Buffer>,
-            lines: Option<Buffer>,
-            draw_reduced: Option<Buffer>,
-            draw_monoid: Option<Buffer>,
-            clip_inp: Option<Buffer>,
-            clip_el: Option<Buffer>,
-            clip_bic: Option<Buffer>,
-            clip_bbox: Option<Buffer>,
-            draw_bbox: Option<Buffer>,
-            bin_header: Option<Buffer>,
-            path: Option<Buffer>,
-            seg_counts: Option<Buffer>,
-        }
-        let cached = {
+        let (cached_stable, cached_scratch) = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.pipeline_cache");
             match recorder.persistent.take_cached_pipeline(gpu_progress) {
-                Some(c) if c.buffer_sizes == buffer_sizes => CachedOwnedBuffers {
-                    info_bin_data: Some(c.info_bin_data),
-                    tile: Some(c.tile),
-                    segments: Some(c.segments),
-                    ptcl: Some(c.ptcl),
-                    blend_spill: Some(c.blend_spill),
-                    reduced: Some(c.reduced),
-                    reduced2: Some(c.reduced2),
-                    reduced_scan: Some(c.reduced_scan),
-                    tagmonoid: Some(c.tagmonoid),
-                    path_bbox: Some(c.path_bbox),
-                    lines: Some(c.lines),
-                    draw_reduced: Some(c.draw_reduced),
-                    draw_monoid: Some(c.draw_monoid),
-                    clip_inp: Some(c.clip_inp),
-                    clip_el: Some(c.clip_el),
-                    clip_bic: Some(c.clip_bic),
-                    clip_bbox: Some(c.clip_bbox),
-                    draw_bbox: Some(c.draw_bbox),
-                    bin_header: Some(c.bin_header),
-                    path: Some(c.path),
-                    seg_counts: Some(c.seg_counts),
-                },
+                Some(c) if c.buffer_sizes == buffer_sizes => (Some(c.stable), Some(c.scratch)),
                 Some(c) => {
                     // Sizes changed: return stale buffers to pool before discarding.
-                    recorder
-                        .persistent
-                        .pool
-                        .return_buf(c.info_bin_data, "ekrano.info_bin_data_buf");
-                    recorder.persistent.pool.return_buf(c.tile, "ekrano.tile_buf");
-                    recorder.persistent.pool.return_buf(c.segments, "ekrano.segments_buf");
-                    recorder.persistent.pool.return_buf(c.ptcl, "ekrano.ptcl_buf");
-                    recorder.persistent.pool.return_buf(c.blend_spill, "ekrano.blend_spill");
-                    recorder.persistent.pool.return_buf(c.reduced, "ekrano.reduced_buf");
-                    recorder.persistent.pool.return_buf(c.reduced2, "ekrano.reduced2_buf");
-                    recorder
-                        .persistent
-                        .pool
-                        .return_buf(c.reduced_scan, "ekrano.reduced_scan_buf");
-                    recorder.persistent.pool.return_buf(c.tagmonoid, "ekrano.tagmonoid_buf");
-                    recorder.persistent.pool.return_buf(c.path_bbox, "ekrano.path_bbox_buf");
-                    recorder.persistent.pool.return_buf(c.lines, "ekrano.lines_buf");
-                    recorder
-                        .persistent
-                        .pool
-                        .return_buf(c.draw_reduced, "ekrano.draw_reduced_buf");
-                    recorder
-                        .persistent
-                        .pool
-                        .return_buf(c.draw_monoid, "ekrano.draw_monoid_buf");
-                    recorder.persistent.pool.return_buf(c.clip_inp, "ekrano.clip_inp_buf");
-                    recorder.persistent.pool.return_buf(c.clip_el, "ekrano.clip_el_buf");
-                    recorder.persistent.pool.return_buf(c.clip_bic, "ekrano.clip_bic_buf");
-                    recorder.persistent.pool.return_buf(c.clip_bbox, "ekrano.clip_bbox_buf");
-                    recorder.persistent.pool.return_buf(c.draw_bbox, "ekrano.draw_bbox_buf");
-                    recorder
-                        .persistent
-                        .pool
-                        .return_buf(c.bin_header, "ekrano.bin_header_buf");
-                    recorder.persistent.pool.return_buf(c.path, "ekrano.path_buf");
-                    recorder
-                        .persistent
-                        .pool
-                        .return_buf(c.seg_counts, "ekrano.seg_counts_buf");
-                    CachedOwnedBuffers {
-                        info_bin_data: None,
-                        tile: None,
-                        segments: None,
-                        ptcl: None,
-                        blend_spill: None,
-                        reduced: None,
-                        reduced2: None,
-                        reduced_scan: None,
-                        tagmonoid: None,
-                        path_bbox: None,
-                        lines: None,
-                        draw_reduced: None,
-                        draw_monoid: None,
-                        clip_inp: None,
-                        clip_el: None,
-                        clip_bic: None,
-                        clip_bbox: None,
-                        draw_bbox: None,
-                        bin_header: None,
-                        path: None,
-                        seg_counts: None,
-                    }
+                    log::debug!("[PIPE-CACHE] buffer_sizes mismatch — returning stale buffers to pool");
+                    c.stable.return_to_pool(recorder);
+                    c.scratch.return_to_pool(recorder);
+                    (None, None)
                 }
-                None => CachedOwnedBuffers {
-                    info_bin_data: None,
-                    tile: None,
-                    segments: None,
-                    ptcl: None,
-                    blend_spill: None,
-                    reduced: None,
-                    reduced2: None,
-                    reduced_scan: None,
-                    tagmonoid: None,
-                    path_bbox: None,
-                    lines: None,
-                    draw_reduced: None,
-                    draw_monoid: None,
-                    clip_inp: None,
-                    clip_el: None,
-                    clip_bic: None,
-                    clip_bbox: None,
-                    draw_bbox: None,
-                    bin_header: None,
-                    path: None,
-                    seg_counts: None,
-                },
+                None => (None, None),
             }
         }; // end ekrano.prepare.pipeline_cache zone
 
         let _tz_alloc = goldy::tracy_zone!("ekrano.prepare.alloc_buffers");
         // Reuse from cache when sizes match (no ResourcePool round-trip). These buffers
         // are fully GPU-overwritten before first read.
-        macro_rules! al_cached {
-            ($cached_opt:expr, $sz:expr, $stride:expr, $name:expr) => {
-                match $cached_opt {
-                    Some(buf) => buf,
-                    None => alloc_pipeline_buffer(recorder, $sz, $stride, $name, BufferFlags::empty())?,
-                }
-            };
-        }
-
-        // Shared: written by coarse, read by fine.
-        let info_bin_data = al_cached!(
-            cached.info_bin_data,
-            buffer_sizes.bin_data.size_in_bytes() as u64,
-            4,
-            "ekrano.info_bin_data_buf"
-        );
-        let tile = al_cached!(
-            cached.tile,
-            buffer_sizes.tiles.size_in_bytes().into(),
-            8,
-            "ekrano.tile_buf"
-        );
-        let segments = al_cached!(
-            cached.segments,
-            buffer_sizes.segments.size_in_bytes().into(),
-            24,
-            "ekrano.segments_buf"
-        );
-        let ptcl = al_cached!(
-            cached.ptcl,
-            buffer_sizes.ptcl.size_in_bytes().into(),
-            4,
-            "ekrano.ptcl_buf"
-        );
-        let reduced = al_cached!(
-            cached.reduced,
-            buffer_sizes.path_reduced.size_in_bytes().into(),
-            20,
-            "ekrano.reduced_buf"
-        );
-        let reduced2 = al_cached!(
-            cached.reduced2,
-            buffer_sizes.path_reduced2.size_in_bytes().into(),
-            20,
-            "ekrano.reduced2_buf"
-        );
-        let reduced_scan = al_cached!(
-            cached.reduced_scan,
-            buffer_sizes.path_reduced_scan.size_in_bytes().into(),
-            20,
-            "ekrano.reduced_scan_buf"
-        );
-        let tagmonoid = al_cached!(
-            cached.tagmonoid,
-            buffer_sizes.path_monoids.size_in_bytes().into(),
-            20,
-            "ekrano.tagmonoid_buf"
-        );
-        let path_bbox = al_cached!(
-            cached.path_bbox,
-            buffer_sizes.path_bboxes.size_in_bytes().into(),
-            24,
-            "ekrano.path_bbox_buf"
-        );
+        let stable = StablePipelineBuffers::alloc(recorder, cached_stable, &buffer_sizes)?;
+        let scratch = ScratchPipelineBuffers::alloc(recorder, cached_scratch, &buffer_sizes)?;
         let bump = alloc_pipeline_buffer(
             recorder,
             buffer_sizes.bump_alloc.size_in_bytes().into(),
@@ -654,80 +606,6 @@ impl PipelineResources {
             BufferFlags::CPU_READABLE,
         )?;
         clear_gpu_buf(recorder, &bump, 0, None)?;
-        let lines = al_cached!(
-            cached.lines,
-            buffer_sizes.lines.size_in_bytes().into(),
-            24,
-            "ekrano.lines_buf"
-        );
-        let draw_reduced = al_cached!(
-            cached.draw_reduced,
-            buffer_sizes.draw_reduced.size_in_bytes().into(),
-            16,
-            "ekrano.draw_reduced_buf"
-        );
-        let draw_monoid = al_cached!(
-            cached.draw_monoid,
-            buffer_sizes.draw_monoids.size_in_bytes().into(),
-            16,
-            "ekrano.draw_monoid_buf"
-        );
-        let clip_inp = al_cached!(
-            cached.clip_inp,
-            buffer_sizes.clip_inps.size_in_bytes().into(),
-            8,
-            "ekrano.clip_inp_buf"
-        );
-        let clip_el = al_cached!(
-            cached.clip_el,
-            buffer_sizes.clip_els.size_in_bytes().into(),
-            32,
-            "ekrano.clip_el_buf"
-        );
-        let clip_bic = al_cached!(
-            cached.clip_bic,
-            buffer_sizes.clip_bics.size_in_bytes().into(),
-            8,
-            "ekrano.clip_bic_buf"
-        );
-        let clip_bbox = al_cached!(
-            cached.clip_bbox,
-            buffer_sizes.clip_bboxes.size_in_bytes().into(),
-            16,
-            "ekrano.clip_bbox_buf"
-        );
-        let draw_bbox = al_cached!(
-            cached.draw_bbox,
-            buffer_sizes.draw_bboxes.size_in_bytes().into(),
-            16,
-            "ekrano.draw_bbox_buf"
-        );
-        let bin_header = al_cached!(
-            cached.bin_header,
-            buffer_sizes.bin_headers.size_in_bytes().into(),
-            8,
-            "ekrano.bin_header_buf"
-        );
-        let path = al_cached!(
-            cached.path,
-            buffer_sizes.paths.size_in_bytes().into(),
-            32,
-            "ekrano.path_buf"
-        );
-        let seg_counts = al_cached!(
-            cached.seg_counts,
-            buffer_sizes.seg_counts.size_in_bytes().into(),
-            8,
-            "ekrano.seg_counts_buf"
-        );
-        // blend_spill is used only by fine, but allocating it as Shared (pre-flush)
-        // avoids the need to split prepare() into two phases.
-        let blend_spill = al_cached!(
-            cached.blend_spill,
-            buffer_sizes.blend_spill.size_in_bytes().into(),
-            size_of::<u32>() as u32,
-            "ekrano.blend_spill"
-        );
 
         // Try to reuse cached render targets from the previous frame (avoids TexturePool
         // round-trips when render dimensions are stable across frames).
@@ -775,28 +653,9 @@ impl PipelineResources {
             scene,
             config,
             indirect: None,
-            info_bin_data,
-            tile,
-            segments,
-            ptcl,
-            reduced,
-            reduced2,
-            reduced_scan,
-            tagmonoid,
-            path_bbox,
+            stable,
+            scratch,
             bump,
-            lines,
-            draw_reduced,
-            draw_monoid,
-            clip_inp,
-            clip_el,
-            clip_bic,
-            clip_bbox,
-            draw_bbox,
-            bin_header,
-            path,
-            seg_counts,
-            blend_spill,
             out_image,
             filter_layers,
             buffer_sizes,

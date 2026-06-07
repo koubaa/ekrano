@@ -164,7 +164,7 @@ impl Render {
             &[
                 pipeline.config.as_binding(),
                 pipeline.scene.as_binding(),
-                pipeline.reduced.as_binding(),
+                pipeline.scratch.reduced.as_binding(),
             ],
         );
         dispatch_stage(
@@ -173,7 +173,7 @@ impl Render {
             shaders.pathtag_reduce2,
             STAGE_PATHTAG_REDUCE2,
             INDIRECT_STRIDE,
-            &[pipeline.reduced.as_binding(), pipeline.reduced2.as_binding()],
+            &[pipeline.scratch.reduced.as_binding(), pipeline.scratch.reduced2.as_binding()],
         );
         dispatch_stage(
             recorder,
@@ -182,9 +182,9 @@ impl Render {
             STAGE_PATHTAG_SCAN1,
             INDIRECT_STRIDE,
             &[
-                pipeline.reduced.as_binding(),
-                pipeline.reduced2.as_binding(),
-                pipeline.reduced_scan.as_binding(),
+                pipeline.scratch.reduced.as_binding(),
+                pipeline.scratch.reduced2.as_binding(),
+                pipeline.scratch.reduced_scan.as_binding(),
             ],
         );
         dispatch_stage(
@@ -196,8 +196,8 @@ impl Render {
             &[
                 pipeline.config.as_binding(),
                 pipeline.scene.as_binding(),
-                pipeline.reduced.as_binding(),
-                pipeline.tagmonoid.as_binding(),
+                pipeline.scratch.reduced.as_binding(),
+                pipeline.scratch.tagmonoid.as_binding(),
             ],
         );
         dispatch_stage(
@@ -209,8 +209,8 @@ impl Render {
             &[
                 pipeline.config.as_binding(),
                 pipeline.scene.as_binding(),
-                pipeline.reduced_scan.as_binding(),
-                pipeline.tagmonoid.as_binding(),
+                pipeline.scratch.reduced_scan.as_binding(),
+                pipeline.scratch.tagmonoid.as_binding(),
             ],
         );
 
@@ -220,16 +220,16 @@ impl Render {
             shaders.bbox_clear,
             STAGE_BBOX_CLEAR,
             INDIRECT_STRIDE,
-            &[pipeline.config.as_binding(), pipeline.path_bbox.as_binding()],
+            &[pipeline.config.as_binding(), pipeline.scratch.path_bbox.as_binding()],
         );
 
         let flatten_bindings = [
             pipeline.config.as_binding(),
             pipeline.scene.as_binding(),
-            pipeline.tagmonoid.as_binding(),
-            pipeline.path_bbox.as_binding(),
+            pipeline.scratch.tagmonoid.as_binding(),
+            pipeline.scratch.path_bbox.as_binding(),
             pipeline.bump.as_binding(),
-            pipeline.lines.as_binding(),
+            pipeline.stable.lines.as_binding(),
         ];
         let flat_wg_x = wg_counts.flatten.0;
         if flat_wg_x > MAX_FLATTEN_WG_PER_SUBMIT {
@@ -260,7 +260,7 @@ impl Render {
             &[
                 pipeline.config.as_binding(),
                 pipeline.scene.as_binding(),
-                pipeline.draw_reduced.as_binding(),
+                pipeline.scratch.draw_reduced.as_binding(),
             ],
         );
 
@@ -273,11 +273,11 @@ impl Render {
             &[
                 pipeline.config.as_binding(),
                 pipeline.scene.as_binding(),
-                pipeline.draw_reduced.as_binding(),
-                pipeline.path_bbox.as_binding(),
-                pipeline.draw_monoid.as_binding(),
-                pipeline.info_bin_data.as_binding(),
-                pipeline.clip_inp.as_binding(),
+                pipeline.scratch.draw_reduced.as_binding(),
+                pipeline.scratch.path_bbox.as_binding(),
+                pipeline.scratch.draw_monoid.as_binding(),
+                pipeline.stable.info_bin_data.as_binding(),
+                pipeline.scratch.clip_inp.as_binding(),
             ],
         );
 
@@ -288,10 +288,10 @@ impl Render {
             STAGE_CLIP_REDUCE,
             INDIRECT_STRIDE,
             &[
-                pipeline.clip_inp.as_binding(),
-                pipeline.path_bbox.as_binding(),
-                pipeline.clip_bic.as_binding(),
-                pipeline.clip_el.as_binding(),
+                pipeline.scratch.clip_inp.as_binding(),
+                pipeline.scratch.path_bbox.as_binding(),
+                pipeline.scratch.clip_bic.as_binding(),
+                pipeline.scratch.clip_el.as_binding(),
             ],
         );
         dispatch_stage(
@@ -302,12 +302,12 @@ impl Render {
             INDIRECT_STRIDE,
             &[
                 pipeline.config.as_binding(),
-                pipeline.clip_inp.as_binding(),
-                pipeline.path_bbox.as_binding(),
-                pipeline.clip_bic.as_binding(),
-                pipeline.clip_el.as_binding(),
-                pipeline.draw_monoid.as_binding(),
-                pipeline.clip_bbox.as_binding(),
+                pipeline.scratch.clip_inp.as_binding(),
+                pipeline.scratch.path_bbox.as_binding(),
+                pipeline.scratch.clip_bic.as_binding(),
+                pipeline.scratch.clip_el.as_binding(),
+                pipeline.scratch.draw_monoid.as_binding(),
+                pipeline.scratch.clip_bbox.as_binding(),
             ],
         );
 
@@ -320,13 +320,13 @@ impl Render {
             &[
                 pipeline.config.as_binding(),
                 pipeline.scene.as_binding(),
-                pipeline.draw_monoid.as_binding(),
-                pipeline.path_bbox.as_binding(),
-                pipeline.clip_bbox.as_binding(),
-                pipeline.draw_bbox.as_binding(),
+                pipeline.scratch.draw_monoid.as_binding(),
+                pipeline.scratch.path_bbox.as_binding(),
+                pipeline.scratch.clip_bbox.as_binding(),
+                pipeline.scratch.draw_bbox.as_binding(),
                 pipeline.bump.as_binding(),
-                pipeline.info_bin_data.as_binding(),
-                pipeline.bin_header.as_binding(),
+                pipeline.stable.info_bin_data.as_binding(),
+                pipeline.scratch.bin_header.as_binding(),
             ],
         );
 
@@ -339,10 +339,10 @@ impl Render {
             &[
                 pipeline.config.as_binding(),
                 pipeline.scene.as_binding(),
-                pipeline.draw_bbox.as_binding(),
+                pipeline.scratch.draw_bbox.as_binding(),
                 pipeline.bump.as_binding(),
-                pipeline.path.as_binding(),
-                pipeline.tile.as_binding(),
+                pipeline.scratch.path.as_binding(),
+                pipeline.stable.tile.as_binding(),
             ],
         );
 
@@ -359,10 +359,10 @@ impl Render {
             &[
                 pipeline.config.as_binding(),
                 pipeline.bump.as_binding(),
-                pipeline.lines.as_binding(),
-                pipeline.path.as_binding(),
-                pipeline.tile.as_binding(),
-                pipeline.seg_counts.as_binding(),
+                pipeline.stable.lines.as_binding(),
+                pipeline.scratch.path.as_binding(),
+                pipeline.stable.tile.as_binding(),
+                pipeline.stable.seg_counts.as_binding(),
             ],
         );
 
@@ -375,8 +375,8 @@ impl Render {
             &[
                 pipeline.config.as_binding(),
                 pipeline.bump.as_binding(),
-                pipeline.path.as_binding(),
-                pipeline.tile.as_binding(),
+                pipeline.scratch.path.as_binding(),
+                pipeline.stable.tile.as_binding(),
             ],
         );
 
@@ -389,13 +389,13 @@ impl Render {
             &[
                 pipeline.config.as_binding(),
                 pipeline.scene.as_binding(),
-                pipeline.draw_monoid.as_binding(),
-                pipeline.bin_header.as_binding(),
-                pipeline.info_bin_data.as_binding(),
-                pipeline.path.as_binding(),
-                pipeline.tile.as_binding(),
+                pipeline.scratch.draw_monoid.as_binding(),
+                pipeline.scratch.bin_header.as_binding(),
+                pipeline.stable.info_bin_data.as_binding(),
+                pipeline.scratch.path.as_binding(),
+                pipeline.stable.tile.as_binding(),
                 pipeline.bump.as_binding(),
-                pipeline.ptcl.as_binding(),
+                pipeline.stable.ptcl.as_binding(),
             ],
         );
 
@@ -405,7 +405,7 @@ impl Render {
             &[
                 pipeline.bump.as_binding(),
                 GpuBinding::Buf(indirect_buf),
-                pipeline.ptcl.as_binding(),
+                pipeline.stable.ptcl.as_binding(),
             ],
         );
 
@@ -415,11 +415,11 @@ impl Render {
             u64::from(STAGE_PATH_TILING) * INDIRECT_STRIDE,
             &[
                 pipeline.bump.as_binding(),
-                pipeline.seg_counts.as_binding(),
-                pipeline.lines.as_binding(),
-                pipeline.path.as_binding(),
-                pipeline.tile.as_binding(),
-                pipeline.segments.as_binding(),
+                pipeline.stable.seg_counts.as_binding(),
+                pipeline.stable.lines.as_binding(),
+                pipeline.scratch.path.as_binding(),
+                pipeline.stable.tile.as_binding(),
+                pipeline.stable.segments.as_binding(),
             ],
         );
 
@@ -517,10 +517,10 @@ impl Render {
 
         let mut fine_resources: Vec<GpuBinding<'_>> = vec![
             pipeline.config.as_binding(),
-            pipeline.segments.as_binding(),
-            pipeline.ptcl.as_binding(),
-            pipeline.info_bin_data.as_binding(),
-            pipeline.blend_spill.as_binding(),
+            pipeline.stable.segments.as_binding(),
+            pipeline.stable.ptcl.as_binding(),
+            pipeline.stable.info_bin_data.as_binding(),
+            pipeline.stable.blend_spill.as_binding(),
             GpuBinding::Tex(out_tex),
             GpuBinding::Tex(&pipeline.gradient),
             GpuBinding::Tex(&pipeline.image_atlas),
