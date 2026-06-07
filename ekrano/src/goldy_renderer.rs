@@ -20,8 +20,8 @@ use std::sync::{Arc, Mutex};
 use goldy::task_graph::{NodeAccess, NodeBuilder};
 use goldy::types::{BufferFlags, TextureFlags, TextureFormat, TextureKind};
 use goldy::{
-    Buffer, BufferKind, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator, ShaderModule, Signal,
-    TaskGraph, Texture, TexturePool, TimelineValue,
+    BudgetPolicy, Buffer, BufferKind, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator, ShaderModule,
+    Signal, TaskGraph, Texture, TexturePool, TimelineValue,
 };
 
 /// Ekrano uses a single-frame fire-and-forget model
@@ -824,33 +824,8 @@ impl<'a> FrameRecorder<'a> {
     }
 
     fn defer_cached_pipeline_owned_buffers(&mut self, c: crate::gpu_resources::CachedPipeline) {
-        self.deferred_owned_buffers
-            .push((c.info_bin_data, "ekrano.info_bin_data_buf"));
-        self.deferred_owned_buffers.push((c.tile, "ekrano.tile_buf"));
-        self.deferred_owned_buffers.push((c.segments, "ekrano.segments_buf"));
-        self.deferred_owned_buffers.push((c.ptcl, "ekrano.ptcl_buf"));
-        self.deferred_owned_buffers.push((c.blend_spill, "ekrano.blend_spill"));
-        self.deferred_owned_buffers.push((c.reduced, "ekrano.reduced_buf"));
-        self.deferred_owned_buffers.push((c.reduced2, "ekrano.reduced2_buf"));
-        self.deferred_owned_buffers
-            .push((c.reduced_scan, "ekrano.reduced_scan_buf"));
-        self.deferred_owned_buffers.push((c.tagmonoid, "ekrano.tagmonoid_buf"));
-        self.deferred_owned_buffers.push((c.path_bbox, "ekrano.path_bbox_buf"));
-        self.deferred_owned_buffers.push((c.lines, "ekrano.lines_buf"));
-        self.deferred_owned_buffers
-            .push((c.draw_reduced, "ekrano.draw_reduced_buf"));
-        self.deferred_owned_buffers
-            .push((c.draw_monoid, "ekrano.draw_monoid_buf"));
-        self.deferred_owned_buffers.push((c.clip_inp, "ekrano.clip_inp_buf"));
-        self.deferred_owned_buffers.push((c.clip_el, "ekrano.clip_el_buf"));
-        self.deferred_owned_buffers.push((c.clip_bic, "ekrano.clip_bic_buf"));
-        self.deferred_owned_buffers.push((c.clip_bbox, "ekrano.clip_bbox_buf"));
-        self.deferred_owned_buffers.push((c.draw_bbox, "ekrano.draw_bbox_buf"));
-        self.deferred_owned_buffers
-            .push((c.bin_header, "ekrano.bin_header_buf"));
-        self.deferred_owned_buffers.push((c.path, "ekrano.path_buf"));
-        self.deferred_owned_buffers
-            .push((c.seg_counts, "ekrano.seg_counts_buf"));
+        c.stable.defer_to(self);
+        c.scratch.defer_to(self);
     }
 
     pub(crate) fn schedule_pipeline_cleanup(
@@ -866,28 +841,9 @@ impl<'a> FrameRecorder<'a> {
             scene,
             config,
             indirect,
-            info_bin_data,
-            tile,
-            segments,
-            ptcl,
-            reduced,
-            reduced2,
-            reduced_scan,
-            tagmonoid,
-            path_bbox,
+            stable,
+            scratch,
             bump,
-            lines,
-            draw_reduced,
-            draw_monoid,
-            clip_inp,
-            clip_el,
-            clip_bic,
-            clip_bbox,
-            draw_bbox,
-            bin_header,
-            path,
-            seg_counts,
-            blend_spill,
             out_image,
             filter_layers,
             buffer_sizes,
@@ -908,27 +864,8 @@ impl<'a> FrameRecorder<'a> {
             self.defer_owned_buffer(bump, "ekrano.bump_buf");
         }
         let pipeline_cache = crate::gpu_resources::CachedPipeline {
-            info_bin_data,
-            tile,
-            segments,
-            ptcl,
-            blend_spill,
-            reduced,
-            reduced2,
-            reduced_scan,
-            tagmonoid,
-            path_bbox,
-            lines,
-            draw_reduced,
-            draw_monoid,
-            clip_inp,
-            clip_el,
-            clip_bic,
-            clip_bbox,
-            draw_bbox,
-            bin_header,
-            path,
-            seg_counts,
+            stable,
+            scratch,
             buffer_sizes,
         };
         if self.persistent.cached_pipeline.is_none() {
@@ -1167,23 +1104,32 @@ fn bind_graph_direct<'a>(
 impl GoldyRenderer {
     /// Create a new renderer for the given device.
     ///
-    /// Installs a [`TrackingVramAllocator`](goldy::vram_allocator::TrackingVramAllocator) on the
-    /// device for byte-level telemetry.
+    /// Takes `&Device` rather than `Device` by value so callers that share one GPU device
+    /// across parallel tests (or a process-wide fixture) can keep their owning handle while
+    /// each renderer clones internally. That clone is required for deterministic shutdown:
+    /// the renderer must own a [`Device`] handle so the GPU backend stays alive until the
+    /// renderer is dropped, even if the caller's temporary handle goes out of scope first.
+    /// Ideally callers would hand off ownership (`new(device: Device)`), but shared static
+    /// fixtures cannot lend their device away without forcing every consumer to clone.
+    ///
+    /// Use [`device`](Self::device) for allocations that must share this renderer's GPU
+    /// context (e.g. output textures in tests) instead of retaining a separate handle.
     pub fn new(device: &Device) -> Result<Self> {
-        use goldy::vram_allocator::{DefaultVramAllocator, TrackingVramAllocator};
-
         let _tz = goldy::tracy_zone!("ekrano.GoldyRenderer::new");
 
-        let tracking = TrackingVramAllocator::new(Arc::new(DefaultVramAllocator::new()));
-        let tracked_device = device.with_vram_allocator(Arc::new(tracking));
+        let device = device.clone();
 
-        let context = tracked_device.create_context().map_err(|e| Error::Gpu(e.to_string()))?;
+        device
+            .set_allocation_policy(Arc::new(BudgetPolicy::new()))
+            .map_err(|e| Error::Gpu(e.to_string()))?;
+
+        let context = device.create_context().map_err(|e| Error::Gpu(e.to_string()))?;
         let frame_pipeline = {
             let _tz = goldy::tracy_zone!("ekrano.GoldyRenderer::new.frame_orchestrator");
             FrameOrchestrator::new(&context, FRAME_PIPELINE_DEPTH)
         };
         let mut renderer = Self {
-            device: tracked_device.clone(),
+            device: device.clone(),
             context,
             shaders: FullShaders::empty(),
             resolver: Resolver::new(),
@@ -1225,14 +1171,68 @@ impl GoldyRenderer {
         renderer.persistent.pool.set_pending_returns(pending_returns);
         {
             let _tz = goldy::tracy_zone!("ekrano.GoldyRenderer::new.release_compiler");
-            tracked_device.release_idle_shader_compiler();
+            device.release_idle_shader_compiler();
         }
         Ok(renderer)
     }
+}
 
+impl GoldyRenderer {
     // =======================================================================
     // Internal helpers — pool sizing & bump persistence
     // =======================================================================
+
+    /// Process bump allocator feedback from the previous frame.
+    ///
+    /// Filters stale all-zero readbacks, logs counters, updates persistent
+    /// estimates, and on overflow rewrites `config` so this frame pre-sizes
+    /// buffers to cover the overflow.
+    fn apply_bump_feedback(
+        &mut self,
+        prev_bump: Option<BumpAllocators>,
+        layout: &Layout,
+        params: &RenderParams,
+        config: &mut RenderConfig,
+        stats: &mut FrameStats,
+    ) {
+        let prev_bump = prev_bump.filter(|b| {
+            let any_nonzero = b.lines > 0
+                || b.seg_counts > 0
+                || b.segments > 0
+                || b.tile > 0
+                || b.binning > 0
+                || b.ptcl > 0
+                || b.blend > 0;
+            if !any_nonzero && b.failed == 0 {
+                log::debug!("Ignoring all-zero bump readback (likely stale)");
+                return false;
+            }
+            true
+        });
+
+        if let Some(ref bump) = prev_bump {
+            let frame_num = FRAME_COUNTER.load(Ordering::Relaxed);
+            log::debug!(
+                "[BUMP] frame={} lines={}, seg_counts={}, segments={}, tile={}, failed=0x{:x}",
+                frame_num,
+                bump.lines,
+                bump.seg_counts,
+                bump.segments,
+                bump.tile,
+                bump.failed,
+            );
+            self.update_persistent_bump(&sanitize_bump(bump));
+
+            // On overflow, recompute config with the actual overflow counters.
+            // Rare in steady state; persistent_bump normally already covers the needed sizes.
+            if bump.failed != 0 {
+                stats.bump_retries += 1;
+                log::info!("Previous frame bump overflow (0x{:x}), growing buffers", bump.failed);
+                *config = RenderConfig::new(layout, params.width, params.height, &params.base_color)
+                    .with_bump_estimates(&sanitize_bump(bump));
+            }
+        }
+    }
 
     /// Update persistent bump estimates with a running component-wise max.
     fn update_persistent_bump(&mut self, bump: &BumpAllocators) {
@@ -1430,6 +1430,11 @@ impl GoldyRenderer {
         }
     }
 
+    /// GPU device handle shared by this renderer (same backend as the caller's clone).
+    pub fn device(&self) -> &Device {
+        &self.device
+    }
+
     /// Query the resource pool's current state for diagnostics or test assertions.
     pub fn resource_pool_stats(&self) -> ResourcePoolStats {
         ResourcePoolStats {
@@ -1610,48 +1615,7 @@ impl GoldyRenderer {
         let t_drain = t_drain_start.elapsed();
 
         let prev_bump = self.persistent.take_last_drained_bump();
-
-        // Only trust bump readback when robust mode produced valid data.
-        // A bump with all-zero counters (no failed flag, no usage) is likely stale
-        // or from a frame where the buffer was never written.
-        let prev_bump = prev_bump.filter(|b| {
-            let any_nonzero = b.lines > 0
-                || b.seg_counts > 0
-                || b.segments > 0
-                || b.tile > 0
-                || b.binning > 0
-                || b.ptcl > 0
-                || b.blend > 0;
-            if !any_nonzero && b.failed == 0 {
-                log::debug!("Ignoring all-zero bump readback (likely stale)");
-                return false;
-            }
-            true
-        });
-
-        if let Some(ref bump) = prev_bump {
-            let frame_num = FRAME_COUNTER.load(Ordering::Relaxed);
-            log::debug!(
-                "[BUMP] frame={} lines={}, seg_counts={}, segments={}, tile={}, failed=0x{:x}",
-                frame_num,
-                bump.lines,
-                bump.seg_counts,
-                bump.segments,
-                bump.tile,
-                bump.failed,
-            );
-            // Update persistent bump estimates (running max across frames).
-            self.update_persistent_bump(&sanitize_bump(bump));
-
-            // On overflow, recompute config with the actual overflow counters.
-            // Rare in steady state; persistent_bump normally already covers the needed sizes.
-            if bump.failed != 0 {
-                stats.bump_retries += 1;
-                log::info!("Previous frame bump overflow (0x{:x}), growing buffers", bump.failed,);
-                config = RenderConfig::new(&layout, params.width, params.height, &params.base_color)
-                    .with_bump_estimates(&sanitize_bump(bump));
-            }
-        }
+        self.apply_bump_feedback(prev_bump, &layout, &params, &mut config, &mut stats);
 
         let preacquired_frame = if let Some(surface) = surface {
             let _tz = goldy::tracy_zone!("ekrano.surface.acquire_early");

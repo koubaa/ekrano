@@ -12,6 +12,11 @@
 //! - Varying scene complexity (warmup pressure) doesn't exhaust the heap
 //! - The `robust` mode flag doesn't alter memory lifecycle correctness
 //! - Multiple AA configs work without heap exhaustion
+//!
+//! These tests assert heap/pool/deferred-ring survival, not byte-level VRAM accounting.
+//! Budget and tracking policies are tested in goldy (`allocation_policy`, `vram_allocator`);
+//! ekrano production paths run with [`NoPolicy`](goldy::NoPolicy) unless the caller installs
+//! one via [`Device::set_allocation_policy`](goldy::Device::set_allocation_policy).
 
 use ekrano::kurbo::{Affine, Circle, Line, Rect, Stroke};
 use ekrano::peniko::{Fill, color::palette};
@@ -85,8 +90,9 @@ fn complex_scene() -> Scene {
     scene
 }
 
-fn render_n_frames(device: &Device, renderer: &mut GoldyRenderer, scene: &Scene, params: &RenderParams, n: usize) {
-    let texture = device
+fn render_n_frames(renderer: &mut GoldyRenderer, scene: &Scene, params: &RenderParams, n: usize) {
+    let texture = renderer
+        .device()
         .alloc_texture(
             params.width,
             params.height,
@@ -112,8 +118,7 @@ fn render_n_frames(device: &Device, renderer: &mut GoldyRenderer, scene: &Scene,
 fn default_strategy_survives_200_frames_tiny_scene() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
-    let device = make_device();
-    let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new");
+    let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
     let scene = tiny_scene();
     let params = RenderParams {
         base_color: palette::css::BLACK,
@@ -122,7 +127,7 @@ fn default_strategy_survives_200_frames_tiny_scene() {
         antialiasing_method: AaConfig::Area,
         robust: false,
     };
-    render_n_frames(&device, &mut renderer, &scene, &params, 200);
+    render_n_frames(&mut renderer, &scene, &params, 200);
 }
 
 #[test]
@@ -130,8 +135,7 @@ fn default_strategy_survives_200_frames_tiny_scene() {
 fn default_strategy_survives_200_frames_complex_scene() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
-    let device = make_device();
-    let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new");
+    let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
     let scene = complex_scene();
     let params = RenderParams {
         base_color: palette::css::BLACK,
@@ -140,7 +144,7 @@ fn default_strategy_survives_200_frames_complex_scene() {
         antialiasing_method: AaConfig::Area,
         robust: false,
     };
-    render_n_frames(&device, &mut renderer, &scene, &params, 200);
+    render_n_frames(&mut renderer, &scene, &params, 200);
 }
 
 // ===========================================================================
@@ -152,8 +156,7 @@ fn default_strategy_survives_200_frames_complex_scene() {
 fn robust_mode_survives_200_frames() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
-    let device = make_device();
-    let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new");
+    let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
     let scene = tiny_scene();
     let params = RenderParams {
         base_color: palette::css::BLACK,
@@ -162,7 +165,7 @@ fn robust_mode_survives_200_frames() {
         antialiasing_method: AaConfig::Area,
         robust: true,
     };
-    render_n_frames(&device, &mut renderer, &scene, &params, 200);
+    render_n_frames(&mut renderer, &scene, &params, 200);
 }
 
 // ===========================================================================
@@ -174,8 +177,7 @@ fn robust_mode_survives_200_frames() {
 fn complex_scene_area_aa_survives_100_frames() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
-    let device = make_device();
-    let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new");
+    let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
     let scene = complex_scene();
     let params = RenderParams {
         base_color: palette::css::BLACK,
@@ -184,7 +186,7 @@ fn complex_scene_area_aa_survives_100_frames() {
         antialiasing_method: AaConfig::Area,
         robust: false,
     };
-    render_n_frames(&device, &mut renderer, &scene, &params, 100);
+    render_n_frames(&mut renderer, &scene, &params, 100);
 }
 
 #[test]
@@ -192,8 +194,7 @@ fn complex_scene_area_aa_survives_100_frames() {
 fn complex_scene_msaa16_survives_100_frames() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
-    let device = make_device();
-    let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new");
+    let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
     let scene = complex_scene();
     let params = RenderParams {
         base_color: palette::css::BLACK,
@@ -202,7 +203,7 @@ fn complex_scene_msaa16_survives_100_frames() {
         antialiasing_method: AaConfig::Msaa16,
         robust: false,
     };
-    render_n_frames(&device, &mut renderer, &scene, &params, 100);
+    render_n_frames(&mut renderer, &scene, &params, 100);
 }
 
 // ===========================================================================
@@ -214,9 +215,9 @@ fn complex_scene_msaa16_survives_100_frames() {
 fn resource_pool_stabilizes_after_warmup() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
-    let device = make_device();
-    let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new");
-    let texture = device
+    let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
+    let texture = renderer
+        .device()
         .alloc_texture(
             WIDTH,
             HEIGHT,
@@ -272,9 +273,9 @@ fn resource_pool_stabilizes_after_warmup() {
 fn overflow_heaps_compact_to_zero_in_steady_state() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
-    let device = make_device();
-    let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new");
-    let texture = device
+    let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
+    let texture = renderer
+        .device()
         .alloc_texture(
             WIDTH,
             HEIGHT,
@@ -301,9 +302,9 @@ fn overflow_heaps_compact_to_zero_in_steady_state() {
 
     // At this point, flush and compact.
     renderer.flush_deferred_deletions();
-    device.compact_overflow_heaps();
+    renderer.device().compact_overflow_heaps();
 
-    if let Some(stats) = device.buffer_heap_stats() {
+    if let Some(stats) = renderer.device().buffer_heap_stats() {
         assert_eq!(
             stats.overflow_count, 0,
             "expected 0 overflow heaps in steady state, got {}",
@@ -321,9 +322,9 @@ fn overflow_heaps_compact_to_zero_in_steady_state() {
 fn growing_scene_survives_without_heap_exhaustion() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
-    let device = make_device();
-    let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new");
-    let texture = device
+    let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
+    let texture = renderer
+        .device()
         .alloc_texture(
             WIDTH,
             HEIGHT,
@@ -368,9 +369,9 @@ fn growing_scene_survives_without_heap_exhaustion() {
 fn shrinking_scene_does_not_leak_buffers() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
-    let device = make_device();
-    let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new");
-    let texture = device
+    let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
+    let texture = renderer
+        .device()
         .alloc_texture(
             WIDTH,
             HEIGHT,
@@ -422,9 +423,9 @@ fn shrinking_scene_does_not_leak_buffers() {
 fn deferred_ring_does_not_grow_unbounded() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
-    let device = make_device();
-    let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new");
-    let texture = device
+    let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
+    let texture = renderer
+        .device()
         .alloc_texture(
             WIDTH,
             HEIGHT,
@@ -468,11 +469,11 @@ fn deferred_ring_does_not_grow_unbounded() {
 fn large_resolution_survives_50_frames() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
-    let device = make_device();
-    let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new");
+    let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
     let w = 512;
     let h = 512;
-    let texture = device
+    let texture = renderer
+        .device()
         .alloc_texture(
             w,
             h,
@@ -505,6 +506,8 @@ fn large_resolution_survives_50_frames() {
 fn recreate_renderer_after_warmup_survives() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
+    // Keep an owning device handle: this test constructs two renderers sequentially and
+    // a texture that outlives both, so we cannot rely on a single renderer's clone alone.
     let device = make_device();
     let texture = device
         .alloc_texture(
