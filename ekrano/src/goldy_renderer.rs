@@ -1104,23 +1104,24 @@ fn bind_graph_direct<'a>(
 impl GoldyRenderer {
     /// Create a new renderer for the given device.
     ///
-    /// Installs a [`TrackingVramAllocator`](goldy::vram_allocator::TrackingVramAllocator) on the
-    /// device for byte-level telemetry.
+    /// Registers a [`VramByteTracker`](goldy::VramByteTracker) observer on the device for
+    /// byte-level telemetry. The renderer holds an owning [`Device`] clone so the GPU backend
+    /// stays alive after the caller's temporary handle is dropped.
     pub fn new(device: &Device) -> Result<Self> {
-        use goldy::vram_allocator::{DefaultVramAllocator, TrackingVramAllocator};
+        use goldy::VramByteTracker;
 
         let _tz = goldy::tracy_zone!("ekrano.GoldyRenderer::new");
 
-        let tracking = TrackingVramAllocator::new(Arc::new(DefaultVramAllocator::new()));
-        let tracked_device = device.with_vram_allocator(Arc::new(tracking));
+        device.add_vram_observer(Arc::new(VramByteTracker::new()));
+        let device = device.clone();
 
-        let context = tracked_device.create_context().map_err(|e| Error::Gpu(e.to_string()))?;
+        let context = device.create_context().map_err(|e| Error::Gpu(e.to_string()))?;
         let frame_pipeline = {
             let _tz = goldy::tracy_zone!("ekrano.GoldyRenderer::new.frame_orchestrator");
             FrameOrchestrator::new(&context, FRAME_PIPELINE_DEPTH)
         };
         let mut renderer = Self {
-            device: tracked_device.clone(),
+            device: device.clone(),
             context,
             shaders: FullShaders::empty(),
             resolver: Resolver::new(),
@@ -1162,7 +1163,7 @@ impl GoldyRenderer {
         renderer.persistent.pool.set_pending_returns(pending_returns);
         {
             let _tz = goldy::tracy_zone!("ekrano.GoldyRenderer::new.release_compiler");
-            tracked_device.release_idle_shader_compiler();
+            device.release_idle_shader_compiler();
         }
         Ok(renderer)
     }
