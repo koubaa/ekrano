@@ -670,7 +670,6 @@ fn read_bump_buffer(device: &Device, persistent: &mut PersistentState, buf: Buff
 /// Renders scenes to textures using the Goldy GPU backend with Slang shaders.
 pub struct GoldyRenderer {
     device: Device,
-    vram_observer_id: goldy::VramObserverId,
     context: Context,
     shaders: FullShaders,
     resolver: Resolver,
@@ -1105,15 +1104,11 @@ fn bind_graph_direct<'a>(
 impl GoldyRenderer {
     /// Create a new renderer for the given device.
     ///
-    /// Registers a [`VramByteTracker`](goldy::VramByteTracker) observer on the device for
-    /// byte-level telemetry. The renderer holds an owning [`Device`] clone so the GPU backend
+    /// The renderer holds an owning [`Device`] clone so the GPU backend
     /// stays alive after the caller's temporary handle is dropped.
     pub fn new(device: &Device) -> Result<Self> {
-        use goldy::VramByteTracker;
-
         let _tz = goldy::tracy_zone!("ekrano.GoldyRenderer::new");
 
-        let vram_observer_id = device.add_vram_observer(Arc::new(VramByteTracker::new()));
         let device = device.clone();
 
         let context = device.create_context().map_err(|e| Error::Gpu(e.to_string()))?;
@@ -1123,7 +1118,6 @@ impl GoldyRenderer {
         };
         let mut renderer = Self {
             device: device.clone(),
-            vram_observer_id,
             context,
             shaders: FullShaders::empty(),
             resolver: Resolver::new(),
@@ -1168,12 +1162,6 @@ impl GoldyRenderer {
             device.release_idle_shader_compiler();
         }
         Ok(renderer)
-    }
-}
-
-impl Drop for GoldyRenderer {
-    fn drop(&mut self) {
-        self.device.remove_vram_observer(self.vram_observer_id);
     }
 }
 
