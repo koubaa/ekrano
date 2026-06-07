@@ -199,7 +199,7 @@ pub fn get_scene_image(params: &TestParams, scene: &Scene) -> Result<ImageData, 
         robust: true,
     };
 
-    let pixels = renderer.render_to_buffer(&device, scene, &render_params)?;
+    let pixels = renderer.render_to_buffer(scene, &render_params)?;
     let data = Blob::new(Arc::new(pixels));
     Ok(ImageData {
         data,

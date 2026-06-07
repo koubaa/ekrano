@@ -7,9 +7,9 @@ use std::mem::size_of;
 
 use goldy::task_graph::NodeAccess;
 use goldy::types::{BufferFlags, ResourceAccess, TextureFlags, TextureKind};
-use goldy::{Buffer, BufferKind, Context, Device, TaskGraph, Texture, TextureFormat};
+use goldy::{Buffer, BufferKind, Texture, TextureFormat};
 
-use crate::goldy_renderer::PersistentState;
+use crate::goldy_renderer::FrameRecorder;
 use crate::resource_proxy::{BindType, ImageFormat};
 use crate::{Error, RenderParams, Result};
 use ekrano_encoding::{BumpAllocators, CoverageMask, Images, Ramps, RenderConfig};
@@ -78,18 +78,15 @@ fn image_fmt_goldy(f: ImageFormat) -> TextureFormat {
 }
 
 pub(crate) fn alloc_pipeline_buffer(
-    device: &Device,
-    ctx: &Context,
-    graph: &mut TaskGraph,
-    persistent: &mut PersistentState,
+    recorder: &mut FrameRecorder<'_>,
     size: u64,
     stride: u32,
     name: &'static str,
     flags: BufferFlags,
 ) -> Result<Buffer, Error> {
-    let buf = persistent.pool.get_buf_with_stride(
-        device,
-        ctx,
+    let buf = recorder.persistent.pool.get_buf_with_stride(
+        recorder.device(),
+        recorder.context(),
         size,
         name,
         BufferKind::Scattered,
@@ -100,71 +97,66 @@ pub(crate) fn alloc_pipeline_buffer(
     // dispatch counts must be 0 before GPU pipelines them). Other pipeline
     // buffers are always overwritten by GPU dispatches before first read.
     if is_pool_exempt(name) {
-        graph.clear_buffer(&buf, 0, size);
+        recorder.graph().clear_buffer(&buf, 0, size);
     }
     Ok(buf)
 }
 
 pub(crate) fn record_upload_bytes(
-    device: &Device,
-    ctx: &Context,
-    graph: &mut TaskGraph,
-    persistent: &mut PersistentState,
+    recorder: &mut FrameRecorder<'_>,
     name: &'static str,
     element_stride: u32,
     bytes: &[u8],
 ) -> Result<Buffer, Error> {
-    let buf = persistent.pool.get_buf_with_stride(
-        device,
-        ctx,
+    let buf = recorder.persistent.pool.get_buf_with_stride(
+        recorder.device(),
+        recorder.context(),
         bytes.len() as u64,
         name,
         BufferKind::Scattered,
         Some(element_stride),
         BufferFlags::empty(),
     )?;
-    graph.write_buffer(&buf, 0, bytes.to_vec());
+    recorder
+        .graph()
+        .write_buffer(&buf, 0, bytes.to_vec());
     Ok(buf)
 }
 
 /// Like [`record_upload_bytes`] but takes ownership of the byte vector, avoiding
 /// the redundant `to_vec()` copy when the caller already holds an owned `Vec<u8>`.
 pub(crate) fn record_upload_bytes_owned(
-    device: &Device,
-    ctx: &Context,
-    graph: &mut TaskGraph,
-    persistent: &mut PersistentState,
+    recorder: &mut FrameRecorder<'_>,
     name: &'static str,
     element_stride: u32,
     bytes: Vec<u8>,
 ) -> Result<Buffer, Error> {
-    let buf = persistent.pool.get_buf_with_stride(
-        device,
-        ctx,
+    let buf = recorder.persistent.pool.get_buf_with_stride(
+        recorder.device(),
+        recorder.context(),
         bytes.len() as u64,
         name,
         BufferKind::Scattered,
         Some(element_stride),
         BufferFlags::empty(),
     )?;
-    graph.write_buffer(&buf, 0, bytes);
+    recorder.graph().write_buffer(&buf, 0, bytes);
     Ok(buf)
 }
 
 pub(crate) fn record_upload_image(
-    device: &Device,
-    graph: &mut TaskGraph,
-    persistent: &mut PersistentState,
+    recorder: &mut FrameRecorder<'_>,
     width: u32,
     height: u32,
     format: ImageFormat,
     bytes: &[u8],
 ) -> Result<Texture, Error> {
     let format = image_fmt_goldy(format);
-    let texture = persistent
+    let texture = recorder
+        .persistent
         .tex_pool
         .acquire(
-            device,
+            recorder.device(),
             width,
             height,
             format,
@@ -172,14 +164,15 @@ pub(crate) fn record_upload_image(
             TextureFlags::COPY_DST,
         )
         .map_err(|e| Error::Shader(e.to_string()))?;
-    graph
+    recorder
+        .graph()
         .write_texture(&texture, bytes.to_vec())
         .map_err(|e| Error::Shader(e.to_string()))?;
     Ok(texture)
 }
 
 pub(crate) fn write_image_region(
-    graph: &mut TaskGraph,
+    recorder: &mut FrameRecorder<'_>,
     tex: &Texture,
     x: u32,
     y: u32,
@@ -207,7 +200,8 @@ pub(crate) fn write_image_region(
         raw_bytes
     };
 
-    graph
+    recorder
+        .graph()
         .write_texture_region(
             tex,
             x,
@@ -235,17 +229,17 @@ fn premultiply_rgba8(bytes: &[u8]) -> Vec<u8> {
 }
 
 pub(crate) fn acquire_texture_rgba(
-    device: &Device,
-    persistent: &mut PersistentState,
+    recorder: &mut FrameRecorder<'_>,
     width: u32,
     height: u32,
     access: TextureKind,
     flags: TextureFlags,
 ) -> Result<Texture, Error> {
-    persistent
+    recorder
+        .persistent
         .tex_pool
         .acquire(
-            device,
+            recorder.device(),
             width,
             height,
             TextureFormat::Rgba8Unorm,
@@ -256,13 +250,13 @@ pub(crate) fn acquire_texture_rgba(
 }
 
 pub(crate) fn clear_gpu_buf(
-    graph: &mut TaskGraph,
+    recorder: &mut FrameRecorder<'_>,
     buf: &Buffer,
     off: u64,
     size: Option<u64>,
 ) -> Result<(), Error> {
     let sz = size.unwrap_or_else(|| buf.size().saturating_sub(off));
-    graph.clear_buffer(buf, off, sz);
+    recorder.graph().clear_buffer(buf, off, sz);
     Ok(())
 }
 
@@ -336,15 +330,8 @@ pub(crate) struct PipelineResources {
 }
 
 impl PipelineResources {
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "Single setup function threads every pipeline buffer and texture from resolve data"
-    )]
     pub(crate) fn prepare(
-        device: &Device,
-        ctx: &Context,
-        graph: &mut TaskGraph,
-        persistent: &mut PersistentState,
+        recorder: &mut FrameRecorder<'_>,
         coverage_mask: Option<&CoverageMask>,
         mut packed: Vec<u8>,
         ramps: Ramps<'_>,
@@ -357,7 +344,7 @@ impl PipelineResources {
             packed.resize(size_of::<u32>(), u8::MAX);
         }
 
-        let gpu_progress = ctx.gpu_progress();
+        let gpu_progress = recorder.context().gpu_progress();
         log::debug!("[RT-CACHE] gpu_progress={gpu_progress} at prepare entry");
 
         let mut cpu_config_owned = *config;
@@ -379,8 +366,7 @@ impl PipelineResources {
             let _tz = goldy::tracy_zone!("ekrano.prepare.gradient");
             if ramps.height == 0 {
                 acquire_texture_rgba(
-                    device,
-                    persistent,
+                    recorder,
                     1,
                     1,
                     TextureKind::Interpolated,
@@ -389,9 +375,7 @@ impl PipelineResources {
             } else {
                 let data: &[u8] = bytemuck::cast_slice(ramps.data);
                 record_upload_image(
-                    device,
-                    graph,
-                    persistent,
+                    recorder,
                     ramps.width,
                     ramps.height,
                     ImageFormat::Rgba8,
@@ -404,8 +388,7 @@ impl PipelineResources {
             let _tz = goldy::tracy_zone!("ekrano.prepare.image_atlas");
             if images.images.is_empty() {
                 let t = acquire_texture_rgba(
-                    device,
-                    persistent,
+                    recorder,
                     1,
                     1,
                     TextureKind::Interpolated,
@@ -414,15 +397,14 @@ impl PipelineResources {
                 (t, (1_u32, 1_u32))
             } else {
                 let t = acquire_texture_rgba(
-                    device,
-                    persistent,
+                    recorder,
                     images.width,
                     images.height,
                     TextureKind::Interpolated,
                     TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
                 )?;
                 for image in images.images {
-                    write_image_region(graph, &t, image.1, image.2, &image.0)?;
+                    write_image_region(recorder, &t, image.1, image.2, &image.0)?;
                 }
                 (t, (images.width, images.height))
             }
@@ -437,9 +419,7 @@ impl PipelineResources {
                         rgba.extend_from_slice(&[b, b, b, 255]);
                     }
                     record_upload_image(
-                        device,
-                        graph,
-                        persistent,
+                        recorder,
                         m.width,
                         m.height,
                         ImageFormat::Rgba8,
@@ -447,9 +427,7 @@ impl PipelineResources {
                     )?
                 }
                 None => record_upload_image(
-                    device,
-                    graph,
-                    persistent,
+                    recorder,
                     1,
                     1,
                     ImageFormat::Rgba8,
@@ -462,7 +440,7 @@ impl PipelineResources {
         // `to_vec()` copy that `record_upload_bytes` would perform on a borrow.
         let scene = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.scene_upload");
-            record_upload_bytes_owned(device, ctx, graph, persistent, "ekrano.scene", 4, packed)?
+            record_upload_bytes_owned(recorder, "ekrano.scene", 4, packed)?
         };
 
         let config_uniform_value = cpu_config_owned.gpu;
@@ -472,7 +450,8 @@ impl PipelineResources {
         // WriteBuffer node is added to the graph, eliminating a staging-belt round-trip.
         let config = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.config_upload");
-            let cache_hit = persistent
+            let cache_hit = recorder
+                .persistent
                 .cached_config_uniform
                 .as_ref()
                 .is_some_and(|(v, _)| v == &config_uniform_value);
@@ -481,11 +460,13 @@ impl PipelineResources {
                 if cache_hit { "HIT" } else { "MISS" }
             );
             if cache_hit {
-                persistent.cached_config_uniform.take().unwrap().1
-            } else if let Some((_, existing_buf)) = persistent.cached_config_uniform.take() {
+                recorder.persistent.cached_config_uniform.take().unwrap().1
+            } else if let Some((_, existing_buf)) =
+                recorder.persistent.cached_config_uniform.take()
+            {
                 // Buffer size is constant (sizeof ConfigUniform); reuse the allocation
                 // and just overwrite with the new value.
-                graph.write_buffer(
+                recorder.graph().write_buffer(
                     &existing_buf,
                     0,
                     bytemuck::bytes_of(&config_uniform_value).to_vec(),
@@ -493,10 +474,7 @@ impl PipelineResources {
                 existing_buf
             } else {
                 record_upload_bytes(
-                    device,
-                    ctx,
-                    graph,
-                    persistent,
+                    recorder,
                     "ekrano.config",
                     size_of::<ekrano_encoding::ConfigUniform>() as u32,
                     bytemuck::bytes_of(&config_uniform_value),
@@ -534,7 +512,7 @@ impl PipelineResources {
         }
         let cached = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.pipeline_cache");
-            match persistent.take_cached_pipeline(gpu_progress) {
+            match recorder.persistent.take_cached_pipeline(gpu_progress) {
                 Some(c) if c.buffer_sizes == buffer_sizes => CachedOwnedBuffers {
                     info_bin_data: Some(c.info_bin_data),
                     tile: Some(c.tile),
@@ -560,55 +538,70 @@ impl PipelineResources {
                 },
                 Some(c) => {
                     // Sizes changed: return stale buffers to pool before discarding.
-                    persistent
+                    recorder
+                        .persistent
                         .pool
                         .return_buf(c.info_bin_data, "ekrano.info_bin_data_buf");
-                    persistent.pool.return_buf(c.tile, "ekrano.tile_buf");
-                    persistent
+                    recorder.persistent.pool.return_buf(c.tile, "ekrano.tile_buf");
+                    recorder
+                        .persistent
                         .pool
                         .return_buf(c.segments, "ekrano.segments_buf");
-                    persistent.pool.return_buf(c.ptcl, "ekrano.ptcl_buf");
-                    persistent
+                    recorder.persistent.pool.return_buf(c.ptcl, "ekrano.ptcl_buf");
+                    recorder
+                        .persistent
                         .pool
                         .return_buf(c.blend_spill, "ekrano.blend_spill");
-                    persistent.pool.return_buf(c.reduced, "ekrano.reduced_buf");
-                    persistent
+                    recorder.persistent.pool.return_buf(c.reduced, "ekrano.reduced_buf");
+                    recorder
+                        .persistent
                         .pool
                         .return_buf(c.reduced2, "ekrano.reduced2_buf");
-                    persistent
+                    recorder
+                        .persistent
                         .pool
                         .return_buf(c.reduced_scan, "ekrano.reduced_scan_buf");
-                    persistent
+                    recorder
+                        .persistent
                         .pool
                         .return_buf(c.tagmonoid, "ekrano.tagmonoid_buf");
-                    persistent
+                    recorder
+                        .persistent
                         .pool
                         .return_buf(c.path_bbox, "ekrano.path_bbox_buf");
-                    persistent.pool.return_buf(c.lines, "ekrano.lines_buf");
-                    persistent
+                    recorder.persistent.pool.return_buf(c.lines, "ekrano.lines_buf");
+                    recorder
+                        .persistent
                         .pool
                         .return_buf(c.draw_reduced, "ekrano.draw_reduced_buf");
-                    persistent
+                    recorder
+                        .persistent
                         .pool
                         .return_buf(c.draw_monoid, "ekrano.draw_monoid_buf");
-                    persistent
+                    recorder
+                        .persistent
                         .pool
                         .return_buf(c.clip_inp, "ekrano.clip_inp_buf");
-                    persistent.pool.return_buf(c.clip_el, "ekrano.clip_el_buf");
-                    persistent
+                    recorder.persistent.pool.return_buf(c.clip_el, "ekrano.clip_el_buf");
+                    recorder
+                        .persistent
                         .pool
                         .return_buf(c.clip_bic, "ekrano.clip_bic_buf");
-                    persistent
+                    recorder
+                        .persistent
                         .pool
                         .return_buf(c.clip_bbox, "ekrano.clip_bbox_buf");
-                    persistent
+                    recorder
+                        .persistent
                         .pool
                         .return_buf(c.draw_bbox, "ekrano.draw_bbox_buf");
-                    persistent
+                    recorder
+                        .persistent
                         .pool
                         .return_buf(c.bin_header, "ekrano.bin_header_buf");
-                    persistent.pool.return_buf(c.path, "ekrano.path_buf");
-                    persistent
+                    recorder.persistent.pool.return_buf(c.path, "ekrano.path_buf");
+                    recorder
+                        .persistent
                         .pool
                         .return_buf(c.seg_counts, "ekrano.seg_counts_buf");
                     CachedOwnedBuffers {
@@ -669,10 +662,7 @@ impl PipelineResources {
                 match $cached_opt {
                     Some(buf) => buf,
                     None => alloc_pipeline_buffer(
-                        device,
-                        ctx,
-                        graph,
-                        persistent,
+                        recorder,
                         $sz,
                         $stride,
                         $name,
@@ -738,16 +728,13 @@ impl PipelineResources {
             "ekrano.path_bbox_buf"
         );
         let bump = alloc_pipeline_buffer(
-            device,
-            ctx,
-            graph,
-            persistent,
+            recorder,
             buffer_sizes.bump_alloc.size_in_bytes().into(),
             size_of::<BumpAllocators>() as u32,
             "ekrano.bump_buf",
             BufferFlags::CPU_READABLE,
         )?;
-        clear_gpu_buf(graph, &bump, 0, None)?;
+        clear_gpu_buf(recorder, &bump, 0, None)?;
         let lines = al_cached!(
             cached.lines,
             buffer_sizes.lines.size_in_bytes().into(),
@@ -827,7 +814,7 @@ impl PipelineResources {
         // round-trips when render dimensions are stable across frames).
         let (out_image, filter_layers) = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.render_targets");
-            if let Some((cached_out, cached_layers)) = persistent.take_cached_render_targets(
+            if let Some((cached_out, cached_layers)) = recorder.persistent.take_cached_render_targets(
                 gpu_progress,
                 params.width,
                 params.height,
@@ -836,10 +823,11 @@ impl PipelineResources {
                 (cached_out, cached_layers)
             } else {
                 let _tz2 = goldy::tracy_zone!("ekrano.prepare.render_targets.ALLOC");
-                let out = persistent
+                let out = recorder
+                    .persistent
                     .tex_pool
                     .acquire(
-                        device,
+                        recorder.device(),
                         params.width,
                         params.height,
                         out_image_format,
@@ -849,8 +837,7 @@ impl PipelineResources {
                     .map_err(|e| Error::Shader(e.to_string()))?;
                 let layers = std::array::from_fn(|_| {
                     acquire_texture_rgba(
-                        device,
-                        persistent,
+                        recorder,
                         params.width,
                         params.height,
                         TextureKind::DirectInterpolated,

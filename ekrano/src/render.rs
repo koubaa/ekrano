@@ -754,14 +754,13 @@ fn pyramid_blur(
         .map(|l| {
             let lw = (width >> (l + 1)).max(1);
             let lh = (height >> (l + 1)).max(1);
-            crate::gpu_resources::acquire_texture_rgba(
-                recorder.device,
-                recorder.persistent,
-                lw,
-                lh,
-                TextureKind::DirectInterpolated,
-                TextureFlags::empty(),
-            )
+            recorder
+                .acquire_texture_rgba(
+                    lw,
+                    lh,
+                    TextureKind::DirectInterpolated,
+                    TextureFlags::empty(),
+                )
             .expect("pyramid level texture")
         })
         .collect();
@@ -784,14 +783,13 @@ fn pyramid_blur(
     let wg_b = (bw.div_ceil(16), bh.div_ceil(16), 1);
 
     // Allocate a transient scratch for the H-blur result at the bottom level.
-    let bottom_scratch = crate::gpu_resources::acquire_texture_rgba(
-        recorder.device,
-        recorder.persistent,
-        bw,
-        bh,
-        TextureKind::DirectInterpolated,
-        TextureFlags::empty(),
-    )
+    let bottom_scratch = recorder
+        .acquire_texture_rgba(
+            bw,
+            bh,
+            TextureKind::DirectInterpolated,
+            TextureFlags::empty(),
+        )
     .expect("pyramid bottom scratch");
 
     let u_h = FilterUniform::gaussian_blur(bw, bh, true, sigma_residual, edge_mode);
@@ -841,14 +839,13 @@ pub(crate) fn record_filter_effects(
         return;
     };
 
-    let scratch = crate::gpu_resources::acquire_texture_rgba(
-        recorder.device,
-        recorder.persistent,
-        width,
-        height,
-        TextureKind::DirectInterpolated,
-        TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
-    )
+    let scratch = recorder
+        .acquire_texture_rgba(
+            width,
+            height,
+            TextureKind::DirectInterpolated,
+            TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
+        )
     .expect("filter scratch texture");
 
     let wg = (width.div_ceil(16), height.div_ceil(16), 1);
@@ -888,14 +885,13 @@ pub(crate) fn record_filter_effects(
                 const PYRAMID_THRESHOLD: f32 = 16.0;
                 if *std_dev > PYRAMID_THRESHOLD {
                     // Allocate a full-res DirectInterpolated scratch for the blurred alpha.
-                    let blur_dst = crate::gpu_resources::acquire_texture_rgba(
-                        recorder.device,
-                        recorder.persistent,
-                        width,
-                        height,
-                        TextureKind::DirectInterpolated,
-                        TextureFlags::empty(),
-                    )
+                    let blur_dst = recorder
+                        .acquire_texture_rgba(
+                            width,
+                            height,
+                            TextureKind::DirectInterpolated,
+                            TextureFlags::empty(),
+                        )
                     .expect("pyramid blur_dst");
 
                     if effect.is_nested {

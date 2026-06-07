@@ -144,7 +144,7 @@ fn render(mut scenes: SceneSet, index: usize, args: &Args) -> Result<()> {
     let mut scene = Scene::new();
     scene.append(&fragment, Some(transform));
 
-    let result_unpadded = renderer.render_to_buffer(&device, &scene, &render_params)?;
+    let result_unpadded = renderer.render_to_buffer(&scene, &render_params)?;
     let out_path = args
         .out_directory
         .join(&example_scene.config.name)

@@ -26,7 +26,6 @@
 //! let texture: goldy::Texture = /* allocate render target */;
 //! renderer
 //!    .render_to_texture(
-//!       &device,
 //!       &scene,
 //!       &texture,
 //!       &RenderParams {
