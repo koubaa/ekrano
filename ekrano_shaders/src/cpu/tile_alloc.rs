@@ -64,12 +64,5 @@ pub fn tile_alloc(_n_wg: u32, resources: &[CpuBinding<'_>]) {
     let mut bump = resources[3].as_typed_mut();
     let mut paths = resources[4].as_slice_mut();
     let mut tiles = resources[5].as_slice_mut();
-    tile_alloc_main(
-        &config,
-        &scene,
-        &draw_bboxes,
-        &mut bump,
-        &mut paths,
-        &mut tiles,
-    );
+    tile_alloc_main(&config, &scene, &draw_bboxes, &mut bump, &mut paths, &mut tiles);
 }

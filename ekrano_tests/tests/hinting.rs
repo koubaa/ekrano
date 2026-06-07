@@ -6,10 +6,7 @@
 // The following lints are part of the Linebender standard set,
 // but resolving them has been deferred for now.
 // Feel free to send a PR that solves one or more of these.
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::allow_attributes_without_reason
-)]
+#![allow(clippy::cast_possible_truncation, clippy::allow_attributes_without_reason)]
 
 use ekrano::{
     Scene,
@@ -44,14 +41,8 @@ fn encode_hinted_text(text: &str, font_size: f32) -> Scene {
 fn simple_hinted() {
     let font_size = 12.;
     let scene = encode_hinted_text("The quick brown fox", font_size);
-    let params = TestParams::new(
-        "simple_hinted",
-        (font_size * 10.) as _,
-        (font_size * 1.1).ceil() as _,
-    );
-    snapshot_test_sync(scene, &params)
-        .unwrap()
-        .assert_mean_less_than(0.02);
+    let params = TestParams::new("simple_hinted", (font_size * 10.) as _, (font_size * 1.1).ceil() as _);
+    snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.02);
 }
 
 #[test]
@@ -61,14 +52,8 @@ fn scaled_hinted() {
     let mut scene = Scene::new();
     scene.append(&text_scene, Some(Affine::scale(1.5)));
 
-    let params = TestParams::new(
-        "scaled_hinted",
-        (font_size * 15.) as _,
-        (font_size * 1.65).ceil() as _,
-    );
-    snapshot_test_sync(scene, &params)
-        .unwrap()
-        .assert_mean_less_than(0.02);
+    let params = TestParams::new("scaled_hinted", (font_size * 15.) as _, (font_size * 1.65).ceil() as _);
+    snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.02);
 }
 
 #[test]
@@ -84,9 +69,7 @@ fn integer_translation() {
         (font_size * 10.) as _,
         (font_size * 1.1 + 10.).ceil() as _,
     );
-    snapshot_test_sync(scene, &params)
-        .unwrap()
-        .assert_mean_less_than(0.02);
+    snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.02);
 }
 
 #[test]
@@ -102,7 +85,5 @@ fn non_integer_translation() {
         (font_size * 10.) as _,
         (font_size * 1.1 + 10.).ceil() as _,
     );
-    snapshot_test_sync(scene, &params)
-        .unwrap()
-        .assert_mean_less_than(0.02);
+    snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.02);
 }

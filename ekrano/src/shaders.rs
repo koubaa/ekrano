@@ -73,10 +73,7 @@ impl FullShaders {
     }
 }
 
-pub(crate) fn goldy_full_shaders(
-    device: &goldy::Device,
-    renderer: &mut GoldyRenderer,
-) -> Result<FullShaders, Error> {
+pub(crate) fn goldy_full_shaders(renderer: &mut GoldyRenderer) -> Result<FullShaders, Error> {
     use BindType::*;
 
     let search_path = ekrano_shaders::slang::slang_search_path();
@@ -86,7 +83,6 @@ pub(crate) fn goldy_full_shaders(
     let sw_opt = goldy::OptimizationLevel::Default;
 
     let pipeline_setup = renderer.add_compute_shader(
-        device,
         "pipeline_setup",
         ekrano_shaders::slang::PIPELINE_SETUP,
         &[BufReadOnly, Buffer],
@@ -94,7 +90,6 @@ pub(crate) fn goldy_full_shaders(
         &[],
     )?;
     let pathtag_reduce = renderer.add_compute_shader(
-        device,
         "pathtag_reduce",
         ekrano_shaders::slang::PATHTAG_REDUCE,
         &[BufReadOnly, BufReadOnly, Buffer],
@@ -102,7 +97,6 @@ pub(crate) fn goldy_full_shaders(
         &[],
     )?;
     let pathtag_reduce2 = renderer.add_compute_shader(
-        device,
         "pathtag_reduce2",
         ekrano_shaders::slang::PATHTAG_REDUCE2,
         &[BufReadOnly, Buffer],
@@ -110,7 +104,6 @@ pub(crate) fn goldy_full_shaders(
         &[],
     )?;
     let pathtag_scan1 = renderer.add_compute_shader(
-        device,
         "pathtag_scan1",
         ekrano_shaders::slang::PATHTAG_SCAN1,
         &[BufReadOnly, BufReadOnly, Buffer],
@@ -118,7 +111,6 @@ pub(crate) fn goldy_full_shaders(
         &[],
     )?;
     let pathtag_scan = renderer.add_compute_shader(
-        device,
         "pathtag_scan_small",
         ekrano_shaders::slang::PATHTAG_SCAN_SMALL,
         &[BufReadOnly, BufReadOnly, BufReadOnly, Buffer],
@@ -126,7 +118,6 @@ pub(crate) fn goldy_full_shaders(
         &[],
     )?;
     let pathtag_scan_large = renderer.add_compute_shader(
-        device,
         "pathtag_scan_large",
         ekrano_shaders::slang::PATHTAG_SCAN_SMALL,
         &[BufReadOnly, BufReadOnly, BufReadOnly, Buffer],
@@ -134,7 +125,6 @@ pub(crate) fn goldy_full_shaders(
         &[],
     )?;
     let bbox_clear = renderer.add_compute_shader(
-        device,
         "bbox_clear",
         ekrano_shaders::slang::BBOX_CLEAR,
         &[BufReadOnly, Buffer],
@@ -142,22 +132,13 @@ pub(crate) fn goldy_full_shaders(
         &[],
     )?;
     let flatten = renderer.add_compute_shader(
-        device,
         "flatten",
         ekrano_shaders::slang::FLATTEN,
-        &[
-            BufReadOnly,
-            BufReadOnly,
-            BufReadOnly,
-            Buffer,
-            Buffer,
-            Buffer,
-        ],
+        &[BufReadOnly, BufReadOnly, BufReadOnly, Buffer, Buffer, Buffer],
         &search_paths,
         &[],
     )?;
     let draw_reduce = renderer.add_compute_shader(
-        device,
         "draw_reduce",
         ekrano_shaders::slang::DRAW_REDUCE,
         &[BufReadOnly, BufReadOnly, Buffer],
@@ -165,7 +146,6 @@ pub(crate) fn goldy_full_shaders(
         &[],
     )?;
     let draw_leaf = renderer.add_compute_shader(
-        device,
         "draw_leaf",
         ekrano_shaders::slang::DRAW_LEAF,
         &[
@@ -181,7 +161,6 @@ pub(crate) fn goldy_full_shaders(
         &[],
     )?;
     let clip_reduce = renderer.add_compute_shader(
-        device,
         "clip_reduce",
         ekrano_shaders::slang::CLIP_REDUCE,
         &[BufReadOnly, BufReadOnly, Buffer, Buffer],
@@ -189,7 +168,6 @@ pub(crate) fn goldy_full_shaders(
         &[],
     )?;
     let clip_leaf = renderer.add_compute_shader(
-        device,
         "clip_leaf",
         ekrano_shaders::slang::CLIP_LEAF,
         &[
@@ -205,7 +183,6 @@ pub(crate) fn goldy_full_shaders(
         &[],
     )?;
     let binning = renderer.add_compute_shader(
-        device,
         "binning",
         ekrano_shaders::slang::BINNING,
         &[
@@ -223,22 +200,13 @@ pub(crate) fn goldy_full_shaders(
         &[],
     )?;
     let tile_alloc = renderer.add_compute_shader(
-        device,
         "tile_alloc",
         ekrano_shaders::slang::TILE_ALLOC,
-        &[
-            BufReadOnly,
-            BufReadOnly,
-            BufReadOnly,
-            Buffer,
-            Buffer,
-            Buffer,
-        ],
+        &[BufReadOnly, BufReadOnly, BufReadOnly, Buffer, Buffer, Buffer],
         &search_paths,
         &[],
     )?;
     let path_count_setup = renderer.add_compute_shader(
-        device,
         "path_count_setup",
         ekrano_shaders::slang::PATH_COUNT_SETUP,
         &[Buffer, Buffer],
@@ -246,22 +214,13 @@ pub(crate) fn goldy_full_shaders(
         &[],
     )?;
     let path_count = renderer.add_compute_shader(
-        device,
         "path_count",
         ekrano_shaders::slang::PATH_COUNT,
-        &[
-            BufReadOnly,
-            Buffer,
-            BufReadOnly,
-            BufReadOnly,
-            Buffer,
-            Buffer,
-        ],
+        &[BufReadOnly, Buffer, BufReadOnly, BufReadOnly, Buffer, Buffer],
         &search_paths,
         &[],
     )?;
     let backdrop = renderer.add_compute_shader(
-        device,
         "backdrop_dyn",
         ekrano_shaders::slang::BACKDROP_DYN,
         &[BufReadOnly, Buffer, BufReadOnly, Buffer],
@@ -269,7 +228,6 @@ pub(crate) fn goldy_full_shaders(
         &[],
     )?;
     let coarse = renderer.add_compute_shader_with_options(
-        device,
         "coarse",
         ekrano_shaders::slang::COARSE,
         &[
@@ -288,7 +246,6 @@ pub(crate) fn goldy_full_shaders(
         sw_opt,
     )?;
     let path_tiling_setup = renderer.add_compute_shader(
-        device,
         "path_tiling_setup",
         ekrano_shaders::slang::PATH_TILING_SETUP,
         &[Buffer, Buffer, Buffer],
@@ -296,17 +253,9 @@ pub(crate) fn goldy_full_shaders(
         &[],
     )?;
     let path_tiling = renderer.add_compute_shader(
-        device,
         "path_tiling",
         ekrano_shaders::slang::PATH_TILING,
-        &[
-            Buffer,
-            BufReadOnly,
-            BufReadOnly,
-            BufReadOnly,
-            BufReadOnly,
-            Buffer,
-        ],
+        &[Buffer, BufReadOnly, BufReadOnly, BufReadOnly, BufReadOnly, Buffer],
         &search_paths,
         &[],
     )?;
@@ -346,7 +295,6 @@ pub(crate) fn goldy_full_shaders(
         Sampler, // nearest_clamp
     ];
     let fine_area = Some(renderer.add_compute_shader_with_options(
-        device,
         "fine_area",
         ekrano_shaders::slang::FINE,
         &fine_resources,
@@ -356,7 +304,6 @@ pub(crate) fn goldy_full_shaders(
     )?);
     let fine_msaa8 = renderer
         .add_compute_shader_with_options(
-            device,
             "fine_msaa8",
             ekrano_shaders::slang::FINE,
             &fine_msaa_resources,
@@ -367,7 +314,6 @@ pub(crate) fn goldy_full_shaders(
         .ok();
     let fine_msaa16 = renderer
         .add_compute_shader_with_options(
-            device,
             "fine_msaa16",
             ekrano_shaders::slang::FINE,
             &fine_msaa_resources,
@@ -378,7 +324,6 @@ pub(crate) fn goldy_full_shaders(
         .ok();
 
     let filter_pass = match renderer.add_compute_shader(
-        device,
         "filter_pass",
         ekrano_shaders::slang::FILTER_PASS,
         &[

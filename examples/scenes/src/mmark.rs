@@ -106,14 +106,9 @@ impl TestScene for MMark {
             }
         }
         let label = format!("mmark test: {n} path elements (up/down to adjust)");
-        params.text.add(
-            scene,
-            None,
-            40.0,
-            None,
-            Affine::translate((100.0, 1100.0)),
-            &label,
-        );
+        params
+            .text
+            .add(scene, None, 40.0, None, Affine::translate((100.0, 1100.0)), &label);
     }
 }
 
@@ -133,19 +128,12 @@ impl Element {
         let seg_type = rng.random_range(0..4);
         let next = GridPoint::random_point(last);
         let (grid_point, seg) = if seg_type < 2 {
-            (
-                next,
-                PathSeg::Line(Line::new(last.coordinate(), next.coordinate())),
-            )
+            (next, PathSeg::Line(Line::new(last.coordinate(), next.coordinate())))
         } else if seg_type < 3 {
             let p2 = GridPoint::random_point(next);
             (
                 p2,
-                PathSeg::Quad(QuadBez::new(
-                    last.coordinate(),
-                    next.coordinate(),
-                    p2.coordinate(),
-                )),
+                PathSeg::Quad(QuadBez::new(last.coordinate(), next.coordinate(), p2.coordinate())),
             )
         } else {
             let p2 = GridPoint::random_point(next);
@@ -194,9 +182,6 @@ impl GridPoint {
     fn coordinate(self) -> Point {
         let scale_x = WIDTH as f64 / ((GRID_WIDTH + 1) as f64);
         let scale_y = HEIGHT as f64 / ((GRID_HEIGHT + 1) as f64);
-        Point::new(
-            (self.0 as f64 + 0.5) * scale_x,
-            100.0 + (self.1 as f64 + 0.5) * scale_y,
-        )
+        Point::new((self.0 as f64 + 0.5) * scale_x, 100.0 + (self.1 as f64 + 0.5) * scale_y)
     }
 }

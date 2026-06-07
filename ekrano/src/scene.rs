@@ -6,12 +6,11 @@ use std::sync::Arc;
 #[cfg(feature = "bump_estimate")]
 use ekrano_encoding::BumpAllocatorMemory;
 use ekrano_encoding::{
-    CoverageMask, DrawBeginClip, Encoding, Filter, Glyph, GlyphRun, NormalizedCoord, Patch,
-    Transform,
+    CoverageMask, DrawBeginClip, Encoding, Filter, Glyph, GlyphRun, NormalizedCoord, Patch, Transform,
 };
 use peniko::{
-    BlendMode, Blob, Brush, BrushRef, Color, ColorStop, ColorStops, ColorStopsSource, Compose,
-    Extend, Fill, FontData, Gradient, ImageBrush, ImageBrushRef, ImageData, Mix, StyleRef,
+    BlendMode, Blob, Brush, BrushRef, Color, ColorStop, ColorStops, ColorStopsSource, Compose, Extend, Fill, FontData,
+    Gradient, ImageBrush, ImageBrushRef, ImageData, Mix, StyleRef,
     color::{AlphaColor, DynamicColor, Srgb, palette},
     kurbo::{Affine, BezPath, Point, Rect, Shape, Stroke, StrokeOpts, Vec2},
 };
@@ -189,12 +188,7 @@ impl Scene {
         single_use_lifetimes,
         reason = "False positive: https://github.com/rust-lang/rust/issues/129255"
     )]
-    pub fn push_clip_layer<'a>(
-        &mut self,
-        clip_style: impl Into<StyleRef<'a>>,
-        transform: Affine,
-        clip: &impl Shape,
-    ) {
+    pub fn push_clip_layer<'a>(&mut self, clip_style: impl Into<StyleRef<'a>>, transform: Affine, clip: &impl Shape) {
         self.push_layer_inner(DrawBeginClip::clip(), clip_style.into(), transform, clip);
     }
 
@@ -295,12 +289,7 @@ impl Scene {
         single_use_lifetimes,
         reason = "False positive: https://github.com/rust-lang/rust/issues/129255"
     )]
-    pub fn push_clip_path<'a>(
-        &mut self,
-        clip_style: impl Into<StyleRef<'a>>,
-        transform: Affine,
-        clip: &impl Shape,
-    ) {
+    pub fn push_clip_path<'a>(&mut self, clip_style: impl Into<StyleRef<'a>>, transform: Affine, clip: &impl Shape) {
         self.push_clip_layer(clip_style, transform, clip);
     }
 
@@ -351,8 +340,7 @@ impl Scene {
             {
                 use peniko::kurbo::PathEl;
                 let path = [PathEl::MoveTo(Point::ZERO), PathEl::LineTo(Point::ZERO)];
-                self.estimator
-                    .count_path(path.into_iter(), &Transform::IDENTITY, None);
+                self.estimator.count_path(path.into_iter(), &Transform::IDENTITY, None);
             }
         }
         self.encoding.encode_begin_clip(parameters);
@@ -404,8 +392,7 @@ impl Scene {
 
         self.encoding.encode_fill_style(Fill::NonZero);
         if self.encoding.encode_shape(&shape, true) {
-            let brush_transform =
-                Transform::from_kurbo(&transform.pre_translate(rect.center().to_vec2()));
+            let brush_transform = Transform::from_kurbo(&transform.pre_translate(rect.center().to_vec2()));
             if self.encoding.encode_transform(brush_transform) {
                 self.encoding.swap_last_path_tags();
             }
@@ -445,8 +432,7 @@ impl Scene {
             }
             self.encoding.encode_brush(brush, 1.0);
             #[cfg(feature = "bump_estimate")]
-            self.estimator
-                .count_path(shape.path_elements(0.1), &t, None);
+            self.estimator.count_path(shape.path_elements(0.1), &t, None);
         }
     }
 
@@ -531,10 +517,8 @@ impl Scene {
             )
             .collect::<Vec<_>>();
             #[cfg(feature = "bump_estimate")]
-            self.estimator
-                .count_path(dashed.iter().copied(), &t, Some(style));
-            self.encoding
-                .encode_path_elements(dashed.into_iter(), false)
+            self.estimator.count_path(dashed.iter().copied(), &t, Some(style));
+            self.encoding.encode_path_elements(dashed.into_iter(), false)
         } else {
             #[cfg(feature = "bump_estimate")]
             self.estimator
@@ -546,12 +530,7 @@ impl Scene {
     /// Draws an image at its natural size with the given transform.
     pub fn draw_image<'b>(&mut self, image: impl Into<ImageBrushRef<'b>>, transform: Affine) {
         let brush = image.into();
-        let rect = Rect::new(
-            0.0,
-            0.0,
-            brush.image.width as f64,
-            brush.image.height as f64,
-        );
+        let rect = Rect::new(0.0, 0.0, brush.image.width as f64, brush.image.height as f64);
         self.fill(Fill::NonZero, transform, brush, None, &rect);
     }
 
@@ -722,11 +701,7 @@ impl<'a> DrawGlyphs<'a> {
         }
     }
 
-    fn draw_outline_glyphs(
-        &mut self,
-        style: impl Into<StyleRef<'a>>,
-        glyphs: impl Iterator<Item = Glyph>,
-    ) -> usize {
+    fn draw_outline_glyphs(&mut self, style: impl Into<StyleRef<'a>>, glyphs: impl Iterator<Item = Glyph>) -> usize {
         let resources = &mut self.scene.encoding.resources;
         self.run.style = style.into().to_owned();
         resources.glyphs.extend(glyphs);
@@ -737,9 +712,7 @@ impl<'a> DrawGlyphs<'a> {
         let index = resources.glyph_runs.len();
         resources.glyph_runs.push(self.run.clone());
         resources.patches.push(Patch::GlyphRun { index });
-        self.scene
-            .encoding
-            .encode_brush(self.brush, self.brush_alpha);
+        self.scene.encoding.encode_brush(self.brush, self.brush_alpha);
         // Glyph run resolve step affects transform and style state in a way
         // that is opaque to the current encoding.
         // See <https://github.com/linebender/vello/issues/424>
@@ -753,20 +726,17 @@ impl<'a> DrawGlyphs<'a> {
         let font = skrifa::FontRef::from_index(blob.as_ref(), font_index).unwrap();
         let upem: f32 = font.head().map(|h| h.units_per_em()).unwrap().into();
         let run_transform = self.run.transform.to_kurbo();
-        let colr_scale = Affine::scale_non_uniform(
-            (self.run.font_size / upem).into(),
-            (-self.run.font_size / upem).into(),
-        );
+        let colr_scale =
+            Affine::scale_non_uniform((self.run.font_size / upem).into(), (-self.run.font_size / upem).into());
 
         let color_collection = font.color_glyphs();
         let bitmaps = font.bitmap_strikes();
         let mut final_glyph = None;
         let mut outline_count = 0;
         // We copy out of the variable font coords here because we need to call an exclusive self method
-        let coords = bytemuck::cast_slice(
-            &self.scene.encoding.resources.normalized_coords[self.run.normalized_coords.clone()],
-        )
-        .to_vec();
+        let coords =
+            bytemuck::cast_slice(&self.scene.encoding.resources.normalized_coords[self.run.normalized_coords.clone()])
+                .to_vec();
         let location = LocationRef::new(&coords);
         loop {
             let ppem = self.run.font_size;
@@ -800,9 +770,7 @@ impl<'a> DrawGlyphs<'a> {
                 EmojiLikeGlyph::Bitmap(bitmap) => {
                     let image = match bitmap.data {
                         bitmap::BitmapData::Bgra(data) => {
-                            if bitmap.width * bitmap.height * 4
-                                != u32::try_from(data.len()).unwrap()
-                            {
+                            if bitmap.width * bitmap.height * 4 != u32::try_from(data.len()).unwrap() {
                                 // TODO: Error once?
                                 log::error!("Invalid font");
                                 continue;
@@ -827,9 +795,7 @@ impl<'a> DrawGlyphs<'a> {
                         }
                         bitmap::BitmapData::Png(data) => {
                             let mut decoder = png::Decoder::new(data);
-                            decoder.set_transformations(
-                                Transformations::ALPHA | Transformations::STRIP_16,
-                            );
+                            decoder.set_transformations(Transformations::ALPHA | Transformations::STRIP_16);
                             let Ok(mut reader) = decoder.read_info() else {
                                 log::error!("Invalid PNG in font");
                                 continue;
@@ -869,14 +835,11 @@ impl<'a> DrawGlyphs<'a> {
                                 // TODO: How do we get the font name here?
                                 continue;
                             }
-                            let alphas = mask.data.iter().flat_map(|it| {
-                                masks
-                                    .iter()
-                                    .map(move |mask| (it & mask.mask) >> mask.right_shift)
-                            });
-                            let data: Box<[u8]> = alphas
-                                .flat_map(|alpha| [u8::MAX, u8::MAX, u8::MAX, alpha])
-                                .collect();
+                            let alphas = mask
+                                .data
+                                .iter()
+                                .flat_map(|it| masks.iter().map(move |mask| (it & mask.mask) >> mask.right_shift));
+                            let data: Box<[u8]> = alphas.flat_map(|alpha| [u8::MAX, u8::MAX, u8::MAX, alpha]).collect();
 
                             ImageData {
                                 // TODO: The design of the Blob type forces the double boxing
@@ -890,8 +853,7 @@ impl<'a> DrawGlyphs<'a> {
                     };
                     let image = ImageBrush::new(image).multiply_alpha(self.brush_alpha);
                     // Split into multiple statements because rustfmt breaks
-                    let transform =
-                        run_transform.pre_translate(Vec2::new(glyph.x.into(), glyph.y.into()));
+                    let transform = run_transform.pre_translate(Vec2::new(glyph.x.into(), glyph.y.into()));
 
                     // Logic copied from Skia without examination or careful understanding:
                     // https://github.com/google/skia/blob/61ac357e8e3338b90fb84983100d90768230797f/src/ports/SkTypeface_fontations.cpp#L664
@@ -904,9 +866,7 @@ impl<'a> DrawGlyphs<'a> {
                     // when both vertical offsets are 0 to avoid incorrect
                     // rendering if Apple ever does encode the offset directly in
                     // the font.
-                    let bearing_y = if bitmap.bearing_y == 0.0
-                        && bitmaps.format() == Some(BitmapFormat::Sbix)
-                    {
+                    let bearing_y = if bitmap.bearing_y == 0.0 && bitmaps.format() == Some(BitmapFormat::Sbix) {
                         100.0
                     } else {
                         bitmap.bearing_y
@@ -939,11 +899,7 @@ impl<'a> DrawGlyphs<'a> {
                     let transform = run_transform
                         * Affine::translate(Vec2::new(glyph.x.into(), glyph.y.into()))
                         * colr_scale
-                        * self
-                            .run
-                            .glyph_transform
-                            .unwrap_or(Transform::IDENTITY)
-                            .to_kurbo();
+                        * self.run.glyph_transform.unwrap_or(Transform::IDENTITY).to_kurbo();
                     colr.paint(
                         location,
                         &mut DrawColorGlyphs {
@@ -990,16 +946,7 @@ fn bitmap_masks(bpp: u8) -> Option<&'static [BitmapMask]> {
     }
     match bpp {
         1 => {
-            const BPP_1_MASK: &[BitmapMask] = &[
-                byte(0),
-                byte(1),
-                byte(2),
-                byte(3),
-                byte(4),
-                byte(5),
-                byte(6),
-                byte(7),
-            ];
+            const BPP_1_MASK: &[BitmapMask] = &[byte(0), byte(1), byte(2), byte(3), byte(4), byte(5), byte(6), byte(7)];
             Some(BPP_1_MASK)
         }
 
@@ -1163,9 +1110,7 @@ impl ColorPainter for DrawColorGlyphs<'_> {
             Fill::NonZero,
             transform.to_kurbo(),
             &conv_brush(brush, self.cpal, self.foreground_brush),
-            brush_transform
-                .map(conv_skrifa_transform)
-                .map(|it| it.to_kurbo()),
+            brush_transform.map(conv_skrifa_transform).map(|it| it.to_kurbo()),
             &path.0,
         );
     }
@@ -1183,10 +1128,8 @@ impl OutlinePen for BezPathOutline {
     }
 
     fn quad_to(&mut self, cx0: f32, cy0: f32, x: f32, y: f32) {
-        self.0.quad_to(
-            Point::new(cx0.into(), cy0.into()),
-            Point::new(x.into(), y.into()),
-        );
+        self.0
+            .quad_to(Point::new(cx0.into(), cy0.into()), Point::new(x.into(), y.into()));
     }
 
     fn curve_to(&mut self, cx0: f32, cy0: f32, cx1: f32, cy1: f32, x: f32, y: f32) {
@@ -1204,10 +1147,7 @@ impl OutlinePen for BezPathOutline {
 
 impl DrawColorGlyphs<'_> {
     fn last_transform(&self) -> Transform {
-        self.transform_stack
-            .last()
-            .copied()
-            .unwrap_or(Transform::IDENTITY)
+        self.transform_stack.last().copied().unwrap_or(Transform::IDENTITY)
     }
 }
 
@@ -1218,16 +1158,9 @@ fn conv_skrifa_transform(transform: skrifa::color::Transform) -> Transform {
     }
 }
 
-fn conv_brush(
-    brush: skrifa::color::Brush<'_>,
-    cpal: &Cpal<'_>,
-    foreground_brush: BrushRef<'_>,
-) -> Brush {
+fn conv_brush(brush: skrifa::color::Brush<'_>, cpal: &Cpal<'_>, foreground_brush: BrushRef<'_>) -> Brush {
     match brush {
-        skrifa::color::Brush::Solid {
-            palette_index,
-            alpha,
-        } => color_index(cpal, palette_index)
+        skrifa::color::Brush::Solid { palette_index, alpha } => color_index(cpal, palette_index)
             .map(|it| Brush::Solid(it.multiply_alpha(alpha)))
             .unwrap_or(foreground_brush.to_owned().multiply_alpha(alpha)),
 
@@ -1262,13 +1195,9 @@ fn conv_brush(
         } => Brush::Gradient(
             // TODO: This is upside-down, see
             // https://github.com/linebender/vello/pull/1221
-            Gradient::new_sweep(
-                conv_point(c0),
-                start_angle.to_radians(),
-                end_angle.to_radians(),
-            )
-            .with_extend(conv_extend(extend))
-            .with_stops(ColorStopsConverter(color_stops, cpal, foreground_brush)),
+            Gradient::new_sweep(conv_point(c0), start_angle.to_radians(), end_angle.to_radians())
+                .with_extend(conv_extend(extend))
+                .with_stops(ColorStopsConverter(color_stops, cpal, foreground_brush)),
         ),
     }
 }

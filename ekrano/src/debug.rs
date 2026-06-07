@@ -89,12 +89,7 @@ impl DebugLayers {
     /// A `DebugLayers` with all layers enabled.
     pub const fn all() -> Self {
         // Custom BitOr is not const, so need to manipulate the inner value here
-        Self(
-            Self::BOUNDING_BOXES.0
-                | Self::LINESOUP_SEGMENTS.0
-                | Self::LINESOUP_POINTS.0
-                | Self::VALIDATION.0,
-        )
+        Self(Self::BOUNDING_BOXES.0 | Self::LINESOUP_SEGMENTS.0 | Self::LINESOUP_POINTS.0 | Self::VALIDATION.0)
     }
 
     /// True if this `DebugLayers` has no layers enabled.

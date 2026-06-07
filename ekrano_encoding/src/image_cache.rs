@@ -68,9 +68,7 @@ impl ImageCache {
         match self.map.entry(image.data.id()) {
             Entry::Occupied(occupied) => Some(*occupied.get()),
             Entry::Vacant(vacant) => {
-                let alloc = self
-                    .atlas
-                    .allocate(size2(image.width as _, image.height as _))?;
+                let alloc = self.atlas.allocate(size2(image.width as _, image.height as _))?;
                 let x = alloc.rectangle.min.x as u32;
                 let y = alloc.rectangle.min.y as u32;
                 self.images.push((image.clone(), x, y));

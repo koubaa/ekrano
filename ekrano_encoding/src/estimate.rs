@@ -51,12 +51,7 @@ impl BumpEstimator {
         self.lines.add(&other.lines, scale);
     }
 
-    pub fn count_path(
-        &mut self,
-        path: impl Iterator<Item = PathEl>,
-        t: &Transform,
-        stroke: Option<&Stroke>,
-    ) {
+    pub fn count_path(&mut self, path: impl Iterator<Item = PathEl>, t: &Transform, stroke: Option<&Stroke>) {
         let mut caps = 1;
         let mut joins: u32 = 0;
         let mut lineto_lines = 0;
@@ -261,9 +256,7 @@ struct LineSoup {
 
 impl LineSoup {
     fn tally(&self, scale: f64) -> u32 {
-        let curves = self
-            .scaled_curve_line_count(scale)
-            .max(5 * self.curve_count);
+        let curves = self.scaled_curve_line_count(scale).max(5 * self.curve_count);
 
         self.linetos + curves
     }
@@ -384,14 +377,7 @@ mod wang {
         (SQRT_OF_DEGREE_TERM_QUAD * m.sqrt() * rsqrt_of_tol).ceil()
     }
 
-    pub(crate) fn cubic(
-        rsqrt_of_tol: f64,
-        p0: Vec2,
-        p1: Vec2,
-        p2: Vec2,
-        p3: Vec2,
-        t: &Transform,
-    ) -> f64 {
+    pub(crate) fn cubic(rsqrt_of_tol: f64, p0: Vec2, p1: Vec2, p2: Vec2, p3: Vec2, t: &Transform) -> f64 {
         let v1 = -2. * p1 + p0 + p2;
         let v2 = -2. * p2 + p1 + p3;
         let v1 = transform(t, v1);

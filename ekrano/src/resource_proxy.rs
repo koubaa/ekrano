@@ -36,10 +36,7 @@ pub enum BindType {
 }
 
 #[cfg(feature = "debug_layers")]
-#[allow(
-    dead_code,
-    reason = "fields read by debug renderer; draw is a no-op stub"
-)]
+#[allow(dead_code, reason = "fields read by debug renderer; draw is a no-op stub")]
 pub struct DrawParams {
     pub shader_id: ShaderId,
     pub instance_count: u32,

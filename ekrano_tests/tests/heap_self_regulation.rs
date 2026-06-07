@@ -85,13 +85,7 @@ fn complex_scene() -> Scene {
     scene
 }
 
-fn render_n_frames(
-    device: &Device,
-    renderer: &mut GoldyRenderer,
-    scene: &Scene,
-    params: &RenderParams,
-    n: usize,
-) {
+fn render_n_frames(device: &Device, renderer: &mut GoldyRenderer, scene: &Scene, params: &RenderParams, n: usize) {
     let texture = device
         .alloc_texture(
             params.width,
@@ -104,7 +98,7 @@ fn render_n_frames(
 
     for i in 0..n {
         renderer
-            .render_to_texture(device, scene, &texture, params)
+            .render_to_texture(scene, &texture, params)
             .unwrap_or_else(|e| panic!("frame {i} failed: {e}"));
     }
 }
@@ -243,7 +237,7 @@ fn resource_pool_stabilizes_after_warmup() {
     // Warmup: 30 frames
     for i in 0..30 {
         renderer
-            .render_to_texture(&device, &scene, &texture, &params)
+            .render_to_texture(&scene, &texture, &params)
             .unwrap_or_else(|e| panic!("warmup frame {i} failed: {e}"));
     }
 
@@ -253,7 +247,7 @@ fn resource_pool_stabilizes_after_warmup() {
     let mut max_pooled = baseline_pool.total_pooled_buffers;
     for i in 0..50 {
         renderer
-            .render_to_texture(&device, &scene, &texture, &params)
+            .render_to_texture(&scene, &texture, &params)
             .unwrap_or_else(|e| panic!("steady frame {i} failed: {e}"));
         let stats = renderer.resource_pool_stats();
         max_pooled = max_pooled.max(stats.total_pooled_buffers);
@@ -301,7 +295,7 @@ fn overflow_heaps_compact_to_zero_in_steady_state() {
     // Run 100 frames with periodic compaction.
     for i in 0..100 {
         renderer
-            .render_to_texture(&device, &scene, &texture, &params)
+            .render_to_texture(&scene, &texture, &params)
             .unwrap_or_else(|e| panic!("frame {i} failed: {e}"));
     }
 
@@ -360,7 +354,7 @@ fn growing_scene_survives_without_heap_exhaustion() {
             );
         }
         renderer
-            .render_to_texture(&device, &scene, &texture, &params)
+            .render_to_texture(&scene, &texture, &params)
             .unwrap_or_else(|e| panic!("frame {frame} (n_shapes={n_shapes}): {e}"));
     }
 }
@@ -397,7 +391,7 @@ fn shrinking_scene_does_not_leak_buffers() {
     let big_scene = complex_scene();
     for i in 0..30 {
         renderer
-            .render_to_texture(&device, &big_scene, &texture, &params)
+            .render_to_texture(&big_scene, &texture, &params)
             .unwrap_or_else(|e| panic!("big frame {i}: {e}"));
     }
 
@@ -405,7 +399,7 @@ fn shrinking_scene_does_not_leak_buffers() {
     let small_scene = tiny_scene();
     for i in 0..50 {
         renderer
-            .render_to_texture(&device, &small_scene, &texture, &params)
+            .render_to_texture(&small_scene, &texture, &params)
             .unwrap_or_else(|e| panic!("small frame {i}: {e}"));
     }
 
@@ -450,7 +444,7 @@ fn deferred_ring_does_not_grow_unbounded() {
 
     for i in 0..100 {
         renderer
-            .render_to_texture(&device, &scene, &texture, &params)
+            .render_to_texture(&scene, &texture, &params)
             .unwrap_or_else(|e| panic!("frame {i}: {e}"));
 
         // The VramAllocator deferred ring should be bounded by pipelining depth.
@@ -497,7 +491,7 @@ fn large_resolution_survives_50_frames() {
     };
     for i in 0..50 {
         renderer
-            .render_to_texture(&device, &scene, &texture, &params)
+            .render_to_texture(&scene, &texture, &params)
             .unwrap_or_else(|e| panic!("frame {i}: {e}"));
     }
 }
@@ -535,7 +529,7 @@ fn recreate_renderer_after_warmup_survives() {
         let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new");
         for i in 0..30 {
             renderer
-                .render_to_texture(&device, &scene, &texture, &params)
+                .render_to_texture(&scene, &texture, &params)
                 .unwrap_or_else(|e| panic!("first renderer frame {i}: {e}"));
         }
     }
@@ -546,7 +540,7 @@ fn recreate_renderer_after_warmup_survives() {
         let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new (second)");
         for i in 0..30 {
             renderer
-                .render_to_texture(&device, &scene, &texture, &params)
+                .render_to_texture(&scene, &texture, &params)
                 .unwrap_or_else(|e| panic!("second renderer frame {i}: {e}"));
         }
     }

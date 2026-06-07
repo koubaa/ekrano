@@ -24,10 +24,7 @@
     clippy::missing_assert_message,
     reason = "Deferred"
 )]
-#![allow(
-    unnameable_types,
-    reason = "Deferred, only apply in some feature sets so not expect"
-)]
+#![allow(unnameable_types, reason = "Deferred, only apply in some feature sets so not expect")]
 
 mod binning;
 mod clip;
@@ -51,18 +48,17 @@ mod resolve;
 pub use binning::BinHeader;
 pub use clip::{Clip, ClipBbox, ClipBic, ClipElement};
 pub use config::{
-    BufferSize, BufferSizes, BumpAllocatorMemory, BumpAllocators, ConfigUniform, IndirectCount,
-    N_INDIRECT_STAGES, RenderConfig, STAGE_BACKDROP, STAGE_BBOX_CLEAR, STAGE_BINNING,
-    STAGE_CLIP_LEAF, STAGE_CLIP_REDUCE, STAGE_COARSE, STAGE_DRAW_LEAF, STAGE_DRAW_REDUCE,
-    STAGE_FINE, STAGE_FLATTEN, STAGE_PATH_COUNT, STAGE_PATH_COUNT_SETUP, STAGE_PATH_TILING,
-    STAGE_PATH_TILING_SETUP, STAGE_PATHTAG_REDUCE, STAGE_PATHTAG_REDUCE2, STAGE_PATHTAG_SCAN,
-    STAGE_PATHTAG_SCAN_LARGE, STAGE_PATHTAG_SCAN1, STAGE_TILE_ALLOC, WorkgroupCounts,
-    WorkgroupCountsGpu, WorkgroupSize,
+    BufferSize, BufferSizes, BumpAllocatorMemory, BumpAllocators, ConfigUniform, IndirectCount, N_INDIRECT_STAGES,
+    RenderConfig, STAGE_BACKDROP, STAGE_BBOX_CLEAR, STAGE_BINNING, STAGE_CLIP_LEAF, STAGE_CLIP_REDUCE, STAGE_COARSE,
+    STAGE_DRAW_LEAF, STAGE_DRAW_REDUCE, STAGE_FINE, STAGE_FLATTEN, STAGE_PATH_COUNT, STAGE_PATH_COUNT_SETUP,
+    STAGE_PATH_TILING, STAGE_PATH_TILING_SETUP, STAGE_PATHTAG_REDUCE, STAGE_PATHTAG_REDUCE2, STAGE_PATHTAG_SCAN,
+    STAGE_PATHTAG_SCAN_LARGE, STAGE_PATHTAG_SCAN1, STAGE_TILE_ALLOC, WorkgroupCounts, WorkgroupCountsGpu,
+    WorkgroupSize,
 };
 pub use coverage_mask::CoverageMask;
 pub use draw::{
-    DRAW_INFO_FLAGS_FILL_RULE_BIT, DrawBbox, DrawBeginClip, DrawBlurRoundedRect, DrawColor,
-    DrawImage, DrawLinearGradient, DrawMonoid, DrawRadialGradient, DrawSweepGradient, DrawTag,
+    DRAW_INFO_FLAGS_FILL_RULE_BIT, DrawBbox, DrawBeginClip, DrawBlurRoundedRect, DrawColor, DrawImage,
+    DrawLinearGradient, DrawMonoid, DrawRadialGradient, DrawSweepGradient, DrawTag,
 };
 pub use encoding::{Encoding, Resources, StreamOffsets};
 pub use filter::{Filter, FilterEdgeMode, FilterPrimitive, FilterUniform, LayerFilterEffect};
@@ -72,8 +68,8 @@ pub use mask::{make_mask_lut, make_mask_lut_16};
 pub use math::Transform;
 pub use monoid::Monoid;
 pub use path::{
-    Cubic, LineSoup, Path, PathBbox, PathEncoder, PathMonoid, PathSegment, PathSegmentType,
-    PathTag, SegmentCount, Style, Tile,
+    Cubic, LineSoup, Path, PathBbox, PathEncoder, PathMonoid, PathSegment, PathSegmentType, PathTag, SegmentCount,
+    Style, Tile,
 };
 pub use ramp_cache::Ramps;
 pub use resolve::{Layout, Patch, Resolver, resolve_solid_paths_only};
@@ -94,7 +90,6 @@ pub type NormalizedCoord = i16;
 
 #[cfg(test)]
 mod tests {
-    const _NORMALISED_COORD_SIZE_MATCHES: () = assert!(
-        size_of::<skrifa::prelude::NormalizedCoord>() == size_of::<crate::NormalizedCoord>()
-    );
+    const _NORMALISED_COORD_SIZE_MATCHES: () =
+        assert!(size_of::<skrifa::prelude::NormalizedCoord>() == size_of::<crate::NormalizedCoord>());
 }

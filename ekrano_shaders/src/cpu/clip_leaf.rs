@@ -64,10 +64,8 @@ fn clip_leaf_main(
             };
             clip_bboxes[global_ix as usize] = bbox;
             draw_monoids[clip_el.ix as usize].path_ix = tos.path_ix;
-            draw_monoids[clip_el.ix as usize].scene_offset =
-                draw_monoids[tos.parent_ix as usize].scene_offset;
-            draw_monoids[clip_el.ix as usize].info_offset =
-                draw_monoids[tos.parent_ix as usize].info_offset;
+            draw_monoids[clip_el.ix as usize].scene_offset = draw_monoids[tos.parent_ix as usize].scene_offset;
+            draw_monoids[clip_el.ix as usize].info_offset = draw_monoids[tos.parent_ix as usize].info_offset;
         }
     }
 }
@@ -78,11 +76,5 @@ pub fn clip_leaf(_n_wg: u32, resources: &[CpuBinding<'_>]) {
     let path_bboxes = resources[2].as_slice();
     let mut draw_monoids = resources[5].as_slice_mut();
     let mut clip_bboxes = resources[6].as_slice_mut();
-    clip_leaf_main(
-        &config,
-        &clip_inp,
-        &path_bboxes,
-        &mut draw_monoids,
-        &mut clip_bboxes,
-    );
+    clip_leaf_main(&config, &clip_inp, &path_bboxes, &mut draw_monoids, &mut clip_bboxes);
 }

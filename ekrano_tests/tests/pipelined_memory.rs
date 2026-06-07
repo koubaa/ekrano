@@ -87,7 +87,7 @@ fn single_frame_ring_depth_bounded() {
 
     for i in 0..FRAME_COUNT {
         renderer
-            .render_to_texture(&device, &scene, &texture, &params)
+            .render_to_texture(&scene, &texture, &params)
             .unwrap_or_else(|e| panic!("frame {i} failed: {e}"));
 
         let depth = renderer.allocator_stats().cleanup_ring_depth;
@@ -126,7 +126,7 @@ fn resource_pool_stable_under_single_frame() {
 
     for i in 0..30 {
         renderer
-            .render_to_texture(&device, &scene, &texture, &params)
+            .render_to_texture(&scene, &texture, &params)
             .unwrap_or_else(|e| panic!("warmup frame {i} failed: {e}"));
     }
 
@@ -135,7 +135,7 @@ fn resource_pool_stable_under_single_frame() {
 
     for i in 0..50 {
         renderer
-            .render_to_texture(&device, &scene, &texture, &params)
+            .render_to_texture(&scene, &texture, &params)
             .unwrap_or_else(|e| panic!("steady frame {i} failed: {e}"));
         max_pooled = max_pooled.max(renderer.resource_pool_stats().total_pooled_buffers);
     }

@@ -176,11 +176,7 @@ impl Resolver {
 
     /// Resolves late bound resources and packs an encoding. Returns the packed
     /// layout and computed ramp data.
-    pub fn resolve<'a>(
-        &'a mut self,
-        encoding: &Encoding,
-        packed: &mut Vec<u8>,
-    ) -> (Layout, Ramps<'a>, Images<'a>) {
+    pub fn resolve<'a>(&'a mut self, encoding: &Encoding, packed: &mut Vec<u8>) -> (Layout, Ramps<'a>, Images<'a>) {
         let resources = &encoding.resources;
         if resources.patches.is_empty() {
             let layout = resolve_solid_paths_only(encoding, packed);
@@ -235,9 +231,7 @@ impl Resolver {
             let stream = &encoding.path_data;
             for patch in &self.patches {
                 if let ResolvedPatch::GlyphRun { index, glyphs, .. } = patch {
-                    let stream_offset = encoding.resources.glyph_runs[*index]
-                        .stream_offsets
-                        .path_data;
+                    let stream_offset = encoding.resources.glyph_runs[*index].stream_offsets.path_data;
                     if pos < stream_offset {
                         data.extend_from_slice(bytemuck::cast_slice(&stream[pos..stream_offset]));
                         pos = stream_offset;
@@ -274,9 +268,7 @@ impl Resolver {
                         extend,
                     } => {
                         if pos < *draw_data_offset {
-                            data.extend_from_slice(bytemuck::cast_slice(
-                                &encoding.draw_data[pos..*draw_data_offset],
-                            ));
+                            data.extend_from_slice(bytemuck::cast_slice(&encoding.draw_data[pos..*draw_data_offset]));
                         }
                         let index_mode = (ramp_id << 2) | *extend as u32;
                         data.extend_from_slice(bytemuck::bytes_of(&index_mode));
@@ -288,9 +280,7 @@ impl Resolver {
                         draw_data_offset,
                     } => {
                         if pos < *draw_data_offset {
-                            data.extend_from_slice(bytemuck::cast_slice(
-                                &encoding.draw_data[pos..*draw_data_offset],
-                            ));
+                            data.extend_from_slice(bytemuck::cast_slice(&encoding.draw_data[pos..*draw_data_offset]));
                         }
                         if let Some((x, y)) = self.pending_images[*index].xy {
                             let xy = (x << 16) | y;
@@ -441,25 +431,21 @@ impl Resolver {
                             hint = false;
                         }
                     }
-                    let Some(mut session) = self.glyph_cache.session(
-                        &run.font,
-                        bytemuck::cast_slice(coords),
-                        font_size,
-                        hint,
-                        &run.style,
-                    ) else {
+                    let Some(mut session) =
+                        self.glyph_cache
+                            .session(&run.font, bytemuck::cast_slice(coords), font_size, hint, &run.style)
+                    else {
                         continue;
                     };
                     let glyph_start = self.glyphs.len();
                     for glyph in glyphs {
-                        let (encoding, stream_sizes) =
-                            session.get_or_insert(glyph.id).unwrap_or_else(|| {
-                                // HACK: We pretend that the encoding was empty.
-                                // In theory, we should be able to skip this glyph, but there is also
-                                // a corresponding entry in `resources`, which means that we would
-                                // need to make the patching process skip this glyph.
-                                (Arc::new(Encoding::new()), StreamOffsets::default())
-                            });
+                        let (encoding, stream_sizes) = session.get_or_insert(glyph.id).unwrap_or_else(|| {
+                            // HACK: We pretend that the encoding was empty.
+                            // In theory, we should be able to skip this glyph, but there is also
+                            // a corresponding entry in `resources`, which means that we would
+                            // need to make the patching process skip this glyph.
+                            (Arc::new(Encoding::new()), StreamOffsets::default())
+                        });
                         run_sizes.add(&stream_sizes);
                         self.glyphs.push(encoding);
                     }
@@ -598,8 +584,7 @@ impl SceneBufferSizes {
     /// Computes common scene buffer sizes for the given encoding and patch
     /// stream sizes.
     fn new(encoding: &Encoding, patch_sizes: &StreamOffsets) -> Self {
-        let n_path_tags =
-            encoding.path_tags.len() + patch_sizes.path_tags + encoding.n_open_clips as usize;
+        let n_path_tags = encoding.path_tags.len() + patch_sizes.path_tags + encoding.n_open_clips as usize;
         let path_tag_padded = align_up(n_path_tags, 4 * crate::config::PATH_REDUCE_WG);
         let buffer_size = path_tag_padded
             + slice_size_in_bytes(&encoding.path_data, patch_sizes.path_data)

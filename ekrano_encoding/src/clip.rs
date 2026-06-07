@@ -22,10 +22,7 @@ pub struct ClipBic {
 /// Clip element.
 #[derive(Copy, Clone, Pod, Zeroable, Debug, Default)]
 #[repr(C)]
-#[expect(
-    clippy::partial_pub_fields,
-    reason = "Padding is meaningless to manipulate directly"
-)]
+#[expect(clippy::partial_pub_fields, reason = "Padding is meaningless to manipulate directly")]
 pub struct ClipElement {
     pub parent_ix: u32,
     _padding: [u8; 12],

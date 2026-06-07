@@ -26,10 +26,7 @@ pub fn default_scene() -> Result<SceneSet> {
     let assets_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../assets/")
         .canonicalize()?;
-    scene_from_files_inner(&[
-        assets_dir.join("Ghostscript_Tiger.svg"),
-        assets_dir.join("downloads"),
-    ])
+    scene_from_files_inner(&[assets_dir.join("Ghostscript_Tiger.svg"), assets_dir.join("downloads")])
 }
 
 fn scene_from_files_inner(files: &[PathBuf]) -> std::result::Result<SceneSet, anyhow::Error> {
@@ -61,13 +58,9 @@ fn example_scene_of(file: PathBuf) -> ExampleScene {
         .unwrap_or_else(|| "unknown".to_string());
     ExampleScene {
         function: Box::new(svg_function_of(name.clone(), move || {
-            std::fs::read_to_string(&file)
-                .unwrap_or_else(|e| panic!("failed to read svg file {file:?}: {e}"))
+            std::fs::read_to_string(&file).unwrap_or_else(|e| panic!("failed to read svg file {file:?}: {e}"))
         })),
-        config: crate::SceneConfig {
-            animated: false,
-            name,
-        },
+        config: crate::SceneConfig { animated: false, name },
     }
 }
 
@@ -77,13 +70,7 @@ fn render_svg_rec(items: &[crate::pico_svg::Item]) -> Scene {
         use crate::pico_svg::Item;
         match item {
             Item::Fill(fill) => {
-                scene.fill(
-                    Fill::NonZero,
-                    Affine::IDENTITY,
-                    fill.color,
-                    None,
-                    &fill.path,
-                );
+                scene.fill(Fill::NonZero, Affine::IDENTITY, fill.color, None, &fill.path);
             }
             Item::Stroke(stroke) => {
                 scene.stroke(
@@ -168,8 +155,7 @@ pub fn svg_function_of<R: AsRef<str>>(
                 let name = name.clone();
                 std::thread::spawn(move || {
                     let contents = contents();
-                    tx.send(render_svg_contents(&name, contents.as_ref()))
-                        .unwrap();
+                    tx.send(render_svg_contents(&name, contents.as_ref())).unwrap();
                 });
             }
             let recv = rx.recv_timeout(timeout);

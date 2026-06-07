@@ -4,8 +4,8 @@
 use crate::SegmentCount;
 
 use super::{
-    BinHeader, Clip, ClipBbox, ClipBic, ClipElement, DrawBbox, DrawMonoid, Layout, LineSoup, Path,
-    PathBbox, PathMonoid, PathSegment, Tile,
+    BinHeader, Clip, ClipBbox, ClipBic, ClipElement, DrawBbox, DrawMonoid, Layout, LineSoup, Path, PathBbox,
+    PathMonoid, PathSegment, Tile,
 };
 use bytemuck::{Pod, Zeroable};
 use std::mem::size_of;
@@ -212,8 +212,7 @@ impl RenderConfig {
         let width_in_tiles = new_width / TILE_WIDTH;
         let height_in_tiles = new_height / TILE_HEIGHT;
         let n_path_tags = layout.path_tags_size();
-        let workgroup_counts =
-            WorkgroupCounts::new(layout, width_in_tiles, height_in_tiles, n_path_tags);
+        let workgroup_counts = WorkgroupCounts::new(layout, width_in_tiles, height_in_tiles, n_path_tags);
         let buffer_sizes = BufferSizes::new(layout, &workgroup_counts);
         Self {
             gpu: ConfigUniform {
@@ -290,12 +289,7 @@ pub struct WorkgroupCounts {
 }
 
 impl WorkgroupCounts {
-    pub fn new(
-        layout: &Layout,
-        width_in_tiles: u32,
-        height_in_tiles: u32,
-        n_path_tags: u32,
-    ) -> Self {
+    pub fn new(layout: &Layout, width_in_tiles: u32, height_in_tiles: u32, n_path_tags: u32) -> Self {
         let n_paths = layout.n_paths;
         let n_draw_objects = layout.n_draw_objects;
         let n_clips = layout.n_clips;
@@ -550,10 +544,7 @@ impl BufferSizes {
         vec![
             (self.path_reduced.len() as usize, size_of::<PathMonoid>()),
             (self.path_reduced2.len() as usize, size_of::<PathMonoid>()),
-            (
-                self.path_reduced_scan.len() as usize,
-                size_of::<PathMonoid>(),
-            ),
+            (self.path_reduced_scan.len() as usize, size_of::<PathMonoid>()),
             (self.path_monoids.len() as usize, size_of::<PathMonoid>()),
             (self.path_bboxes.len() as usize, size_of::<PathBbox>()),
             (self.draw_reduced.len() as usize, size_of::<DrawMonoid>()),

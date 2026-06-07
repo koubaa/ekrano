@@ -123,9 +123,7 @@ mod impls {
     use std::sync::Arc;
 
     use crate::SceneParams;
-    use ekrano::kurbo::{
-        Affine, BezPath, Cap, Circle, Ellipse, Join, PathEl, Point, Rect, Shape, Stroke, Vec2,
-    };
+    use ekrano::kurbo::{Affine, BezPath, Cap, Circle, Ellipse, Join, PathEl, Point, Rect, Shape, Stroke, Vec2};
     use ekrano::peniko::color::{AlphaColor, Lch, palette};
     use ekrano::peniko::*;
     use ekrano::*;
@@ -175,20 +173,8 @@ mod impls {
             None,
             &missing_movetos,
         );
-        scene.fill(
-            Fill::NonZero,
-            Affine::IDENTITY,
-            palette::css::BLUE,
-            None,
-            &empty,
-        );
-        scene.fill(
-            Fill::NonZero,
-            Affine::IDENTITY,
-            palette::css::BLUE,
-            None,
-            &only_movetos,
-        );
+        scene.fill(Fill::NonZero, Affine::IDENTITY, palette::css::BLUE, None, &empty);
+        scene.fill(Fill::NonZero, Affine::IDENTITY, palette::css::BLUE, None, &only_movetos);
         scene.stroke(
             &Stroke::new(8.0),
             Affine::translate((100.0, 100.0)),
@@ -430,12 +416,7 @@ mod impls {
             [(40., 40.), (0., 0.), (200., 200.), (0., 0.)],   // Diag w/ an internal 180
             [(0., 0.), (1e-2, 0.), (-1e-2, 0.), (0., 0.)],    // Circle
             // Flat line with no turns:
-            [
-                (400.75, 100.05),
-                (400.75, 100.05),
-                (100.05, 300.95),
-                (100.05, 300.95),
-            ],
+            [(400.75, 100.05), (400.75, 100.05), (100.05, 300.95), (100.05, 300.95)],
             [(0.5, 0.), (0., 0.), (20., 0.), (10., 0.)], // Flat line with 2 180s
             [(10., 0.), (0., 0.), (10., 0.), (10., 0.)], // Flat line with a 180
         ];
@@ -661,11 +642,7 @@ mod impls {
                     let mut i: f64 = 0.0;
                     while i < 1.0 {
                         path.push(LineTo(
-                            (
-                                pts[0].0 * (1.0 - i) + pts[1].0 * i,
-                                pts[0].1 * (1.0 - i) + pts[1].1 * i,
-                            )
-                                .into(),
+                            (pts[0].0 * (1.0 - i) + pts[1].0 * i, pts[0].1 * (1.0 - i) + pts[1].1 * i).into(),
                         ));
                         i += 0.05;
                     }
@@ -705,23 +682,12 @@ mod impls {
             LineTo((79.0, 90.0).into()),
             ClosePath,
         ];
-        scene.fill(
-            Fill::NonZero,
-            Affine::IDENTITY,
-            palette::css::GRAY,
-            None,
-            &rect,
-        );
+        scene.fill(Fill::NonZero, Affine::IDENTITY, palette::css::GRAY, None, &rect);
         let text_size = 60.0 + 40.0 * (params.time as f32).sin();
         let s = "\u{1f600}hello Vello text!";
-        params.text.add(
-            scene,
-            None,
-            text_size,
-            None,
-            Affine::translate((110.0, 600.0)),
-            s,
-        );
+        params
+            .text
+            .add(scene, None, text_size, None, Affine::translate((110.0, 600.0)), s);
         params.text.add_run(
             scene,
             None,
@@ -850,12 +816,10 @@ mod impls {
             let width = 300_f64;
             let height = 300_f64;
             let gradient: Brush = match kind {
-                Kind::Linear => {
-                    Gradient::new_linear((width * 0.35, height * 0.5), (width * 0.65, height * 0.5))
-                        .with_stops(colors)
-                        .with_extend(extend)
-                        .into()
-                }
+                Kind::Linear => Gradient::new_linear((width * 0.35, height * 0.5), (width * 0.65, height * 0.5))
+                    .with_stops(colors)
+                    .with_extend(extend)
+                    .into(),
                 Kind::Radial => {
                     let center = (width * 0.5, height * 0.5);
                     let radius = (width * 0.25) as f32;
@@ -864,14 +828,12 @@ mod impls {
                         .with_extend(extend)
                         .into()
                 }
-                Kind::Sweep => Gradient::new_sweep(
-                    (width * 0.5, height * 0.5),
-                    30_f32.to_radians(),
-                    150_f32.to_radians(),
-                )
-                .with_stops(colors)
-                .with_extend(extend)
-                .into(),
+                Kind::Sweep => {
+                    Gradient::new_sweep((width * 0.5, height * 0.5), 30_f32.to_radians(), 150_f32.to_radians())
+                        .with_stops(colors)
+                        .with_extend(extend)
+                        .into()
+                }
             };
             scene.fill(
                 Fill::NonZero,
@@ -883,12 +845,8 @@ mod impls {
         }
         let extend_modes = [Extend::Pad, Extend::Repeat, Extend::Reflect];
         for (x, extend) in extend_modes.iter().enumerate() {
-            for (y, kind) in [Kind::Linear, Kind::Radial, Kind::Sweep]
-                .into_iter()
-                .enumerate()
-            {
-                let transform =
-                    Affine::translate((x as f64 * 350.0 + 50.0, y as f64 * 350.0 + 100.0));
+            for (y, kind) in [Kind::Linear, Kind::Radial, Kind::Sweep].into_iter().enumerate() {
+                let transform = Affine::translate((x as f64 * 350.0 + 50.0, y as f64 * 350.0 + 100.0));
                 square(scene, kind, transform, *extend);
             }
         }
@@ -918,11 +876,7 @@ mod impls {
             transform: Affine,
             extend: Extend,
         ) {
-            let colors = [
-                palette::css::RED,
-                palette::css::YELLOW,
-                Color::from_rgb8(6, 85, 186),
-            ];
+            let colors = [palette::css::RED, palette::css::YELLOW, Color::from_rgb8(6, 85, 186)];
             let width = 400_f64;
             let height = 200_f64;
             let rect = Rect::new(0.0, 0.0, width, height);
@@ -958,10 +912,7 @@ mod impls {
         // These demonstrate radial gradient patterns similar to the examples shown
         // at <https://learn.microsoft.com/en-us/typography/opentype/spec/colr#radial-gradients>
 
-        for (i, mode) in [Extend::Pad, Extend::Repeat, Extend::Reflect]
-            .iter()
-            .enumerate()
-        {
+        for (i, mode) in [Extend::Pad, Extend::Repeat, Extend::Reflect].iter().enumerate() {
             let y = 100.0;
             let x0 = 140.0;
             let x1 = x0 + 140.0;
@@ -980,10 +931,7 @@ mod impls {
             );
         }
 
-        for (i, mode) in [Extend::Pad, Extend::Repeat, Extend::Reflect]
-            .iter()
-            .enumerate()
-        {
+        for (i, mode) in [Extend::Pad, Extend::Repeat, Extend::Reflect].iter().enumerate() {
             let y = 100.0;
             let x0 = 140.0;
             let x1 = x0 + 140.0;
@@ -1002,10 +950,7 @@ mod impls {
             );
         }
 
-        for (i, mode) in [Extend::Pad, Extend::Repeat, Extend::Reflect]
-            .iter()
-            .enumerate()
-        {
+        for (i, mode) in [Extend::Pad, Extend::Repeat, Extend::Reflect].iter().enumerate() {
             let y = 100.0;
             let x0 = 140.0;
             let x1 = x0 + 140.0;
@@ -1024,10 +969,7 @@ mod impls {
             );
         }
 
-        for (i, mode) in [Extend::Pad, Extend::Repeat, Extend::Reflect]
-            .iter()
-            .enumerate()
-        {
+        for (i, mode) in [Extend::Pad, Extend::Repeat, Extend::Reflect].iter().enumerate() {
             let x0 = 140.0;
             let y0 = 125.0;
             let r0 = 20.0;
@@ -1047,10 +989,7 @@ mod impls {
             );
         }
 
-        for (i, mode) in [Extend::Pad, Extend::Repeat, Extend::Reflect]
-            .iter()
-            .enumerate()
-        {
+        for (i, mode) in [Extend::Pad, Extend::Repeat, Extend::Reflect].iter().enumerate() {
             let x0 = 140.0;
             let y0 = 125.0;
             let r0 = 20.0;
@@ -1058,8 +997,7 @@ mod impls {
             let y1 = 100.0;
             let r1 = 96.0;
             // Shift p0 so the outer edges of both circles touch
-            let p0 = Point::new(x1, y1)
-                + ((Point::new(x0, y0) - Point::new(x1, y1)).normalize() * (r1 - r0));
+            let p0 = Point::new(x1, y1) + ((Point::new(x0, y0) - Point::new(x1, y1)).normalize() * (r1 - r0));
             make(
                 scene,
                 p0.x,
@@ -1105,13 +1043,7 @@ mod impls {
     pub(super) fn deep_blend(scene: &mut Scene, params: &mut SceneParams<'_>) {
         params.resolution = Some(Vec2::new(1000., 1000.));
         let main_rect = Rect::from_origin_size((10., 10.), (900., 900.));
-        scene.fill(
-            Fill::EvenOdd,
-            Affine::IDENTITY,
-            palette::css::RED,
-            None,
-            &main_rect,
-        );
+        scene.fill(Fill::EvenOdd, Affine::IDENTITY, palette::css::RED, None, &main_rect);
         let options = [
             (800., palette::css::AQUA),
             (700., palette::css::RED),
@@ -1148,8 +1080,7 @@ mod impls {
         base_tri.line_to((25.0, 43.3));
         for y in 0..10 {
             for x in 0..10 {
-                let translate =
-                    Affine::translate((100. * (x as f64 + 0.5), 100. * (y as f64 + 0.5)));
+                let translate = Affine::translate((100. * (x as f64 + 0.5), 100. * (y as f64 + 0.5)));
                 const CLIPS_PER_FILL: usize = 3;
                 for _ in 0..CLIPS_PER_FILL {
                     let rot = Affine::rotate(rng.random_range(0.0..PI));
@@ -1185,13 +1116,7 @@ mod impls {
             path.push(PathEl::MoveTo(p0));
             path.push(PathEl::LineTo(p1));
         }
-        scene.stroke(
-            &Stroke::new(2.0),
-            Affine::IDENTITY,
-            palette::css::BLUE,
-            None,
-            &path,
-        );
+        scene.stroke(&Stroke::new(2.0), Affine::IDENTITY, palette::css::BLUE, None, &path);
     }
 
     pub(super) fn render_clip_test(scene: &mut Scene) {
@@ -1216,13 +1141,7 @@ mod impls {
             scene.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &path);
         }
         let rect = Rect::new(X0, Y0, X1, Y1);
-        scene.fill(
-            Fill::NonZero,
-            Affine::IDENTITY,
-            palette::css::LIME,
-            None,
-            &rect,
-        );
+        scene.fill(Fill::NonZero, Affine::IDENTITY, palette::css::LIME, None, &rect);
         for _ in 0..N {
             scene.pop_layer();
         }
@@ -1244,11 +1163,7 @@ mod impls {
             None,
             &make_diamond(1024.0, 125.0),
         );
-        scene.push_clip_layer(
-            Fill::NonZero,
-            Affine::IDENTITY,
-            &make_diamond(1024.0, 150.0),
-        );
+        scene.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &make_diamond(1024.0, 150.0));
         scene.fill(
             Fill::NonZero,
             Affine::IDENTITY,
@@ -1262,8 +1177,8 @@ mod impls {
     pub(super) fn render_blend_square(scene: &mut Scene, blend: BlendMode, transform: Affine) {
         // Inspired by https://developer.mozilla.org/en-US/docs/Web/CSS/mix-blend-mode
         let rect = Rect::from_origin_size(Point::new(0., 0.), (200., 200.));
-        let linear = Gradient::new_linear((0.0, 0.0), (200.0, 0.0))
-            .with_stops([palette::css::BLACK, palette::css::WHITE]);
+        let linear =
+            Gradient::new_linear((0.0, 0.0), (200.0, 0.0)).with_stops([palette::css::BLACK, palette::css::WHITE]);
         scene.fill(Fill::NonZero, transform, &linear, None, &rect);
         const GRADIENTS: &[(f64, f64, Color)] = &[
             (150., 0., Color::from_rgb8(255, 240, 64)),
@@ -1278,8 +1193,7 @@ mod impls {
         const COLORS: &[Color] = &[palette::css::RED, palette::css::LIME, palette::css::BLUE];
         scene.push_layer(Fill::NonZero, Mix::Normal, 1.0, transform, &rect);
         for (i, c) in COLORS.iter().enumerate() {
-            let linear = Gradient::new_linear((0.0, 0.0), (0.0, 200.0))
-                .with_stops([palette::css::WHITE, *c]);
+            let linear = Gradient::new_linear((0.0, 0.0), (0.0, 200.0)).with_stops([palette::css::WHITE, *c]);
             scene.push_layer(Fill::NonZero, blend, 1.0, transform, &rect);
             // squash the ellipse
             let a = transform
@@ -1518,13 +1432,7 @@ mod impls {
         path.line_to((256.0, 24.5));
         path.line_to((241.0, 24.5));
         path.close_path();
-        scene.fill(
-            Fill::NonZero,
-            Affine::IDENTITY,
-            palette::css::YELLOW,
-            None,
-            &path,
-        );
+        scene.fill(Fill::NonZero, Affine::IDENTITY, palette::css::YELLOW, None, &path);
         scene.fill(
             Fill::EvenOdd,
             Affine::translate((300.0, 0.0)),
@@ -1588,27 +1496,16 @@ mod impls {
         {
             let text_size = 60.0 + 40.0 * (params.time as f32).sin();
             let s = "Some clipped text!";
-            params.text.add(
-                scene,
-                None,
-                text_size,
-                None,
-                Affine::translate((110.0, 100.0)),
-                s,
-            );
+            params
+                .text
+                .add(scene, None, text_size, None, Affine::translate((110.0, 100.0)), s);
         }
         scene.pop_layer();
 
         // Even-odd clip-layer demo: a self-intersecting star ("pentagram") has different results
         // under non-zero vs even-odd fill rules (even-odd produces a hole).
         let demo_rect = Rect::new(250.0, 20.0, 450.0, 220.0);
-        scene.fill(
-            Fill::NonZero,
-            Affine::IDENTITY,
-            palette::css::BLUE,
-            None,
-            &demo_rect,
-        );
+        scene.fill(Fill::NonZero, Affine::IDENTITY, palette::css::BLUE, None, &demo_rect);
         let mut star = BezPath::new();
         let center = Point::new(350.0, 120.0);
         let outer_r = 90.0;
@@ -1625,13 +1522,7 @@ mod impls {
         star.close_path();
 
         scene.push_clip_layer(Fill::EvenOdd, Affine::IDENTITY, &star);
-        scene.fill(
-            Fill::NonZero,
-            Affine::IDENTITY,
-            palette::css::RED,
-            None,
-            &demo_rect,
-        );
+        scene.fill(Fill::NonZero, Affine::IDENTITY, palette::css::RED, None, &demo_rect);
         scene.pop_layer();
 
         // Stroke clip demo: clip to the stroked outline of a path.
@@ -1664,13 +1555,7 @@ mod impls {
         scene.push_clip_layer(&stroke, Affine::IDENTITY, &stroke_star);
         let grad = Gradient::new_linear((250.0, 240.0), (450.0, 440.0))
             .with_stops([palette::css::MAGENTA, palette::css::CYAN]);
-        scene.fill(
-            Fill::NonZero,
-            Affine::IDENTITY,
-            &grad,
-            None,
-            &stroke_demo_rect,
-        );
+        scene.fill(Fill::NonZero, Affine::IDENTITY, &grad, None, &stroke_demo_rect);
         scene.pop_layer();
 
         // Dashed stroke clip demo: clip to the stroked outline of a path.
@@ -1704,13 +1589,7 @@ mod impls {
         scene.push_clip_layer(&stroke, Affine::IDENTITY, &stroke_star);
         let grad = Gradient::new_linear((250.0, 460.0), (450.0, 660.0))
             .with_stops([palette::css::MAGENTA, palette::css::CYAN]);
-        scene.fill(
-            Fill::NonZero,
-            Affine::IDENTITY,
-            &grad,
-            None,
-            &stroke_demo_rect,
-        );
+        scene.fill(Fill::NonZero, Affine::IDENTITY, &grad, None, &stroke_demo_rect);
         scene.pop_layer();
 
         let large_background_rect = Rect::new(-1000.0, -1000.0, 2000.0, 2000.0);
@@ -1744,28 +1623,14 @@ mod impls {
         );
         scene.fill(
             Fill::NonZero,
-            Affine::new([
-                scale,
-                0.0,
-                0.0,
-                scale,
-                29.027636718750003,
-                182.9755506427786,
-            ]),
+            Affine::new([scale, 0.0, 0.0, scale, 29.027636718750003, 182.9755506427786]),
             palette::css::LIME,
             None,
             &inside_clip_rect,
         );
         scene.fill(
             Fill::NonZero,
-            Affine::new([
-                scale,
-                0.0,
-                0.0,
-                scale,
-                29.027636718750003,
-                scale * 559.3583631427786,
-            ]),
+            Affine::new([scale, 0.0, 0.0, scale, 29.027636718750003, scale * 559.3583631427786]),
             palette::css::RED,
             None,
             &outside_clip_rect,
@@ -1800,13 +1665,7 @@ mod impls {
             for i in 0..N_WIDE {
                 let x = (i as f64 + 0.5) * (SCENE_WIDTH / N_WIDE as f64);
                 let c = Circle::new((x, y), 3.0);
-                scene.fill(
-                    Fill::NonZero,
-                    Affine::IDENTITY,
-                    palette::css::YELLOW,
-                    None,
-                    &c,
-                );
+                scene.fill(Fill::NonZero, Affine::IDENTITY, palette::css::YELLOW, None, &c);
             }
         }
     }
@@ -1837,12 +1696,8 @@ mod impls {
     }
 
     pub(super) fn splash_with_tiger() -> impl FnMut(&mut Scene, &mut SceneParams<'_>) {
-        let contents = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../assets/Ghostscript_Tiger.svg"
-        ));
-        let mut tiger =
-            crate::svg::svg_function_of("Ghostscript Tiger".to_string(), move || contents);
+        let contents = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/Ghostscript_Tiger.svg"));
+        let mut tiger = crate::svg::svg_function_of("Ghostscript Tiger".to_string(), move || contents);
         move |scene, params| {
             tiger(scene, params);
             splash_screen(scene, params);
@@ -1898,11 +1753,7 @@ mod impls {
         let shape = BezPath::from_iter(
             rect.inflate(kernel_size, kernel_size)
                 .path_elements(0.1)
-                .chain(
-                    RoundedRect::from_rect(rect, radius)
-                        .to_path(0.1)
-                        .reverse_subpaths(),
-                ),
+                .chain(RoundedRect::from_rect(rect, radius).to_path(0.1).reverse_subpaths()),
         );
         scene.draw_blurred_rounded_rect_in(
             &shape,
@@ -1937,10 +1788,7 @@ mod impls {
             alpha_type: ImageAlphaType::Alpha,
         };
 
-        scene.draw_image(
-            &image,
-            Affine::scale(200.).then_translate((100., 100.).into()),
-        );
+        scene.draw_image(&image, Affine::scale(200.).then_translate((100., 100.).into()));
         scene.draw_image(
             &image,
             Affine::translate((-1., -1.))
@@ -1963,9 +1811,7 @@ mod impls {
         );
     }
 
-    pub(super) fn image_extend_modes(
-        quality: ImageQuality,
-    ) -> impl FnMut(&mut Scene, &mut SceneParams<'_>) {
+    pub(super) fn image_extend_modes(quality: ImageQuality) -> impl FnMut(&mut Scene, &mut SceneParams<'_>) {
         move |scene, params| {
             params.resolution = Some(Vec2::new(1500., 1500.));
             params.base_color = Some(palette::css::WHITE);
@@ -2015,9 +1861,7 @@ mod impls {
                 brush_offset,
                 &Rect::new(0., 0., 6., 6.),
             );
-            let image = image
-                .with_x_extend(Extend::Repeat)
-                .with_y_extend(Extend::Reflect);
+            let image = image.with_x_extend(Extend::Repeat).with_y_extend(Extend::Reflect);
             scene.fill(
                 Fill::NonZero,
                 Affine::scale(100.).then_translate((800., 800.).into()),

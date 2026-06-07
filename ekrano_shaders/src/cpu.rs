@@ -7,10 +7,7 @@
 //! a full CPU fallback as an alternative to GPU shaders is not provided.
 
 // Allow un-idiomatic Rust to more closely match shaders
-#![expect(
-    clippy::needless_range_loop,
-    reason = "Keeps code easily comparable to GPU shaders"
-)]
+#![expect(clippy::needless_range_loop, reason = "Keeps code easily comparable to GPU shaders")]
 
 mod backdrop;
 mod bbox_clear;
@@ -106,9 +103,7 @@ impl CpuBinding<'_> {
     pub fn as_typed<T: Pod>(&self) -> TypedBufGuard<'_, T> {
         match self {
             CpuBinding::Buffer(b) => TypedBufGuard::Slice(bytemuck::from_bytes(b)),
-            CpuBinding::BufferRW(b) => {
-                TypedBufGuard::Interior(Ref::map(b.borrow(), |buf| bytemuck::from_bytes(buf)))
-            }
+            CpuBinding::BufferRW(b) => TypedBufGuard::Interior(Ref::map(b.borrow(), |buf| bytemuck::from_bytes(buf))),
             _ => panic!("resource type mismatch"),
         }
     }
@@ -117,9 +112,7 @@ impl CpuBinding<'_> {
         match self {
             CpuBinding::Buffer(_) => panic!("can't borrow external buffer mutably"),
             CpuBinding::BufferRW(b) => {
-                TypedBufGuardMut::Interior(RefMut::map(b.borrow_mut(), |buf| {
-                    bytemuck::from_bytes_mut(buf)
-                }))
+                TypedBufGuardMut::Interior(RefMut::map(b.borrow_mut(), |buf| bytemuck::from_bytes_mut(buf)))
             }
             _ => panic!("resource type mismatch"),
         }
@@ -128,9 +121,7 @@ impl CpuBinding<'_> {
     pub fn as_slice<T: Pod>(&self) -> TypedBufGuard<'_, [T]> {
         match self {
             CpuBinding::Buffer(b) => TypedBufGuard::Slice(bytemuck::cast_slice(b)),
-            CpuBinding::BufferRW(b) => {
-                TypedBufGuard::Interior(Ref::map(b.borrow(), |buf| bytemuck::cast_slice(buf)))
-            }
+            CpuBinding::BufferRW(b) => TypedBufGuard::Interior(Ref::map(b.borrow(), |buf| bytemuck::cast_slice(buf))),
             _ => panic!("resource type mismatch"),
         }
     }
@@ -139,9 +130,7 @@ impl CpuBinding<'_> {
         match self {
             CpuBinding::Buffer(_) => panic!("can't borrow external buffer mutably"),
             CpuBinding::BufferRW(b) => {
-                TypedBufGuardMut::Interior(RefMut::map(b.borrow_mut(), |buf| {
-                    bytemuck::cast_slice_mut(buf)
-                }))
+                TypedBufGuardMut::Interior(RefMut::map(b.borrow_mut(), |buf| bytemuck::cast_slice_mut(buf)))
             }
             _ => panic!("resource type mismatch"),
         }

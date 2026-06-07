@@ -4,8 +4,8 @@
 use ekrano_encoding::{Clip, ConfigUniform, DrawMonoid, DrawTag, Monoid, PathBbox};
 
 use super::{
-    CpuBinding, RAD_GRAD_KIND_CIRCULAR, RAD_GRAD_KIND_CONE, RAD_GRAD_KIND_FOCAL_ON_CIRCLE,
-    RAD_GRAD_KIND_STRIP, RAD_GRAD_SWAPPED,
+    CpuBinding, RAD_GRAD_KIND_CIRCULAR, RAD_GRAD_KIND_CONE, RAD_GRAD_KIND_FOCAL_ON_CIRCLE, RAD_GRAD_KIND_STRIP,
+    RAD_GRAD_SWAPPED,
     util::{Transform, Vec2, read_draw_tag_from_scene},
 };
 
@@ -118,22 +118,19 @@ fn draw_leaf_main(
                             focal_x = r0 / (r0 - r1);
                             let cf = (1.0 - focal_x) * p0 + focal_x * p1;
                             radius = r1 / cf.distance(p1);
-                            let user_to_unit_line =
-                                two_point_to_unit_line(cf, p1) * user_to_gradient;
+                            let user_to_unit_line = two_point_to_unit_line(cf, p1) * user_to_gradient;
                             let user_to_scaled;
                             // When r == 1.0, focal point is on circle
                             if (radius - 1.0).abs() <= GRADIENT_EPSILON {
                                 kind = RAD_GRAD_KIND_FOCAL_ON_CIRCLE;
                                 let scale = 0.5 * (1.0 - focal_x).abs();
-                                user_to_scaled = Transform([scale, 0.0, 0.0, scale, 0.0, 0.0])
-                                    * user_to_unit_line;
+                                user_to_scaled = Transform([scale, 0.0, 0.0, scale, 0.0, 0.0]) * user_to_unit_line;
                             } else {
                                 let a = radius * radius - 1.0;
                                 let scale_ratio = (1.0 - focal_x).abs() / a;
                                 let scale_x = radius * scale_ratio;
                                 let scale_y = a.abs().sqrt() * scale_ratio;
-                                user_to_scaled = Transform([scale_x, 0.0, 0.0, scale_y, 0.0, 0.0])
-                                    * user_to_unit_line;
+                                user_to_scaled = Transform([scale_x, 0.0, 0.0, scale_y, 0.0, 0.0]) * user_to_unit_line;
                             }
                             xform = user_to_scaled;
                         }
@@ -153,8 +150,7 @@ fn draw_leaf_main(
                             f32::from_bits(scene[dd as usize + 1]),
                             f32::from_bits(scene[dd as usize + 2]),
                         );
-                        let xform =
-                            (transform * Transform([1.0, 0.0, 0.0, 1.0, p0.x, p0.y])).inverse();
+                        let xform = (transform * Transform([1.0, 0.0, 0.0, 1.0, p0.x, p0.y])).inverse();
                         info[di + 1] = f32::to_bits(xform.0[0]);
                         info[di + 2] = f32::to_bits(xform.0[1]);
                         info[di + 3] = f32::to_bits(xform.0[2]);
@@ -238,12 +234,5 @@ fn two_point_to_unit_line(p0: Vec2, p1: Vec2) -> Transform {
 }
 
 fn from_poly2(p0: Vec2, p1: Vec2) -> Transform {
-    Transform([
-        p1.y - p0.y,
-        p0.x - p1.x,
-        p1.x - p0.x,
-        p1.y - p0.y,
-        p0.x,
-        p0.y,
-    ])
+    Transform([p1.y - p0.y, p0.x - p1.x, p1.x - p0.x, p1.y - p0.y, p0.x, p0.y])
 }

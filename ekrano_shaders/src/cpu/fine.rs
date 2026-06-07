@@ -3,10 +3,7 @@
 
 use ekrano_encoding::{ConfigUniform, PathSegment, Tile};
 
-use super::{
-    CMD_COLOR, CMD_END, CMD_FILL, CMD_JUMP, CMD_SET_BLEND_MODE, CMD_SOLID, CpuTexture,
-    PTCL_INITIAL_ALLOC,
-};
+use super::{CMD_COLOR, CMD_END, CMD_FILL, CMD_JUMP, CMD_SET_BLEND_MODE, CMD_SOLID, CpuTexture, PTCL_INITIAL_ALLOC};
 
 // These should also move into a common area
 const TILE_WIDTH: usize = 16;
@@ -68,8 +65,7 @@ fn fill_path(area: &mut [f32], segments: &[PathSegment], fill: &CmdFill, x_tile:
             let y0 = y.clamp(0.0, 1.0);
             let y1 = (y + delta[1]).clamp(0.0, 1.0);
             let dy = y0 - y1;
-            let y_edge =
-                delta[0].signum() * (y_tile + yi as f32 - segment.y_edge + 1.0).clamp(0.0, 1.0);
+            let y_edge = delta[0].signum() * (y_tile + yi as f32 - segment.y_edge + 1.0).clamp(0.0, 1.0);
             if dy != 0.0 {
                 let vec_y_recip = delta[1].recip();
                 let t0 = (y0 - y) * vec_y_recip;
@@ -179,8 +175,7 @@ fn fine_main(
         }
         // Write tile (in rgba)
         for y in 0..TILE_HEIGHT {
-            let base =
-                output.width * (tile_y as usize * TILE_HEIGHT + y) + tile_x as usize * TILE_WIDTH;
+            let base = output.width * (tile_y as usize * TILE_HEIGHT + y) + tile_x as usize * TILE_WIDTH;
             for x in 0..TILE_WIDTH {
                 let rgba32 = pack4x8unorm(rgba[y * TILE_WIDTH + x]);
                 output.pixels[base + x] = rgba32;

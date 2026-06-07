@@ -98,9 +98,7 @@ impl GlyphCache {
         let serial = self.serial;
         self.serial += 1;
         // Don't iterate over the whole cache every frame
-        if serial - self.last_prune_serial < PRUNE_FREQUENCY
-            && self.cached_count < CACHED_COUNT_THRESHOLD
-        {
+        if serial - self.last_prune_serial < PRUNE_FREQUENCY && self.cached_count < CACHED_COUNT_THRESHOLD {
             return;
         }
         self.last_prune_serial = serial;
@@ -149,10 +147,7 @@ pub(crate) struct GlyphCacheSession<'a> {
 }
 
 impl GlyphCacheSession<'_> {
-    pub(crate) fn get_or_insert(
-        &mut self,
-        glyph_id: u32,
-    ) -> Option<(Arc<Encoding>, StreamOffsets)> {
+    pub(crate) fn get_or_insert(&mut self, glyph_id: u32) -> Option<(Arc<Encoding>, StreamOffsets)> {
         let key = GlyphKey {
             font_id: self.font_id,
             font_index: self.font_index,

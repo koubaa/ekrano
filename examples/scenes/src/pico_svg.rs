@@ -52,10 +52,7 @@ impl PicoSvg {
         let (origin, viewbox_size) = root
             .attribute("viewBox")
             .and_then(|vb_attr| {
-                let vs: Vec<f64> = vb_attr
-                    .split(' ')
-                    .map(|s| f64::from_str(s).unwrap())
-                    .collect();
+                let vs: Vec<f64> = vb_attr.split(' ').map(|s| f64::from_str(s).unwrap()).collect();
                 if let &[x, y, width, height] = vs.as_slice() {
                     Some((Point { x, y }, Size { width, height }))
                 } else {
@@ -72,9 +69,7 @@ impl PicoSvg {
 
         transform *= match (width, height, viewbox_size) {
             (None, None, Some(_)) => Affine::IDENTITY,
-            (Some(w), Some(h), Some(s)) => {
-                Affine::scale_non_uniform(1.0 / s.width * w, 1.0 / s.height * h)
-            }
+            (Some(w), Some(h), Some(s)) => Affine::scale_non_uniform(1.0 / s.width * w, 1.0 / s.height * h),
             (Some(w), None, Some(s)) => Affine::scale(1.0 / s.width * w),
             (None, Some(h), Some(s)) => Affine::scale(1.0 / s.height * h),
             _ => Affine::IDENTITY,
@@ -203,10 +198,7 @@ fn parse_transform(transform: &str) -> Affine {
                 .map(str::parse)
                 .collect::<Result<Vec<f64>, _>>()
                 .expect("Could parse all values of 'matrix' as floats");
-            Affine::new(
-                vals.try_into()
-                    .expect("Should be six arguments to `matrix`"),
-            )
+            Affine::new(vals.try_into().expect("Should be six arguments to `matrix`"))
         } else if let Some(s) = ts.strip_prefix("translate(") {
             if let Ok(vals) = s
                 .split([',', ' '])
@@ -265,11 +257,7 @@ fn parse_color(color: &str) -> AlphaColor<Srgb> {
         .unwrap_or(palette::css::FUCHSIA.with_alpha(0.5))
 }
 
-fn modify_opacity(
-    color: AlphaColor<Srgb>,
-    attr_name: &str,
-    node: Node<'_, '_>,
-) -> AlphaColor<Srgb> {
+fn modify_opacity(color: AlphaColor<Srgb>, attr_name: &str, node: Node<'_, '_>) -> AlphaColor<Srgb> {
     if let Some(opacity) = node.attribute(attr_name) {
         let alpha: f32 = if let Some(o) = opacity.strip_suffix('%') {
             let pctg = o.parse().unwrap_or(100.0);

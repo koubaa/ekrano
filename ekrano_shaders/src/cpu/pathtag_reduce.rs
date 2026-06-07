@@ -7,12 +7,7 @@ use super::CpuBinding;
 
 const WG_SIZE: usize = 256;
 
-fn pathtag_reduce_main(
-    n_wg: u32,
-    config: &ConfigUniform,
-    scene: &[u32],
-    reduced: &mut [PathMonoid],
-) {
+fn pathtag_reduce_main(n_wg: u32, config: &ConfigUniform, scene: &[u32], reduced: &mut [PathMonoid]) {
     let pathtag_base = config.layout.path_tag_base;
     for i in 0..n_wg {
         let mut m = PathMonoid::default();

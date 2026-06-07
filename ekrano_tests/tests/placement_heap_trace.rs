@@ -76,17 +76,14 @@ fn placement_heap_paged_stable() {
 
     for i in 0..FRAME_COUNT {
         renderer
-            .render_to_texture(&device, &scene, &texture, &params)
+            .render_to_texture(&scene, &texture, &params)
             .unwrap_or_else(|e| panic!("frame {i} failed: {e}"));
 
         if let Some(stats) = renderer.placement_heap_stats() {
             capacities.push(stats.capacity);
 
             if i < 10 || i % 50 == 0 || i == FRAME_COUNT - 1 {
-                eprintln!(
-                    "{i:>6}  {:>10.2}",
-                    stats.capacity as f64 / (1024.0 * 1024.0),
-                );
+                eprintln!("{i:>6}  {:>10.2}", stats.capacity as f64 / (1024.0 * 1024.0),);
             }
         }
     }
@@ -150,7 +147,7 @@ fn placement_heap_capacity_sized_correctly() {
 
     for i in 0..50 {
         renderer
-            .render_to_texture(&device, &scene, &texture, &params)
+            .render_to_texture(&scene, &texture, &params)
             .unwrap_or_else(|e| panic!("frame {i} failed: {e}"));
 
         if let Some(stats) = renderer.placement_heap_stats() {

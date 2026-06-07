@@ -53,25 +53,13 @@ fn non_isolated_blend(mix: Mix) -> Scene {
     );
 
     let rect1 = Rect::new(10.5, 10.5, 70.5, 70.5);
-    scene.fill(
-        Fill::NonZero,
-        Affine::IDENTITY,
-        BLUE.with_alpha(0.5),
-        None,
-        &rect1,
-    );
+    scene.fill(Fill::NonZero, Affine::IDENTITY, BLUE.with_alpha(0.5), None, &rect1);
 
     // Non-isolated blend: the second draw blends directly into the accumulated
     // layer content (not into an isolated group).
     scene.set_blend_mode(BlendMode::new(mix, Compose::SrcOver));
     let rect2 = Rect::new(30.5, 30.5, 90.5, 90.5);
-    scene.fill(
-        Fill::NonZero,
-        Affine::IDENTITY,
-        LIME.with_alpha(0.5),
-        None,
-        &rect2,
-    );
+    scene.fill(Fill::NonZero, Affine::IDENTITY, LIME.with_alpha(0.5), None, &rect2);
     scene.reset_draw_blend_mode();
 
     scene.pop_layer();
@@ -166,13 +154,7 @@ fn mix_modes_non_gradient_test_matrix() {
         Affine::IDENTITY,
         &vp,
     );
-    scene.fill(
-        Fill::NonZero,
-        Affine::IDENTITY,
-        Color::from_rgb8(30, 30, 30),
-        None,
-        &vp,
-    );
+    scene.fill(Fill::NonZero, Affine::IDENTITY, Color::from_rgb8(30, 30, 30), None, &vp);
     scene.pop_layer();
 
     for (row, mix_mode) in mix_modes.iter().enumerate() {
@@ -182,12 +164,7 @@ fn mix_modes_non_gradient_test_matrix() {
 
             let cell = Rect::new(x, y, x + cell_size, y + cell_size);
             let blend_rect = Rect::new(x, y, x + cell_size * 0.7, y + cell_size * 0.7);
-            let white_rect = Rect::new(
-                x + cell_size * 0.3,
-                y + cell_size * 0.3,
-                x + cell_size,
-                y + cell_size,
-            );
+            let white_rect = Rect::new(x + cell_size * 0.3, y + cell_size * 0.3, x + cell_size, y + cell_size);
 
             // Destination (base color) in its own layer, so fills are rendered.
             // Direct scene.fill() calls outside any layer are not rendered by ekrano.

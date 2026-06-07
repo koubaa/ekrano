@@ -115,11 +115,7 @@ impl Style {
         let (dashed, dash_offset, dash_packed) = if stroke.dash_pattern.len() == 2 {
             let on = crate::math::f32_to_f16(stroke.dash_pattern[0] as f32) as u32;
             let off = crate::math::f32_to_f16(stroke.dash_pattern[1] as f32) as u32;
-            (
-                Self::FLAGS_DASHED_BIT,
-                stroke.dash_offset as f32,
-                on | (off << 16),
-            )
+            (Self::FLAGS_DASHED_BIT, stroke.dash_offset as f32, on | (off << 16))
         } else {
             (0, 0.0, 0)
         };
@@ -140,13 +136,11 @@ impl Style {
     #[cfg(test)]
     fn fill(self) -> Option<Fill> {
         if self.is_fill() {
-            Some(
-                if (self.flags_and_miter_limit & Self::FLAGS_FILL_BIT) == 0 {
-                    Fill::NonZero
-                } else {
-                    Fill::EvenOdd
-                },
-            )
+            Some(if (self.flags_and_miter_limit & Self::FLAGS_FILL_BIT) == 0 {
+                Fill::NonZero
+            } else {
+                Fill::EvenOdd
+            })
         } else {
             None
         }
@@ -425,10 +419,7 @@ pub struct PathBbox {
 /// Tiled path object.
 #[derive(Copy, Clone, Pod, Zeroable, Debug, Default)]
 #[repr(C)]
-#[expect(
-    clippy::partial_pub_fields,
-    reason = "Padding is meaningless to manipulate directly"
-)]
+#[expect(clippy::partial_pub_fields, reason = "Padding is meaningless to manipulate directly")]
 pub struct Path {
     /// Bounding box in tiles.
     pub bbox: [u32; 4],
@@ -743,10 +734,7 @@ impl<'a> PathEncoder<'a> {
             // We expect that the most recently encoded pair of coordinates in the path data stream
             // contain the first control point in the path segment (see `PathEncoder::close`).
             // Hence a line-to encoded here should embed the subpath's start tangent.
-            self.line_to(
-                self.first_start_tangent_end[0],
-                self.first_start_tangent_end[1],
-            );
+            self.line_to(self.first_start_tangent_end[0], self.first_start_tangent_end[1]);
         } else {
             self.quad_to(
                 self.first_point[0],
@@ -762,18 +750,10 @@ impl<'a> PathEncoder<'a> {
         if len < 2 {
             return None;
         }
-        Some((
-            bytemuck::cast(self.data[len - 2]),
-            bytemuck::cast(self.data[len - 1]),
-        ))
+        Some((bytemuck::cast(self.data[len - 2]), bytemuck::cast(self.data[len - 1])))
     }
 
-    fn is_zero_length_segment(
-        &self,
-        p1: (f32, f32),
-        p2: Option<(f32, f32)>,
-        p3: Option<(f32, f32)>,
-    ) -> bool {
+    fn is_zero_length_segment(&self, p1: (f32, f32), p2: Option<(f32, f32)>, p3: Option<(f32, f32)>) -> bool {
         let p0 = self.last_point().unwrap();
         let p2 = p2.unwrap_or(p1);
         let p3 = p3.unwrap_or(p1);
@@ -791,12 +771,7 @@ impl<'a> PathEncoder<'a> {
     // represent a cubic Bezier.
     //
     // `self.first_point` is always treated as the first control point of the curve.
-    fn start_tangent_for_curve(
-        &self,
-        p1: (f32, f32),
-        p2: (f32, f32),
-        p3: (f32, f32),
-    ) -> Option<(f32, f32)> {
+    fn start_tangent_for_curve(&self, p1: (f32, f32), p2: (f32, f32), p3: (f32, f32)) -> Option<(f32, f32)> {
         let p0 = (self.first_point[0], self.first_point[1]);
         let pt = if (p1.0 - p0.0).abs() > EPSILON || (p1.1 - p0.1).abs() > EPSILON {
             p1
@@ -814,10 +789,7 @@ impl<'a> PathEncoder<'a> {
     fn start_tangent_for_line(&self, p1: (f32, f32)) -> Option<(f32, f32)> {
         let p0 = (self.first_point[0], self.first_point[1]);
         let pt = if (p1.0 - p0.0).abs() > EPSILON || (p1.1 - p0.1).abs() > EPSILON {
-            (
-                p0.0 + 1. / 3. * (p1.0 - p0.0),
-                p0.1 + 1. / 3. * (p1.1 - p0.1),
-            )
+            (p0.0 + 1. / 3. * (p1.0 - p0.0), p0.1 + 1. / 3. * (p1.1 - p0.1))
         } else {
             return None;
         };
@@ -828,15 +800,9 @@ impl<'a> PathEncoder<'a> {
     fn start_tangent_for_quad(&self, p1: (f32, f32), p2: (f32, f32)) -> Option<(f32, f32)> {
         let p0 = (self.first_point[0], self.first_point[1]);
         let pt = if (p1.0 - p0.0).abs() > EPSILON || (p1.1 - p0.1).abs() > EPSILON {
-            (
-                p1.0 + 1. / 3. * (p0.0 - p1.0),
-                p1.1 + 1. / 3. * (p0.1 - p1.1),
-            )
+            (p1.0 + 1. / 3. * (p0.0 - p1.0), p1.1 + 1. / 3. * (p0.1 - p1.1))
         } else if (p2.0 - p0.0).abs() > EPSILON || (p2.1 - p0.1).abs() > EPSILON {
-            (
-                p1.0 + 1. / 3. * (p2.0 - p1.0),
-                p1.1 + 1. / 3. * (p2.1 - p1.1),
-            )
+            (p1.0 + 1. / 3. * (p2.0 - p1.0), p1.1 + 1. / 3. * (p2.1 - p1.1))
         } else {
             return None;
         };
