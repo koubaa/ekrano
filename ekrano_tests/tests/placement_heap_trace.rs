@@ -47,9 +47,9 @@ fn tiny_scene() -> Scene {
 fn placement_heap_paged_stable() {
     env_logger::try_init().ok();
 
-    let device = make_device();
-    let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new");
-    let texture = device
+    let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
+    let texture = renderer
+        .device()
         .alloc_texture(
             WIDTH,
             HEIGHT,
@@ -123,9 +123,9 @@ fn placement_heap_paged_stable() {
 fn placement_heap_capacity_sized_correctly() {
     env_logger::try_init().ok();
 
-    let device = make_device();
-    let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new");
-    let texture = device
+    let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
+    let texture = renderer
+        .device()
         .alloc_texture(
             WIDTH,
             HEIGHT,

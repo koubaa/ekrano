@@ -1104,8 +1104,16 @@ fn bind_graph_direct<'a>(
 impl GoldyRenderer {
     /// Create a new renderer for the given device.
     ///
-    /// The renderer holds an owning [`Device`] clone so the GPU backend
-    /// stays alive after the caller's temporary handle is dropped.
+    /// Takes `&Device` rather than `Device` by value so callers that share one GPU device
+    /// across parallel tests (or a process-wide fixture) can keep their owning handle while
+    /// each renderer clones internally. That clone is required for deterministic shutdown:
+    /// the renderer must own a [`Device`] handle so the GPU backend stays alive until the
+    /// renderer is dropped, even if the caller's temporary handle goes out of scope first.
+    /// Ideally callers would hand off ownership (`new(device: Device)`), but shared static
+    /// fixtures cannot lend their device away without forcing every consumer to clone.
+    ///
+    /// Use [`device`](Self::device) for allocations that must share this renderer's GPU
+    /// context (e.g. output textures in tests) instead of retaining a separate handle.
     pub fn new(device: &Device) -> Result<Self> {
         let _tz = goldy::tracy_zone!("ekrano.GoldyRenderer::new");
 
@@ -1416,6 +1424,11 @@ impl GoldyRenderer {
         AllocatorStats {
             cleanup_ring_depth: self.frame_pipeline.pending_frames(),
         }
+    }
+
+    /// GPU device handle shared by this renderer (same backend as the caller's clone).
+    pub fn device(&self) -> &Device {
+        &self.device
     }
 
     /// Query the resource pool's current state for diagnostics or test assertions.

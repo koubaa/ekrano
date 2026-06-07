@@ -65,9 +65,9 @@ fn single_frame_ring_depth_bounded() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
 
-    let device = make_device();
-    let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new");
-    let texture = device
+    let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
+    let texture = renderer
+        .device()
         .alloc_texture(
             WIDTH,
             HEIGHT,
@@ -104,9 +104,9 @@ fn resource_pool_stable_under_single_frame() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
 
-    let device = make_device();
-    let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new");
-    let texture = device
+    let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
+    let texture = renderer
+        .device()
         .alloc_texture(
             WIDTH,
             HEIGHT,

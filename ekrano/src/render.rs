@@ -173,7 +173,10 @@ impl Render {
             shaders.pathtag_reduce2,
             STAGE_PATHTAG_REDUCE2,
             INDIRECT_STRIDE,
-            &[pipeline.scratch.reduced.as_binding(), pipeline.scratch.reduced2.as_binding()],
+            &[
+                pipeline.scratch.reduced.as_binding(),
+                pipeline.scratch.reduced2.as_binding(),
+            ],
         );
         dispatch_stage(
             recorder,

@@ -297,13 +297,43 @@ impl StablePipelineBuffers {
             None => (None, None, None, None, None, None, None),
         };
         Ok(Self {
-            info_bin_data: al_cached_opt(recorder, c_ibd, bs.bin_data.size_in_bytes() as u64, 4, "ekrano.info_bin_data_buf")?,
+            info_bin_data: al_cached_opt(
+                recorder,
+                c_ibd,
+                bs.bin_data.size_in_bytes() as u64,
+                4,
+                "ekrano.info_bin_data_buf",
+            )?,
             tile: al_cached_opt(recorder, c_tile, bs.tiles.size_in_bytes().into(), 8, "ekrano.tile_buf")?,
-            segments: al_cached_opt(recorder, c_seg, bs.segments.size_in_bytes().into(), 24, "ekrano.segments_buf")?,
+            segments: al_cached_opt(
+                recorder,
+                c_seg,
+                bs.segments.size_in_bytes().into(),
+                24,
+                "ekrano.segments_buf",
+            )?,
             ptcl: al_cached_opt(recorder, c_ptcl, bs.ptcl.size_in_bytes().into(), 4, "ekrano.ptcl_buf")?,
-            blend_spill: al_cached_opt(recorder, c_bs, bs.blend_spill.size_in_bytes().into(), size_of::<u32>() as u32, "ekrano.blend_spill")?,
-            lines: al_cached_opt(recorder, c_lines, bs.lines.size_in_bytes().into(), 24, "ekrano.lines_buf")?,
-            seg_counts: al_cached_opt(recorder, c_sc, bs.seg_counts.size_in_bytes().into(), 8, "ekrano.seg_counts_buf")?,
+            blend_spill: al_cached_opt(
+                recorder,
+                c_bs,
+                bs.blend_spill.size_in_bytes().into(),
+                size_of::<u32>() as u32,
+                "ekrano.blend_spill",
+            )?,
+            lines: al_cached_opt(
+                recorder,
+                c_lines,
+                bs.lines.size_in_bytes().into(),
+                24,
+                "ekrano.lines_buf",
+            )?,
+            seg_counts: al_cached_opt(
+                recorder,
+                c_sc,
+                bs.seg_counts.size_in_bytes().into(),
+                8,
+                "ekrano.seg_counts_buf",
+            )?,
         })
     }
 
@@ -356,36 +386,120 @@ impl ScratchPipelineBuffers {
         cached: Option<Self>,
         bs: &ekrano_encoding::BufferSizes,
     ) -> Result<Self, Error> {
-        let (
-            c_red, c_red2, c_reds, c_tag, c_pbbox,
-            c_dred, c_dmon, c_ci, c_ce, c_cb,
-            c_cbb, c_db, c_bh, c_path,
-        ) = match cached {
-            Some(c) => (
-                Some(c.reduced), Some(c.reduced2), Some(c.reduced_scan), Some(c.tagmonoid),
-                Some(c.path_bbox), Some(c.draw_reduced), Some(c.draw_monoid),
-                Some(c.clip_inp), Some(c.clip_el), Some(c.clip_bic),
-                Some(c.clip_bbox), Some(c.draw_bbox), Some(c.bin_header), Some(c.path),
-            ),
-            None => (
-                None, None, None, None, None, None, None,
-                None, None, None, None, None, None, None,
-            ),
-        };
+        let (c_red, c_red2, c_reds, c_tag, c_pbbox, c_dred, c_dmon, c_ci, c_ce, c_cb, c_cbb, c_db, c_bh, c_path) =
+            match cached {
+                Some(c) => (
+                    Some(c.reduced),
+                    Some(c.reduced2),
+                    Some(c.reduced_scan),
+                    Some(c.tagmonoid),
+                    Some(c.path_bbox),
+                    Some(c.draw_reduced),
+                    Some(c.draw_monoid),
+                    Some(c.clip_inp),
+                    Some(c.clip_el),
+                    Some(c.clip_bic),
+                    Some(c.clip_bbox),
+                    Some(c.draw_bbox),
+                    Some(c.bin_header),
+                    Some(c.path),
+                ),
+                None => (
+                    None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+                ),
+            };
         Ok(Self {
-            reduced: al_cached_opt(recorder, c_red, bs.path_reduced.size_in_bytes().into(), 20, "ekrano.reduced_buf")?,
-            reduced2: al_cached_opt(recorder, c_red2, bs.path_reduced2.size_in_bytes().into(), 20, "ekrano.reduced2_buf")?,
-            reduced_scan: al_cached_opt(recorder, c_reds, bs.path_reduced_scan.size_in_bytes().into(), 20, "ekrano.reduced_scan_buf")?,
-            tagmonoid: al_cached_opt(recorder, c_tag, bs.path_monoids.size_in_bytes().into(), 20, "ekrano.tagmonoid_buf")?,
-            path_bbox: al_cached_opt(recorder, c_pbbox, bs.path_bboxes.size_in_bytes().into(), 24, "ekrano.path_bbox_buf")?,
-            draw_reduced: al_cached_opt(recorder, c_dred, bs.draw_reduced.size_in_bytes().into(), 16, "ekrano.draw_reduced_buf")?,
-            draw_monoid: al_cached_opt(recorder, c_dmon, bs.draw_monoids.size_in_bytes().into(), 16, "ekrano.draw_monoid_buf")?,
-            clip_inp: al_cached_opt(recorder, c_ci, bs.clip_inps.size_in_bytes().into(), 8, "ekrano.clip_inp_buf")?,
-            clip_el: al_cached_opt(recorder, c_ce, bs.clip_els.size_in_bytes().into(), 32, "ekrano.clip_el_buf")?,
-            clip_bic: al_cached_opt(recorder, c_cb, bs.clip_bics.size_in_bytes().into(), 8, "ekrano.clip_bic_buf")?,
-            clip_bbox: al_cached_opt(recorder, c_cbb, bs.clip_bboxes.size_in_bytes().into(), 16, "ekrano.clip_bbox_buf")?,
-            draw_bbox: al_cached_opt(recorder, c_db, bs.draw_bboxes.size_in_bytes().into(), 16, "ekrano.draw_bbox_buf")?,
-            bin_header: al_cached_opt(recorder, c_bh, bs.bin_headers.size_in_bytes().into(), 8, "ekrano.bin_header_buf")?,
+            reduced: al_cached_opt(
+                recorder,
+                c_red,
+                bs.path_reduced.size_in_bytes().into(),
+                20,
+                "ekrano.reduced_buf",
+            )?,
+            reduced2: al_cached_opt(
+                recorder,
+                c_red2,
+                bs.path_reduced2.size_in_bytes().into(),
+                20,
+                "ekrano.reduced2_buf",
+            )?,
+            reduced_scan: al_cached_opt(
+                recorder,
+                c_reds,
+                bs.path_reduced_scan.size_in_bytes().into(),
+                20,
+                "ekrano.reduced_scan_buf",
+            )?,
+            tagmonoid: al_cached_opt(
+                recorder,
+                c_tag,
+                bs.path_monoids.size_in_bytes().into(),
+                20,
+                "ekrano.tagmonoid_buf",
+            )?,
+            path_bbox: al_cached_opt(
+                recorder,
+                c_pbbox,
+                bs.path_bboxes.size_in_bytes().into(),
+                24,
+                "ekrano.path_bbox_buf",
+            )?,
+            draw_reduced: al_cached_opt(
+                recorder,
+                c_dred,
+                bs.draw_reduced.size_in_bytes().into(),
+                16,
+                "ekrano.draw_reduced_buf",
+            )?,
+            draw_monoid: al_cached_opt(
+                recorder,
+                c_dmon,
+                bs.draw_monoids.size_in_bytes().into(),
+                16,
+                "ekrano.draw_monoid_buf",
+            )?,
+            clip_inp: al_cached_opt(
+                recorder,
+                c_ci,
+                bs.clip_inps.size_in_bytes().into(),
+                8,
+                "ekrano.clip_inp_buf",
+            )?,
+            clip_el: al_cached_opt(
+                recorder,
+                c_ce,
+                bs.clip_els.size_in_bytes().into(),
+                32,
+                "ekrano.clip_el_buf",
+            )?,
+            clip_bic: al_cached_opt(
+                recorder,
+                c_cb,
+                bs.clip_bics.size_in_bytes().into(),
+                8,
+                "ekrano.clip_bic_buf",
+            )?,
+            clip_bbox: al_cached_opt(
+                recorder,
+                c_cbb,
+                bs.clip_bboxes.size_in_bytes().into(),
+                16,
+                "ekrano.clip_bbox_buf",
+            )?,
+            draw_bbox: al_cached_opt(
+                recorder,
+                c_db,
+                bs.draw_bboxes.size_in_bytes().into(),
+                16,
+                "ekrano.draw_bbox_buf",
+            )?,
+            bin_header: al_cached_opt(
+                recorder,
+                c_bh,
+                bs.bin_headers.size_in_bytes().into(),
+                8,
+                "ekrano.bin_header_buf",
+            )?,
             path: al_cached_opt(recorder, c_path, bs.paths.size_in_bytes().into(), 32, "ekrano.path_buf")?,
         })
     }
