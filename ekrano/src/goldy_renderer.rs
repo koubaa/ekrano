@@ -20,8 +20,8 @@ use std::sync::{Arc, Mutex};
 use goldy::task_graph::{NodeAccess, NodeBuilder};
 use goldy::types::{BufferFlags, TextureFlags, TextureFormat, TextureKind};
 use goldy::{
-    Buffer, BufferKind, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator, ShaderModule, Signal,
-    TaskGraph, Texture, TexturePool, TimelineValue,
+    Buffer, BufferKind, BudgetPolicy, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator, ShaderModule,
+    Signal, TaskGraph, Texture, TexturePool, TimelineValue,
 };
 
 /// Ekrano uses a single-frame fire-and-forget model
@@ -1118,6 +1118,10 @@ impl GoldyRenderer {
         let _tz = goldy::tracy_zone!("ekrano.GoldyRenderer::new");
 
         let device = device.clone();
+
+        device
+            .set_allocation_policy(Arc::new(BudgetPolicy::new()))
+            .map_err(|e| Error::Gpu(e.to_string()))?;
 
         let context = device.create_context().map_err(|e| Error::Gpu(e.to_string()))?;
         let frame_pipeline = {
