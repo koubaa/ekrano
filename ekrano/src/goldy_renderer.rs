@@ -36,7 +36,7 @@ use crate::{
     Error, RenderParams, Result, Scene,
     gpu_resources::{
         GpuBinding, acquire_texture_rgba, alloc_pipeline_buffer, bind_type_to_node_access,
-        collect_bindless_indices_into, node_access_to_resource_access, record_upload_bytes,
+        collect_bindless_indices_into, record_upload_bytes,
         record_upload_bytes_owned,
     },
     render::Render,
@@ -47,7 +47,7 @@ use ekrano_encoding::{BumpAllocators, Images, Layout, Ramps, RenderConfig, Resol
 
 const MAX_BUMP_RETRIES: usize = 2;
 
-/// Timeline-guarded slots for cross-frame render-target and pipeline-buffer reuse.
+/// Timeline-guarded slots for cross-frame render-target reuse.
 /// Two slots suffice at depth=1: one aging entry plus one empty install slot.
 const RESOURCE_CACHE_SLOTS: usize = 2;
 
@@ -480,6 +480,33 @@ pub(crate) struct PersistentState {
     pending_owned_returns: Arc<Mutex<Vec<(Buffer, &'static str)>>>,
 }
 
+impl PersistentState {
+    pub(crate) fn new(device: &Device) -> Self {
+        Self {
+            pool: ResourcePool::default(),
+            retained_pool: RetainedPool::new(Arc::new(device.clone())),
+            tex_pool: TexturePool::default(),
+            last_drained_bump: None,
+            pending_bump_readback: None,
+            linear_clamp_sampler: None,
+            nearest_clamp_sampler: None,
+            cached_render_targets: std::array::from_fn(|_| None),
+            cached_rt_timelines: [0; RESOURCE_CACHE_SLOTS],
+            cached_pipeline: None,
+            rt_slot_swapchain_image: [None; RESOURCE_CACHE_SLOTS],
+            deferred_owned_cap_hint: 0,
+            deferred_textures_cap_hint: 0,
+            stable_mask_lut_msaa8: None,
+            stable_mask_lut_msaa16: None,
+            cached_wg_counts: None,
+            cached_config_uniform: None,
+            cached_filter_uniforms: Vec::new(),
+            pending_texture_returns: Arc::new(Mutex::new(Vec::new())),
+            pending_owned_returns: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
 /// Timeline-guarded render target cache.
 impl PersistentState {
     /// Drop all cached render targets when any occupied slot no longer matches the
@@ -607,7 +634,7 @@ impl PersistentState {
     }
 
     /// Return textures and owned buffers whose GPU retirement completed since the last frame.
-    fn drain_pending_returns(&mut self, _ctx: &Context) {
+    fn drain_pending_returns(&mut self) {
         if let Ok(mut pending) = self.pending_texture_returns.lock() {
             for tex in pending.drain(..) {
                 self.tex_pool.release(tex);
@@ -861,11 +888,10 @@ impl<'a> FrameRecorder<'a> {
             scratch,
             buffer_sizes,
         };
-        if let Some(old) = self.persistent.cached_pipeline.take() {
-            log::debug!("[PIPE-CACHE] schedule: replacing occupied slot");
-            old.stable.return_to_pool(self);
-            old.scratch.return_to_pool(self);
-        }
+        assert!(
+            self.persistent.cached_pipeline.is_none(),
+            "cached_pipeline must be empty at schedule (prepare should have taken it)"
+        );
         self.persistent.cached_pipeline = Some(pipeline_cache);
         log::debug!("[PIPE-CACHE] schedule: cached");
         if let Some(i) = find_empty_cache_slot(&self.persistent.cached_render_targets) {
@@ -1077,7 +1103,7 @@ fn bind_graph_direct<'a>(
             });
         node = match binding {
             GpuBinding::Buf(b) => node.bind_buffer(b, access),
-            GpuBinding::Parcel(p) => node.bind_parcel(p, node_access_to_resource_access(access)),
+            GpuBinding::Parcel(p) => node.bind_parcel(p, access),
             GpuBinding::Tex(t) => node.bind_texture(t, access),
             // Samplers and persistent (pre-initialized) buffers are stateless —
             // their slot index flows through push-constants but they need no
@@ -1127,28 +1153,7 @@ impl GoldyRenderer {
             shaders: FullShaders::empty(),
             resolver: Resolver::new(),
             engine_shaders: Vec::new(),
-            persistent: PersistentState {
-                pool: ResourcePool::default(),
-                retained_pool: RetainedPool::new(Arc::new(device.clone())),
-                tex_pool: TexturePool::default(),
-                last_drained_bump: None,
-                pending_bump_readback: None,
-                linear_clamp_sampler: None,
-                nearest_clamp_sampler: None,
-                cached_render_targets: std::array::from_fn(|_| None),
-                cached_rt_timelines: [0; RESOURCE_CACHE_SLOTS],
-                cached_pipeline: None,
-                rt_slot_swapchain_image: [None; RESOURCE_CACHE_SLOTS],
-                deferred_owned_cap_hint: 0,
-                deferred_textures_cap_hint: 0,
-                stable_mask_lut_msaa8: None,
-                stable_mask_lut_msaa16: None,
-                cached_wg_counts: None,
-                cached_config_uniform: None,
-                cached_filter_uniforms: Vec::new(),
-                pending_texture_returns: Arc::new(Mutex::new(Vec::new())),
-                pending_owned_returns: Arc::new(Mutex::new(Vec::new())),
-            },
+            persistent: PersistentState::new(&device),
             frame_pipeline,
             persistent_bump: None,
             cleanup_frame_counter: 0,
@@ -1279,7 +1284,7 @@ impl GoldyRenderer {
         for signal in self.context.poll_signals_and_service() {
             match signal {
                 Signal::BoundaryCrossed { epoch } => {
-                    self.persistent.drain_pending_returns(&self.context);
+                    self.persistent.drain_pending_returns();
                     self.frame_pipeline.note_presented(epoch);
                 }
                 Signal::Oversubscribed { .. } => {
@@ -1289,7 +1294,7 @@ impl GoldyRenderer {
                         break;
                     }
                     self.context.flush_deferred_deletions();
-                    self.persistent.drain_pending_returns(&self.context);
+                    self.persistent.drain_pending_returns();
                 }
                 Signal::SwapchainReturned { image_index } => {
                     self.persistent.mark_rt_slot_returned(&self.context, image_index);
@@ -1577,7 +1582,7 @@ impl GoldyRenderer {
         // --- Reclaim completed frames & open recording bracket ---
         // Drain pool returns from prior-frame token drops (cheap; no GPU sync).
         // BoundaryCrossed signals are serviced by poll_and_reclaim at frame entry.
-        self.persistent.drain_pending_returns(&self.context);
+        self.persistent.drain_pending_returns();
 
         let out_image_format = surface.map(|s| s.format()).unwrap_or(TextureFormat::Rgba8Unorm);
         self.persistent.purge_render_target_cache_if_mismatch(
@@ -1911,28 +1916,7 @@ mod tests {
             robust: false,
         };
 
-        let mut persistent = PersistentState {
-            pool: ResourcePool::default(),
-            retained_pool: RetainedPool::new(Arc::new(device.clone())),
-            tex_pool: TexturePool::default(),
-            last_drained_bump: None,
-            pending_bump_readback: None,
-            linear_clamp_sampler: None,
-            nearest_clamp_sampler: None,
-            cached_render_targets: std::array::from_fn(|_| None),
-            cached_rt_timelines: [0; RESOURCE_CACHE_SLOTS],
-            cached_pipeline: None,
-            rt_slot_swapchain_image: [None; RESOURCE_CACHE_SLOTS],
-            deferred_owned_cap_hint: 0,
-            deferred_textures_cap_hint: 0,
-            stable_mask_lut_msaa8: None,
-            stable_mask_lut_msaa16: None,
-            cached_wg_counts: None,
-            cached_config_uniform: None,
-            cached_filter_uniforms: Vec::new(),
-            pending_texture_returns: Arc::new(Mutex::new(Vec::new())),
-            pending_owned_returns: Arc::new(Mutex::new(Vec::new())),
-        };
+        let mut persistent = PersistentState::new(&device);
         {
             let pending = persistent.pending_owned_returns.clone();
             persistent.pool.set_pending_returns(pending);

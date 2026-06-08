@@ -323,42 +323,37 @@ impl StablePipelineBuffers {
                 c_ibd,
                 bs.bin_data.size_in_bytes() as u64,
                 4,
-                "ekrano.info_bin_data_buf",
             )?,
-            tile: alloc_stable_parcel(recorder, c_tile, bs.tiles.size_in_bytes().into(), 8, "ekrano.tile_buf")?,
+            tile: alloc_stable_parcel(recorder, c_tile, bs.tiles.size_in_bytes().into(), 8)?,
             segments: alloc_stable_parcel(
                 recorder,
                 c_seg,
                 bs.segments.size_in_bytes().into(),
                 24,
-                "ekrano.segments_buf",
             )?,
-            ptcl: alloc_stable_parcel(recorder, c_ptcl, bs.ptcl.size_in_bytes().into(), 4, "ekrano.ptcl_buf")?,
+            ptcl: alloc_stable_parcel(recorder, c_ptcl, bs.ptcl.size_in_bytes().into(), 4)?,
             blend_spill: alloc_stable_parcel(
                 recorder,
                 c_bs,
                 bs.blend_spill.size_in_bytes().into(),
                 size_of::<u32>() as u32,
-                "ekrano.blend_spill",
             )?,
             lines: alloc_stable_parcel(
                 recorder,
                 c_lines,
                 bs.lines.size_in_bytes().into(),
                 24,
-                "ekrano.lines_buf",
             )?,
             seg_counts: alloc_stable_parcel(
                 recorder,
                 c_sc,
                 bs.seg_counts.size_in_bytes().into(),
                 8,
-                "ekrano.seg_counts_buf",
             )?,
         })
     }
 
-    fn relinquish(self, recorder: &mut FrameRecorder<'_>) {
+    pub(crate) fn release(self, recorder: &mut FrameRecorder<'_>) {
         let ctx = recorder.context();
         let pool = &mut recorder.persistent.retained_pool;
         for parcel in [
@@ -370,12 +365,8 @@ impl StablePipelineBuffers {
             self.lines,
             self.seg_counts,
         ] {
-            let _ = pool.transfer_out(ctx, parcel);
+            pool.release(ctx, parcel);
         }
-    }
-
-    pub(crate) fn return_to_pool(self, recorder: &mut FrameRecorder<'_>) {
-        self.relinquish(recorder);
     }
 }
 
@@ -384,13 +375,12 @@ fn alloc_stable_parcel(
     cached: Option<Parcel>,
     size: u64,
     stride: u32,
-    name: &'static str,
 ) -> Result<Parcel, Error> {
     if let Some(parcel) = cached {
         return Ok(parcel);
     }
     if std::env::var_os("EKRANO_LOG_PIPELINE_RESIZE").is_some() {
-        log::info!("[PIPE-RESIZE] alloc {name} size={size} stride={stride}");
+        log::info!("[PIPE-RESIZE] acquire stable parcel size={size} stride={stride}");
     }
     recorder
         .persistent
@@ -722,10 +712,10 @@ impl PipelineResources {
                 Some(c) if c.buffer_sizes == buffer_sizes => (Some(c.stable), Some(c.scratch)),
                 Some(c) => {
                     if std::env::var_os("EKRANO_LOG_PIPELINE_RESIZE").is_some() {
-                        log::info!("[PIPE-RESIZE] buffer_sizes mismatch — relinquishing stable parcels");
+                        log::info!("[PIPE-RESIZE] buffer_sizes mismatch — releasing stable parcels");
                     }
-                    log::debug!("[PIPE-CACHE] buffer_sizes mismatch — relinquishing stable parcels");
-                    c.stable.return_to_pool(recorder);
+                    log::debug!("[PIPE-CACHE] buffer_sizes mismatch — releasing stable parcels");
+                    c.stable.release(recorder);
                     c.scratch.return_to_pool(recorder);
                     (None, None)
                 }
@@ -849,14 +839,6 @@ pub(crate) fn bind_type_to_node_access(bt: BindType) -> NodeAccess {
         BindType::Buffer | BindType::Image(_) => NodeAccess::ReadWrite,
         BindType::BufReadOnly | BindType::Uniform | BindType::ImageRead(_) => NodeAccess::Read,
         BindType::Sampler => NodeAccess::Read,
-    }
-}
-
-pub(crate) fn node_access_to_resource_access(access: NodeAccess) -> ResourceAccess {
-    match access {
-        NodeAccess::Read => ResourceAccess::Read,
-        NodeAccess::Write => ResourceAccess::Write,
-        NodeAccess::ReadWrite => ResourceAccess::ReadWrite,
     }
 }
 
