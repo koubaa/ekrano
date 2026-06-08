@@ -20,12 +20,15 @@ use std::sync::{Arc, Mutex};
 use goldy::task_graph::{NodeAccess, NodeBuilder};
 use goldy::types::{BufferFlags, TextureFlags, TextureFormat, TextureKind};
 use goldy::{
-    BudgetPolicy, Buffer, BufferKind, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator, ShaderModule,
-    Signal, TaskGraph, Texture, TexturePool, TimelineValue,
+    BudgetPolicy, Buffer, BufferKind, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator, RetainedPool,
+    ShaderModule, Signal, TaskGraph, Texture, TexturePool, TimelineValue,
 };
 
-/// Ekrano uses a single-frame fire-and-forget model
-const FRAME_PIPELINE_DEPTH: usize = 1;
+/// Ekrano uses a single-frame fire-and-forget model.
+///
+/// Stable pipeline parcels live in [`RetainedPool`] deeds reused across frames only while
+/// depth stays at 1 (see [`StablePipelineBuffers`](crate::gpu_resources::StablePipelineBuffers)).
+pub(crate) const FRAME_PIPELINE_DEPTH: usize = 1;
 
 use mem::size_of;
 
@@ -43,7 +46,7 @@ use ekrano_encoding::{BumpAllocators, Images, Layout, Ramps, RenderConfig, Resol
 
 const MAX_BUMP_RETRIES: usize = 2;
 
-/// Timeline-guarded slots for cross-frame render-target and pipeline-buffer reuse.
+/// Timeline-guarded slots for cross-frame render-target reuse.
 /// Two slots suffice at depth=1: one aging entry plus one empty install slot.
 const RESOURCE_CACHE_SLOTS: usize = 2;
 
@@ -167,7 +170,6 @@ impl Drop for DeferredTextureToken {
 #[derive(Debug, Default)]
 pub(crate) struct CacheScheduleOutcome {
     cached_render_targets_slot: Option<usize>,
-    cached_pipeline_installed: bool,
 }
 
 /// Outcome of [`FrameRecorder::finish`]: orchestrator submit result plus resources
@@ -416,6 +418,9 @@ fn env_robust_override() -> Option<bool> {
 pub(crate) struct PersistentState {
     /// Owned buffer cache: recycles pool-exempt buffers (bump, indirect, etc.)
     pub(crate) pool: ResourcePool,
+    /// Retained pool for the seven stable pipeline buffers (`resource-pool.md` §4).
+    /// Valid only at [`FRAME_PIPELINE_DEPTH`] = 1; see [`StablePipelineBuffers`](crate::gpu_resources::StablePipelineBuffers).
+    pub(crate) retained_pool: RetainedPool,
     /// Texture pool for intermediate render targets (gradient, filter layers, etc.)
     pub(crate) tex_pool: TexturePool,
     /// Bump allocator counters from the most recently drained frame.
@@ -440,8 +445,6 @@ pub(crate) struct PersistentState {
     /// Cached pipeline buffers from the previous frame. At depth=1 only one
     /// entry exists at a time: take-then-install within a single `run_frame`.
     pub(crate) cached_pipeline: Option<crate::gpu_resources::CachedPipeline>,
-    /// Timeline of the frame that produced `cached_pipeline`. `0` when empty.
-    pub(crate) cached_pipeline_timeline: TimelineValue,
     /// Maps RT cache slot index → swapchain image index of the last frame that
     /// used that slot, so [`Self::mark_rt_slot_returned`] can mark it reusable.
     pub(crate) rt_slot_swapchain_image: [Option<u32>; RESOURCE_CACHE_SLOTS],
@@ -474,6 +477,33 @@ pub(crate) struct PersistentState {
     /// Owned buffers waiting to be returned to [`Self::pool`] after GPU retirement.
     /// Populated by [`DeferredOwnedBuffersToken`] drops from [`Context::defer_release`].
     pending_owned_returns: Arc<Mutex<Vec<(Buffer, &'static str)>>>,
+}
+
+impl PersistentState {
+    pub(crate) fn new(device: &Device) -> Self {
+        Self {
+            pool: ResourcePool::default(),
+            retained_pool: RetainedPool::new(Arc::new(device.clone())),
+            tex_pool: TexturePool::default(),
+            last_drained_bump: None,
+            pending_bump_readback: None,
+            linear_clamp_sampler: None,
+            nearest_clamp_sampler: None,
+            cached_render_targets: std::array::from_fn(|_| None),
+            cached_rt_timelines: [0; RESOURCE_CACHE_SLOTS],
+            cached_pipeline: None,
+            rt_slot_swapchain_image: [None; RESOURCE_CACHE_SLOTS],
+            deferred_owned_cap_hint: 0,
+            deferred_textures_cap_hint: 0,
+            stable_mask_lut_msaa8: None,
+            stable_mask_lut_msaa16: None,
+            cached_wg_counts: None,
+            cached_config_uniform: None,
+            cached_filter_uniforms: Vec::new(),
+            pending_texture_returns: Arc::new(Mutex::new(Vec::new())),
+            pending_owned_returns: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
 }
 
 /// Timeline-guarded render target cache.
@@ -590,19 +620,13 @@ impl PersistentState {
         read_bump_buffer(device, self, buf)
     }
 
-    /// Claim a pipeline buffer cache slot.
+    /// Claim cached pipeline buffers for this frame.
     ///
-    /// Pipeline buffers are fully overwritten each frame, so reuse is safe
-    /// without waiting for the GPU to finish the prior frame's reads.
-    pub(crate) fn take_cached_pipeline(
-        &mut self,
-        progress: TimelineValue,
-    ) -> Option<crate::gpu_resources::CachedPipeline> {
-        if progress < self.cached_pipeline_timeline {
-            return None;
-        }
+    /// Pipeline buffers are fully GPU-overwritten each frame. At depth=1, [`FrameOrchestrator`]
+    /// retirement in `begin_frame` provides cross-frame ordering — no `gpu_progress` gate here.
+    pub(crate) fn take_cached_pipeline(&mut self) -> Option<crate::gpu_resources::CachedPipeline> {
         if let Some(c) = self.cached_pipeline.take() {
-            log::debug!("[PIPE-CACHE] HIT timeline={}", self.cached_pipeline_timeline);
+            log::debug!("[PIPE-CACHE] HIT");
             return Some(c);
         }
         None
@@ -823,11 +847,6 @@ impl<'a> FrameRecorder<'a> {
         self.deferred_textures.push(tex);
     }
 
-    fn defer_cached_pipeline_owned_buffers(&mut self, c: crate::gpu_resources::CachedPipeline) {
-        c.stable.defer_to(self);
-        c.scratch.defer_to(self);
-    }
-
     pub(crate) fn schedule_pipeline_cleanup(
         &mut self,
         pipeline: crate::gpu_resources::PipelineResources,
@@ -868,14 +887,12 @@ impl<'a> FrameRecorder<'a> {
             scratch,
             buffer_sizes,
         };
-        if self.persistent.cached_pipeline.is_none() {
-            self.persistent.cached_pipeline = Some(pipeline_cache);
-            outcome.cached_pipeline_installed = true;
-            log::debug!("[PIPE-CACHE] schedule: cached");
-        } else {
-            self.defer_cached_pipeline_owned_buffers(pipeline_cache);
-            log::debug!("[PIPE-CACHE] schedule: slot occupied — deferred current frame");
-        }
+        assert!(
+            self.persistent.cached_pipeline.is_none(),
+            "cached_pipeline must be empty at schedule (prepare should have taken it)"
+        );
+        self.persistent.cached_pipeline = Some(pipeline_cache);
+        log::debug!("[PIPE-CACHE] schedule: cached");
         if let Some(i) = find_empty_cache_slot(&self.persistent.cached_render_targets) {
             self.persistent.cached_render_targets[i] = Some((out_image, filter_layers));
             outcome.cached_render_targets_slot = Some(i);
@@ -1085,6 +1102,7 @@ fn bind_graph_direct<'a>(
             });
         node = match binding {
             GpuBinding::Buf(b) => node.bind_buffer(b, access),
+            GpuBinding::Parcel(p) => node.bind_parcel(p, access),
             GpuBinding::Tex(t) => node.bind_texture(t, access),
             // Samplers and persistent (pre-initialized) buffers are stateless —
             // their slot index flows through push-constants but they need no
@@ -1134,28 +1152,7 @@ impl GoldyRenderer {
             shaders: FullShaders::empty(),
             resolver: Resolver::new(),
             engine_shaders: Vec::new(),
-            persistent: PersistentState {
-                pool: ResourcePool::default(),
-                tex_pool: TexturePool::default(),
-                last_drained_bump: None,
-                pending_bump_readback: None,
-                linear_clamp_sampler: None,
-                nearest_clamp_sampler: None,
-                cached_render_targets: std::array::from_fn(|_| None),
-                cached_rt_timelines: [0; RESOURCE_CACHE_SLOTS],
-                cached_pipeline: None,
-                cached_pipeline_timeline: 0,
-                rt_slot_swapchain_image: [None; RESOURCE_CACHE_SLOTS],
-                deferred_owned_cap_hint: 0,
-                deferred_textures_cap_hint: 0,
-                stable_mask_lut_msaa8: None,
-                stable_mask_lut_msaa16: None,
-                cached_wg_counts: None,
-                cached_config_uniform: None,
-                cached_filter_uniforms: Vec::new(),
-                pending_texture_returns: Arc::new(Mutex::new(Vec::new())),
-                pending_owned_returns: Arc::new(Mutex::new(Vec::new())),
-            },
+            persistent: PersistentState::new(&device),
             frame_pipeline,
             persistent_bump: None,
             cleanup_frame_counter: 0,
@@ -1601,7 +1598,7 @@ impl GoldyRenderer {
             .frame_pipeline
             .begin_frame(|_, _| Ok::<(), Error>(()))
             .map_err(|e| Error::Shader(e.to_string()))?;
-        // After begin_frame the GPU has completed the previous frame (depth=1 wait),
+        // After begin_frame the GPU has completed the previous frame (wait),
         // so any queued bump readback is now guaranteed ready.
         self.drain_ready_bump_readbacks()?;
         // Rate-limit housekeeping to avoid per-frame cost in steady state.
@@ -1763,9 +1760,6 @@ impl GoldyRenderer {
                 self.persistent.rt_slot_swapchain_image[i] = Some(idx);
             }
         }
-        if cache_outcome.cached_pipeline_installed {
-            self.persistent.cached_pipeline_timeline = frame_tv;
-        }
         if let Some(buf) = bump_readback {
             self.persistent.queue_bump_readback(frame_tv, buf);
         }
@@ -1921,28 +1915,7 @@ mod tests {
             robust: false,
         };
 
-        let mut persistent = PersistentState {
-            pool: ResourcePool::default(),
-            tex_pool: TexturePool::default(),
-            last_drained_bump: None,
-            pending_bump_readback: None,
-            linear_clamp_sampler: None,
-            nearest_clamp_sampler: None,
-            cached_render_targets: std::array::from_fn(|_| None),
-            cached_rt_timelines: [0; RESOURCE_CACHE_SLOTS],
-            cached_pipeline: None,
-            cached_pipeline_timeline: 0,
-            rt_slot_swapchain_image: [None; RESOURCE_CACHE_SLOTS],
-            deferred_owned_cap_hint: 0,
-            deferred_textures_cap_hint: 0,
-            stable_mask_lut_msaa8: None,
-            stable_mask_lut_msaa16: None,
-            cached_wg_counts: None,
-            cached_config_uniform: None,
-            cached_filter_uniforms: Vec::new(),
-            pending_texture_returns: Arc::new(Mutex::new(Vec::new())),
-            pending_owned_returns: Arc::new(Mutex::new(Vec::new())),
-        };
+        let mut persistent = PersistentState::new(&device);
         {
             let pending = persistent.pending_owned_returns.clone();
             persistent.pool.set_pending_returns(pending);
