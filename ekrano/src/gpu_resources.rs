@@ -7,7 +7,7 @@ use std::mem::size_of;
 
 use goldy::task_graph::NodeAccess;
 use goldy::types::{BufferFlags, ResourceAccess, TextureFlags, TextureKind};
-use goldy::{Buffer, BufferKind, Texture, TextureFormat};
+use goldy::{Buffer, BufferKind, Parcel, Texture, TextureFormat};
 
 use crate::goldy_renderer::FrameRecorder;
 use crate::resource_proxy::{BindType, ImageFormat};
@@ -25,8 +25,15 @@ impl PipelineBuffer for Buffer {
     }
 }
 
+impl PipelineBuffer for Parcel {
+    fn as_binding(&self) -> GpuBinding<'_> {
+        GpuBinding::Parcel(self)
+    }
+}
+
 pub(crate) enum GpuBinding<'a> {
     Buf(&'a Buffer),
+    Parcel(&'a Parcel),
     Tex(&'a Texture),
     /// A GPU sampler represented by its pre-resolved bindless index.
     /// We store the index directly (not a reference) so `fine_resources` doesn't
@@ -49,6 +56,13 @@ impl<'a> GpuBinding<'a> {
                     buf.resource_index(ResourceAccess::Read)
                 } else {
                     buf.resource_index(ResourceAccess::Write)
+                }
+            }
+            GpuBinding::Parcel(parcel) => {
+                if is_read_only {
+                    parcel.resource_index(ResourceAccess::Read)
+                } else {
+                    parcel.resource_index(ResourceAccess::Write)
                 }
             }
             GpuBinding::Tex(tex) => {
@@ -264,18 +278,25 @@ fn al_cached_opt(
 }
 
 /// The seven large pipeline buffers whose sizes are fixed or change only on coarse
-/// config changes — "retained-shaped": allocate once, reuse in place across frames.
+/// config changes — retained parcels in [`crate::goldy_renderer::PersistentState::retained_pool`].
 /// See `resource-pool.md §1` for the rationale behind this split from [`ScratchPipelineBuffers`].
+///
+/// At [`crate::goldy_renderer::FRAME_PIPELINE_DEPTH`] = 1, `begin_frame` retires the prior
+/// submission before recording, so the same deeds can be rebound and GPU-overwritten each frame
+/// with no client-side progress gate. If pipeline depth is raised so the next frame may record
+/// while the prior frame's GPU work is still in flight on these buffers, a single retained deed
+/// is not enough — use double-buffered parcels or a transient pool instead; do not keep them in
+/// [`goldy::RetainedPool`] under inter-frame overlap.
 pub(crate) struct StablePipelineBuffers {
-    pub info_bin_data: Buffer,
-    pub tile: Buffer,
-    pub segments: Buffer,
-    pub ptcl: Buffer,
+    pub info_bin_data: Parcel,
+    pub tile: Parcel,
+    pub segments: Parcel,
+    pub ptcl: Parcel,
     /// Used only by fine, but allocated in the shared pre-flush phase to avoid
     /// splitting `prepare` into two phases.
-    pub blend_spill: Buffer,
-    pub lines: Buffer,
-    pub seg_counts: Buffer,
+    pub blend_spill: Parcel,
+    pub lines: Parcel,
+    pub seg_counts: Parcel,
 }
 
 impl StablePipelineBuffers {
@@ -297,37 +318,37 @@ impl StablePipelineBuffers {
             None => (None, None, None, None, None, None, None),
         };
         Ok(Self {
-            info_bin_data: al_cached_opt(
+            info_bin_data: alloc_stable_parcel(
                 recorder,
                 c_ibd,
                 bs.bin_data.size_in_bytes() as u64,
                 4,
                 "ekrano.info_bin_data_buf",
             )?,
-            tile: al_cached_opt(recorder, c_tile, bs.tiles.size_in_bytes().into(), 8, "ekrano.tile_buf")?,
-            segments: al_cached_opt(
+            tile: alloc_stable_parcel(recorder, c_tile, bs.tiles.size_in_bytes().into(), 8, "ekrano.tile_buf")?,
+            segments: alloc_stable_parcel(
                 recorder,
                 c_seg,
                 bs.segments.size_in_bytes().into(),
                 24,
                 "ekrano.segments_buf",
             )?,
-            ptcl: al_cached_opt(recorder, c_ptcl, bs.ptcl.size_in_bytes().into(), 4, "ekrano.ptcl_buf")?,
-            blend_spill: al_cached_opt(
+            ptcl: alloc_stable_parcel(recorder, c_ptcl, bs.ptcl.size_in_bytes().into(), 4, "ekrano.ptcl_buf")?,
+            blend_spill: alloc_stable_parcel(
                 recorder,
                 c_bs,
                 bs.blend_spill.size_in_bytes().into(),
                 size_of::<u32>() as u32,
                 "ekrano.blend_spill",
             )?,
-            lines: al_cached_opt(
+            lines: alloc_stable_parcel(
                 recorder,
                 c_lines,
                 bs.lines.size_in_bytes().into(),
                 24,
                 "ekrano.lines_buf",
             )?,
-            seg_counts: al_cached_opt(
+            seg_counts: alloc_stable_parcel(
                 recorder,
                 c_sc,
                 bs.seg_counts.size_in_bytes().into(),
@@ -337,26 +358,45 @@ impl StablePipelineBuffers {
         })
     }
 
-    fn return_to_pool(self, recorder: &mut FrameRecorder<'_>) {
-        let pool = &mut recorder.persistent.pool;
-        pool.return_buf(self.info_bin_data, "ekrano.info_bin_data_buf");
-        pool.return_buf(self.tile, "ekrano.tile_buf");
-        pool.return_buf(self.segments, "ekrano.segments_buf");
-        pool.return_buf(self.ptcl, "ekrano.ptcl_buf");
-        pool.return_buf(self.blend_spill, "ekrano.blend_spill");
-        pool.return_buf(self.lines, "ekrano.lines_buf");
-        pool.return_buf(self.seg_counts, "ekrano.seg_counts_buf");
+    fn relinquish(self, recorder: &mut FrameRecorder<'_>) {
+        let ctx = recorder.context();
+        let pool = &mut recorder.persistent.retained_pool;
+        for parcel in [
+            self.info_bin_data,
+            self.tile,
+            self.segments,
+            self.ptcl,
+            self.blend_spill,
+            self.lines,
+            self.seg_counts,
+        ] {
+            let _ = pool.transfer_out(ctx, parcel);
+        }
     }
 
-    pub(crate) fn defer_to(self, recorder: &mut FrameRecorder<'_>) {
-        recorder.defer_owned_buffer(self.info_bin_data, "ekrano.info_bin_data_buf");
-        recorder.defer_owned_buffer(self.tile, "ekrano.tile_buf");
-        recorder.defer_owned_buffer(self.segments, "ekrano.segments_buf");
-        recorder.defer_owned_buffer(self.ptcl, "ekrano.ptcl_buf");
-        recorder.defer_owned_buffer(self.blend_spill, "ekrano.blend_spill");
-        recorder.defer_owned_buffer(self.lines, "ekrano.lines_buf");
-        recorder.defer_owned_buffer(self.seg_counts, "ekrano.seg_counts_buf");
+    pub(crate) fn return_to_pool(self, recorder: &mut FrameRecorder<'_>) {
+        self.relinquish(recorder);
     }
+}
+
+fn alloc_stable_parcel(
+    recorder: &mut FrameRecorder<'_>,
+    cached: Option<Parcel>,
+    size: u64,
+    stride: u32,
+    name: &'static str,
+) -> Result<Parcel, Error> {
+    if let Some(parcel) = cached {
+        return Ok(parcel);
+    }
+    if std::env::var_os("EKRANO_LOG_PIPELINE_RESIZE").is_some() {
+        log::info!("[PIPE-RESIZE] alloc {name} size={size} stride={stride}");
+    }
+    recorder
+        .persistent
+        .retained_pool
+        .acquire_buffer(size, BufferKind::Scattered, Some(stride), BufferFlags::empty(), None)
+        .map_err(|e| Error::Gpu(e.to_string()))
 }
 
 /// The fourteen count-derived scratch buffers whose sizes track scene complexity.
@@ -504,7 +544,7 @@ impl ScratchPipelineBuffers {
         })
     }
 
-    fn return_to_pool(self, recorder: &mut FrameRecorder<'_>) {
+    pub(crate) fn return_to_pool(self, recorder: &mut FrameRecorder<'_>) {
         let pool = &mut recorder.persistent.pool;
         pool.return_buf(self.reduced, "ekrano.reduced_buf");
         pool.return_buf(self.reduced2, "ekrano.reduced2_buf");
@@ -521,30 +561,13 @@ impl ScratchPipelineBuffers {
         pool.return_buf(self.bin_header, "ekrano.bin_header_buf");
         pool.return_buf(self.path, "ekrano.path_buf");
     }
-
-    pub(crate) fn defer_to(self, recorder: &mut FrameRecorder<'_>) {
-        recorder.defer_owned_buffer(self.reduced, "ekrano.reduced_buf");
-        recorder.defer_owned_buffer(self.reduced2, "ekrano.reduced2_buf");
-        recorder.defer_owned_buffer(self.reduced_scan, "ekrano.reduced_scan_buf");
-        recorder.defer_owned_buffer(self.tagmonoid, "ekrano.tagmonoid_buf");
-        recorder.defer_owned_buffer(self.path_bbox, "ekrano.path_bbox_buf");
-        recorder.defer_owned_buffer(self.draw_reduced, "ekrano.draw_reduced_buf");
-        recorder.defer_owned_buffer(self.draw_monoid, "ekrano.draw_monoid_buf");
-        recorder.defer_owned_buffer(self.clip_inp, "ekrano.clip_inp_buf");
-        recorder.defer_owned_buffer(self.clip_el, "ekrano.clip_el_buf");
-        recorder.defer_owned_buffer(self.clip_bic, "ekrano.clip_bic_buf");
-        recorder.defer_owned_buffer(self.clip_bbox, "ekrano.clip_bbox_buf");
-        recorder.defer_owned_buffer(self.draw_bbox, "ekrano.draw_bbox_buf");
-        recorder.defer_owned_buffer(self.bin_header, "ekrano.bin_header_buf");
-        recorder.defer_owned_buffer(self.path, "ekrano.path_buf");
-    }
 }
 
 /// Cached GPU buffers that survive across frames when `buffer_sizes` is stable.
 ///
 /// At depth=1 the previous frame's GPU work is complete by the time `begin_frame`
-/// returns, so these buffers are safe to rebind immediately. All handles are
-/// persistent `ResourcePool` allocations with stable bindless indices.
+/// returns, so these buffers are safe to rebind immediately. Stable parcels stay
+/// in [`goldy::RetainedPool`] deeds; scratch buffers are `ResourcePool` allocations.
 pub(crate) struct CachedPipeline {
     pub stable: StablePipelineBuffers,
     pub scratch: ScratchPipelineBuffers,
@@ -691,14 +714,17 @@ impl PipelineResources {
 
         // Try to reuse cached pipeline buffers from the previous frame.
         // At depth=1, begin_frame blocks until the previous frame's GPU work is complete,
-        // so these buffers are safe to rebind immediately without any fence check.
+        // so these buffers are safe to rebind immediately — ordering is via the orchestrator
+        // and task-graph barriers, not a client-side gpu_progress gate on the cache slot.
         let (cached_stable, cached_scratch) = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.pipeline_cache");
-            match recorder.persistent.take_cached_pipeline(gpu_progress) {
+            match recorder.persistent.take_cached_pipeline() {
                 Some(c) if c.buffer_sizes == buffer_sizes => (Some(c.stable), Some(c.scratch)),
                 Some(c) => {
-                    // Sizes changed: return stale buffers to pool before discarding.
-                    log::debug!("[PIPE-CACHE] buffer_sizes mismatch — returning stale buffers to pool");
+                    if std::env::var_os("EKRANO_LOG_PIPELINE_RESIZE").is_some() {
+                        log::info!("[PIPE-RESIZE] buffer_sizes mismatch — relinquishing stable parcels");
+                    }
+                    log::debug!("[PIPE-CACHE] buffer_sizes mismatch — relinquishing stable parcels");
                     c.stable.return_to_pool(recorder);
                     c.scratch.return_to_pool(recorder);
                     (None, None)
@@ -793,7 +819,7 @@ pub(crate) fn collect_bindless_indices_into(
         let is_read_only = matches!(bind_types.get(i), Some(BindType::BufReadOnly));
         let is_sampled_image = matches!(bind_types.get(i), Some(BindType::ImageRead(_)));
         let idx = match binding {
-            GpuBinding::Buf(_) => binding.bindless_slot(is_read_only)?,
+            GpuBinding::Buf(_) | GpuBinding::Parcel(_) => binding.bindless_slot(is_read_only)?,
             GpuBinding::Tex(tex) if is_sampled_image => tex
                 .resource_index(ResourceAccess::Read)
                 .or_else(|| {
@@ -823,6 +849,14 @@ pub(crate) fn bind_type_to_node_access(bt: BindType) -> NodeAccess {
         BindType::Buffer | BindType::Image(_) => NodeAccess::ReadWrite,
         BindType::BufReadOnly | BindType::Uniform | BindType::ImageRead(_) => NodeAccess::Read,
         BindType::Sampler => NodeAccess::Read,
+    }
+}
+
+pub(crate) fn node_access_to_resource_access(access: NodeAccess) -> ResourceAccess {
+    match access {
+        NodeAccess::Read => ResourceAccess::Read,
+        NodeAccess::Write => ResourceAccess::Write,
+        NodeAccess::ReadWrite => ResourceAccess::ReadWrite,
     }
 }
 
