@@ -20,8 +20,8 @@ use std::sync::{Arc, Mutex};
 use goldy::task_graph::{NodeAccess, NodeBuilder};
 use goldy::types::{BufferFlags, TextureFlags, TextureFormat, TextureKind};
 use goldy::{
-    BudgetPolicy, Buffer, BufferKind, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator,
-    RetainedPool, ShaderModule, Signal, TaskGraph, Texture, TexturePool, TimelineValue,
+    BudgetPolicy, Buffer, BufferKind, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator, RetainedPool,
+    ShaderModule, Signal, TaskGraph, Texture, TexturePool, TimelineValue,
 };
 
 /// Ekrano uses a single-frame fire-and-forget model.
@@ -36,8 +36,7 @@ use crate::{
     Error, RenderParams, Result, Scene,
     gpu_resources::{
         GpuBinding, acquire_texture_rgba, alloc_pipeline_buffer, bind_type_to_node_access,
-        collect_bindless_indices_into, record_upload_bytes,
-        record_upload_bytes_owned,
+        collect_bindless_indices_into, record_upload_bytes, record_upload_bytes_owned,
     },
     render::Render,
     resource_proxy::{BindType, ShaderId},
@@ -420,7 +419,7 @@ pub(crate) struct PersistentState {
     /// Owned buffer cache: recycles pool-exempt buffers (bump, indirect, etc.)
     pub(crate) pool: ResourcePool,
     /// Retained pool for the seven stable pipeline buffers (`resource-pool.md` §4).
-    /// Valid only at [`FRAME_PIPELINE_DEPTH`] = 1; see [`StablePipelineBuffers`].
+    /// Valid only at [`FRAME_PIPELINE_DEPTH`] = 1; see [`StablePipelineBuffers`](crate::gpu_resources::StablePipelineBuffers).
     pub(crate) retained_pool: RetainedPool,
     /// Texture pool for intermediate render targets (gradient, filter layers, etc.)
     pub(crate) tex_pool: TexturePool,

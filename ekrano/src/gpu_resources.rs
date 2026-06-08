@@ -318,19 +318,9 @@ impl StablePipelineBuffers {
             None => (None, None, None, None, None, None, None),
         };
         Ok(Self {
-            info_bin_data: alloc_stable_parcel(
-                recorder,
-                c_ibd,
-                bs.bin_data.size_in_bytes() as u64,
-                4,
-            )?,
+            info_bin_data: alloc_stable_parcel(recorder, c_ibd, bs.bin_data.size_in_bytes() as u64, 4)?,
             tile: alloc_stable_parcel(recorder, c_tile, bs.tiles.size_in_bytes().into(), 8)?,
-            segments: alloc_stable_parcel(
-                recorder,
-                c_seg,
-                bs.segments.size_in_bytes().into(),
-                24,
-            )?,
+            segments: alloc_stable_parcel(recorder, c_seg, bs.segments.size_in_bytes().into(), 24)?,
             ptcl: alloc_stable_parcel(recorder, c_ptcl, bs.ptcl.size_in_bytes().into(), 4)?,
             blend_spill: alloc_stable_parcel(
                 recorder,
@@ -338,18 +328,8 @@ impl StablePipelineBuffers {
                 bs.blend_spill.size_in_bytes().into(),
                 size_of::<u32>() as u32,
             )?,
-            lines: alloc_stable_parcel(
-                recorder,
-                c_lines,
-                bs.lines.size_in_bytes().into(),
-                24,
-            )?,
-            seg_counts: alloc_stable_parcel(
-                recorder,
-                c_sc,
-                bs.seg_counts.size_in_bytes().into(),
-                8,
-            )?,
+            lines: alloc_stable_parcel(recorder, c_lines, bs.lines.size_in_bytes().into(), 24)?,
+            seg_counts: alloc_stable_parcel(recorder, c_sc, bs.seg_counts.size_in_bytes().into(), 8)?,
         })
     }
 
