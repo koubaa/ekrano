@@ -21,6 +21,7 @@
 use ekrano::kurbo::{Affine, Circle, Line, Rect, Stroke};
 use ekrano::peniko::{Fill, color::palette};
 use ekrano::{AaConfig, GoldyRenderer, RenderParams, Scene};
+use ekrano_tests::test_alloc_texture;
 use goldy::types::{TextureFlags, TextureFormat, TextureKind};
 use goldy::{Device, DeviceDescriptor, Instance, RequestAdapterOptions};
 
@@ -91,16 +92,14 @@ fn complex_scene() -> Scene {
 }
 
 fn render_n_frames(renderer: &mut GoldyRenderer, scene: &Scene, params: &RenderParams, n: usize) {
-    let texture = renderer
-        .device()
-        .alloc_texture(
-            params.width,
-            params.height,
-            TextureFormat::Rgba8Unorm,
-            TextureKind::Direct,
-            TextureFlags::COPY_DST,
-        )
-        .expect("alloc_texture");
+    let texture = test_alloc_texture(
+        renderer.device(),
+        params.width,
+        params.height,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::Direct,
+        TextureFlags::COPY_DST,
+    );
 
     for i in 0..n {
         renderer
@@ -216,16 +215,14 @@ fn resource_pool_stabilizes_after_warmup() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
     let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
-    let texture = renderer
-        .device()
-        .alloc_texture(
-            WIDTH,
-            HEIGHT,
-            TextureFormat::Rgba8Unorm,
-            TextureKind::Direct,
-            TextureFlags::COPY_DST,
-        )
-        .expect("alloc_texture");
+    let texture = test_alloc_texture(
+        renderer.device(),
+        WIDTH,
+        HEIGHT,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::Direct,
+        TextureFlags::COPY_DST,
+    );
     let scene = tiny_scene();
     let params = RenderParams {
         base_color: palette::css::BLACK,
@@ -274,16 +271,14 @@ fn overflow_heaps_compact_to_zero_in_steady_state() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
     let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
-    let texture = renderer
-        .device()
-        .alloc_texture(
-            WIDTH,
-            HEIGHT,
-            TextureFormat::Rgba8Unorm,
-            TextureKind::Direct,
-            TextureFlags::COPY_DST,
-        )
-        .expect("alloc_texture");
+    let texture = test_alloc_texture(
+        renderer.device(),
+        WIDTH,
+        HEIGHT,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::Direct,
+        TextureFlags::COPY_DST,
+    );
     let scene = tiny_scene();
     let params = RenderParams {
         base_color: palette::css::BLACK,
@@ -323,16 +318,14 @@ fn growing_scene_survives_without_heap_exhaustion() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
     let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
-    let texture = renderer
-        .device()
-        .alloc_texture(
-            WIDTH,
-            HEIGHT,
-            TextureFormat::Rgba8Unorm,
-            TextureKind::Direct,
-            TextureFlags::COPY_DST,
-        )
-        .expect("alloc_texture");
+    let texture = test_alloc_texture(
+        renderer.device(),
+        WIDTH,
+        HEIGHT,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::Direct,
+        TextureFlags::COPY_DST,
+    );
     let params = RenderParams {
         base_color: palette::css::BLACK,
         width: WIDTH,
@@ -370,16 +363,14 @@ fn shrinking_scene_does_not_leak_buffers() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
     let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
-    let texture = renderer
-        .device()
-        .alloc_texture(
-            WIDTH,
-            HEIGHT,
-            TextureFormat::Rgba8Unorm,
-            TextureKind::Direct,
-            TextureFlags::COPY_DST,
-        )
-        .expect("alloc_texture");
+    let texture = test_alloc_texture(
+        renderer.device(),
+        WIDTH,
+        HEIGHT,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::Direct,
+        TextureFlags::COPY_DST,
+    );
     let params = RenderParams {
         base_color: palette::css::BLACK,
         width: WIDTH,
@@ -424,16 +415,14 @@ fn deferred_ring_does_not_grow_unbounded() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
     let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
-    let texture = renderer
-        .device()
-        .alloc_texture(
-            WIDTH,
-            HEIGHT,
-            TextureFormat::Rgba8Unorm,
-            TextureKind::Direct,
-            TextureFlags::COPY_DST,
-        )
-        .expect("alloc_texture");
+    let texture = test_alloc_texture(
+        renderer.device(),
+        WIDTH,
+        HEIGHT,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::Direct,
+        TextureFlags::COPY_DST,
+    );
     let scene = tiny_scene();
     let params = RenderParams {
         base_color: palette::css::BLACK,
@@ -472,16 +461,14 @@ fn large_resolution_survives_50_frames() {
     let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
     let w = 512;
     let h = 512;
-    let texture = renderer
-        .device()
-        .alloc_texture(
-            w,
-            h,
-            TextureFormat::Rgba8Unorm,
-            TextureKind::Direct,
-            TextureFlags::COPY_DST,
-        )
-        .expect("alloc_texture");
+    let texture = test_alloc_texture(
+        renderer.device(),
+        w,
+        h,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::Direct,
+        TextureFlags::COPY_DST,
+    );
     let scene = tiny_scene();
     let params = RenderParams {
         base_color: palette::css::BLACK,
@@ -509,15 +496,14 @@ fn recreate_renderer_after_warmup_survives() {
     // Keep an owning device handle: this test constructs two renderers sequentially and
     // a texture that outlives both, so we cannot rely on a single renderer's clone alone.
     let device = make_device();
-    let texture = device
-        .alloc_texture(
-            WIDTH,
-            HEIGHT,
-            TextureFormat::Rgba8Unorm,
-            TextureKind::Direct,
-            TextureFlags::COPY_DST,
-        )
-        .expect("alloc_texture");
+    let texture = test_alloc_texture(
+        &device,
+        WIDTH,
+        HEIGHT,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::Direct,
+        TextureFlags::COPY_DST,
+    );
     let scene = tiny_scene();
     let params = RenderParams {
         base_color: palette::css::BLACK,

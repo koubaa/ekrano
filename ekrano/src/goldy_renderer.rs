@@ -297,7 +297,7 @@ impl ResourcePool {
 
     pub(crate) fn get_buf_with_stride(
         &mut self,
-        device: &Device,
+        retained_pool: &mut RetainedPool,
         ctx: &Context,
         size: u64,
         name: &'static str,
@@ -316,9 +316,11 @@ impl ResourcePool {
             return Ok(buf);
         }
 
-        // Pool miss: try a fresh allocation.
-        match device.alloc_buffer(size, access, stride, buffer_flags) {
-            Ok(b) => Ok(b),
+        // Pool miss: try a fresh allocation via the retained pool door.
+        match retained_pool.acquire_buffer(size, access, stride, buffer_flags, None) {
+            Ok(parcel) => parcel
+                .detach_buffer()
+                .map_err(|e| Error::Shader(e.to_string())),
             Err(_) => {
                 // Attempt 2 (non-blocking): flush deferred deletions so that any GPU
                 // work that completed since the last flush moves buffers from the vram
@@ -354,8 +356,9 @@ impl ResourcePool {
 
                 // Final attempt: one more fresh allocation (heap may have space now that
                 // the DeletionQueue was processed inside flush_deferred_deletions).
-                device
-                    .alloc_buffer(size, access, stride, buffer_flags)
+                retained_pool
+                    .acquire_buffer(size, access, stride, buffer_flags, None)
+                    .and_then(|parcel| parcel.detach_buffer())
                     .map_err(|e| Error::Shader(e.to_string()))
             }
         }
@@ -718,7 +721,7 @@ pub struct GoldyRenderer {
 
 pub(crate) struct FrameRecorder<'a> {
     device: &'a Device,
-    context: &'a Context,
+    pub(crate) context: &'a Context,
     graph: &'a mut TaskGraph,
     frame_pipeline: &'a mut FrameOrchestrator<()>,
     frame_handle: FrameHandle,
@@ -1468,14 +1471,17 @@ impl GoldyRenderer {
         let width = params.width;
         let height = params.height;
         let texture = self
-            .device
-            .alloc_texture(
+            .persistent
+            .retained_pool
+            .acquire_texture(
                 width,
                 height,
                 TextureFormat::Rgba8Unorm,
                 TextureKind::Direct,
                 TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
+                None,
             )
+            .and_then(|parcel| parcel.detach_texture())
             .map_err(|e| Error::Gpu(e.to_string()))?;
 
         for _attempt in 0..=MAX_BUMP_RETRIES {

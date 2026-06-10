@@ -43,7 +43,8 @@ use ekrano::kurbo::{Affine, Vec2};
 use ekrano::peniko::{Blob, Color, ImageFormat, color::palette};
 use ekrano::peniko::{ImageAlphaType, ImageData};
 use ekrano::{AaConfig, GoldyRenderer, Scene};
-use goldy::{Device, DeviceDescriptor, Instance, RequestAdapterOptions};
+use goldy::types::{TextureFlags, TextureFormat, TextureKind};
+use goldy::{Device, DeviceDescriptor, Instance, RequestAdapterOptions, RetainedPool, Texture};
 use image::RgbImage;
 use scenes::{ExampleScene, ImageCache, SceneParams, SimpleText};
 
@@ -61,6 +62,22 @@ use scenes::{ExampleScene, ImageCache, SceneParams, SimpleText};
 ///
 /// TODO: this papers over a legitimate problem with ekrano - each test should have its
 /// own context and therefore never race if the runtime is implemented correctly.
+/// Allocate a standalone texture for integration tests (via [`RetainedPool`]).
+pub fn test_alloc_texture(
+    device: &Device,
+    width: u32,
+    height: u32,
+    format: TextureFormat,
+    access: TextureKind,
+    flags: TextureFlags,
+) -> Texture {
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    pool.acquire_texture(width, height, format, access, flags, None)
+        .expect("acquire_texture")
+        .detach_texture()
+        .expect("detach_texture")
+}
+
 fn test_device() -> Device {
     let instance = Instance::new().expect("Instance::new failed");
     instance
