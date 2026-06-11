@@ -318,9 +318,7 @@ impl ResourcePool {
 
         // Pool miss: try a fresh allocation via the retained pool door.
         match retained_pool.acquire_buffer(size, access, stride, buffer_flags, None) {
-            Ok(parcel) => parcel
-                .detach_buffer()
-                .map_err(|e| Error::Shader(e.to_string())),
+            Ok(parcel) => parcel.detach_buffer().map_err(|e| Error::Shader(e.to_string())),
             Err(_) => {
                 // Attempt 2 (non-blocking): flush deferred deletions so that any GPU
                 // work that completed since the last flush moves buffers from the vram
