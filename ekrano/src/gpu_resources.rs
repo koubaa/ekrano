@@ -96,9 +96,11 @@ pub(crate) fn alloc_pipeline_buffer(
     name: &'static str,
     flags: BufferFlags,
 ) -> Result<Buffer, Error> {
-    let buf = recorder.persistent.pool.get_buf_with_stride(
-        recorder.device(),
-        recorder.context(),
+    let ctx = recorder.context;
+    let persistent = &mut recorder.persistent;
+    let buf = persistent.pool.get_buf_with_stride(
+        &mut persistent.retained_pool,
+        ctx,
         size,
         name,
         BufferKind::Scattered,
@@ -120,9 +122,11 @@ pub(crate) fn record_upload_bytes(
     element_stride: u32,
     bytes: &[u8],
 ) -> Result<Buffer, Error> {
-    let buf = recorder.persistent.pool.get_buf_with_stride(
-        recorder.device(),
-        recorder.context(),
+    let ctx = recorder.context;
+    let persistent = &mut recorder.persistent;
+    let buf = persistent.pool.get_buf_with_stride(
+        &mut persistent.retained_pool,
+        ctx,
         bytes.len() as u64,
         name,
         BufferKind::Scattered,
@@ -141,9 +145,11 @@ pub(crate) fn record_upload_bytes_owned(
     element_stride: u32,
     bytes: Vec<u8>,
 ) -> Result<Buffer, Error> {
-    let buf = recorder.persistent.pool.get_buf_with_stride(
-        recorder.device(),
-        recorder.context(),
+    let ctx = recorder.context;
+    let persistent = &mut recorder.persistent;
+    let buf = persistent.pool.get_buf_with_stride(
+        &mut persistent.retained_pool,
+        ctx,
         bytes.len() as u64,
         name,
         BufferKind::Scattered,

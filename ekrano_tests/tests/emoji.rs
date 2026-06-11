@@ -109,6 +109,9 @@ fn colr_undef() {
     snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.001);
 }
 
+// Bitmap emoji compositing can differ slightly between DX12 WARP and hardware GPUs
+// (±1–2 RGB on opaque glyph pixels; FLIP mean ~0.0011 on WARP vs ~0.0009 on hardware).
+// CI runs on WARP; regenerate the snapshot with `EKRANO_TEST_UPDATE=big_bitmap` on WARP if needed.
 #[test]
 #[cfg_attr(skip_slow_tests, ignore)]
 fn big_bitmap() {

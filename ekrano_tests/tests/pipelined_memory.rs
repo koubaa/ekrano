@@ -10,6 +10,7 @@
 use ekrano::kurbo::{Affine, Rect};
 use ekrano::peniko::{Fill, color::palette};
 use ekrano::{AaConfig, GoldyRenderer, RenderParams, Scene};
+use ekrano_tests::test_alloc_texture;
 use goldy::types::{TextureFlags, TextureFormat, TextureKind};
 use goldy::{Device, DeviceDescriptor, Instance, RequestAdapterOptions};
 
@@ -66,16 +67,14 @@ fn single_frame_ring_depth_bounded() {
     let _gpu_guard = gpu_test_lock();
 
     let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
-    let texture = renderer
-        .device()
-        .alloc_texture(
-            WIDTH,
-            HEIGHT,
-            TextureFormat::Rgba8Unorm,
-            TextureKind::Direct,
-            TextureFlags::COPY_DST,
-        )
-        .expect("alloc_texture");
+    let texture = test_alloc_texture(
+        renderer.device(),
+        WIDTH,
+        HEIGHT,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::Direct,
+        TextureFlags::COPY_DST,
+    );
     let scene = tiny_scene();
     let params = RenderParams {
         base_color: palette::css::BLACK,
@@ -105,16 +104,14 @@ fn resource_pool_stable_under_single_frame() {
     let _gpu_guard = gpu_test_lock();
 
     let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
-    let texture = renderer
-        .device()
-        .alloc_texture(
-            WIDTH,
-            HEIGHT,
-            TextureFormat::Rgba8Unorm,
-            TextureKind::Direct,
-            TextureFlags::COPY_DST,
-        )
-        .expect("alloc_texture");
+    let texture = test_alloc_texture(
+        renderer.device(),
+        WIDTH,
+        HEIGHT,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::Direct,
+        TextureFlags::COPY_DST,
+    );
     let scene = tiny_scene();
     let params = RenderParams {
         base_color: palette::css::BLACK,
