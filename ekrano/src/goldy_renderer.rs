@@ -770,6 +770,9 @@ impl<'a> FrameRecorder<'a> {
         surface: Option<&'a goldy::Surface>,
         preacquired_frame: Option<goldy::Frame>,
     ) -> Self {
+        // TODO(retained-scheme): per-frame clear()+rebuild defeats retained-scheme /
+        // dirty-tracked submission — see `TaskGraph::clear` docs and
+        // docu/development/projects/diwan/in-progress/retained-scheme/design.md.
         // Clear the long-lived graph so the schedule cache is preserved but
         // the node list is empty and ready for this frame's recording.
         graph.clear();

@@ -188,8 +188,18 @@ fn complex_scene_area_aa_survives_100_frames() {
     render_n_frames(&mut renderer, &scene, &params, 100);
 }
 
+/// Observed failure (June 2026, DX12 debug build): aborts mid-run with
+/// `memory allocation of 137438953472 bytes failed` (128 GiB host-side alloc,
+/// exit 0xc0000409). This is NOT the stale-`gpu_progress` issue the original
+/// ignore cited — the clock was fixed by the unified boundary event
+/// (`Device::boundary_crossed`), and the tiny-scene / area-AA siblings now pass
+/// unmodified. The 128 GiB request points at a size computation gone wild in
+/// the old `ResourcePool`/`TexturePool` reuse path under MSAA16 (likely garbage
+/// readback or overflow in a growth calculation). Left unfixed deliberately:
+/// this path is slated for replacement by the retained-scheme lease design
+/// (`docu/.../diwan/in-progress/retained-scheme/design.md`, phases 2-3 of its project).
 #[test]
-#[ignore = "archive reclamation at dispatch boundaries not wired correctly (gpu_progress stale)"]
+#[ignore = "128 GiB host alloc abort in old ResourcePool path under MSAA16; superseded by retained-scheme design (see comment)"]
 fn complex_scene_msaa16_survives_100_frames() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
