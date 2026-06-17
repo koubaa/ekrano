@@ -15,7 +15,7 @@ env:
   # The files stored in LFS the tests need to access, in JSON format
   LFS_FILES: '["ekrano_tests/snapshots/*.png"]'
   # Goldy is an external path dependency (sibling repo). CI clones it at this branch.
-  GOLDY_BRANCH: "main"
+  GOLDY_BRANCH: "scheming"
   GOLDY_REPO: "https://github.com/koubaa/goldy.git"
   # Redistributable WARP via NuGet (Microsoft.Direct3D.WARP). Dropped next to the
   # test binaries on Windows CI to override the older OS-provided d3d10warp.dll
