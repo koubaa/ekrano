@@ -967,7 +967,10 @@ impl<'a> FrameRecorder<'a> {
         let mut node = self.graph.node("dispatch", &self.shaders[shader_id.0].pipeline);
         node = bind_graph_direct(node, bindings, bind_types);
         if !indices.is_empty() || !push_tail.is_empty() {
-            node = node.bind_resources_raw_with_user(indices, push_tail);
+            node = node.with_resource_slots(indices);
+            for &val in push_tail {
+                node = node.with_param(val);
+            }
         }
         node.dispatch(x, y, z);
     }
@@ -998,9 +1001,9 @@ impl<'a> FrameRecorder<'a> {
             .graph
             .node("dispatch_indirect", &self.shaders[shader_id.0].pipeline);
         node = bind_graph_direct(node, bindings, bind_types);
-        node = node.bind_buffer(indirect_buf, NodeAccess::Read);
+        node = node.with_buffer(indirect_buf, NodeAccess::Read);
         if !indices.is_empty() {
-            node = node.bind_resources_raw(indices);
+            node = node.with_resource_slots(indices);
         }
         node.dispatch_indirect(indirect_buf, offset);
     }
@@ -1105,9 +1108,9 @@ fn bind_graph_direct<'a>(
                 NodeAccess::ReadWrite
             });
         node = match binding {
-            GpuBinding::Buf(b) => node.bind_buffer(b, access),
-            GpuBinding::Parcel(p) => node.bind_parcel(p, access),
-            GpuBinding::Tex(t) => node.bind_texture(t, access),
+            GpuBinding::Buf(b) => node.with_buffer(b, access),
+            GpuBinding::Parcel(p) => node.with_parcel(p, access),
+            GpuBinding::Tex(t) => node.with_texture(t, access),
             // Samplers and persistent (pre-initialized) buffers are stateless —
             // their slot index flows through push-constants but they need no
             // resource-barrier tracking in the task graph.  Persistent buffers
