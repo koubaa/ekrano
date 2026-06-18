@@ -262,6 +262,20 @@ struct BufferKey {
     buffer_flags: BufferFlags,
 }
 
+fn pool_key_for_return(buf: &Buffer, name: &'static str) -> BufferKey {
+    let buffer_flags = if name == "ekrano.bump_buf" {
+        BufferFlags::CPU_READABLE
+    } else {
+        BufferFlags::empty()
+    };
+    BufferKey {
+        size: buf.byte_size(),
+        access: BufferKind::Scattered,
+        name,
+        buffer_flags,
+    }
+}
+
 type PendingOwnedReturns = Arc<Mutex<Vec<(Buffer, &'static str)>>>;
 
 #[derive(Default)]
@@ -318,7 +332,7 @@ impl ResourcePool {
 
         // Pool miss: try a fresh allocation via the retained pool door.
         match retained_pool.acquire_buffer(size, access, stride, buffer_flags, None) {
-            Ok(parcel) => parcel.detach_buffer().map_err(|e| Error::Shader(e.to_string())),
+            Ok(buf) => Ok(buf),
             Err(_) => {
                 // Attempt 2 (non-blocking): flush deferred deletions so that any GPU
                 // work that completed since the last flush moves buffers from the vram
@@ -356,7 +370,6 @@ impl ResourcePool {
                 // the DeletionQueue was processed inside flush_deferred_deletions).
                 retained_pool
                     .acquire_buffer(size, access, stride, buffer_flags, None)
-                    .and_then(|parcel| parcel.detach_buffer())
                     .map_err(|e| Error::Shader(e.to_string()))
             }
         }
@@ -364,12 +377,7 @@ impl ResourcePool {
 
     /// Return a buffer to the pool for reuse by a future frame.
     pub(crate) fn return_buf(&mut self, buf: Buffer, name: &'static str) {
-        let key = BufferKey {
-            size: buf.size(),
-            access: buf.access(),
-            name,
-            buffer_flags: buf.flags(),
-        };
+        let key = pool_key_for_return(&buf, name);
         self.bufs.entry(key).or_default().push(buf);
     }
 
@@ -665,7 +673,7 @@ impl PersistentState {
 
 fn read_bump_buffer(device: &Device, persistent: &mut PersistentState, buf: Buffer) -> Result<()> {
     let _bump = goldy::tracy_zone!("ekrano.bump_readback");
-    let size = buf.size() as usize;
+    let size = buf.byte_size() as usize;
     let mut output = {
         let _alloc = goldy::tracy_zone!("ekrano.bump_readback.alloc");
         vec![0_u8; size]
@@ -1005,7 +1013,8 @@ impl<'a> FrameRecorder<'a> {
         if !indices.is_empty() {
             node = node.with_resource_slots(indices);
         }
-        node.dispatch_indirect(indirect_buf, offset);
+        node.dispatch_indirect_parcel(indirect_buf, offset)
+            .expect("dispatch_indirect_parcel failed");
     }
 
     /// Stub for debug-layer draw commands (not yet implemented in Goldy).
@@ -1476,16 +1485,15 @@ impl GoldyRenderer {
         let height = params.height;
         let texture = self
             .persistent
-            .retained_pool
-            .acquire_texture(
+            .tex_pool
+            .acquire(
+                &self.device,
                 width,
                 height,
                 TextureFormat::Rgba8Unorm,
                 TextureKind::Direct,
                 TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
-                None,
             )
-            .and_then(|parcel| parcel.detach_texture())
             .map_err(|e| Error::Gpu(e.to_string()))?;
 
         for _attempt in 0..=MAX_BUMP_RETRIES {
