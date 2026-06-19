@@ -695,6 +695,28 @@ fn read_bump_buffer(device: &Device, persistent: &mut PersistentState, buf: Buff
 }
 
 // -----------------------------------------------------------------------
+// GoldyBackend — runtime backend selector
+// -----------------------------------------------------------------------
+
+/// Selects which frame-loop backend [`GoldyRenderer`] uses at runtime.
+///
+/// Both variants share the same public API.  The `Classic` path is the
+/// existing `TaskGraph`-based loop; `Scheme` will use the retained-scheme
+/// loop once it is implemented (Phase 2 of the retained-scheme migration).
+///
+/// The flag is **runtime** (not a Cargo feature) so both paths can be kept
+/// alive simultaneously during the transition, enabling side-by-side
+/// correctness checks and FPS comparisons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GoldyBackend {
+    /// `TaskGraph`-based frame loop (current production path).
+    #[default]
+    Classic,
+    /// Retained-`Scheme`-based frame loop (Phase 2 work-in-progress).
+    Scheme,
+}
+
+// -----------------------------------------------------------------------
 // GoldyRenderer — the merged struct
 // -----------------------------------------------------------------------
 
@@ -719,6 +741,8 @@ pub struct GoldyRenderer {
     /// Long-lived task graph cleared (not replaced) each frame so the schedule cache
     /// survives across frames. `FrameRecorder` borrows this mutably per frame.
     graph: TaskGraph,
+    /// Active frame-loop backend.  See [`GoldyBackend`].
+    backend: GoldyBackend,
 }
 
 // -----------------------------------------------------------------------
@@ -1148,7 +1172,16 @@ impl GoldyRenderer {
     ///
     /// Use [`device`](Self::device) for allocations that must share this renderer's GPU
     /// context (e.g. output textures in tests) instead of retaining a separate handle.
+    /// Create a renderer using the default [`GoldyBackend::Classic`] frame loop.
     pub fn new(device: &Device) -> Result<Self> {
+        Self::new_with_backend(device, GoldyBackend::Classic)
+    }
+
+    /// Create a renderer with an explicit backend selector.
+    ///
+    /// Use [`GoldyBackend::Classic`] for the existing `TaskGraph` path or
+    /// [`GoldyBackend::Scheme`] for the retained-scheme path (Phase 2).
+    pub fn new_with_backend(device: &Device, backend: GoldyBackend) -> Result<Self> {
         let _tz = goldy::tracy_zone!("ekrano.GoldyRenderer::new");
 
         let device = device.clone();
@@ -1173,6 +1206,7 @@ impl GoldyRenderer {
             persistent_bump: None,
             cleanup_frame_counter: 0,
             graph: TaskGraph::new(),
+            backend,
         };
         let shaders = {
             let _tz = goldy::tracy_zone!("ekrano.GoldyRenderer::new.compile_shaders");
@@ -1446,6 +1480,11 @@ impl GoldyRenderer {
     /// GPU device handle shared by this renderer (same backend as the caller's clone).
     pub fn device(&self) -> &Device {
         &self.device
+    }
+
+    /// Returns the active frame-loop backend.
+    pub fn backend(&self) -> GoldyBackend {
+        self.backend
     }
 
     /// Query the resource pool's current state for diagnostics or test assertions.

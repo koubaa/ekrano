@@ -90,7 +90,7 @@ pub use peniko::kurbo;
 
 pub use goldy::placement_heap::PlacementHeapStats;
 pub use goldy::{Frame, TimelineValue};
-pub use goldy_renderer::{AllocatorStats, FrameStats, GoldyRenderer, PreparedFrame, ResourcePoolStats};
+pub use goldy_renderer::{AllocatorStats, FrameStats, GoldyBackend, GoldyRenderer, PreparedFrame, ResourcePoolStats};
 
 pub use ekrano_encoding::{Glyph, NormalizedCoord};
 pub use scene::{DrawGlyphs, Scene};
