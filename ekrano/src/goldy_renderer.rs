@@ -262,6 +262,20 @@ struct BufferKey {
     buffer_flags: BufferFlags,
 }
 
+fn pool_key_for_return(buf: &Buffer, name: &'static str) -> BufferKey {
+    let buffer_flags = if name == "ekrano.bump_buf" {
+        BufferFlags::CPU_READABLE
+    } else {
+        BufferFlags::empty()
+    };
+    BufferKey {
+        size: buf.byte_size(),
+        access: BufferKind::Scattered,
+        name,
+        buffer_flags,
+    }
+}
+
 type PendingOwnedReturns = Arc<Mutex<Vec<(Buffer, &'static str)>>>;
 
 #[derive(Default)]
@@ -318,7 +332,7 @@ impl ResourcePool {
 
         // Pool miss: try a fresh allocation via the retained pool door.
         match retained_pool.acquire_buffer(size, access, stride, buffer_flags, None) {
-            Ok(parcel) => parcel.detach_buffer().map_err(|e| Error::Shader(e.to_string())),
+            Ok(buf) => Ok(buf),
             Err(_) => {
                 // Attempt 2 (non-blocking): flush deferred deletions so that any GPU
                 // work that completed since the last flush moves buffers from the vram
@@ -356,7 +370,6 @@ impl ResourcePool {
                 // the DeletionQueue was processed inside flush_deferred_deletions).
                 retained_pool
                     .acquire_buffer(size, access, stride, buffer_flags, None)
-                    .and_then(|parcel| parcel.detach_buffer())
                     .map_err(|e| Error::Shader(e.to_string()))
             }
         }
@@ -364,12 +377,7 @@ impl ResourcePool {
 
     /// Return a buffer to the pool for reuse by a future frame.
     pub(crate) fn return_buf(&mut self, buf: Buffer, name: &'static str) {
-        let key = BufferKey {
-            size: buf.size(),
-            access: buf.access(),
-            name,
-            buffer_flags: buf.flags(),
-        };
+        let key = pool_key_for_return(&buf, name);
         self.bufs.entry(key).or_default().push(buf);
     }
 
@@ -665,7 +673,7 @@ impl PersistentState {
 
 fn read_bump_buffer(device: &Device, persistent: &mut PersistentState, buf: Buffer) -> Result<()> {
     let _bump = goldy::tracy_zone!("ekrano.bump_readback");
-    let size = buf.size() as usize;
+    let size = buf.byte_size() as usize;
     let mut output = {
         let _alloc = goldy::tracy_zone!("ekrano.bump_readback.alloc");
         vec![0_u8; size]
@@ -770,6 +778,9 @@ impl<'a> FrameRecorder<'a> {
         surface: Option<&'a goldy::Surface>,
         preacquired_frame: Option<goldy::Frame>,
     ) -> Self {
+        // TODO(retained-scheme): per-frame clear()+rebuild defeats retained-scheme /
+        // dirty-tracked submission — see `TaskGraph::clear` docs and
+        // docu/development/projects/diwan/in-progress/retained-scheme/design.md.
         // Clear the long-lived graph so the schedule cache is preserved but
         // the node list is empty and ready for this frame's recording.
         graph.clear();
@@ -964,7 +975,10 @@ impl<'a> FrameRecorder<'a> {
         let mut node = self.graph.node("dispatch", &self.shaders[shader_id.0].pipeline);
         node = bind_graph_direct(node, bindings, bind_types);
         if !indices.is_empty() || !push_tail.is_empty() {
-            node = node.bind_resources_raw_with_user(indices, push_tail);
+            node = node.with_resource_slots(indices);
+            for &val in push_tail {
+                node = node.with_param(val);
+            }
         }
         node.dispatch(x, y, z);
     }
@@ -995,11 +1009,12 @@ impl<'a> FrameRecorder<'a> {
             .graph
             .node("dispatch_indirect", &self.shaders[shader_id.0].pipeline);
         node = bind_graph_direct(node, bindings, bind_types);
-        node = node.bind_buffer(indirect_buf, NodeAccess::Read);
+        node = node.with_buffer(indirect_buf, NodeAccess::Read);
         if !indices.is_empty() {
-            node = node.bind_resources_raw(indices);
+            node = node.with_resource_slots(indices);
         }
-        node.dispatch_indirect(indirect_buf, offset);
+        node.dispatch_indirect_parcel(indirect_buf, offset)
+            .expect("dispatch_indirect_parcel failed");
     }
 
     /// Stub for debug-layer draw commands (not yet implemented in Goldy).
@@ -1102,9 +1117,9 @@ fn bind_graph_direct<'a>(
                 NodeAccess::ReadWrite
             });
         node = match binding {
-            GpuBinding::Buf(b) => node.bind_buffer(b, access),
-            GpuBinding::Parcel(p) => node.bind_parcel(p, access),
-            GpuBinding::Tex(t) => node.bind_texture(t, access),
+            GpuBinding::Buf(b) => node.with_buffer(b, access),
+            GpuBinding::Parcel(p) => node.with_parcel(p, access),
+            GpuBinding::Tex(t) => node.with_texture(t, access),
             // Samplers and persistent (pre-initialized) buffers are stateless —
             // their slot index flows through push-constants but they need no
             // resource-barrier tracking in the task graph.  Persistent buffers
@@ -1470,16 +1485,15 @@ impl GoldyRenderer {
         let height = params.height;
         let texture = self
             .persistent
-            .retained_pool
-            .acquire_texture(
+            .tex_pool
+            .acquire(
+                &self.device,
                 width,
                 height,
                 TextureFormat::Rgba8Unorm,
                 TextureKind::Direct,
                 TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
-                None,
             )
-            .and_then(|parcel| parcel.detach_texture())
             .map_err(|e| Error::Gpu(e.to_string()))?;
 
         for _attempt in 0..=MAX_BUMP_RETRIES {
@@ -1754,6 +1768,35 @@ impl GoldyRenderer {
             recorder.finish()?
         };
 
+        // On Metal (Apple Silicon unified memory), per-frame storage-buffer
+        // writes use a direct CPU memcpy into the buffer's `contents()` pointer
+        // (the fast path in goldy/src/backend/metal/compute.rs). If the CPU
+        // records frame N+1 while frame N's compute is still in flight it will
+        // clobber the bytes the GPU is reading → glitch/black frames with no
+        // command-buffer fault. We must enforce the depth-1 gate with a real
+        // fence by stamping the ring slot synchronously here rather than relying
+        // on the async fence-poller path (`BoundaryCrossed` epoch), which lands
+        // a stale low value that `gpu_progress` has already passed.
+        //
+        // Staged-copy backends (DX12, Vulkan) record the overwrite as a
+        // CopyBufferRegion / vkCmdCopyBuffer from a timeline-recycled upload
+        // belt into a DEFAULT/DEVICE_LOCAL buffer, fenced by an explicit
+        // UAV→COPY_DEST barrier. The GPU serializes the write itself, so the
+        // CPU can safely run frames ahead. Forcing a synchronous depth-1 wait
+        // on those backends destroys cross-frame pipelining for no benefit.
+        //
+        // Gate on the early (compute) partition's timeline when available: the
+        // single-buffered per-frame resources are consumed only by that pass,
+        // while the late (blit) partition reads the RT-cached `out_image`. This
+        // lets the blit + present overlap the next frame's CPU recording. Falls
+        // back to the full submit timeline when the frame was not split.
+        if self.device.backend_type() == goldy::BackendType::Metal {
+            let gate_tv = surface_frame
+                .as_ref()
+                .and_then(goldy::Frame::early_timeline)
+                .unwrap_or(frame_tv);
+            self.frame_pipeline.note_presented(gate_tv);
+        }
         if let Some(i) = cache_outcome.cached_render_targets_slot {
             log::debug!(
                 "[RT-CACHE] stamp slot={i} timeline={frame_tv} (prev={})",

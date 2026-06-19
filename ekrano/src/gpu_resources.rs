@@ -111,7 +111,10 @@ pub(crate) fn alloc_pipeline_buffer(
     // dispatch counts must be 0 before GPU pipelines them). Other pipeline
     // buffers are always overwritten by GPU dispatches before first read.
     if is_pool_exempt(name) {
-        recorder.graph().clear_buffer(&buf, 0, size);
+        recorder
+            .graph()
+            .clear_parcel(&buf, 0, size)
+            .map_err(|e| Error::Shader(e.to_string()))?;
     }
     Ok(buf)
 }
@@ -133,7 +136,10 @@ pub(crate) fn record_upload_bytes(
         Some(element_stride),
         BufferFlags::empty(),
     )?;
-    recorder.graph().write_buffer(&buf, 0, bytes.to_vec());
+    recorder
+        .graph()
+        .write_parcel(&buf, 0, bytes.to_vec())
+        .map_err(|e| Error::Shader(e.to_string()))?;
     Ok(buf)
 }
 
@@ -156,7 +162,10 @@ pub(crate) fn record_upload_bytes_owned(
         Some(element_stride),
         BufferFlags::empty(),
     )?;
-    recorder.graph().write_buffer(&buf, 0, bytes);
+    recorder
+        .graph()
+        .write_parcel(&buf, 0, bytes)
+        .map_err(|e| Error::Shader(e.to_string()))?;
     Ok(buf)
 }
 
@@ -264,8 +273,11 @@ pub(crate) fn clear_gpu_buf(
     off: u64,
     size: Option<u64>,
 ) -> Result<(), Error> {
-    let sz = size.unwrap_or_else(|| buf.size().saturating_sub(off));
-    recorder.graph().clear_buffer(buf, off, sz);
+    let sz = size.unwrap_or_else(|| buf.byte_size().saturating_sub(off));
+    recorder
+        .graph()
+        .clear_parcel(buf, off, sz)
+        .map_err(|e| Error::Shader(e.to_string()))?;
     Ok(())
 }
 
@@ -294,15 +306,15 @@ fn al_cached_opt(
 /// is not enough — use double-buffered parcels or a transient pool instead; do not keep them in
 /// [`goldy::RetainedPool`] under inter-frame overlap.
 pub(crate) struct StablePipelineBuffers {
-    pub info_bin_data: Parcel,
-    pub tile: Parcel,
-    pub segments: Parcel,
-    pub ptcl: Parcel,
+    pub info_bin_data: Buffer,
+    pub tile: Buffer,
+    pub segments: Buffer,
+    pub ptcl: Buffer,
     /// Used only by fine, but allocated in the shared pre-flush phase to avoid
     /// splitting `prepare` into two phases.
-    pub blend_spill: Parcel,
-    pub lines: Parcel,
-    pub seg_counts: Parcel,
+    pub blend_spill: Buffer,
+    pub lines: Buffer,
+    pub seg_counts: Buffer,
 }
 
 impl StablePipelineBuffers {
@@ -324,25 +336,25 @@ impl StablePipelineBuffers {
             None => (None, None, None, None, None, None, None),
         };
         Ok(Self {
-            info_bin_data: alloc_stable_parcel(recorder, c_ibd, bs.bin_data.size_in_bytes() as u64, 4)?,
-            tile: alloc_stable_parcel(recorder, c_tile, bs.tiles.size_in_bytes().into(), 8)?,
-            segments: alloc_stable_parcel(recorder, c_seg, bs.segments.size_in_bytes().into(), 24)?,
-            ptcl: alloc_stable_parcel(recorder, c_ptcl, bs.ptcl.size_in_bytes().into(), 4)?,
-            blend_spill: alloc_stable_parcel(
+            info_bin_data: alloc_stable_buffer(recorder, c_ibd, bs.bin_data.size_in_bytes() as u64, 4)?,
+            tile: alloc_stable_buffer(recorder, c_tile, bs.tiles.size_in_bytes().into(), 8)?,
+            segments: alloc_stable_buffer(recorder, c_seg, bs.segments.size_in_bytes().into(), 24)?,
+            ptcl: alloc_stable_buffer(recorder, c_ptcl, bs.ptcl.size_in_bytes().into(), 4)?,
+            blend_spill: alloc_stable_buffer(
                 recorder,
                 c_bs,
                 bs.blend_spill.size_in_bytes().into(),
                 size_of::<u32>() as u32,
             )?,
-            lines: alloc_stable_parcel(recorder, c_lines, bs.lines.size_in_bytes().into(), 24)?,
-            seg_counts: alloc_stable_parcel(recorder, c_sc, bs.seg_counts.size_in_bytes().into(), 8)?,
+            lines: alloc_stable_buffer(recorder, c_lines, bs.lines.size_in_bytes().into(), 24)?,
+            seg_counts: alloc_stable_buffer(recorder, c_sc, bs.seg_counts.size_in_bytes().into(), 8)?,
         })
     }
 
     pub(crate) fn release(self, recorder: &mut FrameRecorder<'_>) {
         let ctx = recorder.context();
         let pool = &mut recorder.persistent.retained_pool;
-        for parcel in [
+        for buffer in [
             self.info_bin_data,
             self.tile,
             self.segments,
@@ -351,22 +363,22 @@ impl StablePipelineBuffers {
             self.lines,
             self.seg_counts,
         ] {
-            pool.release(ctx, parcel);
+            pool.release_buffer(ctx, buffer);
         }
     }
 }
 
-fn alloc_stable_parcel(
+fn alloc_stable_buffer(
     recorder: &mut FrameRecorder<'_>,
-    cached: Option<Parcel>,
+    cached: Option<Buffer>,
     size: u64,
     stride: u32,
-) -> Result<Parcel, Error> {
-    if let Some(parcel) = cached {
-        return Ok(parcel);
+) -> Result<Buffer, Error> {
+    if let Some(buffer) = cached {
+        return Ok(buffer);
     }
     if std::env::var_os("EKRANO_LOG_PIPELINE_RESIZE").is_some() {
-        log::info!("[PIPE-RESIZE] acquire stable parcel size={size} stride={stride}");
+        log::info!("[PIPE-RESIZE] acquire stable buffer size={size} stride={stride}");
     }
     recorder
         .persistent
@@ -674,7 +686,8 @@ impl PipelineResources {
                 // and just overwrite with the new value.
                 recorder
                     .graph()
-                    .write_buffer(&existing_buf, 0, bytemuck::bytes_of(&config_uniform_value).to_vec());
+                    .write_parcel(&existing_buf, 0, bytemuck::bytes_of(&config_uniform_value).to_vec())
+                    .map_err(|e| Error::Shader(e.to_string()))?;
                 existing_buf
             } else {
                 record_upload_bytes(

@@ -44,7 +44,7 @@ use ekrano::peniko::{Blob, Color, ImageFormat, color::palette};
 use ekrano::peniko::{ImageAlphaType, ImageData};
 use ekrano::{AaConfig, GoldyRenderer, Scene};
 use goldy::types::{TextureFlags, TextureFormat, TextureKind};
-use goldy::{Device, DeviceDescriptor, Instance, RequestAdapterOptions, RetainedPool, Texture};
+use goldy::{Device, DeviceDescriptor, Instance, RequestAdapterOptions, Texture, TexturePool};
 use image::RgbImage;
 use scenes::{ExampleScene, ImageCache, SceneParams, SimpleText};
 
@@ -62,7 +62,7 @@ use scenes::{ExampleScene, ImageCache, SceneParams, SimpleText};
 ///
 /// TODO: this papers over a legitimate problem with ekrano - each test should have its
 /// own context and therefore never race if the runtime is implemented correctly.
-/// Allocate a standalone texture for integration tests (via [`RetainedPool`]).
+/// Allocate a standalone texture for integration tests (via [`TexturePool`]).
 pub fn test_alloc_texture(
     device: &Device,
     width: u32,
@@ -71,11 +71,9 @@ pub fn test_alloc_texture(
     access: TextureKind,
     flags: TextureFlags,
 ) -> Texture {
-    let mut pool = RetainedPool::new(Arc::new(device.clone()));
-    pool.acquire_texture(width, height, format, access, flags, None)
-        .expect("acquire_texture")
-        .detach_texture()
-        .expect("detach_texture")
+    TexturePool::default()
+        .acquire(device, width, height, format, access, flags)
+        .expect("acquire texture")
 }
 
 fn test_device() -> Device {
