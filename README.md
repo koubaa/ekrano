@@ -24,6 +24,8 @@ For now, prefer updating the package-level readmes, e.g. vello/README.md.
 
 </div>
 
+Ekrano is a fork of Vello using Goldy instead of Wgpu.
+
 Vello is a 2D graphics rendering engine written in Rust, with a focus on GPU compute.
 It can draw large 2D scenes with interactive or near-interactive performance, using [`wgpu`] for GPU access.
 
