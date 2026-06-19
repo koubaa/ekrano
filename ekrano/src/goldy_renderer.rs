@@ -1768,6 +1768,25 @@ impl GoldyRenderer {
             recorder.finish()?
         };
 
+        // Stamp the orchestrator ring slot with the frame's GPU fence now,
+        // synchronously on the render thread. The slot was pushed with
+        // `timeline: None` during `finish()`, and the only other stamp source
+        // (`poll_and_reclaim` -> `note_presented(BoundaryCrossed.epoch)`) uses a
+        // stale low epoch — or never runs before the next `begin_frame` on the
+        // async-present path. Without this, the depth-1 gate has no real fence
+        // to wait on and the CPU overwrites single-buffered per-frame resources
+        // while the GPU is still reading them (glitch/black frames, no CB fault).
+        //
+        // Gate on the early (compute) partition's timeline when available: the
+        // single-buffered per-frame resources are consumed only by that pass,
+        // while the late (blit) partition reads the RT-cached `out_image`. This
+        // lets the blit + present overlap the next frame's CPU recording. Falls
+        // back to the full submit timeline when the frame was not split.
+        let gate_tv = surface_frame
+            .as_ref()
+            .and_then(goldy::Frame::early_timeline)
+            .unwrap_or(frame_tv);
+        self.frame_pipeline.note_presented(gate_tv);
         if let Some(i) = cache_outcome.cached_render_targets_slot {
             log::debug!(
                 "[RT-CACHE] stamp slot={i} timeline={frame_tv} (prev={})",
