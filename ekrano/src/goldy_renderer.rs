@@ -957,13 +957,28 @@ impl GoldyRenderer {
 
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::graph_gpu_resources::PipelineResources;
     use crate::graph_renderer::GraphRecorder;
     use crate::{RenderParams, Scene};
     use ekrano_encoding::{RenderConfig, Resolver};
-    use goldy::{FrameOrchestrator, Instance, TaskGraph};
+    use goldy::{Device, FrameOrchestrator, Instance, TaskGraph};
+
+    /// Shared test helper: acquire a GPU device and a wired-up [`PersistentState`].
+    ///
+    /// Returns `None` when no GPU adapter is available (CI without hardware).
+    pub(crate) fn make_device_and_persistent() -> Option<(Device, PersistentState)> {
+        let instance = Instance::new().ok()?;
+        let device = instance
+            .request_adapter(&goldy::RequestAdapterOptions::default())
+            .and_then(|a| a.request_device(&goldy::DeviceDescriptor::default()))
+            .ok()?;
+        let mut persistent = PersistentState::new(&device);
+        let pending = persistent.pending_owned_returns.clone();
+        persistent.pool.set_pending_returns(pending);
+        Some((device, persistent))
+    }
 
     /// Regression test: `PipelineResources::prepare` must create `out_image` with
     /// the format supplied by the caller, not hardcode `Rgba8Unorm`.
@@ -979,13 +994,7 @@ mod tests {
     /// surface (BGRA) and headless (RGBA) paths.
     #[test]
     fn prepare_out_image_format_matches_requested() {
-        let Ok(instance) = Instance::new() else {
-            return;
-        };
-        let Ok(device) = instance
-            .request_adapter(&goldy::RequestAdapterOptions::default())
-            .and_then(|a| a.request_device(&goldy::DeviceDescriptor::default()))
-        else {
+        let Some((device, mut persistent)) = make_device_and_persistent() else {
             return;
         };
 
@@ -999,12 +1008,6 @@ mod tests {
             antialiasing_method: crate::AaConfig::Area,
             robust: false,
         };
-
-        let mut persistent = PersistentState::new(&device);
-        {
-            let pending = persistent.pending_owned_returns.clone();
-            persistent.pool.set_pending_returns(pending);
-        }
 
         for &expected_format in &[TextureFormat::Bgra8Unorm, TextureFormat::Rgba8Unorm] {
             let mut resolver = Resolver::new();
