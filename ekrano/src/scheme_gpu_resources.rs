@@ -6,12 +6,12 @@
 use std::mem::size_of;
 
 use goldy::types::{BufferFlags, TextureFlags, TextureKind};
-use goldy::{Buffer, BufferKind, Parcel, Sampler, Texture, TextureFormat};
+use goldy::{Buffer, BufferKind, DispatchShape, Parcel, Sampler, Texture, TextureFormat};
 
 use crate::scheme_renderer::SchemeRecorder;
 use crate::resource_proxy::{BindType, ImageFormat};
 use crate::{Error, RenderParams, Result};
-use ekrano_encoding::{BumpAllocators, CoverageMask, Images, Ramps, RenderConfig};
+use ekrano_encoding::{BumpAllocators, CoverageMask, Images, Ramps, RenderConfig, WorkgroupCountsGpu, N_INDIRECT_STAGES, STAGE_PATH_COUNT, STAGE_PATH_TILING};
 
 /// Shader binding helper for pipeline [`Buffer`] handles.
 pub(crate) trait PipelineBuffer {
@@ -43,7 +43,10 @@ pub(crate) enum GpuBinding<'a> {
 }
 
 fn is_pool_exempt(name: &'static str) -> bool {
-    matches!(name, "ekrano.bump_buf" | "ekrano.indirect_dispatch")
+    // Only the bump buffer needs to be pre-cleared each frame.
+    // The scheme indirect buffers are initialised via commit_write_parcel / GPU setup shaders,
+    // so they are NOT pre-cleared here.
+    name == "ekrano.bump_buf"
 }
 
 fn image_fmt_goldy(f: ImageFormat) -> TextureFormat {
@@ -75,12 +78,50 @@ pub(crate) fn alloc_pipeline_buffer(
     // dispatch counts must be 0 before GPU pipelines them). Other pipeline
     // buffers are always overwritten by GPU dispatches before first read.
     if is_pool_exempt(name) {
-            recorder
-                .scheme()
-                .commit_clear_parcel(&buf, 0, size)
-                .map_err(|e| Error::Shader(e.to_string()))?;
+        recorder
+            .scheme()
+            .commit_clear_parcel(&buf, 0, size)
+            .map_err(|e| Error::Shader(e.to_string()))?;
     }
     Ok(buf)
+}
+
+/// Allocate `N_INDIRECT_STAGES` per-stage [`DispatchShape`] buffers for the scheme indirect path.
+///
+/// Each buffer is a single-element `DispatchShape` whole-buffer parcel.  For all stages except
+/// [`STAGE_PATH_COUNT`] and [`STAGE_PATH_TILING`] (whose counts are GPU-computed by the
+/// `path_count_setup_scheme` / `path_tiling_setup_scheme` shaders), the CPU-known workgroup
+/// count is uploaded immediately via `commit_write_parcel`.
+///
+/// The returned `Vec` is indexed directly: `bufs[STAGE_FOO as usize]`.
+pub(crate) fn alloc_scheme_indirect_buffers(
+    recorder: &mut SchemeRecorder<'_>,
+    wg_counts_gpu: &WorkgroupCountsGpu,
+) -> Result<Vec<Buffer>, Error> {
+    let mut bufs = Vec::with_capacity(N_INDIRECT_STAGES as usize);
+    for i in 0..N_INDIRECT_STAGES as usize {
+        let buf = recorder.persistent.pool.get_buf_with_stride(
+            &mut recorder.persistent.retained_pool,
+            recorder.context,
+            size_of::<DispatchShape>() as u64,
+            "ekrano.scheme_indirect",
+            BufferKind::Scattered,
+            Some(size_of::<DispatchShape>() as u32),
+            BufferFlags::empty(),
+        )?;
+        // Upload CPU-known counts for static stages now; GPU-written stages
+        // are filled in by path_count_setup_scheme / path_tiling_setup_scheme.
+        if i != STAGE_PATH_COUNT as usize && i != STAGE_PATH_TILING as usize {
+            let e = wg_counts_gpu.entries[i];
+            let shape = DispatchShape { x: e[0], y: e[1], z: e[2] };
+            recorder
+                .scheme()
+                .commit_write_parcel(&*buf, 0, bytemuck::bytes_of(&shape).to_vec())
+                .map_err(|e| Error::Shader(e.to_string()))?;
+        }
+        bufs.push(buf);
+    }
+    Ok(bufs)
 }
 
 pub(crate) fn record_upload_bytes(
@@ -487,7 +528,9 @@ pub(crate) struct PipelineResources {
     pub mask_atlas: Texture,
     pub scene: Buffer,
     pub config: Buffer,
-    pub indirect: Option<Buffer>,
+    /// Per-stage indirect dispatch buffers (one `DispatchShape` element each).
+    /// Indexed by `STAGE_*` constants from `ekrano_encoding`.
+    pub indirect: Option<Vec<Buffer>>,
     pub stable: StablePipelineBuffers,
     pub scratch: ScratchPipelineBuffers,
     pub bump: Buffer,

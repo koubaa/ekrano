@@ -379,13 +379,10 @@ pub(crate) fn goldy_full_shaders_scheme(renderer: &mut crate::scheme_renderer::S
 
     let sw_opt = goldy::OptimizationLevel::Default;
 
-    let pipeline_setup = renderer.add_compute_shader(
-        "pipeline_setup",
-        ekrano_shaders::slang::PIPELINE_SETUP,
-        &[BufReadOnly, Buffer],
-        &search_paths,
-        &[],
-    )?;
+    // The scheme backend initialises indirect dispatch buffers on the CPU
+    // (see `alloc_scheme_indirect_buffers`), so `pipeline_setup` is not compiled.
+    // ShaderId(0) is a sentinel; scheme_render.rs never dispatches it.
+    let pipeline_setup = ShaderId(0);
     let pathtag_reduce = renderer.add_compute_shader(
         "pathtag_reduce",
         ekrano_shaders::slang::PATHTAG_REDUCE,
@@ -504,8 +501,8 @@ pub(crate) fn goldy_full_shaders_scheme(renderer: &mut crate::scheme_renderer::S
         &[],
     )?;
     let path_count_setup = renderer.add_compute_shader(
-        "path_count_setup",
-        ekrano_shaders::slang::PATH_COUNT_SETUP,
+        "path_count_setup_scheme",
+        ekrano_shaders::slang::PATH_COUNT_SETUP_SCHEME,
         &[Buffer, Buffer],
         &search_paths,
         &[],
@@ -543,8 +540,8 @@ pub(crate) fn goldy_full_shaders_scheme(renderer: &mut crate::scheme_renderer::S
         sw_opt,
     )?;
     let path_tiling_setup = renderer.add_compute_shader(
-        "path_tiling_setup",
-        ekrano_shaders::slang::PATH_TILING_SETUP,
+        "path_tiling_setup_scheme",
+        ekrano_shaders::slang::PATH_TILING_SETUP_SCHEME,
         &[Buffer, Buffer, Buffer],
         &search_paths,
         &[],

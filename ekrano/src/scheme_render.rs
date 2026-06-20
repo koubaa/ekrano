@@ -5,17 +5,15 @@
 //! Scheme-backend scene recording.
 
 use crate::scheme_renderer::SchemeRecorder;
-use crate::scheme_gpu_resources::{GpuBinding, PipelineBuffer, PipelineResources};
+use crate::scheme_gpu_resources::{GpuBinding, PipelineBuffer, PipelineResources, alloc_scheme_indirect_buffers};
 use crate::shaders::FullShaders;
 use crate::{AaConfig, RenderParams};
 
-use std::mem::size_of;
-
 use ekrano_encoding::{
-    FilterPrimitive, FilterUniform, IndirectCount, LayerFilterEffect, WorkgroupCountsGpu, WorkgroupSize, make_mask_lut,
+    FilterPrimitive, FilterUniform, LayerFilterEffect, WorkgroupCountsGpu, WorkgroupSize, make_mask_lut,
     make_mask_lut_16,
 };
-use goldy::types::{BufferFlags, TextureFlags, TextureKind};
+use goldy::types::{TextureFlags, TextureKind};
 use goldy::{Buffer, Texture};
 use peniko::color::{PremulColor, Srgb};
 
@@ -57,13 +55,12 @@ const FLATTEN_THREADS_PER_GROUP: u32 = 256;
 
 fn dispatch_stage(
     recorder: &mut SchemeRecorder<'_>,
-    indirect: &Buffer,
+    indirect: &[Buffer],
     shader: crate::ShaderId,
     stage: u32,
-    stride: u64,
     bindings: &[GpuBinding<'_>],
 ) {
-    recorder.dispatch_indirect(shader, indirect, u64::from(stage) * stride, bindings);
+    recorder.dispatch_shape(shader, &indirect[stage as usize], bindings);
 }
 
 impl Default for Render {
@@ -105,62 +102,28 @@ impl Render {
         }
         let buffer_sizes = &config.buffer_sizes;
         let wg_counts = &config.workgroup_counts;
-
-        const INDIRECT_STRIDE: u64 = size_of::<IndirectCount>() as u64;
+        let _ = buffer_sizes; // used in orig path; kept to avoid dead-code warnings on the field
 
         let wg_counts_gpu = WorkgroupCountsGpu::from(wg_counts);
 
-        // Cache hit check: compare before taking ownership.
-        let cache_hit = recorder
-            .persistent
-            .cached_wg_counts
-            .as_ref()
-            .is_some_and(|(v, _)| v == &wg_counts_gpu);
-        log::trace!("wg_counts cache {}", if cache_hit { "HIT" } else { "MISS" });
-
-        // Take the buffer out of the cache (or upload fresh on miss).
-        // Buffer::Drop destroys the GPU resource, so we must NOT drop the cached buffer on
-        // a hit — it will be restored into the cache after the dispatch below.
-        let wg_buf = if cache_hit {
-            recorder.persistent.cached_wg_counts.take().unwrap().1
-        } else {
-            if let Some((_, old_buf)) = recorder.persistent.cached_wg_counts.take() {
-                // Return evicted buffer to pool so its GPU memory can be reused.
-                recorder.persistent.pool.return_buf(old_buf, "ekrano.wg_counts");
-            }
-            recorder.upload_typed("ekrano.wg_counts", &wg_counts_gpu)
-        };
-
-        let indirect = recorder
-            .alloc_pipeline_buffer_named(
-                buffer_sizes.indirect_count.size_in_bytes().into(),
-                size_of::<IndirectCount>() as u32,
-                "ekrano.indirect_dispatch",
-                BufferFlags::empty(),
-            )
-            .expect("indirect buffer");
-        recorder.dispatch(
-            shaders.pipeline_setup,
-            (1, 1, 1),
-            &[GpuBinding::Buf(&wg_buf), indirect.as_binding()],
-        );
-
-        // Restore buffer to persistent cache; its lifetime is now managed by
-        // PersistentState. Do NOT call defer_owned_buffer here.
-        recorder.persistent.cached_wg_counts = Some((wg_counts_gpu, wg_buf));
-        pipeline.indirect = Some(indirect);
+        // CPU-side initialisation: allocate one DispatchShape buffer per stage and
+        // upload the CPU-known workgroup counts now.  GPU-computed stages
+        // (PATH_COUNT, PATH_TILING) are left uninitialised here and written later
+        // by path_count_setup_scheme / path_tiling_setup_scheme.
+        let indirect_bufs = alloc_scheme_indirect_buffers(recorder, &wg_counts_gpu)
+            .expect("alloc_scheme_indirect_buffers");
+        pipeline.indirect = Some(indirect_bufs);
 
         let indirect_buf = pipeline
             .indirect
             .as_ref()
-            .expect("pipeline_setup must produce an indirect dispatch buffer");
+            .expect("alloc_scheme_indirect_buffers must produce indirect buffers");
 
         dispatch_stage(
             recorder,
             indirect_buf,
             shaders.pathtag_reduce,
             STAGE_PATHTAG_REDUCE,
-            INDIRECT_STRIDE,
             &[
                 pipeline.config.as_binding(),
                 pipeline.scene.as_binding(),
@@ -172,7 +135,6 @@ impl Render {
             indirect_buf,
             shaders.pathtag_reduce2,
             STAGE_PATHTAG_REDUCE2,
-            INDIRECT_STRIDE,
             &[
                 pipeline.scratch.reduced.as_binding(),
                 pipeline.scratch.reduced2.as_binding(),
@@ -183,7 +145,6 @@ impl Render {
             indirect_buf,
             shaders.pathtag_scan1,
             STAGE_PATHTAG_SCAN1,
-            INDIRECT_STRIDE,
             &[
                 pipeline.scratch.reduced.as_binding(),
                 pipeline.scratch.reduced2.as_binding(),
@@ -195,7 +156,6 @@ impl Render {
             indirect_buf,
             shaders.pathtag_scan,
             STAGE_PATHTAG_SCAN,
-            INDIRECT_STRIDE,
             &[
                 pipeline.config.as_binding(),
                 pipeline.scene.as_binding(),
@@ -208,7 +168,6 @@ impl Render {
             indirect_buf,
             shaders.pathtag_scan_large,
             STAGE_PATHTAG_SCAN_LARGE,
-            INDIRECT_STRIDE,
             &[
                 pipeline.config.as_binding(),
                 pipeline.scene.as_binding(),
@@ -222,7 +181,6 @@ impl Render {
             indirect_buf,
             shaders.bbox_clear,
             STAGE_BBOX_CLEAR,
-            INDIRECT_STRIDE,
             &[pipeline.config.as_binding(), pipeline.scratch.path_bbox.as_binding()],
         );
 
@@ -244,14 +202,7 @@ impl Render {
                 base_wg += chunk;
             }
         } else {
-            dispatch_stage(
-                recorder,
-                indirect_buf,
-                shaders.flatten,
-                STAGE_FLATTEN,
-                INDIRECT_STRIDE,
-                &flatten_bindings,
-            );
+            dispatch_stage(recorder, indirect_buf, shaders.flatten, STAGE_FLATTEN, &flatten_bindings);
         }
 
         dispatch_stage(
@@ -259,7 +210,6 @@ impl Render {
             indirect_buf,
             shaders.draw_reduce,
             STAGE_DRAW_REDUCE,
-            INDIRECT_STRIDE,
             &[
                 pipeline.config.as_binding(),
                 pipeline.scene.as_binding(),
@@ -272,7 +222,6 @@ impl Render {
             indirect_buf,
             shaders.draw_leaf,
             STAGE_DRAW_LEAF,
-            INDIRECT_STRIDE,
             &[
                 pipeline.config.as_binding(),
                 pipeline.scene.as_binding(),
@@ -289,7 +238,6 @@ impl Render {
             indirect_buf,
             shaders.clip_reduce,
             STAGE_CLIP_REDUCE,
-            INDIRECT_STRIDE,
             &[
                 pipeline.scratch.clip_inp.as_binding(),
                 pipeline.scratch.path_bbox.as_binding(),
@@ -302,7 +250,6 @@ impl Render {
             indirect_buf,
             shaders.clip_leaf,
             STAGE_CLIP_LEAF,
-            INDIRECT_STRIDE,
             &[
                 pipeline.config.as_binding(),
                 pipeline.scratch.clip_inp.as_binding(),
@@ -319,7 +266,6 @@ impl Render {
             indirect_buf,
             shaders.binning,
             STAGE_BINNING,
-            INDIRECT_STRIDE,
             &[
                 pipeline.config.as_binding(),
                 pipeline.scene.as_binding(),
@@ -338,7 +284,6 @@ impl Render {
             indirect_buf,
             shaders.tile_alloc,
             STAGE_TILE_ALLOC,
-            INDIRECT_STRIDE,
             &[
                 pipeline.config.as_binding(),
                 pipeline.scene.as_binding(),
@@ -349,16 +294,21 @@ impl Render {
             ],
         );
 
+        // path_count_setup_scheme writes the workgroup count for path_count into
+        // the per-stage DispatchShape buffer.
         recorder.dispatch(
             shaders.path_count_setup,
             wg_counts.path_count_setup,
-            &[pipeline.bump.as_binding(), GpuBinding::Buf(indirect_buf)],
+            &[
+                pipeline.bump.as_binding(),
+                indirect_buf[STAGE_PATH_COUNT as usize].as_binding(),
+            ],
         );
 
-        recorder.dispatch_indirect(
+        // Indirect dispatch driven by the GPU-written path_count shape buffer.
+        recorder.dispatch_shape(
             shaders.path_count,
-            indirect_buf,
-            u64::from(STAGE_PATH_COUNT) * INDIRECT_STRIDE,
+            &indirect_buf[STAGE_PATH_COUNT as usize],
             &[
                 pipeline.config.as_binding(),
                 pipeline.bump.as_binding(),
@@ -374,7 +324,6 @@ impl Render {
             indirect_buf,
             shaders.backdrop,
             STAGE_BACKDROP,
-            INDIRECT_STRIDE,
             &[
                 pipeline.config.as_binding(),
                 pipeline.bump.as_binding(),
@@ -388,7 +337,6 @@ impl Render {
             indirect_buf,
             shaders.coarse,
             STAGE_COARSE,
-            INDIRECT_STRIDE,
             &[
                 pipeline.config.as_binding(),
                 pipeline.scene.as_binding(),
@@ -402,20 +350,22 @@ impl Render {
             ],
         );
 
+        // path_tiling_setup_scheme writes the workgroup count for path_tiling
+        // into the per-stage DispatchShape buffer.
         recorder.dispatch(
             shaders.path_tiling_setup,
             wg_counts.path_tiling_setup,
             &[
                 pipeline.bump.as_binding(),
-                GpuBinding::Buf(indirect_buf),
+                indirect_buf[STAGE_PATH_TILING as usize].as_binding(),
                 pipeline.stable.ptcl.as_binding(),
             ],
         );
 
-        recorder.dispatch_indirect(
+        // Indirect dispatch driven by the GPU-written path_tiling shape buffer.
+        recorder.dispatch_shape(
             shaders.path_tiling,
-            indirect_buf,
-            u64::from(STAGE_PATH_TILING) * INDIRECT_STRIDE,
+            &indirect_buf[STAGE_PATH_TILING as usize],
             &[
                 pipeline.bump.as_binding(),
                 pipeline.stable.seg_counts.as_binding(),
