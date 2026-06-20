@@ -327,6 +327,7 @@ impl GraphRenderer {
         ResourcePoolStats {
             total_pooled_buffers: self.persistent.pool.total_pooled_buffers(),
             distinct_keys: self.persistent.pool.distinct_keys(),
+            retained_pool_buffer_bytes: 0,
         }
     }
 

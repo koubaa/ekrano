@@ -335,6 +335,7 @@ impl SchemeRenderer {
         ResourcePoolStats {
             total_pooled_buffers: self.persistent.pool.total_pooled_buffers(),
             distinct_keys: self.persistent.pool.distinct_keys(),
+            retained_pool_buffer_bytes: self.persistent.retained_pool.bytes_by_kind().buffer,
         }
     }
 
@@ -871,10 +872,8 @@ impl<'a> SchemeRecorder<'a> {
         self.defer_texture(mask_atlas);
         self.defer_owned_buffer(scene, "ekrano.scene");
         self.persistent.cached_config_uniform = Some((config_uniform_value, config));
-        if let Some(bufs) = indirect {
-            for b in bufs {
-                self.defer_owned_buffer(b, "ekrano.scheme_indirect");
-            }
+        if let Some((wg_counts_gpu, indirect_buf)) = indirect {
+            self.persistent.cached_scheme_indirect = Some((wg_counts_gpu, indirect_buf));
         }
         if bump_readback {
             self.bump_buf_for_readback = Some(bump);
@@ -1022,7 +1021,7 @@ impl<'a> SchemeRecorder<'a> {
     pub fn dispatch_shape(
         &mut self,
         shader: ShaderId,
-        shape: &Buffer,
+        shape: &goldy::Parcel,
         bindings: &[GpuBinding<'_>],
     ) {
         let bind_types = &self.shaders[shader.0].bindings;
@@ -1041,7 +1040,7 @@ impl<'a> SchemeRecorder<'a> {
                 GpuBinding::PersistentBuf(b) => node.with_parcel(*b, access),
             };
         }
-        node.dispatch_shape(&**shape).expect("dispatch_shape failed");
+        node.dispatch_shape(shape).expect("dispatch_shape failed");
     }
 
     /// Stub for debug-layer draw commands (not yet implemented in Goldy).
