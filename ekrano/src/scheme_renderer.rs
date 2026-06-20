@@ -840,16 +840,6 @@ impl<'a> SchemeRecorder<'a> {
     // detail (e.g. coarse vs fine partitions). Callers should not assume or
     // rely on intra-frame submission boundaries.
 
-    pub(crate) fn alloc_pipeline_buffer_named(
-        &mut self,
-        size: u64,
-        stride: u32,
-        name: &'static str,
-        flags: BufferFlags,
-    ) -> Result<Buffer, Error> {
-        alloc_pipeline_buffer(self, size, stride, name, flags)
-    }
-
     pub(crate) fn defer_texture(&mut self, tex: Texture) {
         self.deferred_textures.push(tex);
     }
@@ -881,8 +871,10 @@ impl<'a> SchemeRecorder<'a> {
         self.defer_texture(mask_atlas);
         self.defer_owned_buffer(scene, "ekrano.scene");
         self.persistent.cached_config_uniform = Some((config_uniform_value, config));
-        if let Some(b) = indirect {
-            self.defer_owned_buffer(b, "ekrano.indirect_dispatch");
+        if let Some(bufs) = indirect {
+            for b in bufs {
+                self.defer_owned_buffer(b, "ekrano.scheme_indirect");
+            }
         }
         if bump_readback {
             self.bump_buf_for_readback = Some(bump);
@@ -1022,40 +1014,19 @@ impl<'a> SchemeRecorder<'a> {
         node.dispatch(x, y, z);
     }
 
-    pub fn dispatch_indirect(
+    /// Issue an indirect compute dispatch using a [`DispatchShape`] buffer as the
+    /// workgroup-count source.  The `shape` buffer must contain exactly one
+    /// `DispatchShape` element; the scheme ordering engine automatically registers
+    /// it as a read dependency so that any preceding write to the buffer
+    /// (e.g. from `path_count_setup_scheme`) is correctly ordered before this node.
+    pub fn dispatch_shape(
         &mut self,
         shader: ShaderId,
-        indirect_buf: &Buffer,
-        offset: u64,
+        shape: &Buffer,
         bindings: &[GpuBinding<'_>],
     ) {
-        Self::record_dispatch_indirect(self.scheme, self.shaders, shader, indirect_buf, offset, bindings);
-    }
-
-    /// Like [`Self::record_dispatch`], for indirect dispatches whose bindings may borrow
-    /// from `recorder.persistent`.
-    pub(crate) fn record_dispatch_indirect(
-        scheme: &mut Scheme,
-        shaders: &[GoldyShader],
-        shader_id: ShaderId,
-        indirect_buf: &Buffer,
-        offset: u64,
-        bindings: &[GpuBinding<'_>],
-    ) {
-        Self::dispatch_indirect_inner(scheme, shaders, shader_id, indirect_buf, offset, bindings);
-    }
-
-    fn dispatch_indirect_inner(
-        scheme: &mut Scheme,
-        shaders: &[GoldyShader],
-        shader_id: ShaderId,
-        indirect_buf: &Buffer,
-        offset: u64,
-        bindings: &[GpuBinding<'_>],
-    ) {
-        let bind_types = &shaders[shader_id.0].bindings;
-
-        let mut node = scheme.node("dispatch_indirect", &shaders[shader_id.0].pipeline);
+        let bind_types = &self.shaders[shader.0].bindings;
+        let mut node = self.scheme.node("dispatch_shape", &self.shaders[shader.0].pipeline);
         for (i, binding) in bindings.iter().enumerate() {
             let access = bind_types
                 .get(i)
@@ -1070,9 +1041,7 @@ impl<'a> SchemeRecorder<'a> {
                 GpuBinding::PersistentBuf(b) => node.with_parcel(*b, access),
             };
         }
-        node = node.with_buffer_dependency(indirect_buf, NodeAccess::Read);
-        node.dispatch_indirect_parcel(indirect_buf, offset)
-            .expect("dispatch_indirect_parcel failed");
+        node.dispatch_shape(&**shape).expect("dispatch_shape failed");
     }
 
     /// Stub for debug-layer draw commands (not yet implemented in Goldy).

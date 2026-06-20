@@ -23,7 +23,9 @@ include_slang!(EKRANO_SHARED, "ekrano_shared.slang");
 include_slang!(BBOX_CLEAR, "bbox_clear.slang");
 include_slang!(PIPELINE_SETUP, "pipeline_setup.slang");
 include_slang!(PATH_COUNT_SETUP, "path_count_setup.slang");
+include_slang!(PATH_COUNT_SETUP_SCHEME, "path_count_setup_scheme.slang");
 include_slang!(PATH_TILING_SETUP, "path_tiling_setup.slang");
+include_slang!(PATH_TILING_SETUP_SCHEME, "path_tiling_setup_scheme.slang");
 include_slang!(PATHTAG_REDUCE, "pathtag_reduce.slang");
 include_slang!(PATHTAG_REDUCE2, "pathtag_reduce2.slang");
 include_slang!(PATHTAG_SCAN1, "pathtag_scan_large.slang"); // Same bindings as pathtag_scan1 (reduced, reduced2, tag_monoids)
