@@ -5,7 +5,7 @@
 //! Scheme-backend scene recording.
 
 use crate::scheme_renderer::SchemeRecorder;
-use crate::scheme_gpu_resources::{GpuBinding, PipelineBuffer, PipelineResources, alloc_scheme_indirect_buffers};
+use crate::scheme_gpu_resources::{GpuBinding, PipelineBuffer, PipelineResources, alloc_or_reuse_scheme_indirect};
 use crate::shaders::FullShaders;
 use crate::{AaConfig, RenderParams};
 
@@ -55,12 +55,12 @@ const FLATTEN_THREADS_PER_GROUP: u32 = 256;
 
 fn dispatch_stage(
     recorder: &mut SchemeRecorder<'_>,
-    indirect: &[Buffer],
+    indirect: &Buffer,
     shader: crate::ShaderId,
     stage: u32,
     bindings: &[GpuBinding<'_>],
 ) {
-    recorder.dispatch_shape(shader, &indirect[stage as usize], bindings);
+    recorder.dispatch_shape(shader, indirect.unit(stage as usize), bindings);
 }
 
 impl Default for Render {
@@ -106,18 +106,14 @@ impl Render {
 
         let wg_counts_gpu = WorkgroupCountsGpu::from(wg_counts);
 
-        // CPU-side initialisation: allocate one DispatchShape buffer per stage and
-        // upload the CPU-known workgroup counts now.  GPU-computed stages
-        // (PATH_COUNT, PATH_TILING) are left uninitialised here and written later
-        // by path_count_setup_scheme / path_tiling_setup_scheme.
-        let indirect_bufs = alloc_scheme_indirect_buffers(recorder, &wg_counts_gpu)
-            .expect("alloc_scheme_indirect_buffers");
-        pipeline.indirect = Some(indirect_bufs);
+        let indirect_composite =
+            alloc_or_reuse_scheme_indirect(recorder, &wg_counts_gpu).expect("alloc_or_reuse_scheme_indirect");
+        pipeline.indirect = Some((wg_counts_gpu, indirect_composite));
 
-        let indirect_buf = pipeline
+        let (_, indirect_buf) = pipeline
             .indirect
             .as_ref()
-            .expect("alloc_scheme_indirect_buffers must produce indirect buffers");
+            .expect("alloc_or_reuse_scheme_indirect must produce indirect buffer");
 
         dispatch_stage(
             recorder,
@@ -301,14 +297,14 @@ impl Render {
             wg_counts.path_count_setup,
             &[
                 pipeline.bump.as_binding(),
-                indirect_buf[STAGE_PATH_COUNT as usize].as_binding(),
+                GpuBinding::Parcel(indirect_buf.unit(STAGE_PATH_COUNT as usize)),
             ],
         );
 
         // Indirect dispatch driven by the GPU-written path_count shape buffer.
         recorder.dispatch_shape(
             shaders.path_count,
-            &indirect_buf[STAGE_PATH_COUNT as usize],
+            indirect_buf.unit(STAGE_PATH_COUNT as usize),
             &[
                 pipeline.config.as_binding(),
                 pipeline.bump.as_binding(),
@@ -357,7 +353,7 @@ impl Render {
             wg_counts.path_tiling_setup,
             &[
                 pipeline.bump.as_binding(),
-                indirect_buf[STAGE_PATH_TILING as usize].as_binding(),
+                GpuBinding::Parcel(indirect_buf.unit(STAGE_PATH_TILING as usize)),
                 pipeline.stable.ptcl.as_binding(),
             ],
         );
@@ -365,7 +361,7 @@ impl Render {
         // Indirect dispatch driven by the GPU-written path_tiling shape buffer.
         recorder.dispatch_shape(
             shaders.path_tiling,
-            &indirect_buf[STAGE_PATH_TILING as usize],
+            indirect_buf.unit(STAGE_PATH_TILING as usize),
             &[
                 pipeline.bump.as_binding(),
                 pipeline.stable.seg_counts.as_binding(),

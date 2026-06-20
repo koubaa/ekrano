@@ -71,6 +71,13 @@ pub struct ResourcePoolStats {
     pub total_pooled_buffers: usize,
     /// Number of distinct `(size, access, name, flags)` keys in the pool.
     pub distinct_keys: usize,
+    /// Committed bytes held in the retained pool (scheme-path only; 0 on Classic).
+    ///
+    /// Increases when `retain_pool.acquire_*` adds a new buffer, stays flat when
+    /// existing allocations are reused. Useful for asserting that the
+    /// `cached_scheme_indirect` composite buffer is reused rather than reallocated
+    /// frame-to-frame.
+    pub retained_pool_buffer_bytes: u64,
 }
 
 /// Upper bound applied to observed bump counters before they're fed into
@@ -476,6 +483,10 @@ pub(crate) struct PersistentState {
     /// Per-slot cached `FilterUniform` buffers, indexed by filter dispatch order.
     /// Stable for scenes with fixed filter effects (e.g. a static drop shadow).
     pub(crate) cached_filter_uniforms: Vec<Option<(ekrano_encoding::FilterUniform, Buffer)>>,
+    /// Composite per-stage indirect `DispatchShape` buffer, retained across frames.
+    /// Cache key is the `WorkgroupCountsGpu` that seeded the allocation.
+    /// Scheme-path only; never touches `ResourcePool`.
+    pub(crate) cached_scheme_indirect: Option<(ekrano_encoding::WorkgroupCountsGpu, Buffer)>,
     /// Textures waiting to be returned to [`Self::tex_pool`] after GPU retirement.
     /// Populated by [`DeferredTextureToken`] drops from [`Context::defer_release`].
     pub(crate) pending_texture_returns: Arc<Mutex<Vec<Texture>>>,
@@ -505,6 +516,7 @@ impl PersistentState {
             cached_wg_counts: None,
             cached_config_uniform: None,
             cached_filter_uniforms: Vec::new(),
+            cached_scheme_indirect: None,
             pending_texture_returns: Arc::new(Mutex::new(Vec::new())),
             pending_owned_returns: Arc::new(Mutex::new(Vec::new())),
         }

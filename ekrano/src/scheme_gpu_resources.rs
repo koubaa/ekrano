@@ -6,7 +6,7 @@
 use std::mem::size_of;
 
 use goldy::types::{BufferFlags, TextureFlags, TextureKind};
-use goldy::{Buffer, BufferKind, DispatchShape, Parcel, Sampler, Texture, TextureFormat};
+use goldy::{Buffer, BufferKind, DispatchShape, Init, Parcel, Sampler, Texture, TextureFormat, ordinal};
 
 use crate::scheme_renderer::SchemeRecorder;
 use crate::resource_proxy::{BindType, ImageFormat};
@@ -86,42 +86,47 @@ pub(crate) fn alloc_pipeline_buffer(
     Ok(buf)
 }
 
-/// Allocate `N_INDIRECT_STAGES` per-stage [`DispatchShape`] buffers for the scheme indirect path.
+/// Allocate or reuse a composite indirect buffer for the scheme path.
 ///
-/// Each buffer is a single-element `DispatchShape` whole-buffer parcel.  For all stages except
-/// [`STAGE_PATH_COUNT`] and [`STAGE_PATH_TILING`] (whose counts are GPU-computed by the
-/// `path_count_setup_scheme` / `path_tiling_setup_scheme` shaders), the CPU-known workgroup
-/// count is uploaded immediately via `commit_write_parcel`.
+/// One [`RetainedPool::acquire_record`] buffer holds `N_INDIRECT_STAGES` ordinal
+/// [`DispatchShape`] parcels. CPU-known stages are initialised at allocation via
+/// [`Init::data`]; GPU-written stages ([`STAGE_PATH_COUNT`], [`STAGE_PATH_TILING`])
+/// use [`Init::reserve`] and are written each frame by setup shaders.
 ///
-/// The returned `Vec` is indexed directly: `bufs[STAGE_FOO as usize]`.
-pub(crate) fn alloc_scheme_indirect_buffers(
+/// Indexed via [`Buffer::unit`]: `buf.unit(STAGE_FOO as usize)`.
+pub(crate) fn alloc_or_reuse_scheme_indirect(
     recorder: &mut SchemeRecorder<'_>,
     wg_counts_gpu: &WorkgroupCountsGpu,
-) -> Result<Vec<Buffer>, Error> {
-    let mut bufs = Vec::with_capacity(N_INDIRECT_STAGES as usize);
-    for i in 0..N_INDIRECT_STAGES as usize {
-        let buf = recorder.persistent.pool.get_buf_with_stride(
-            &mut recorder.persistent.retained_pool,
-            recorder.context,
-            size_of::<DispatchShape>() as u64,
-            "ekrano.scheme_indirect",
-            BufferKind::Scattered,
-            Some(size_of::<DispatchShape>() as u32),
-            BufferFlags::empty(),
-        )?;
-        // Upload CPU-known counts for static stages now; GPU-written stages
-        // are filled in by path_count_setup_scheme / path_tiling_setup_scheme.
-        if i != STAGE_PATH_COUNT as usize && i != STAGE_PATH_TILING as usize {
-            let e = wg_counts_gpu.entries[i];
-            let shape = DispatchShape { x: e[0], y: e[1], z: e[2] };
-            recorder
-                .scheme()
-                .commit_write_parcel(&*buf, 0, bytemuck::bytes_of(&shape).to_vec())
-                .map_err(|e| Error::Shader(e.to_string()))?;
+) -> Result<Buffer, Error> {
+    if let Some((cached_wg, buf)) = recorder.persistent.cached_scheme_indirect.take() {
+        if &cached_wg == wg_counts_gpu {
+            return Ok(buf);
         }
-        bufs.push(buf);
+        // WorkgroupCountsGpu changed (resize / topology change): drop the stale
+        // composite buffer immediately. At FRAME_PIPELINE_DEPTH=1, begin_frame has
+        // already waited for the prior frame to retire before we reach this point,
+        // so the buffer is no longer in-flight on the GPU.
+        drop(buf);
     }
-    Ok(bufs)
+    let fields: Vec<_> = (0..N_INDIRECT_STAGES as usize)
+        .map(|i| {
+            if i != STAGE_PATH_COUNT as usize && i != STAGE_PATH_TILING as usize {
+                let e = wg_counts_gpu.entries[i];
+                ordinal(Init::data(&[DispatchShape {
+                    x: e[0],
+                    y: e[1],
+                    z: e[2],
+                }]))
+            } else {
+                ordinal(Init::reserve::<DispatchShape>(1))
+            }
+        })
+        .collect();
+    recorder
+        .persistent
+        .retained_pool
+        .acquire_record(fields)
+        .map_err(|e| Error::Gpu(e.to_string()))
 }
 
 pub(crate) fn record_upload_bytes(
@@ -528,9 +533,9 @@ pub(crate) struct PipelineResources {
     pub mask_atlas: Texture,
     pub scene: Buffer,
     pub config: Buffer,
-    /// Per-stage indirect dispatch buffers (one `DispatchShape` element each).
-    /// Indexed by `STAGE_*` constants from `ekrano_encoding`.
-    pub indirect: Option<Vec<Buffer>>,
+    /// Composite indirect buffer (one ordinal `DispatchShape` parcel per stage).
+    /// Cache key and buffer live in [`crate::goldy_renderer::PersistentState::cached_scheme_indirect`].
+    pub indirect: Option<(WorkgroupCountsGpu, Buffer)>,
     pub stable: StablePipelineBuffers,
     pub scratch: ScratchPipelineBuffers,
     pub bump: Buffer,
