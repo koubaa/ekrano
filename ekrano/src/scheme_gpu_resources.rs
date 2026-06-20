@@ -1,15 +1,14 @@
 // Copyright 2026 the Ekrano Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Direct GPU resource handles (no bind-map / proxies).
+//! Scheme-backend GPU resource helpers.
 
 use std::mem::size_of;
 
-use goldy::task_graph::NodeAccess;
-use goldy::types::{BufferFlags, ResourceAccess, TextureFlags, TextureKind};
-use goldy::{Buffer, BufferKind, Parcel, Texture, TextureFormat};
+use goldy::types::{BufferFlags, TextureFlags, TextureKind};
+use goldy::{Buffer, BufferKind, Parcel, Sampler, Texture, TextureFormat};
 
-use crate::goldy_renderer::FrameRecorder;
+use crate::scheme_renderer::SchemeRecorder;
 use crate::resource_proxy::{BindType, ImageFormat};
 use crate::{Error, RenderParams, Result};
 use ekrano_encoding::{BumpAllocators, CoverageMask, Images, Ramps, RenderConfig};
@@ -35,47 +34,12 @@ pub(crate) enum GpuBinding<'a> {
     Buf(&'a Buffer),
     Parcel(&'a Parcel),
     Tex(&'a Texture),
-    /// A GPU sampler represented by its pre-resolved bindless index.
-    /// We store the index directly (not a reference) so `fine_resources` doesn't
-    /// borrow from `recorder.persistent`, which would conflict with `recorder.dispatch()`.
-    Sampler(u32),
-    /// A persistent (pre-initialized) buffer represented by its pre-resolved bindless
-    /// index.  Like `Sampler`, the index is stored directly so `fine_resources` can be
-    /// built without holding a live `&Buffer` reference across a `recorder.dispatch()`
-    /// call.  Use this for buffers that are uploaded exactly once (e.g. static LUTs
-    /// stored in `PersistentState`) and are guaranteed to be GPU-readable on every
-    /// frame after their first upload, without any additional `WriteBuffer` nodes.
-    PersistentBuf(u32),
-}
-
-impl<'a> GpuBinding<'a> {
-    pub(crate) fn bindless_slot(&self, is_read_only: bool) -> Result<u32, Error> {
-        let idx = match self {
-            GpuBinding::Buf(buf) => {
-                if is_read_only {
-                    buf.resource_index(ResourceAccess::Read)
-                } else {
-                    buf.resource_index(ResourceAccess::Write)
-                }
-            }
-            GpuBinding::Parcel(parcel) => {
-                if is_read_only {
-                    parcel.resource_index(ResourceAccess::Read)
-                } else {
-                    parcel.resource_index(ResourceAccess::Write)
-                }
-            }
-            GpuBinding::Tex(tex) => {
-                if is_read_only {
-                    tex.resource_index(ResourceAccess::Read)
-                } else {
-                    tex.resource_index(ResourceAccess::Write)
-                }
-            }
-            GpuBinding::Sampler(idx) | GpuBinding::PersistentBuf(idx) => return Ok(*idx),
-        };
-        idx.ok_or_else(|| Error::Shader("bindless index missing for shader resource binding".into()))
-    }
+    /// A GPU sampler from [`crate::goldy_renderer::PersistentState`].
+    Sampler(&'a Sampler),
+    /// A persistent (pre-initialized) buffer from [`crate::goldy_renderer::PersistentState`].
+    /// Use for buffers uploaded exactly once (e.g. static LUTs) that are GPU-readable on
+    /// every frame after their first upload, without additional write nodes.
+    PersistentBuf(&'a Buffer),
 }
 
 fn is_pool_exempt(name: &'static str) -> bool {
@@ -90,7 +54,7 @@ fn image_fmt_goldy(f: ImageFormat) -> TextureFormat {
 }
 
 pub(crate) fn alloc_pipeline_buffer(
-    recorder: &mut FrameRecorder<'_>,
+    recorder: &mut SchemeRecorder<'_>,
     size: u64,
     stride: u32,
     name: &'static str,
@@ -111,16 +75,16 @@ pub(crate) fn alloc_pipeline_buffer(
     // dispatch counts must be 0 before GPU pipelines them). Other pipeline
     // buffers are always overwritten by GPU dispatches before first read.
     if is_pool_exempt(name) {
-        recorder
-            .graph()
-            .clear_parcel(&buf, 0, size)
-            .map_err(|e| Error::Shader(e.to_string()))?;
+            recorder
+                .scheme()
+                .commit_clear_parcel(&buf, 0, size)
+                .map_err(|e| Error::Shader(e.to_string()))?;
     }
     Ok(buf)
 }
 
 pub(crate) fn record_upload_bytes(
-    recorder: &mut FrameRecorder<'_>,
+    recorder: &mut SchemeRecorder<'_>,
     name: &'static str,
     element_stride: u32,
     bytes: &[u8],
@@ -136,17 +100,17 @@ pub(crate) fn record_upload_bytes(
         Some(element_stride),
         BufferFlags::empty(),
     )?;
-    recorder
-        .graph()
-        .write_parcel(&buf, 0, bytes.to_vec())
-        .map_err(|e| Error::Shader(e.to_string()))?;
+        recorder
+            .scheme()
+            .commit_write_parcel(&buf, 0, bytes.to_vec())
+            .map_err(|e| Error::Shader(e.to_string()))?;
     Ok(buf)
 }
 
 /// Like [`record_upload_bytes`] but takes ownership of the byte vector, avoiding
 /// the redundant `to_vec()` copy when the caller already holds an owned `Vec<u8>`.
 pub(crate) fn record_upload_bytes_owned(
-    recorder: &mut FrameRecorder<'_>,
+    recorder: &mut SchemeRecorder<'_>,
     name: &'static str,
     element_stride: u32,
     bytes: Vec<u8>,
@@ -162,15 +126,15 @@ pub(crate) fn record_upload_bytes_owned(
         Some(element_stride),
         BufferFlags::empty(),
     )?;
-    recorder
-        .graph()
-        .write_parcel(&buf, 0, bytes)
-        .map_err(|e| Error::Shader(e.to_string()))?;
+        recorder
+            .scheme()
+            .commit_write_parcel(&buf, 0, bytes)
+            .map_err(|e| Error::Shader(e.to_string()))?;
     Ok(buf)
 }
 
 pub(crate) fn record_upload_image(
-    recorder: &mut FrameRecorder<'_>,
+    recorder: &mut SchemeRecorder<'_>,
     width: u32,
     height: u32,
     format: ImageFormat,
@@ -189,15 +153,15 @@ pub(crate) fn record_upload_image(
             TextureFlags::COPY_DST,
         )
         .map_err(|e| Error::Shader(e.to_string()))?;
-    recorder
-        .graph()
-        .write_texture(&texture, bytes.to_vec())
-        .map_err(|e| Error::Shader(e.to_string()))?;
+        recorder
+            .scheme()
+            .commit_write_texture(&texture, bytes.to_vec())
+            .map_err(|e| Error::Shader(e.to_string()))?;
     Ok(texture)
 }
 
 pub(crate) fn write_image_region(
-    recorder: &mut FrameRecorder<'_>,
+    recorder: &mut SchemeRecorder<'_>,
     tex: &Texture,
     x: u32,
     y: u32,
@@ -225,10 +189,10 @@ pub(crate) fn write_image_region(
         raw_bytes
     };
 
-    recorder
-        .graph()
-        .write_texture_region(tex, x, y, image_data.width, image_data.height, bytes.to_vec())
-        .map_err(|e| Error::Shader(e.to_string()))?;
+        recorder
+            .scheme()
+            .commit_write_texture_region(tex, x, y, image_data.width, image_data.height, bytes.to_vec())
+            .map_err(|e| Error::Shader(e.to_string()))?;
     Ok(())
 }
 
@@ -247,7 +211,7 @@ fn premultiply_rgba8(bytes: &[u8]) -> Vec<u8> {
 }
 
 pub(crate) fn acquire_texture_rgba(
-    recorder: &mut FrameRecorder<'_>,
+    recorder: &mut SchemeRecorder<'_>,
     width: u32,
     height: u32,
     access: TextureKind,
@@ -268,22 +232,22 @@ pub(crate) fn acquire_texture_rgba(
 }
 
 pub(crate) fn clear_gpu_buf(
-    recorder: &mut FrameRecorder<'_>,
+    recorder: &mut SchemeRecorder<'_>,
     buf: &Buffer,
     off: u64,
     size: Option<u64>,
 ) -> Result<(), Error> {
     let sz = size.unwrap_or_else(|| buf.byte_size().saturating_sub(off));
-    recorder
-        .graph()
-        .clear_parcel(buf, off, sz)
-        .map_err(|e| Error::Shader(e.to_string()))?;
+        recorder
+            .scheme()
+            .commit_clear_parcel(buf, off, sz)
+            .map_err(|e| Error::Shader(e.to_string()))?;
     Ok(())
 }
 
 /// Reuse a cached buffer if one is available, or allocate a fresh one from the pool.
 fn al_cached_opt(
-    recorder: &mut FrameRecorder<'_>,
+    recorder: &mut SchemeRecorder<'_>,
     cached: Option<Buffer>,
     size: u64,
     stride: u32,
@@ -319,7 +283,7 @@ pub(crate) struct StablePipelineBuffers {
 
 impl StablePipelineBuffers {
     fn alloc(
-        recorder: &mut FrameRecorder<'_>,
+        recorder: &mut SchemeRecorder<'_>,
         cached: Option<Self>,
         bs: &ekrano_encoding::BufferSizes,
     ) -> Result<Self, Error> {
@@ -350,26 +314,10 @@ impl StablePipelineBuffers {
             seg_counts: alloc_stable_buffer(recorder, c_sc, bs.seg_counts.size_in_bytes().into(), 8)?,
         })
     }
-
-    pub(crate) fn release(self, recorder: &mut FrameRecorder<'_>) {
-        let ctx = recorder.context();
-        let pool = &mut recorder.persistent.retained_pool;
-        for buffer in [
-            self.info_bin_data,
-            self.tile,
-            self.segments,
-            self.ptcl,
-            self.blend_spill,
-            self.lines,
-            self.seg_counts,
-        ] {
-            pool.release_buffer(ctx, buffer);
-        }
-    }
 }
 
 fn alloc_stable_buffer(
-    recorder: &mut FrameRecorder<'_>,
+    recorder: &mut SchemeRecorder<'_>,
     cached: Option<Buffer>,
     size: u64,
     stride: u32,
@@ -410,7 +358,7 @@ pub(crate) struct ScratchPipelineBuffers {
 
 impl ScratchPipelineBuffers {
     fn alloc(
-        recorder: &mut FrameRecorder<'_>,
+        recorder: &mut SchemeRecorder<'_>,
         cached: Option<Self>,
         bs: &ekrano_encoding::BufferSizes,
     ) -> Result<Self, Error> {
@@ -531,35 +479,6 @@ impl ScratchPipelineBuffers {
             path: al_cached_opt(recorder, c_path, bs.paths.size_in_bytes().into(), 32, "ekrano.path_buf")?,
         })
     }
-
-    pub(crate) fn return_to_pool(self, recorder: &mut FrameRecorder<'_>) {
-        let pool = &mut recorder.persistent.pool;
-        pool.return_buf(self.reduced, "ekrano.reduced_buf");
-        pool.return_buf(self.reduced2, "ekrano.reduced2_buf");
-        pool.return_buf(self.reduced_scan, "ekrano.reduced_scan_buf");
-        pool.return_buf(self.tagmonoid, "ekrano.tagmonoid_buf");
-        pool.return_buf(self.path_bbox, "ekrano.path_bbox_buf");
-        pool.return_buf(self.draw_reduced, "ekrano.draw_reduced_buf");
-        pool.return_buf(self.draw_monoid, "ekrano.draw_monoid_buf");
-        pool.return_buf(self.clip_inp, "ekrano.clip_inp_buf");
-        pool.return_buf(self.clip_el, "ekrano.clip_el_buf");
-        pool.return_buf(self.clip_bic, "ekrano.clip_bic_buf");
-        pool.return_buf(self.clip_bbox, "ekrano.clip_bbox_buf");
-        pool.return_buf(self.draw_bbox, "ekrano.draw_bbox_buf");
-        pool.return_buf(self.bin_header, "ekrano.bin_header_buf");
-        pool.return_buf(self.path, "ekrano.path_buf");
-    }
-}
-
-/// Cached GPU buffers that survive across frames when `buffer_sizes` is stable.
-///
-/// At depth=1 the previous frame's GPU work is complete by the time `begin_frame`
-/// returns, so these buffers are safe to rebind immediately. Stable parcels stay
-/// in [`goldy::RetainedPool`] deeds; scratch buffers are `ResourcePool` allocations.
-pub(crate) struct CachedPipeline {
-    pub stable: StablePipelineBuffers,
-    pub scratch: ScratchPipelineBuffers,
-    pub buffer_sizes: ekrano_encoding::BufferSizes,
 }
 
 pub(crate) struct PipelineResources {
@@ -584,7 +503,7 @@ pub(crate) struct PipelineResources {
 
 impl PipelineResources {
     pub(crate) fn prepare(
-        recorder: &mut FrameRecorder<'_>,
+        recorder: &mut SchemeRecorder<'_>,
         coverage_mask: Option<&CoverageMask>,
         mut packed: Vec<u8>,
         ramps: Ramps<'_>,
@@ -684,10 +603,11 @@ impl PipelineResources {
             } else if let Some((_, existing_buf)) = recorder.persistent.cached_config_uniform.take() {
                 // Buffer size is constant (sizeof ConfigUniform); reuse the allocation
                 // and just overwrite with the new value.
-                recorder
-                    .graph()
-                    .write_parcel(&existing_buf, 0, bytemuck::bytes_of(&config_uniform_value).to_vec())
-                    .map_err(|e| Error::Shader(e.to_string()))?;
+                let data = bytemuck::bytes_of(&config_uniform_value).to_vec();
+                    recorder
+                        .scheme()
+                        .commit_write_parcel(&existing_buf, 0, data)
+                        .map_err(|e| Error::Shader(e.to_string()))?;
                 existing_buf
             } else {
                 record_upload_bytes(
@@ -708,14 +628,67 @@ impl PipelineResources {
         let (cached_stable, cached_scratch) = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.pipeline_cache");
             match recorder.persistent.take_cached_pipeline() {
-                Some(c) if c.buffer_sizes == buffer_sizes => (Some(c.stable), Some(c.scratch)),
+                Some(c) if c.buffer_sizes == buffer_sizes => {
+                    let stable = StablePipelineBuffers {
+                        info_bin_data: c.stable.info_bin_data,
+                        tile: c.stable.tile,
+                        segments: c.stable.segments,
+                        ptcl: c.stable.ptcl,
+                        blend_spill: c.stable.blend_spill,
+                        lines: c.stable.lines,
+                        seg_counts: c.stable.seg_counts,
+                    };
+                    let scratch = ScratchPipelineBuffers {
+                        reduced: c.scratch.reduced,
+                        reduced2: c.scratch.reduced2,
+                        reduced_scan: c.scratch.reduced_scan,
+                        tagmonoid: c.scratch.tagmonoid,
+                        path_bbox: c.scratch.path_bbox,
+                        draw_reduced: c.scratch.draw_reduced,
+                        draw_monoid: c.scratch.draw_monoid,
+                        clip_inp: c.scratch.clip_inp,
+                        clip_el: c.scratch.clip_el,
+                        clip_bic: c.scratch.clip_bic,
+                        clip_bbox: c.scratch.clip_bbox,
+                        draw_bbox: c.scratch.draw_bbox,
+                        bin_header: c.scratch.bin_header,
+                        path: c.scratch.path,
+                    };
+                    (Some(stable), Some(scratch))
+                }
                 Some(c) => {
                     if std::env::var_os("EKRANO_LOG_PIPELINE_RESIZE").is_some() {
                         log::info!("[PIPE-RESIZE] buffer_sizes mismatch — releasing stable parcels");
                     }
                     log::debug!("[PIPE-CACHE] buffer_sizes mismatch — releasing stable parcels");
-                    c.stable.release(recorder);
-                    c.scratch.return_to_pool(recorder);
+                    let ctx = recorder.context();
+                    let pool = &mut recorder.persistent.retained_pool;
+                    for buffer in [
+                        c.stable.info_bin_data,
+                        c.stable.tile,
+                        c.stable.segments,
+                        c.stable.ptcl,
+                        c.stable.blend_spill,
+                        c.stable.lines,
+                        c.stable.seg_counts,
+                    ] {
+                        pool.release_buffer(ctx, buffer);
+                    }
+                    let ppool = &mut recorder.persistent.pool;
+                    ppool.return_buf(c.scratch.reduced, "ekrano.reduced_buf");
+                    ppool.return_buf(c.scratch.reduced2, "ekrano.reduced2_buf");
+                    ppool.return_buf(c.scratch.reduced_scan, "ekrano.reduced_scan_buf");
+                    ppool.return_buf(c.scratch.tagmonoid, "ekrano.tagmonoid_buf");
+                    ppool.return_buf(c.scratch.path_bbox, "ekrano.path_bbox_buf");
+                    ppool.return_buf(c.scratch.draw_reduced, "ekrano.draw_reduced_buf");
+                    ppool.return_buf(c.scratch.draw_monoid, "ekrano.draw_monoid_buf");
+                    ppool.return_buf(c.scratch.clip_inp, "ekrano.clip_inp_buf");
+                    ppool.return_buf(c.scratch.clip_el, "ekrano.clip_el_buf");
+                    ppool.return_buf(c.scratch.clip_bic, "ekrano.clip_bic_buf");
+                    ppool.return_buf(c.scratch.clip_bbox, "ekrano.clip_bbox_buf");
+                    ppool.return_buf(c.scratch.draw_bbox, "ekrano.draw_bbox_buf");
+                    ppool.return_buf(c.scratch.bin_header, "ekrano.bin_header_buf");
+                    ppool.return_buf(c.scratch.path, "ekrano.path_buf");
                     (None, None)
                 }
                 None => (None, None),
@@ -793,112 +766,11 @@ impl PipelineResources {
     }
 }
 
-/// Fill `out` with bindless slot indices for `bindings`, reusing its existing allocation.
-///
-/// Clears `out` before filling so the caller may pass a scratch `Vec<u32>` that already
-/// has capacity from a previous call, avoiding a heap allocation per dispatch.
-pub(crate) fn collect_bindless_indices_into(
-    out: &mut Vec<u32>,
-    bindings: &[GpuBinding<'_>],
-    bind_types: &[BindType],
-    max_slots: usize,
-) -> Result<(), Error> {
-    out.clear();
-    for (i, binding) in bindings.iter().enumerate() {
-        let is_read_only = matches!(bind_types.get(i), Some(BindType::BufReadOnly));
-        let is_sampled_image = matches!(bind_types.get(i), Some(BindType::ImageRead(_)));
-        let idx = match binding {
-            GpuBinding::Buf(_) | GpuBinding::Parcel(_) => binding.bindless_slot(is_read_only)?,
-            GpuBinding::Tex(tex) if is_sampled_image => tex
-                .resource_index(ResourceAccess::Read)
-                .or_else(|| {
-                    // Direct storage images have no separate sampled slot; use the primary
-                    // storage index (legacy bindless_sampled_index().or_else(bindless_index)).
-                    tex.resource_index(ResourceAccess::Write)
-                        .or_else(|| tex.resource_index(ResourceAccess::ReadWrite))
-                })
-                .ok_or_else(|| Error::Shader("resource sampled index missing for ImageRead texture binding".into()))?,
-            GpuBinding::Tex(_) => binding.bindless_slot(false)?,
-            GpuBinding::Sampler(idx) | GpuBinding::PersistentBuf(idx) => *idx,
-        };
-        out.push(idx);
-    }
-    if out.len() > max_slots {
-        return Err(Error::Shader(format!(
-            "shader requires {} bindless slots, exceeds limit of {}",
-            out.len(),
-            max_slots
-        )));
-    }
-    Ok(())
-}
-
-pub(crate) fn bind_type_to_node_access(bt: BindType) -> NodeAccess {
+pub(crate) fn bind_type_to_node_access(bt: BindType) -> goldy::task_graph::NodeAccess {
     match bt {
-        BindType::Buffer | BindType::Image(_) => NodeAccess::ReadWrite,
-        BindType::BufReadOnly | BindType::Uniform | BindType::ImageRead(_) => NodeAccess::Read,
-        BindType::Sampler => NodeAccess::Read,
+        BindType::Buffer | BindType::Image(_) => goldy::task_graph::NodeAccess::ReadWrite,
+        BindType::BufReadOnly | BindType::Uniform | BindType::ImageRead(_) => goldy::task_graph::NodeAccess::Read,
+        BindType::Sampler => goldy::task_graph::NodeAccess::Read,
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Helpers that return a fixed bindless index without touching the GPU.
-    fn sampler_binding(idx: u32) -> GpuBinding<'static> {
-        GpuBinding::Sampler(idx)
-    }
-
-    #[test]
-    fn collect_into_sampler_indices() {
-        let bindings = [sampler_binding(7), sampler_binding(3)];
-        let bind_types = [BindType::Sampler, BindType::Sampler];
-
-        let mut out = Vec::new();
-        collect_bindless_indices_into(&mut out, &bindings, &bind_types, 16).unwrap();
-
-        assert_eq!(out, [7, 3]);
-    }
-
-    #[test]
-    fn collect_into_clears_previous_contents() {
-        let bindings = [sampler_binding(1)];
-        let bind_types = [BindType::Sampler];
-
-        let mut out = vec![99_u32; 5];
-        collect_bindless_indices_into(&mut out, &bindings, &bind_types, 16).unwrap();
-
-        assert_eq!(out, [1]);
-    }
-
-    #[test]
-    fn collect_into_reuses_capacity() {
-        let mut out: Vec<u32> = Vec::with_capacity(16);
-
-        for _ in 0..3 {
-            let bindings = [sampler_binding(5), sampler_binding(6)];
-            let bind_types = [BindType::Sampler, BindType::Sampler];
-            collect_bindless_indices_into(&mut out, &bindings, &bind_types, 16).unwrap();
-            assert_eq!(out, [5, 6]);
-        }
-    }
-
-    #[test]
-    fn collect_into_exceeds_max_slots_returns_err() {
-        let bindings = [sampler_binding(0), sampler_binding(1), sampler_binding(2)];
-        let bind_types = [BindType::Sampler; 3];
-
-        let mut out = Vec::new();
-        let result = collect_bindless_indices_into(&mut out, &bindings, &bind_types, 2);
-
-        assert!(result.is_err(), "expected Err when bindings exceed max_slots");
-    }
-
-    #[test]
-    fn collect_into_empty_bindings() {
-        let mut out = vec![99_u32];
-        collect_bindless_indices_into(&mut out, &[], &[], 16).unwrap();
-        assert!(out.is_empty());
-    }
-}
