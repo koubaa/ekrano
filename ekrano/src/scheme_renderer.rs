@@ -33,7 +33,7 @@ use std::mem;
 use std::sync::Arc;
 
 use goldy::task_graph::NodeAccess;
-use goldy::types::{BufferFlags, TextureFlags, TextureFormat, TextureKind};
+use goldy::types::{TextureFlags, TextureFormat, TextureKind};
 use goldy::{
     BudgetPolicy, Buffer, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator,
     Grant, ShaderModule, Signal, Scheme, TaskGraph, Texture,
@@ -48,7 +48,7 @@ use crate::{
         FRAME_COUNTER, sanitize_bump, find_empty_cache_slot, CacheScheduleOutcome,
     },
     scheme_gpu_resources::{
-        GpuBinding, alloc_pipeline_buffer, bind_type_to_node_access,
+        GpuBinding, bind_type_to_node_access,
         record_upload_bytes, record_upload_bytes_owned, acquire_texture_rgba,
     },
     scheme_render::Render,
@@ -1103,6 +1103,87 @@ impl Drop for SchemeRecorder<'_> {
     fn drop(&mut self) {
         if !self.finished {
             self.frame_pipeline.abort_frame(self.frame_handle);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scheme_gpu_resources::PipelineResources;
+    use crate::{RenderParams, Scene};
+    use ekrano_encoding::{RenderConfig, Resolver};
+    use goldy::{FrameOrchestrator, Scheme};
+
+    /// Scheme-backend counterpart of the Classic `prepare_out_image_format_matches_requested`
+    /// test in [`crate::goldy_renderer::tests`].
+    ///
+    /// Verifies that `scheme_gpu_resources::PipelineResources::prepare` honours the
+    /// `out_image_format` argument and does not hard-code `Rgba8Unorm`.  The same
+    /// channel-swap regression (velato tiger turning blue) can occur on the Scheme
+    /// path if `copy_texture_to_present` copies an RGBA `out_image` into a BGRA
+    /// present lease.
+    #[test]
+    fn prepare_out_image_format_matches_requested() {
+        let Some((device, mut persistent)) =
+            crate::goldy_renderer::tests::make_device_and_persistent()
+        else {
+            return;
+        };
+
+        let scene = Scene::new();
+        let encoding = scene.encoding();
+
+        let params = RenderParams {
+            base_color: peniko::color::palette::css::BLACK,
+            width: 64,
+            height: 64,
+            antialiasing_method: crate::AaConfig::Area,
+            robust: false,
+        };
+
+        for &expected_format in &[TextureFormat::Bgra8Unorm, TextureFormat::Rgba8Unorm] {
+            let mut resolver = Resolver::new();
+            let mut packed = Vec::new();
+            let (layout, ramps, images) = resolver.resolve(encoding, &mut packed);
+            let config = RenderConfig::new(&layout, params.width, params.height, &params.base_color);
+
+            let ctx = device.create_context().expect("context");
+            let mut scheme = Scheme::new(&ctx);
+            let mut frame_pipeline = FrameOrchestrator::new(&ctx, FRAME_PIPELINE_DEPTH);
+            let frame_handle = frame_pipeline
+                .begin_frame(|_, _| Ok::<(), Error>(()))
+                .expect("begin_frame");
+            let pipeline = {
+                let mut recorder = SchemeRecorder::new(
+                    &device,
+                    &ctx,
+                    &mut scheme,
+                    &mut frame_pipeline,
+                    frame_handle,
+                    &mut persistent,
+                    &[],
+                );
+                PipelineResources::prepare(
+                    &mut recorder,
+                    encoding.coverage_mask.as_ref(),
+                    packed,
+                    ramps,
+                    images,
+                    &params,
+                    &config,
+                    expected_format,
+                )
+                .unwrap_or_else(|e| panic!("PipelineResources::prepare({expected_format:?}) failed: {e}"))
+            };
+
+            assert_eq!(
+                pipeline.out_image.format(),
+                expected_format,
+                "out_image must use the requested format {expected_format:?}; \
+                 using Rgba8Unorm unconditionally would cause copy_texture_to_present \
+                 to swap R and B when copying to a Bgra8Unorm present lease"
+            );
         }
     }
 }
