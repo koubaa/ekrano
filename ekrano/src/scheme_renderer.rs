@@ -20,7 +20,9 @@
 //! 4. [`goldy::Scheme::grant_present`] records the present easement (once per frame in
 //!    Phase 2; retained in Phase 3).
 //! 5. [`goldy::Scheme::submit`] submits all partitions, including the present-touching one.
-//! 6. [`goldy::PresentGrant::consume`] performs scanout.
+//! 6. [`PresentToken::present`] performs scanout — synchronously in
+//!    [`Self::render_to_swapchain`], or async on TID_PRESENT via
+//!    [`Self::submit_to_swapchain`] + velato's `Presenter`.
 //!
 //! # Phase 2 notes
 //!
@@ -35,7 +37,7 @@ use std::sync::Arc;
 use goldy::task_graph::NodeAccess;
 use goldy::types::{ResourceAccess, TextureFlags, TextureFormat, TextureKind};
 use goldy::{
-    BudgetPolicy, Buffer, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator, Grant,
+    BudgetPolicy, Buffer, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator,
     ShaderModule, Signal, Scheme, TaskGraph, Texture,
 };
 
@@ -43,7 +45,7 @@ use crate::{
     Error, RenderParams, Result, Scene,
     goldy_renderer::{
         FrameFinishOutcome, FrameStats, GoldyShader, AllocatorStats,
-        FRAME_PIPELINE_DEPTH, MAX_BUMP_RETRIES, PreparedFrame, PersistentState,
+        FRAME_PIPELINE_DEPTH, MAX_BUMP_RETRIES, PreparedFrame, PresentToken, PersistentState,
         ResourcePoolStats, defer_frame_gpu_resources, env_robust_override,
         FRAME_COUNTER, sanitize_bump, find_empty_cache_slot, CacheScheduleOutcome,
     },
@@ -262,8 +264,8 @@ impl SchemeRenderer {
     /// Render a scene to a swapchain using the scheme-native present mechanism.
     ///
     /// `pool` must have been created with the same [`Context`] as this renderer.
-    /// Each call acquires a drawable from the pool, submits the scheme, and presents
-    /// via [`goldy::PresentGrant::consume`].
+    /// Each call acquires a drawable from the pool, submits the scheme, and returns
+    /// a [`PresentToken`] for scanout via [`PresentToken::present`].
     pub fn render_to_swapchain(
         &mut self,
         scene: &Scene,
@@ -272,7 +274,9 @@ impl SchemeRenderer {
     ) -> Result<FrameStats> {
         let _tz = goldy::tracy_zone!("ekrano.render_to_swapchain");
         let prepared = self.prepare(scene, params)?;
-        self.submit_to_swapchain(prepared, pool)
+        let (stats, token) = self.submit_to_swapchain(prepared, pool)?;
+        token.present()?;
+        Ok(stats)
     }
 
     /// Phase 1: resolve scene encoding to CPU buffers.
@@ -320,16 +324,21 @@ impl SchemeRenderer {
         })
     }
 
-    /// Phase 2: record GPU work, present, and return frame stats.
+    /// Phase 2: record GPU work and return frame stats plus a present token.
     ///
     /// Uses the scheme-native present mechanism: records a `copy_texture_to_present`
-    /// node followed by `grant_present`, submits the scheme, and calls
-    /// [`goldy::PresentGrant::consume`] to perform scanout.
-    pub fn submit_to_swapchain(&mut self, prepared: PreparedFrame, pool: &goldy::SwapchainPool) -> Result<FrameStats> {
+    /// node followed by `grant_present`, submits the scheme, and returns a
+    /// [`PresentToken`] for scanout (does not call [`PresentToken::present`]).
+    pub fn submit_to_swapchain(
+        &mut self,
+        prepared: PreparedFrame,
+        pool: &goldy::SwapchainPool,
+    ) -> Result<(FrameStats, PresentToken)> {
         let _tz = goldy::tracy_zone!("ekrano.submit_to_swapchain");
         self.poll_and_reclaim();
-        let (stats, _) = self.run_frame_from_prepared(prepared, None, Some(pool))?;
-        Ok(stats)
+        let (stats, token) = self.run_frame_from_prepared(prepared, None, Some(pool))?;
+        token.ok_or_else(|| Error::Shader("missing present grant for swapchain submit".into()))
+            .map(|token| (stats, token))
     }
 
     /// Query frame-scheduling state for diagnostics or test assertions.
@@ -459,20 +468,23 @@ impl SchemeRenderer {
         pool: Option<&goldy::SwapchainPool>,
     ) -> Result<FrameStats> {
         let prepared = self.prepare(scene, params)?;
-        let (stats, _) = self.run_frame_from_prepared(prepared, output_texture, pool)?;
+        let (stats, token) = self.run_frame_from_prepared(prepared, output_texture, pool)?;
+        if let Some(token) = token {
+            token.present()?;
+        }
         Ok(stats)
     }
 
     /// GPU submission path for both texture and swapchain rendering.
     ///
     /// When `pool` is `Some`, records `copy_texture_to_present` + `grant_present`
-    /// into the scheme, submits, and consumes the present grant.
+    /// into the scheme, submits, and returns a [`PresentToken`] (does not present).
     fn run_frame_from_prepared(
         &mut self,
         prepared: PreparedFrame,
         output_texture: Option<&Texture>,
         pool: Option<&goldy::SwapchainPool>,
-    ) -> Result<(FrameStats, ())> {
+    ) -> Result<(FrameStats, Option<PresentToken>)> {
         let _tz = goldy::tracy_zone!("ekrano.run_frame");
         use std::time::Instant;
         let frame_start = Instant::now();
@@ -770,7 +782,7 @@ impl SchemeRenderer {
             scheme_submission,
         } = {
             let _tz = goldy::tracy_zone!("ekrano.finish");
-            recorder.finish()?
+            recorder.finish(pool.is_some())?
         };
 
         if let Some((present, bump, topology, filter_effects, out_image)) = worker_cache {
@@ -790,12 +802,16 @@ impl SchemeRenderer {
             .then(|| self.persistent.cached_present_grant.clone())
             .flatten();
 
-        // Present using the scheme's native mechanism.
-        if let (Some(grant), Some(submission)) = (present_grant.as_ref(), scheme_submission.as_ref()) {
-            grant
-                .consume(submission)
-                .map_err(|e| Error::Shader(e.to_string()))?;
+        if params.robust && self.persistent.cached_bump_grant.is_some() {
+            if let Some(ref submission) = scheme_submission {
+                self.persistent.queue_bump_submission(submission.clone());
+            }
         }
+
+        let present_token = match (present_grant, scheme_submission) {
+            (Some(grant), Some(submission)) => Some(PresentToken { grant, submission }),
+            _ => None,
+        };
 
         // On Metal, gate the orchestrator on the compute timeline to allow the
         // present partition to overlap the next frame's CPU recording.
@@ -809,11 +825,6 @@ impl SchemeRenderer {
                 self.persistent.cached_rt_timelines[i],
             );
             self.persistent.cached_rt_timelines[i] = frame_tv;
-        }
-        if params.robust && self.persistent.cached_bump_grant.is_some() {
-            if let Some(submission) = scheme_submission {
-                self.persistent.queue_bump_submission(submission);
-            }
         }
         defer_frame_gpu_resources(
             &self.context,
@@ -857,7 +868,7 @@ impl SchemeRenderer {
             );
         }
 
-        Ok((stats, ()))
+        Ok((stats, present_token))
     }
 
     // =======================================================================
@@ -1266,7 +1277,9 @@ impl<'a> SchemeRecorder<'a> {
     ///
     /// Surface paths call [`goldy::Frame::submit_frame`] before returning so the
     /// timeline is valid for cache stamping before [`goldy::Frame::present`].
-    pub(crate) fn finish(mut self) -> Result<FrameFinishOutcome> {
+    /// Surface paths with deferred scanout call [`Self::finish(true)`]; headless /
+    /// render-to-texture paths call [`Self::finish(false)`].
+    pub(crate) fn finish(mut self, deferred_present: bool) -> Result<FrameFinishOutcome> {
         self.finished = true;
 
         self.persistent.deferred_owned_cap_hint = self.deferred_owned_buffers.capacity();
@@ -1277,17 +1290,31 @@ impl<'a> SchemeRecorder<'a> {
 
         let frame_handle = self.frame_handle;
 
-        self.upload
-            .submit()
-            .map_err(|e| Error::Shader(e.to_string()))?;
+        {
+            let _tz = goldy::tracy_zone!("ekrano.finish.upload_submit");
+            self.upload
+                .submit()
+                .map_err(|e| Error::Shader(e.to_string()))?;
+        }
 
-        let submission = self.scheme.submit().map_err(|e| Error::Shader(e.to_string()))?;
+        let submission = {
+            let _tz = goldy::tracy_zone!("ekrano.finish.worker_submit");
+            self.scheme.submit().map_err(|e| Error::Shader(e.to_string()))?
+        };
         let scheme_tv = submission.timeline_value();
         let mut empty_graph = TaskGraph::new();
-        let tv = self
-            .frame_pipeline
-            .end_frame_standalone(frame_handle, &mut empty_graph, Some(scheme_tv), ())
-            .map_err(|e| Error::Shader(e.to_string()))?;
+        let tv = {
+            let _tz = goldy::tracy_zone!("ekrano.finish.orchestrator");
+            if deferred_present {
+                self.frame_pipeline
+                    .end_frame_for_present(frame_handle, scheme_tv, ())
+                    .map_err(|e| Error::Shader(e.to_string()))?
+            } else {
+                self.frame_pipeline
+                    .end_frame_standalone(frame_handle, &mut empty_graph, Some(scheme_tv), ())
+                    .map_err(|e| Error::Shader(e.to_string()))?
+            }
+        };
         Ok(FrameFinishOutcome {
             timeline: tv,
             surface_frame: None,

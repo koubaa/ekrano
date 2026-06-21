@@ -177,9 +177,27 @@ pub(crate) struct FrameFinishOutcome {
     /// Scheme-path submission returned by [`goldy::Scheme::submit`].
     /// `None` on the Classic (`TaskGraph`) path.
     ///
-    /// Held here so that `SchemeRenderer::run_frame_from_prepared` can pass it to
-    /// [`goldy::Grant::consume`] on a [`goldy::PresentGrant`] after `finish()` returns.
+    /// Held here so that `SchemeRenderer::run_frame_from_prepared` can build a
+    /// [`PresentToken`] after `finish()` returns.
     pub(crate) scheme_submission: Option<goldy::Submission>,
+}
+
+/// Scheme-path present token — analogue of [`goldy::Frame`] on the Classic path.
+///
+/// Produced by [`GoldyRenderer::submit_to_swapchain`]. Hand to TID_PRESENT for async
+/// scanout, or call [`Self::present`] synchronously (e.g. [`SchemeRenderer::render_to_swapchain`]).
+pub struct PresentToken {
+    pub(crate) grant: goldy::PresentGrant,
+    pub(crate) submission: goldy::Submission,
+}
+
+impl PresentToken {
+    /// Perform scanout via [`goldy::PresentGrant::consume`].
+    pub fn present(self) -> Result<()> {
+        self.grant
+            .consume(&self.submission)
+            .map_err(|e| Error::Shader(e.to_string()))
+    }
 }
 
 /// CPU-resolved scene data ready for GPU submission.
@@ -996,10 +1014,17 @@ impl GoldyRenderer {
         }
     }
 
-    /// Phase 2: record GPU work, present, and return frame stats (Scheme path).
+    /// Phase 2: record GPU work and return frame stats plus a present token (Scheme path).
+    ///
+    /// Does not call [`PresentToken::present`]; the caller must present synchronously or
+    /// hand the token to TID_PRESENT for async scanout.
     ///
     /// Panics if called on the Classic backend.
-    pub fn submit_to_swapchain(&mut self, prepared: PreparedFrame, pool: &goldy::SwapchainPool) -> Result<FrameStats> {
+    pub fn submit_to_swapchain(
+        &mut self,
+        prepared: PreparedFrame,
+        pool: &goldy::SwapchainPool,
+    ) -> Result<(FrameStats, PresentToken)> {
         match self {
             Self::Classic(_) => panic!(
                 "GoldyRenderer::submit_to_swapchain called on Classic backend — \
