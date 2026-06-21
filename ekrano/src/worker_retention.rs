@@ -5,6 +5,8 @@
 
 use goldy::types::{ResourceHandle, TextureFormat};
 #[cfg(debug_assertions)]
+use goldy::types::ResourceAccess;
+#[cfg(debug_assertions)]
 use goldy::{Buffer, Texture};
 
 use crate::goldy_renderer::PersistentState;

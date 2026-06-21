@@ -325,7 +325,10 @@ pub(crate) fn stage_scene_bytes(
         .write(0, bytes)
         .map_err(|e| Error::Gpu(e.to_string()))?;
     if recorder.upload_needs_record {
-        let copy_size = bytes.len() as u64;
+        // Copy the full staging buffer (bucket-sized) rather than bytes.len() bytes.
+        // On retained frames the packed content varies within the bucket; the GPU reads
+        // up to config.scene_size bytes (always ≤ bucket), so the tail is never accessed.
+        let copy_size = staging.byte_size();
         recorder
             .upload_scheme()
             .copy_buffer_parcel(staging.whole(), 0, scene.whole(), 0, copy_size)
