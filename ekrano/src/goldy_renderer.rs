@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 
 use goldy::types::{BufferFlags, TextureFormat};
 use goldy::{
-    Buffer, BufferKind, ComputePipeline, Context, Device, RetainedPool,
+    Buffer, BufferKind, ComputePipeline, Context, Device, Grant, RetainedPool,
     Texture, TexturePool, TimelineValue,
 };
 
@@ -487,6 +487,43 @@ pub(crate) struct PersistentState {
     /// Cache key is the `WorkgroupCountsGpu` that seeded the allocation.
     /// Scheme-path only; never touches `ResourcePool`.
     pub(crate) cached_scheme_indirect: Option<(ekrano_encoding::WorkgroupCountsGpu, Buffer)>,
+    /// Stable scene buffer for the retained worker scheme (bucket capacity, buffer).
+    pub(crate) cached_scene: Option<(u64, Buffer)>,
+    /// CPU-writable staging for scene uploads (bucket capacity, buffer).
+    pub(crate) cached_scene_staging: Option<(u64, Buffer)>,
+    /// CPU-writable staging for config uniform uploads.
+    pub(crate) cached_config_staging: Option<Buffer>,
+    /// Stable bump buffer keyed by byte size; read back via [`Self::cached_bump_grant`].
+    pub(crate) cached_bump: Option<(u64, Buffer)>,
+    /// Recorded once on the worker when `robust` is enabled.
+    pub(crate) cached_bump_grant: Option<goldy::ReadGrant<goldy::GrantBuffer>>,
+    /// Stable gradient atlas (width, height, texture).
+    pub(crate) cached_gradient: Option<(u32, u32, Texture)>,
+    /// Stable image atlas (width, height, texture).
+    pub(crate) cached_image_atlas: Option<(u32, u32, Texture)>,
+    /// Stable mask atlas (width, height, texture).
+    pub(crate) cached_mask_atlas: Option<(u32, u32, Texture)>,
+    /// Present grant recorded once on the worker when swapchain presentation is enabled.
+    pub(crate) cached_present_grant: Option<goldy::PresentGrant>,
+    /// `out_image` handle the worker was recorded against (RT cache rotation invalidates retention).
+    pub(crate) cached_worker_out_image: Option<goldy::types::ResourceHandle>,
+    /// Full worker-bound handles from the last record (debug invariant checks only).
+    #[cfg(debug_assertions)]
+    pub(crate) cached_worker_resources: Option<crate::worker_retention::WorkerResourceHandles>,
+    /// Last worker topology the retained scheme was recorded against.
+    pub(crate) cached_worker_topology: Option<crate::worker_retention::WorkerTopology>,
+    /// Filter effects from the last worker record (topology comparison).
+    pub(crate) cached_worker_filter_effects: Vec<ekrano_encoding::LayerFilterEffect>,
+    /// Worker submission from the prior frame, consumed via [`Self::cached_bump_grant`] at drain.
+    pub(crate) pending_bump_submission: Option<goldy::Submission>,
+    /// Upload key the upload scheme was recorded against (scene bucket + all atlas dims).
+    pub(crate) cached_upload_key: Option<crate::worker_retention::UploadKey>,
+    /// CPU-writable staging for gradient atlas uploads.
+    pub(crate) cached_gradient_staging: Option<(u32, u32, Buffer)>,
+    /// CPU-writable staging for mask atlas uploads.
+    pub(crate) cached_mask_staging: Option<(u32, u32, Buffer)>,
+    /// CPU-writable staging buffers for image atlas region uploads.
+    pub(crate) cached_image_region_stagings: Vec<((u32, u32, u32, u32), Buffer)>,
     /// Textures waiting to be returned to [`Self::tex_pool`] after GPU retirement.
     /// Populated by [`DeferredTextureToken`] drops from [`Context::defer_release`].
     pub(crate) pending_texture_returns: Arc<Mutex<Vec<Texture>>>,
@@ -517,13 +554,40 @@ impl PersistentState {
             cached_config_uniform: None,
             cached_filter_uniforms: Vec::new(),
             cached_scheme_indirect: None,
+            cached_scene: None,
+            cached_scene_staging: None,
+            cached_config_staging: None,
+            cached_bump: None,
+            cached_bump_grant: None,
+            cached_gradient: None,
+            cached_image_atlas: None,
+            cached_mask_atlas: None,
+            cached_present_grant: None,
+            cached_worker_out_image: None,
+            #[cfg(debug_assertions)]
+            cached_worker_resources: None,
+            cached_worker_topology: None,
+            cached_worker_filter_effects: Vec::new(),
+            pending_bump_submission: None,
+            cached_upload_key: None,
+            cached_gradient_staging: None,
+            cached_mask_staging: None,
+            cached_image_region_stagings: Vec::new(),
             pending_texture_returns: Arc::new(Mutex::new(Vec::new())),
             pending_owned_returns: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
 
-/// Timeline-guarded render target cache.
+#[cfg(test)]
+impl PersistentState {
+    /// Minimal stub for unit tests that only inspect plain fields (no GPU resources).
+    pub(crate) fn new_test_only() -> Self {
+        let mock_device = goldy::test_support::mock_device();
+        Self::new(&mock_device)
+    }
+}
+
 impl PersistentState {
     /// Drop all cached render targets when any occupied slot no longer matches the
     /// requested dimensions. Waits for the oldest slot timeline so heap-backed textures
@@ -625,7 +689,28 @@ impl PersistentState {
         self.pending_bump_readback = Some((timeline, buf));
     }
 
+    pub(crate) fn queue_bump_submission(&mut self, submission: goldy::Submission) {
+        self.pending_bump_submission = Some(submission);
+    }
+
     pub(crate) fn drain_ready_bump_readbacks(&mut self, device: &Device, ctx: &Context) -> Result<()> {
+        if let Some(submission) = self.pending_bump_submission.take() {
+            if let Some(grant) = self.cached_bump_grant.as_ref() {
+                let tv = submission.timeline_value();
+                if tv > ctx.gpu_progress() {
+                    self.pending_bump_submission = Some(submission);
+                    return Ok(());
+                }
+                let _tz = goldy::tracy_zone!("ekrano.drain_ready_bump_readbacks.grant");
+                let loan = grant
+                    .consume(&submission)
+                    .map_err(|e| Error::Shader(e.to_string()))?;
+                read_bump_bytes(self, &loan);
+                return Ok(());
+            }
+            self.pending_bump_submission = Some(submission);
+        }
+
         let Some((timeline, buf)) = self.pending_bump_readback.take() else {
             return Ok(());
         };
@@ -679,6 +764,11 @@ impl PersistentState {
     }
 }
 
+fn read_bump_bytes(persistent: &mut PersistentState, bytes: &[u8]) {
+    let _parse = goldy::tracy_zone!("ekrano.bump_readback.parse");
+    persistent.last_drained_bump = Some(bytemuck::pod_read_unaligned(bytes));
+}
+
 fn read_bump_buffer(device: &Device, persistent: &mut PersistentState, buf: Buffer) -> Result<()> {
     let _bump = goldy::tracy_zone!("ekrano.bump_readback");
     let size = buf.byte_size() as usize;
@@ -692,8 +782,7 @@ fn read_bump_buffer(device: &Device, persistent: &mut PersistentState, buf: Buff
             .map_err(|e| Error::Shader(e.to_string()))?;
     }
     {
-        let _parse = goldy::tracy_zone!("ekrano.bump_readback.parse");
-        persistent.last_drained_bump = Some(bytemuck::pod_read_unaligned(&output));
+        read_bump_bytes(persistent, &output);
     }
     {
         let _return = goldy::tracy_zone!("ekrano.bump_readback.return_pool");

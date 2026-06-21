@@ -74,6 +74,7 @@ mod graph_gpu_resources;
 mod scheme_gpu_resources;
 mod graph_render;
 mod scheme_render;
+mod worker_retention;
 
 pub mod low_level {
     //! Utilities which can be used to create an alternative renderer to [`GoldyRenderer`][crate::GoldyRenderer].

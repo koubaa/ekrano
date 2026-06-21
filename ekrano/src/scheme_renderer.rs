@@ -33,10 +33,10 @@ use std::mem;
 use std::sync::Arc;
 
 use goldy::task_graph::NodeAccess;
-use goldy::types::{TextureFlags, TextureFormat, TextureKind};
+use goldy::types::{ResourceAccess, TextureFlags, TextureFormat, TextureKind};
 use goldy::{
-    BudgetPolicy, Buffer, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator,
-    Grant, ShaderModule, Signal, Scheme, TaskGraph, Texture,
+    BudgetPolicy, Buffer, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator, Grant,
+    ShaderModule, Signal, Scheme, TaskGraph, Texture,
 };
 
 use crate::{
@@ -52,9 +52,12 @@ use crate::{
         record_upload_bytes, record_upload_bytes_owned, acquire_texture_rgba,
     },
     scheme_render::Render,
+    worker_retention::{upload_key, worker_stale, worker_topology},
     resource_proxy::{BindType, ShaderId},
     shaders::{self, FullShaders},
 };
+#[cfg(debug_assertions)]
+use crate::worker_retention::{debug_assert_retained_worker_resources, worker_resource_handles};
 use ekrano_encoding::{BumpAllocators, Images, Layout, Ramps, RenderConfig, Resolver};
 
 // -----------------------------------------------------------------------
@@ -84,11 +87,16 @@ pub struct SchemeRenderer {
     persistent_bump: Option<BumpAllocators>,
     /// Frame counter for rate-limiting housekeeping operations.
     cleanup_frame_counter: u64,
-    /// Retained scheme.
-    ///
-    /// Rebuilt from scratch each frame in Phase 2; Phase 3 retains topology
-    /// across frames for the zero-rerecord path.
-    scheme: Scheme,
+    /// Retained worker scheme: compute topology recorded once per fingerprint.
+    worker: Scheme,
+    /// Persistent upload scheme: per-frame property writes without churning worker topology.
+    upload: Scheme,
+    /// Cumulative worker topology records across worker replacements (tests / diagnostics).
+    #[cfg(test)]
+    worker_record_epochs: u64,
+    /// Cumulative upload scheme records across upload replacements (tests / diagnostics).
+    #[cfg(test)]
+    upload_record_epochs: u64,
 }
 
 impl SchemeRenderer {
@@ -107,7 +115,8 @@ impl SchemeRenderer {
             let _tz = goldy::tracy_zone!("ekrano.SchemeRenderer::new.frame_orchestrator");
             FrameOrchestrator::new(&context, FRAME_PIPELINE_DEPTH)
         };
-        let scheme = Scheme::new(&context);
+        let worker = Scheme::new(&context);
+        let upload = Scheme::new(&context);
         let mut renderer = Self {
             device: device.clone(),
             context,
@@ -118,7 +127,12 @@ impl SchemeRenderer {
             frame_pipeline,
             persistent_bump: None,
             cleanup_frame_counter: 0,
-            scheme,
+            worker,
+            upload,
+            #[cfg(test)]
+            worker_record_epochs: 0,
+            #[cfg(test)]
+            upload_record_epochs: 0,
         };
         let shaders = {
             let _tz = goldy::tracy_zone!("ekrano.SchemeRenderer::new.compile_shaders");
@@ -325,6 +339,30 @@ impl SchemeRenderer {
         }
     }
 
+    /// Worker scheme retention counters (tests / diagnostics).
+    #[cfg(test)]
+    pub(crate) fn worker_replay_stats(&self) -> goldy::ReplayStats {
+        self.worker.replay_stats()
+    }
+
+    /// Upload scheme retention counters (tests / diagnostics).
+    #[cfg(test)]
+    pub(crate) fn upload_replay_stats(&self) -> goldy::ReplayStats {
+        self.upload.replay_stats()
+    }
+
+    /// Worker topology records across worker replacements (tests / diagnostics).
+    #[cfg(test)]
+    pub(crate) fn worker_record_epochs(&self) -> u64 {
+        self.worker_record_epochs
+    }
+
+    /// Upload scheme records across upload replacements (tests / diagnostics).
+    #[cfg(test)]
+    pub(crate) fn upload_record_epochs(&self) -> u64 {
+        self.upload_record_epochs
+    }
+
     /// GPU device handle shared by this renderer.
     pub fn device(&self) -> &Device {
         &self.device
@@ -508,92 +546,221 @@ impl SchemeRenderer {
         let t_pool = t1.elapsed();
 
         let t2 = Instant::now();
-        // Phase 2: rebuild the scheme from scratch each frame so recording starts fresh.
-        // Phase 3 will retain the topology across frames for zero-rerecord paths.
-        self.scheme = Scheme::new(&self.context);
+        let scene_bucket = crate::worker_retention::scene_size_bucket(packed.len());
+        let coverage_mask_dims = coverage_mask.as_ref().map(|m| (m.width, m.height));
+        let topology = worker_topology(
+            &params,
+            &config,
+            out_image_format,
+            coverage_mask.is_some(),
+            ramps_width,
+            ramps_height,
+            images_width,
+            images_height,
+            image_entries.len(),
+            pool.is_some(),
+            scene_bucket,
+            coverage_mask_dims,
+        );
+
+        let upload_key = upload_key(
+            scene_bucket,
+            ramps_width,
+            ramps_height,
+            image_entries.len(),
+            images_width,
+            images_height,
+            coverage_mask_dims,
+        );
+        let upload_needs_record = crate::worker_retention::upload_stale(&self.persistent, &upload_key);
+        if upload_needs_record {
+            self.upload = Scheme::new(&self.context);
+            #[cfg(test)]
+            {
+                self.upload_record_epochs += 1;
+            }
+        }
+
+        let (mut pipeline, out_image_handle) = {
+            let mut recorder = SchemeRecorder::new(
+                &self.device,
+                &self.context,
+                &mut self.worker,
+                &mut self.upload,
+                upload_needs_record,
+                &mut self.frame_pipeline,
+                frame_handle,
+                &mut self.persistent,
+                &self.engine_shaders,
+            );
+            let pipeline = {
+                let _tz = goldy::tracy_zone!("ekrano.prepare");
+                let pipeline_result = recorder.prepare_pipeline_resources(
+                    coverage_mask.as_ref(),
+                    packed,
+                    ramps,
+                    images,
+                    &params,
+                    &config,
+                    out_image_format,
+                );
+                self.resolver = resolver;
+                match pipeline_result {
+                    Ok(p) => p,
+                    Err(e) => {
+                        recorder.dismiss();
+                        return Err(e);
+                    }
+                }
+            };
+            let out_image_handle = pipeline
+                .out_image
+                .handle(ResourceAccess::Write)
+                .expect("out_image must be writable");
+            recorder.dismiss();
+            (pipeline, out_image_handle)
+        };
+
+        if upload_needs_record {
+            self.persistent.cached_upload_key = Some(upload_key);
+        }
+
+        let worker_stale = worker_stale(
+            &self.persistent,
+            &topology,
+            &layer_filter_effects,
+            out_image_handle,
+        );
+
+        #[cfg(debug_assertions)]
+        if !worker_stale {
+            if let Some(recorded) = self.persistent.cached_worker_resources.as_ref() {
+                let current = worker_resource_handles(
+                    &pipeline.scene,
+                    &pipeline.bump,
+                    &pipeline.gradient,
+                    &pipeline.image_atlas,
+                    &pipeline.mask_atlas,
+                    &pipeline.out_image,
+                );
+                debug_assert_retained_worker_resources(recorded, &current);
+            }
+        }
+
+        #[cfg(debug_assertions)]
+        let debug_recorded_resources = worker_stale.then(|| {
+            worker_resource_handles(
+                &pipeline.scene,
+                &pipeline.bump,
+                &pipeline.gradient,
+                &pipeline.image_atlas,
+                &pipeline.mask_atlas,
+                &pipeline.out_image,
+            )
+        });
+
+        if worker_stale {
+            self.worker = Scheme::new(&self.context);
+            self.persistent.cached_bump_grant = None;
+            self.persistent.cached_present_grant = None;
+        }
+
         let mut recorder = SchemeRecorder::new(
             &self.device,
             &self.context,
-            &mut self.scheme,
+            &mut self.worker,
+            &mut self.upload,
+            upload_needs_record,
             &mut self.frame_pipeline,
             frame_handle,
             &mut self.persistent,
             &self.engine_shaders,
         );
 
-        let mut pipeline = {
-            let _tz = goldy::tracy_zone!("ekrano.prepare");
-            let pipeline_result = recorder.prepare_pipeline_resources(
-                coverage_mask.as_ref(),
-                packed,
-                ramps,
-                images,
-                &params,
-                &config,
-                out_image_format,
-            );
-            self.resolver = resolver;
-            match pipeline_result {
-                Ok(p) => p,
-                Err(e) => {
-                    drop(recorder);
-                    return Err(e);
-                }
-            }
-        };
-
         let mut render = Render::new();
-        {
-            let _tz = goldy::tracy_zone!("ekrano.coarse");
-            render.run_coarse(
-                &mut pipeline,
-                &self.shaders,
-                &params,
-                params.robust,
-                &config,
-                &mut recorder,
-            );
-        }
-        let t_coarse = t2.elapsed();
+        let mut worker_cache = None;
+        let (t_coarse, t_fine_record) = if worker_stale {
+            {
+                let _tz = goldy::tracy_zone!("ekrano.coarse");
+                render.run_coarse(
+                    &mut pipeline,
+                    &self.shaders,
+                    &params,
+                    params.robust,
+                    &config,
+                    &mut recorder,
+                );
+            }
+            let t_coarse = t2.elapsed();
 
-        let t3 = Instant::now();
-        {
-            let _tz = goldy::tracy_zone!("ekrano.fine");
+            let t3 = Instant::now();
+            {
+                let _tz = goldy::tracy_zone!("ekrano.fine");
 
-            render.record_fine(
-                &layer_filter_effects,
-                &self.shaders,
-                &pipeline,
-                output_texture,
-                &mut recorder,
-            );
-            #[cfg(feature = "debug_layers")]
-            let _ = render.take_captured_buffers();
-            crate::scheme_render::record_filter_effects(
-                &layer_filter_effects,
-                &self.shaders,
-                &mut recorder,
-                &pipeline,
-                output_texture,
-            );
-        }
-        let t_fine_record = t3.elapsed();
+                render.record_fine(
+                    &layer_filter_effects,
+                    &self.shaders,
+                    &pipeline,
+                    output_texture,
+                    &mut recorder,
+                );
+                #[cfg(feature = "debug_layers")]
+                let _ = render.take_captured_buffers();
+                crate::scheme_render::record_filter_effects(
+                    &layer_filter_effects,
+                    &self.shaders,
+                    &mut recorder,
+                    &pipeline,
+                    output_texture,
+                );
+            }
+            let t_fine_record = t3.elapsed();
 
-        // Surface path: record copy_texture_to_present + grant_present before submit.
-        let present_grant = if let Some(pool) = pool {
-            let screen = pool.lease();
-            recorder.copy_texture_to_present(&pipeline.out_image, &screen);
-            Some(recorder.grant_present(&screen))
+            let present_grant = if let Some(pool) = pool {
+                let screen = pool.lease();
+                recorder.copy_texture_to_present(&pipeline.out_image, &screen);
+                Some(recorder.grant_present(&screen))
+            } else {
+                None
+            };
+
+            let bump_grant = if params.robust {
+                Some(
+                    recorder
+                        .scheme()
+                        .grant_read(&pipeline.bump)
+                        .map_err(|e| Error::Shader(e.to_string()))?,
+                )
+            } else {
+                None
+            };
+
+            worker_cache = Some((
+                present_grant,
+                bump_grant,
+                topology,
+                layer_filter_effects.clone(),
+                out_image_handle,
+            ));
+            #[cfg(test)]
+            {
+                self.worker_record_epochs += 1;
+            }
+            (t_coarse, t_fine_record)
         } else {
-            None
+            // Worker retained: coarse/fine are not re-run this frame.
+            // t_coarse and t_fine_record are reported as zero in FrameStats on the
+            // hot retained path — the timings reflect only the recording cost, which
+            // is zero by design when the COW bit is clean.
+            (std::time::Duration::ZERO, std::time::Duration::ZERO)
         };
 
         let t4 = Instant::now();
-        let cache_outcome = recorder.schedule_pipeline_cleanup(pipeline, params.robust);
+        let cache_outcome = recorder.schedule_pipeline_cleanup(pipeline);
         let FrameFinishOutcome {
             timeline: frame_tv,
             surface_frame: _,
-            bump_readback,
+            bump_readback: _,
             deferred_textures,
             recyclable_owned,
             scheme_submission,
@@ -602,10 +769,27 @@ impl SchemeRenderer {
             recorder.finish()?
         };
 
+        if let Some((present, bump, topology, filter_effects, out_image)) = worker_cache {
+            self.persistent.cached_present_grant = present;
+            self.persistent.cached_bump_grant = bump;
+            self.persistent.cached_worker_topology = Some(topology);
+            self.persistent.cached_worker_filter_effects = filter_effects;
+            self.persistent.cached_worker_out_image = Some(out_image);
+            #[cfg(debug_assertions)]
+            if let Some(resources) = debug_recorded_resources {
+                self.persistent.cached_worker_resources = Some(resources);
+            }
+        }
+
+        let present_grant = pool
+            .is_some()
+            .then(|| self.persistent.cached_present_grant.clone())
+            .flatten();
+
         // Present using the scheme's native mechanism.
-        if let (Some(grant), Some(submission)) = (present_grant, scheme_submission) {
+        if let (Some(grant), Some(submission)) = (present_grant.as_ref(), scheme_submission.as_ref()) {
             grant
-                .consume(&submission)
+                .consume(submission)
                 .map_err(|e| Error::Shader(e.to_string()))?;
         }
 
@@ -622,8 +806,10 @@ impl SchemeRenderer {
             );
             self.persistent.cached_rt_timelines[i] = frame_tv;
         }
-        if let Some(buf) = bump_readback {
-            self.persistent.queue_bump_readback(frame_tv, buf);
+        if params.robust && self.persistent.cached_bump_grant.is_some() {
+            if let Some(submission) = scheme_submission {
+                self.persistent.queue_bump_submission(submission);
+            }
         }
         defer_frame_gpu_resources(
             &self.context,
@@ -735,7 +921,12 @@ impl SchemeRenderer {
 pub(crate) struct SchemeRecorder<'a> {
     device: &'a Device,
     pub(crate) context: &'a Context,
+    /// Retained worker scheme (compute + present topology).
     pub(crate) scheme: &'a mut Scheme,
+    /// Per-frame upload scheme (property writes only).
+    upload: &'a mut Scheme,
+    /// When true, the upload scheme IR is empty and copy/upload nodes must be recorded this frame.
+    pub(crate) upload_needs_record: bool,
     frame_pipeline: &'a mut FrameOrchestrator<()>,
     frame_handle: FrameHandle,
     pub(crate) persistent: &'a mut PersistentState,
@@ -743,9 +934,6 @@ pub(crate) struct SchemeRecorder<'a> {
     /// Set to `true` by `finish` or `abort`; the `Drop` impl aborts the open frame
     /// if the recorder is dropped without being properly completed (e.g. on a `?` return).
     finished: bool,
-    /// The bump readback buffer for the current frame (`robust=true` only).
-    /// Queued into `PersistentState::pending_bump_readback` after GPU submit.
-    bump_buf_for_readback: Option<Buffer>,
     deferred_owned_buffers: Vec<(Buffer, &'static str)>,
     deferred_textures: Vec<Texture>,
     /// Per-frame filter dispatch slot counter, incremented by each `filter_dispatch` call.
@@ -767,6 +955,10 @@ impl<'a> SchemeRecorder<'a> {
         self.scheme
     }
 
+    pub(crate) fn upload_scheme(&mut self) -> &mut Scheme {
+        self.upload
+    }
+
     pub(crate) fn copy_texture_to_present(&mut self, src: &Texture, dst: &goldy::PresentLease) {
         self.scheme.copy_texture_to_present(src, dst);
     }
@@ -779,6 +971,8 @@ impl<'a> SchemeRecorder<'a> {
         device: &'a Device,
         context: &'a Context,
         scheme: &'a mut Scheme,
+        upload: &'a mut Scheme,
+        upload_needs_record: bool,
         frame_pipeline: &'a mut FrameOrchestrator<()>,
         frame_handle: FrameHandle,
         persistent: &'a mut PersistentState,
@@ -792,16 +986,22 @@ impl<'a> SchemeRecorder<'a> {
             device,
             context,
             scheme,
+            upload,
+            upload_needs_record,
             frame_pipeline,
             frame_handle,
             persistent,
             shaders,
-            bump_buf_for_readback: None,
             deferred_owned_buffers: Vec::with_capacity(owned_cap),
             deferred_textures: Vec::with_capacity(tex_cap),
             finished: false,
             filter_dispatch_slot: 0,
         }
+    }
+
+    /// End prepare-only use without aborting the open frame (upload scheme retains writes).
+    pub(crate) fn dismiss(mut self) {
+        self.finished = true;
     }
 
     pub(crate) fn acquire_texture_rgba(
@@ -848,7 +1048,6 @@ impl<'a> SchemeRecorder<'a> {
     pub(crate) fn schedule_pipeline_cleanup(
         &mut self,
         pipeline: crate::scheme_gpu_resources::PipelineResources,
-        bump_readback: bool,
     ) -> CacheScheduleOutcome {
         let mut outcome = CacheScheduleOutcome::default();
         let crate::scheme_gpu_resources::PipelineResources {
@@ -867,19 +1066,13 @@ impl<'a> SchemeRecorder<'a> {
             config_uniform_value,
         } = pipeline;
 
-        self.defer_texture(gradient);
-        self.defer_texture(image_atlas);
-        self.defer_texture(mask_atlas);
-        self.defer_owned_buffer(scene, "ekrano.scene");
+        let _ = (gradient, image_atlas, mask_atlas);
+        self.persistent.cached_scene = Some((scene.byte_size(), scene));
         self.persistent.cached_config_uniform = Some((config_uniform_value, config));
         if let Some((wg_counts_gpu, indirect_buf)) = indirect {
             self.persistent.cached_scheme_indirect = Some((wg_counts_gpu, indirect_buf));
         }
-        if bump_readback {
-            self.bump_buf_for_readback = Some(bump);
-        } else {
-            self.defer_owned_buffer(bump, "ekrano.bump_buf");
-        }
+        self.persistent.cached_bump = Some((bump.byte_size(), bump));
         let pipeline_cache = crate::graph_gpu_resources::CachedPipeline {
             stable: crate::graph_gpu_resources::StablePipelineBuffers {
                 info_bin_data: stable.info_bin_data,
@@ -1057,6 +1250,7 @@ impl<'a> SchemeRecorder<'a> {
         }
     }
 
+    #[cfg(feature = "debug_layers")]
     pub(crate) fn defer_owned_buffer(&mut self, buf: Buffer, name: &'static str) {
         self.deferred_owned_buffers.push((buf, name));
     }
@@ -1075,10 +1269,13 @@ impl<'a> SchemeRecorder<'a> {
         self.persistent.deferred_textures_cap_hint = self.deferred_textures.capacity();
 
         let deferred_textures = mem::take(&mut self.deferred_textures);
-        let bump_readback = self.bump_buf_for_readback.take();
         let recyclable_owned = mem::take(&mut self.deferred_owned_buffers);
 
         let frame_handle = self.frame_handle;
+
+        self.upload
+            .submit()
+            .map_err(|e| Error::Shader(e.to_string()))?;
 
         let submission = self.scheme.submit().map_err(|e| Error::Shader(e.to_string()))?;
         let scheme_tv = submission.timeline_value();
@@ -1090,7 +1287,7 @@ impl<'a> SchemeRecorder<'a> {
         Ok(FrameFinishOutcome {
             timeline: tv,
             surface_frame: None,
-            bump_readback,
+            bump_readback: None,
             deferred_textures,
             recyclable_owned,
             scheme_submission: Some(submission),
@@ -1148,7 +1345,8 @@ mod tests {
             let config = RenderConfig::new(&layout, params.width, params.height, &params.base_color);
 
             let ctx = device.create_context().expect("context");
-            let mut scheme = Scheme::new(&ctx);
+            let mut worker = Scheme::new(&ctx);
+            let mut upload = Scheme::new(&ctx);
             let mut frame_pipeline = FrameOrchestrator::new(&ctx, FRAME_PIPELINE_DEPTH);
             let frame_handle = frame_pipeline
                 .begin_frame(|_, _| Ok::<(), Error>(()))
@@ -1157,7 +1355,9 @@ mod tests {
                 let mut recorder = SchemeRecorder::new(
                     &device,
                     &ctx,
-                    &mut scheme,
+                    &mut worker,
+                    &mut upload,
+                    true,
                     &mut frame_pipeline,
                     frame_handle,
                     &mut persistent,
@@ -1184,5 +1384,243 @@ mod tests {
                  to swap R and B when copying to a Bgra8Unorm present lease"
             );
         }
+    }
+
+    /// Worker scheme records once and resubmits on subsequent frames with stable topology.
+    #[test]
+    fn worker_scheme_retains_topology_across_frames() {
+        let Some((device, _)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
+            return;
+        };
+
+        let mut renderer = SchemeRenderer::new(&device).expect("SchemeRenderer::new");
+        let mut scene = Scene::new();
+        scene.fill(
+            peniko::Fill::NonZero,
+            peniko::kurbo::Affine::IDENTITY,
+            peniko::Color::from_rgb8(200, 100, 50),
+            None,
+            &peniko::kurbo::Circle::new((32.0, 32.0), 24.0),
+        );
+
+        let params = RenderParams {
+            base_color: peniko::color::palette::css::BLACK,
+            width: 64,
+            height: 64,
+            antialiasing_method: crate::AaConfig::Area,
+            robust: false,
+        };
+
+        const FRAMES: u32 = 4;
+        for _ in 0..FRAMES {
+            renderer
+                .render_to_buffer(&scene, &params)
+                .expect("render_to_buffer");
+        }
+
+        let stats = renderer.worker_replay_stats();
+        assert_eq!(
+            stats.records, 1,
+            "worker must record exactly once for stable topology"
+        );
+        let upload_stats = renderer.upload_replay_stats();
+        assert_eq!(
+            upload_stats.records, 1,
+            "upload scheme must record exactly once for stable topology"
+        );
+    }
+
+    /// Resolution change invalidates worker retention and triggers exactly one re-record.
+    #[test]
+    fn worker_scheme_rerecords_on_topology_change() {
+        let Some((device, _)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
+            return;
+        };
+
+        let mut renderer = SchemeRenderer::new(&device).expect("SchemeRenderer::new");
+        let mut scene = Scene::new();
+        scene.fill(
+            peniko::Fill::NonZero,
+            peniko::kurbo::Affine::IDENTITY,
+            peniko::Color::from_rgb8(200, 100, 50),
+            None,
+            &peniko::kurbo::Circle::new((32.0, 32.0), 24.0),
+        );
+
+        let mut params = RenderParams {
+            base_color: peniko::color::palette::css::BLACK,
+            width: 64,
+            height: 64,
+            antialiasing_method: crate::AaConfig::Area,
+            robust: false,
+        };
+
+        for _ in 0..2 {
+            renderer
+                .render_to_buffer(&scene, &params)
+                .expect("render_to_buffer");
+        }
+        assert_eq!(renderer.worker_record_epochs(), 1);
+
+        params.width = 128;
+        params.height = 128;
+        for _ in 0..2 {
+            renderer
+                .render_to_buffer(&scene, &params)
+                .expect("render_to_buffer");
+        }
+        assert_eq!(
+            renderer.worker_record_epochs(), 2,
+            "resolution change must trigger exactly one additional worker record"
+        );
+        assert_eq!(
+            renderer.worker_replay_stats().records, 1,
+            "retained worker at new resolution records once then resubmits"
+        );
+    }
+
+    /// Upload scheme re-records exactly once when scene_bucket grows, and the worker also
+    /// re-records because the scene buffer ResourceHandle changed.
+    ///
+    /// This is a regression guard for the scene_bucket gap in the original worker_stale
+    /// predicate: the scene buffer is bound by handle in the worker's recorded dispatches,
+    /// so a bucket change (new allocation) must invalidate the worker too.
+    #[test]
+    fn worker_and_upload_rerecord_on_scene_bucket_growth() {
+        let Some((device, _)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
+            return;
+        };
+
+        let mut renderer = SchemeRenderer::new(&device).expect("SchemeRenderer::new");
+
+        let mut small_scene = Scene::new();
+        small_scene.fill(
+            peniko::Fill::NonZero,
+            peniko::kurbo::Affine::IDENTITY,
+            peniko::Color::from_rgb8(200, 100, 50),
+            None,
+            &peniko::kurbo::Circle::new((32.0, 32.0), 24.0),
+        );
+
+        // Build a scene whose packed bytes land in the next power-of-two bucket
+        // above the small scene.  We add enough paths to reliably cross a bucket boundary
+        // without pinning exact byte counts (the assertion is on record epochs, not bytes).
+        let mut large_scene = Scene::new();
+        for i in 0..200 {
+            let r = (i % 256) as u8;
+            large_scene.fill(
+                peniko::Fill::NonZero,
+                peniko::kurbo::Affine::IDENTITY,
+                peniko::Color::from_rgb8(r, 100, 50),
+                None,
+                &peniko::kurbo::Circle::new((32.0, 32.0), 8.0),
+            );
+        }
+
+        let params = RenderParams {
+            base_color: peniko::color::palette::css::BLACK,
+            width: 64,
+            height: 64,
+            antialiasing_method: crate::AaConfig::Area,
+            robust: false,
+        };
+
+        // Warm up with the small scene — establishes an initial bucket.
+        for _ in 0..2 {
+            renderer
+                .render_to_buffer(&small_scene, &params)
+                .expect("render_to_buffer small");
+        }
+        let worker_epochs_after_small = renderer.worker_record_epochs();
+        let upload_epochs_after_small = renderer.upload_record_epochs();
+        assert_eq!(worker_epochs_after_small, 1);
+        assert_eq!(upload_epochs_after_small, 1);
+
+        // Switch to a much larger scene.  The scene_bucket should grow and force both
+        // the upload scheme (new staging copy topology) and the worker scheme (new scene
+        // buffer handle) to re-record.
+        renderer
+            .render_to_buffer(&large_scene, &params)
+            .expect("render_to_buffer large");
+
+        assert!(
+            renderer.upload_record_epochs() > upload_epochs_after_small,
+            "upload scheme must re-record when scene byte bucket grows"
+        );
+        assert!(
+            renderer.worker_record_epochs() > worker_epochs_after_small,
+            "worker scheme must re-record when scene buffer is reallocated (bucket grew)"
+        );
+
+        // Stabilise: two more large frames must not trigger additional records.
+        let worker_epochs_stable = renderer.worker_record_epochs();
+        let upload_epochs_stable = renderer.upload_record_epochs();
+        for _ in 0..2 {
+            renderer
+                .render_to_buffer(&large_scene, &params)
+                .expect("render_to_buffer large stable");
+        }
+        assert_eq!(
+            renderer.worker_record_epochs(), worker_epochs_stable,
+            "worker must not re-record on repeated large-scene frames"
+        );
+        assert_eq!(
+            renderer.upload_record_epochs(), upload_epochs_stable,
+            "upload must not re-record on repeated large-scene frames"
+        );
+    }
+
+    /// Upload scheme is stable when only worker topology changes (AA mode switch).
+    ///
+    /// A topology-only change (AA mode) forces a worker re-record but the upload key
+    /// (scene bucket + atlas dims) is unchanged, so the upload scheme must NOT re-record.
+    #[test]
+    fn upload_scheme_stable_when_only_worker_topology_changes() {
+        let Some((device, _)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
+            return;
+        };
+
+        let mut renderer = SchemeRenderer::new(&device).expect("SchemeRenderer::new");
+        let mut scene = Scene::new();
+        scene.fill(
+            peniko::Fill::NonZero,
+            peniko::kurbo::Affine::IDENTITY,
+            peniko::Color::from_rgb8(200, 100, 50),
+            None,
+            &peniko::kurbo::Circle::new((32.0, 32.0), 24.0),
+        );
+
+        let mut params = RenderParams {
+            base_color: peniko::color::palette::css::BLACK,
+            width: 64,
+            height: 64,
+            antialiasing_method: crate::AaConfig::Area,
+            robust: false,
+        };
+
+        for _ in 0..2 {
+            renderer
+                .render_to_buffer(&scene, &params)
+                .expect("render_to_buffer");
+        }
+        let upload_epochs_after_area = renderer.upload_record_epochs();
+        let worker_epochs_after_area = renderer.worker_record_epochs();
+        assert_eq!(upload_epochs_after_area, 1);
+        assert_eq!(worker_epochs_after_area, 1);
+
+        // Switch AA — this changes WorkerTopology.aa but not the UploadKey.
+        params.antialiasing_method = crate::AaConfig::Msaa16;
+        renderer
+            .render_to_buffer(&scene, &params)
+            .expect("render_to_buffer with msaa16");
+
+        assert_eq!(
+            renderer.upload_record_epochs(), upload_epochs_after_area,
+            "upload scheme must NOT re-record when only AA mode changes"
+        );
+        assert_eq!(
+            renderer.worker_record_epochs(), worker_epochs_after_area + 1,
+            "worker scheme must re-record on AA mode change"
+        );
     }
 }
