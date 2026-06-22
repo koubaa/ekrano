@@ -5,7 +5,7 @@
 
 use std::mem::size_of;
 
-use goldy::types::{BufferFlags, TextureFlags, TextureKind};
+use goldy::types::{BufferFlags, ResourceAccess, TextureFlags, TextureKind};
 use goldy::{Buffer, BufferKind, DispatchShape, Init, Parcel, Sampler, Texture, TextureFormat, ordinal};
 
 use crate::scheme_renderer::SchemeRecorder;
@@ -1142,15 +1142,15 @@ impl PipelineResources {
 
         // Try to reuse cached render targets from the previous frame (avoids TexturePool
         // round-trips when render dimensions are stable across frames).
-        let (out_image, filter_layers) = {
+        let (out_image, filter_layers, out_image_from_cache) = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.render_targets");
-            if let Some((cached_out, cached_layers)) = recorder.persistent.take_cached_render_targets(
-                gpu_progress,
+            if let Some((cached_out, cached_layers)) = recorder.persistent.take_scheme_render_targets(
+                recorder.context(),
                 params.width,
                 params.height,
                 out_image_format,
             ) {
-                (cached_out, cached_layers)
+                (cached_out, cached_layers, true)
             } else {
                 let _tz2 = goldy::tracy_zone!("ekrano.prepare.render_targets.ALLOC");
                 let out = recorder
@@ -1175,9 +1175,31 @@ impl PipelineResources {
                     )
                     .expect("filter layer")
                 });
-                (out, layers)
+                (out, layers, false)
             }
         };
+        // #region agent log
+        {
+            use goldy::validation_env::dbg_session_log;
+            let write_idx = out_image.resource_index(ResourceAccess::Write);
+            let read_idx = out_image.resource_index(ResourceAccess::Read);
+            dbg_session_log(
+                "H1",
+                "scheme_gpu_resources.rs:prepare",
+                "out_image after acquire",
+                &format!(
+                    r#"{{"from_cache":{},"gpu_handle":{},"access":"{:?}","flags":"{:?}","write_idx":{:?},"read_idx":{:?},"owned":{}}}"#,
+                    out_image_from_cache,
+                    out_image.gpu_handle(),
+                    out_image.access(),
+                    out_image.flags(),
+                    write_idx,
+                    read_idx,
+                    out_image.is_owned(),
+                ),
+            );
+        }
+        // #endregion
 
         Ok(Self {
             gradient,

@@ -47,7 +47,7 @@ use crate::{
         FrameFinishOutcome, FrameStats, GoldyShader, AllocatorStats,
         FRAME_PIPELINE_DEPTH, MAX_BUMP_RETRIES, PreparedFrame, PresentToken, PersistentState,
         ResourcePoolStats, defer_frame_gpu_resources, env_robust_override,
-        FRAME_COUNTER, sanitize_bump, find_empty_cache_slot, CacheScheduleOutcome,
+        FRAME_COUNTER, sanitize_bump, CacheScheduleOutcome,
     },
     scheme_gpu_resources::{
         GpuBinding, bind_type_to_node_access,
@@ -93,6 +93,8 @@ pub struct SchemeRenderer {
     worker: Scheme,
     /// Persistent upload scheme: per-frame property writes without churning worker topology.
     upload: Scheme,
+    /// Standalone scheme for headless texture readback (does not resubmit worker compute IR).
+    readback: Scheme,
     /// Cumulative worker topology records across worker replacements (tests / diagnostics).
     #[cfg(test)]
     worker_record_epochs: u64,
@@ -119,6 +121,7 @@ impl SchemeRenderer {
         };
         let worker = Scheme::new(&context);
         let upload = Scheme::new(&context);
+        let readback = Scheme::new(&context);
         let mut renderer = Self {
             device: device.clone(),
             context,
@@ -131,6 +134,7 @@ impl SchemeRenderer {
             cleanup_frame_counter: 0,
             worker,
             upload,
+            readback,
             #[cfg(test)]
             worker_record_epochs: 0,
             #[cfg(test)]
@@ -419,23 +423,9 @@ impl SchemeRenderer {
 
     /// Render a scene and return the pixel data as RGBA bytes (synchronous).
     pub fn render_to_buffer(&mut self, scene: &Scene, params: &RenderParams) -> Result<Vec<u8>> {
-        let width = params.width;
-        let height = params.height;
-        let texture = self
-            .persistent
-            .tex_pool
-            .acquire(
-                &self.device,
-                width,
-                height,
-                TextureFormat::Rgba8Unorm,
-                TextureKind::Direct,
-                TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
-            )
-            .map_err(|e| Error::Gpu(e.to_string()))?;
-
         for _attempt in 0..=MAX_BUMP_RETRIES {
-            self.render_to_texture(scene, &texture, params)?;
+            self.poll_and_reclaim();
+            self.run_frame(scene, params, None, None)?;
             self.frame_pipeline
                 .drain_all(|_, _| Ok::<(), Error>(()))
                 .map_err(|e| Error::Shader(e.to_string()))?;
@@ -445,6 +435,7 @@ impl SchemeRenderer {
             match self.persistent.last_drained_bump() {
                 Some(bump) if bump.failed != 0 => {
                     log::info!("Bump overflow in render_to_buffer (0x{:x}), retrying", bump.failed);
+                    self.persistent.cached_scheme_rt = None;
                 }
                 _ => break,
             }
@@ -461,10 +452,73 @@ impl SchemeRenderer {
             );
         }
 
-        let mut output = vec![0_u8; texture.byte_size()];
-        texture
-            .read_to_cpu(&mut output)
+        let layout = {
+            let out_image = self
+                .persistent
+                .cached_scheme_rt
+                .as_ref()
+                .map(|(t, _, _)| t)
+                .ok_or_else(|| Error::Shader("render_to_buffer: missing scheme out_image".into()))?;
+            self.readback
+                .texture_host_copy_layout(out_image)
+                .map_err(|e| Error::Readback(e.to_string()))?
+        };
+        let host_buf = self
+            .persistent
+            .acquire_readback_host_buf(&self.context, layout.staging_bytes)
             .map_err(|e| Error::Readback(e.to_string()))?;
+        {
+            let out_image = self
+                .persistent
+                .cached_scheme_rt
+                .as_ref()
+                .map(|(t, _, _)| t)
+                .expect("render_to_buffer: missing scheme out_image");
+            self.readback
+                .copy_texture_to_host(out_image, &host_buf)
+                .map_err(|e| Error::Readback(e.to_string()))?;
+        }
+        let submission = self
+            .readback
+            .submit()
+            .map_err(|e| Error::Readback(e.to_string()))?;
+        submission
+            .wait(&self.context)
+            .map_err(|e| Error::Readback(e.to_string()))?;
+        let mut padded = vec![0_u8; layout.staging_bytes as usize];
+        host_buf
+            .read_to_cpu(&self.device, &mut padded)
+            .map_err(|e| Error::Readback(e.to_string()))?;
+        let row_bytes = layout.tight_row_bytes() as usize;
+        let pitch = layout.row_pitch as usize;
+        let mut output = vec![0_u8; layout.logical_bytes as usize];
+        for row in 0..layout.height as usize {
+            let src_offset = layout.footprint_offset as usize + row * pitch;
+            let dst_offset = row * row_bytes;
+            output[dst_offset..dst_offset + row_bytes]
+                .copy_from_slice(&padded[src_offset..src_offset + row_bytes]);
+        }
+        self.persistent
+            .store_readback_host_buf(host_buf, layout.staging_bytes);
+        // #region agent log
+        {
+            use goldy::types::ResourceAccess;
+            use goldy::validation_env::dbg_session_log;
+            if let Some((out_image, _, _)) = self.persistent.cached_scheme_rt.as_ref() {
+                let write_idx = out_image.resource_index(ResourceAccess::Write);
+                dbg_session_log(
+                    "H3",
+                    "scheme_renderer.rs:render_to_buffer",
+                    "out_image write_idx after readback (no clone drop)",
+                    &format!(
+                        r#"{{"gpu_handle":{},"write_idx":{:?}}}"#,
+                        out_image.gpu_handle(),
+                        write_idx,
+                    ),
+                );
+            }
+        }
+        // #endregion
         Ok(output)
     }
 
@@ -649,6 +703,26 @@ impl SchemeRenderer {
                     }
                 }
             };
+            // #region agent log
+            {
+                use goldy::validation_env::dbg_session_log;
+                use goldy::types::ResourceAccess;
+                let write_idx = pipeline.out_image.resource_index(ResourceAccess::Write);
+                let read_idx = pipeline.out_image.resource_index(ResourceAccess::Read);
+                dbg_session_log(
+                    "H2",
+                    "scheme_renderer.rs:run_frame_from_prepared",
+                    "out_image before handle(Write)",
+                    &format!(
+                        r#"{{"gpu_handle":{},"access":"{:?}","write_idx":{:?},"read_idx":{:?}}}"#,
+                        pipeline.out_image.gpu_handle(),
+                        pipeline.out_image.access(),
+                        write_idx,
+                        read_idx,
+                    ),
+                );
+            }
+            // #endregion
             let out_image_handle = pipeline
                 .out_image
                 .handle(ResourceAccess::Write)
@@ -668,6 +742,7 @@ impl SchemeRenderer {
                 &topology,
                 &layer_filter_effects,
                 out_image_handle,
+                output_texture.map(|t| t.gpu_handle()),
             )
         };
 
@@ -816,6 +891,7 @@ impl SchemeRenderer {
             self.persistent.cached_worker_topology = Some(topology);
             self.persistent.cached_worker_filter_effects = filter_effects;
             self.persistent.cached_worker_out_image = Some(out_image);
+            self.persistent.cached_worker_output_texture = output_texture.map(|t| t.gpu_handle());
             #[cfg(debug_assertions)]
             if let Some(resources) = debug_recorded_resources {
                 self.persistent.cached_worker_resources = Some(resources);
@@ -844,6 +920,12 @@ impl SchemeRenderer {
             self.frame_pipeline.note_presented(frame_tv);
         }
 
+        if cache_outcome.scheme_rt_stored {
+            if let Some(entry) = self.persistent.cached_scheme_rt.as_mut() {
+                log::debug!("[RT-CACHE] stamp scheme out_image timeline={frame_tv}");
+                entry.2 = frame_tv;
+            }
+        }
         if let Some(i) = cache_outcome.cached_render_targets_slot {
             log::debug!(
                 "[RT-CACHE] stamp slot={i} timeline={frame_tv} (prev={})",
@@ -1147,17 +1229,10 @@ impl<'a> SchemeRecorder<'a> {
         );
         self.persistent.cached_pipeline = Some(pipeline_cache);
         log::debug!("[PIPE-CACHE] schedule: cached");
-        if let Some(i) = find_empty_cache_slot(&self.persistent.cached_render_targets) {
-            self.persistent.cached_render_targets[i] = Some((out_image, filter_layers));
-            outcome.cached_render_targets_slot = Some(i);
-            log::debug!("[RT-CACHE] schedule: cached slot={i}");
-        } else {
-            self.defer_texture(out_image);
-            for l in filter_layers {
-                self.defer_texture(l);
-            }
-            log::debug!("[RT-CACHE] schedule: all slots full — deferred current frame RTs");
-        }
+        self.persistent
+            .store_scheme_render_targets(out_image, filter_layers, 0);
+        outcome.scheme_rt_stored = true;
+        log::debug!("[RT-CACHE] schedule: scheme out_image stored (single slot)");
         outcome
     }
 
