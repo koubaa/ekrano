@@ -164,6 +164,10 @@ impl Drop for DeferredTextureToken {
 #[derive(Debug, Default)]
 pub(crate) struct CacheScheduleOutcome {
     pub(crate) cached_render_targets_slot: Option<usize>,
+    /// Set when the scheme path stored its single persistent `out_image` into
+    /// [`PersistentState::cached_scheme_rt`]; the post-submit step then stamps the
+    /// frame timeline so a later resize can wait before recycling.
+    pub(crate) scheme_rt_stored: bool,
 }
 
 /// Outcome of [`crate::graph_renderer::GraphRecorder::finish`]: orchestrator submit result plus resources
@@ -281,7 +285,7 @@ struct BufferKey {
 }
 
 fn pool_key_for_return(buf: &Buffer, name: &'static str) -> BufferKey {
-    let buffer_flags = if name == "ekrano.bump_buf" {
+    let buffer_flags = if name == "ekrano.bump_buf" || name == "ekrano.readback_host_buf" {
         BufferFlags::CPU_READABLE
     } else {
         BufferFlags::empty()
@@ -469,6 +473,9 @@ pub(crate) struct PersistentState {
     pub(crate) cached_render_targets: [Option<(Texture, [Texture; 4])>; RESOURCE_CACHE_SLOTS],
     /// Timeline of the frame that last wrote each render-target slot. `0` when empty.
     pub(crate) cached_rt_timelines: [TimelineValue; RESOURCE_CACHE_SLOTS],
+    /// Scheme-path render-target reuse: a single persistent `out_image` + filter
+    /// layers, intentionally decoupled from [`RESOURCE_CACHE_SLOTS`].
+    pub(crate) cached_scheme_rt: Option<(Texture, [Texture; 4], TimelineValue)>,
     /// Cached pipeline buffers from the previous frame. At depth=1 only one
     /// entry exists at a time: take-then-install within a single `run_frame`.
     pub(crate) cached_pipeline: Option<crate::graph_gpu_resources::CachedPipeline>,
@@ -522,6 +529,8 @@ pub(crate) struct PersistentState {
     pub(crate) cached_present_grant: Option<goldy::PresentGrant>,
     /// `out_image` handle the worker was recorded against (RT cache rotation invalidates retention).
     pub(crate) cached_worker_out_image: Option<goldy::types::ResourceHandle>,
+    /// Output texture handle the worker fine pass was recorded against.
+    pub(crate) cached_worker_output_texture: Option<goldy::backend::TextureHandle>,
     /// Full worker-bound handles from the last record (debug invariant checks only).
     #[cfg(debug_assertions)]
     pub(crate) cached_worker_resources: Option<crate::worker_retention::WorkerResourceHandles>,
@@ -545,7 +554,7 @@ pub(crate) struct PersistentState {
     /// Owned buffers waiting to be returned to [`Self::pool`] after GPU retirement.
     /// Populated by [`DeferredOwnedBuffersToken`] drops from [`Context::defer_release`].
     pub(crate) pending_owned_returns: Arc<Mutex<Vec<(Buffer, &'static str)>>>,
-    /// Persistent host buffer parcel for `SchemeRenderer::render_to_buffer`.
+    /// Persistent host buffer parcel for [`SchemeRenderer::render_to_buffer`].
     pub(crate) readback_host_buf: Option<(Buffer, u64)>,
 }
 
@@ -561,6 +570,7 @@ impl PersistentState {
             nearest_clamp_sampler: None,
             cached_render_targets: std::array::from_fn(|_| None),
             cached_rt_timelines: [0; RESOURCE_CACHE_SLOTS],
+            cached_scheme_rt: None,
             cached_pipeline: None,
             rt_slot_swapchain_image: [None; RESOURCE_CACHE_SLOTS],
             deferred_owned_cap_hint: 0,
@@ -581,6 +591,7 @@ impl PersistentState {
             cached_mask_atlas: None,
             cached_present_grant: None,
             cached_worker_out_image: None,
+            cached_worker_output_texture: None,
             #[cfg(debug_assertions)]
             cached_worker_resources: None,
             cached_worker_topology: None,
@@ -596,7 +607,11 @@ impl PersistentState {
         }
     }
 
-    pub(crate) fn acquire_readback_host_buf(&mut self, ctx: &Context, staging_bytes: u64) -> Result<Buffer, Error> {
+    pub(crate) fn acquire_readback_host_buf(
+        &mut self,
+        ctx: &Context,
+        staging_bytes: u64,
+    ) -> Result<Buffer, Error> {
         let needs_new = self
             .readback_host_buf
             .as_ref()
@@ -606,32 +621,78 @@ impl PersistentState {
             if let Some((old, _)) = self.readback_host_buf.take() {
                 self.pool.return_buf(old, "ekrano.readback_host_buf");
             }
-            self.pool.get_buf_with_stride(
-                &mut self.retained_pool,
-                ctx,
-                staging_bytes,
-                "ekrano.readback_host_buf",
-                BufferKind::Scattered,
-                None,
-                BufferFlags::CPU_READABLE,
-            )
+            let buf = self
+                .pool
+                .get_buf_with_stride(
+                    &mut self.retained_pool,
+                    ctx,
+                    staging_bytes,
+                    "ekrano.readback_host_buf",
+                    BufferKind::Scattered,
+                    None,
+                    BufferFlags::CPU_READABLE,
+                )
+                .map_err(|e| Error::Shader(e.to_string()))?;
+            Ok(buf)
         } else if let Some((buf, _)) = self.readback_host_buf.take() {
             Ok(buf)
         } else {
-            self.pool.get_buf_with_stride(
-                &mut self.retained_pool,
-                ctx,
-                staging_bytes,
-                "ekrano.readback_host_buf",
-                BufferKind::Scattered,
-                None,
-                BufferFlags::CPU_READABLE,
-            )
+            self.pool
+                .get_buf_with_stride(
+                    &mut self.retained_pool,
+                    ctx,
+                    staging_bytes,
+                    "ekrano.readback_host_buf",
+                    BufferKind::Scattered,
+                    None,
+                    BufferFlags::CPU_READABLE,
+                )
+                .map_err(|e| Error::Shader(e.to_string()))
         }
     }
 
     pub(crate) fn store_readback_host_buf(&mut self, buf: Buffer, staging_bytes: u64) {
         self.readback_host_buf = Some((buf, staging_bytes));
+    }
+
+    pub(crate) fn take_scheme_render_targets(
+        &mut self,
+        ctx: &Context,
+        width: u32,
+        height: u32,
+        out_format: TextureFormat,
+    ) -> Option<(Texture, [Texture; 4])> {
+        let Some((out, layers, tv)) = self.cached_scheme_rt.take() else {
+            return None;
+        };
+        if out.width() == width && out.height() == height && out.format() == out_format {
+            if tv != 0 && ctx.gpu_progress() < tv {
+                let _ = ctx.wait_until(tv);
+            }
+            return Some((out, layers));
+        }
+        log::warn!(
+            "[RT-CACHE] scheme MISS (resize) timeline={tv} {}x{} vs {width}x{height} fmt={out_format:?}",
+            out.width(),
+            out.height(),
+        );
+        if ctx.gpu_progress() < tv {
+            let _ = ctx.wait_until(tv);
+        }
+        self.tex_pool.release(out);
+        for l in layers {
+            self.tex_pool.release(l);
+        }
+        None
+    }
+
+    pub(crate) fn store_scheme_render_targets(
+        &mut self,
+        out: Texture,
+        layers: [Texture; 4],
+        timeline: TimelineValue,
+    ) {
+        self.cached_scheme_rt = Some((out, layers, timeline));
     }
 }
 
