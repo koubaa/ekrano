@@ -185,8 +185,9 @@ pub(crate) fn worker_stale(
     topology: &WorkerTopology,
     filter_effects: &[LayerFilterEffect],
     out_image: ResourceHandle,
+    output_texture: Option<goldy::backend::TextureHandle>,
 ) -> bool {
-    worker_stale_reasons(persistent, topology, filter_effects, out_image)
+    worker_stale_reasons(persistent, topology, filter_effects, out_image, output_texture)
 }
 
 pub(crate) fn worker_stale_reasons(
@@ -194,12 +195,18 @@ pub(crate) fn worker_stale_reasons(
     topology: &WorkerTopology,
     filter_effects: &[LayerFilterEffect],
     out_image: ResourceHandle,
+    output_texture: Option<goldy::backend::TextureHandle>,
 ) -> bool {
     let out_image_mismatch = persistent.cached_worker_out_image != Some(out_image);
+    let output_texture_mismatch =
+        persistent.cached_worker_output_texture != output_texture;
     let topology_mismatch = persistent.cached_worker_topology.as_ref() != Some(topology);
     let filter_effects_mismatch =
         !layer_filter_effects_eq(&persistent.cached_worker_filter_effects, filter_effects);
-    out_image_mismatch || topology_mismatch || filter_effects_mismatch
+    out_image_mismatch
+        || output_texture_mismatch
+        || topology_mismatch
+        || filter_effects_mismatch
 }
 
 /// Retained resubmit assumes worker-bound resources keep the same GPU handles.
