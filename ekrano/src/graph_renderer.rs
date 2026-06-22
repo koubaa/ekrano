@@ -390,10 +390,10 @@ impl GraphRenderer {
             );
         }
 
-        let mut output = vec![0_u8; texture.byte_size()];
-        texture
-            .read_to_cpu(&mut output)
-            .map_err(|e| Error::Readback(e.to_string()))?;
+        let mut output = vec![0_u8; texture.byte_size() as usize];
+        #[allow(deprecated)]
+        let read_result = texture.read_to_cpu(&mut output);
+        read_result.map_err(|e| Error::Readback(e.to_string()))?;
         Ok(output)
     }
 
