@@ -54,7 +54,7 @@ use crate::{
         record_upload_bytes, record_upload_bytes_owned, acquire_texture_rgba,
     },
     scheme_render::Render,
-    worker_retention::{upload_key, worker_stale, worker_topology},
+    worker_retention::{upload_key, worker_stale_reasons, worker_topology},
     resource_proxy::{BindType, ShaderId},
     shaders::{self, FullShaders},
 };
@@ -334,9 +334,25 @@ impl SchemeRenderer {
         prepared: PreparedFrame,
         pool: &goldy::SwapchainPool,
     ) -> Result<(FrameStats, PresentToken)> {
+        self.submit_to_swapchain_with(prepared, pool, || Ok(()))
+    }
+
+    /// Like [`Self::submit_to_swapchain`], but runs `pre_acquire` after the upload
+    /// scheme is submitted and immediately before the worker acquires its swapchain
+    /// drawable. Callers use this to defer present-ack backpressure to the acquire
+    /// boundary so upload recording/submit overlaps the previous frame's present.
+    pub fn submit_to_swapchain_with<F>(
+        &mut self,
+        prepared: PreparedFrame,
+        pool: &goldy::SwapchainPool,
+        pre_acquire: F,
+    ) -> Result<(FrameStats, PresentToken)>
+    where
+        F: FnOnce() -> Result<()>,
+    {
         let _tz = goldy::tracy_zone!("ekrano.submit_to_swapchain");
         self.poll_and_reclaim();
-        let (stats, token) = self.run_frame_from_prepared(prepared, None, Some(pool))?;
+        let (stats, token) = self.run_frame_from_prepared(prepared, None, Some(pool), pre_acquire)?;
         token.ok_or_else(|| Error::Shader("missing present grant for swapchain submit".into()))
             .map(|token| (stats, token))
     }
@@ -468,7 +484,7 @@ impl SchemeRenderer {
         pool: Option<&goldy::SwapchainPool>,
     ) -> Result<FrameStats> {
         let prepared = self.prepare(scene, params)?;
-        let (stats, token) = self.run_frame_from_prepared(prepared, output_texture, pool)?;
+        let (stats, token) = self.run_frame_from_prepared(prepared, output_texture, pool, || Ok(()))?;
         if let Some(token) = token {
             token.present()?;
         }
@@ -479,12 +495,16 @@ impl SchemeRenderer {
     ///
     /// When `pool` is `Some`, records `copy_texture_to_present` + `grant_present`
     /// into the scheme, submits, and returns a [`PresentToken`] (does not present).
-    fn run_frame_from_prepared(
+    fn run_frame_from_prepared<F>(
         &mut self,
         prepared: PreparedFrame,
         output_texture: Option<&Texture>,
         pool: Option<&goldy::SwapchainPool>,
-    ) -> Result<(FrameStats, Option<PresentToken>)> {
+        pre_acquire: F,
+    ) -> Result<(FrameStats, Option<PresentToken>)>
+    where
+        F: FnOnce() -> Result<()>,
+    {
         let _tz = goldy::tracy_zone!("ekrano.run_frame");
         use std::time::Instant;
         let frame_start = Instant::now();
@@ -641,12 +661,15 @@ impl SchemeRenderer {
             self.persistent.cached_upload_key = Some(upload_key);
         }
 
-        let worker_stale = worker_stale(
-            &self.persistent,
-            &topology,
-            &layer_filter_effects,
-            out_image_handle,
-        );
+        let worker_stale = {
+            let _tz = goldy::tracy_zone!("ekrano.worker_stale_check");
+            worker_stale_reasons(
+                &self.persistent,
+                &topology,
+                &layer_filter_effects,
+                out_image_handle,
+            )
+        };
 
         #[cfg(debug_assertions)]
         if !worker_stale {
@@ -676,6 +699,7 @@ impl SchemeRenderer {
         });
 
         if worker_stale {
+            let _tz = goldy::tracy_zone!("ekrano.worker_record");
             self.worker = Scheme::new(&self.context);
             self.persistent.cached_bump_grant = None;
             self.persistent.cached_present_grant = None;
@@ -764,6 +788,7 @@ impl SchemeRenderer {
             }
             (t_coarse, t_fine_record)
         } else {
+            let _tz = goldy::tracy_zone!("ekrano.worker_retained");
             // Worker retained: coarse/fine are not re-run this frame.
             // t_coarse and t_fine_record are reported as zero in FrameStats on the
             // hot retained path — the timings reflect only the recording cost, which
@@ -782,7 +807,7 @@ impl SchemeRenderer {
             scheme_submission,
         } = {
             let _tz = goldy::tracy_zone!("ekrano.finish");
-            recorder.finish(pool.is_some())?
+            recorder.finish(pool.is_some(), pre_acquire)?
         };
 
         if let Some((present, bump, topology, filter_effects, out_image)) = worker_cache {
@@ -1279,7 +1304,10 @@ impl<'a> SchemeRecorder<'a> {
     /// timeline is valid for cache stamping before [`goldy::Frame::present`].
     /// Surface paths with deferred scanout call [`Self::finish(true)`]; headless /
     /// render-to-texture paths call [`Self::finish(false)`].
-    pub(crate) fn finish(mut self, deferred_present: bool) -> Result<FrameFinishOutcome> {
+    pub(crate) fn finish<F>(mut self, deferred_present: bool, pre_acquire: F) -> Result<FrameFinishOutcome>
+    where
+        F: FnOnce() -> Result<()>,
+    {
         self.finished = true;
 
         self.persistent.deferred_owned_cap_hint = self.deferred_owned_buffers.capacity();
@@ -1295,6 +1323,16 @@ impl<'a> SchemeRecorder<'a> {
             self.upload
                 .submit()
                 .map_err(|e| Error::Shader(e.to_string()))?;
+        }
+
+        // The upload scheme has no dependency on the swapchain image — only the
+        // worker's present partition acquires a drawable. Run the caller's
+        // pre-acquire barrier (e.g. wait-for-present-ack) here, after the upload
+        // is submitted but before the worker acquire, so upload recording/submit
+        // overlaps the previous frame's present round-trip.
+        {
+            let _tz = goldy::tracy_zone!("ekrano.finish.pre_acquire");
+            pre_acquire()?;
         }
 
         let submission = {
