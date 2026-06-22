@@ -611,7 +611,7 @@ impl PersistentState {
         &mut self,
         ctx: &Context,
         staging_bytes: u64,
-    ) -> Result<Buffer, crate::Error> {
+    ) -> Result<Buffer, Error> {
         let needs_new = self
             .readback_host_buf
             .as_ref()
@@ -632,7 +632,7 @@ impl PersistentState {
                     None,
                     BufferFlags::CPU_READABLE,
                 )
-                .map_err(|e| crate::Error::Shader(e.to_string()))?;
+                .map_err(|e| Error::Shader(e.to_string()))?;
             Ok(buf)
         } else if let Some((buf, _)) = self.readback_host_buf.take() {
             Ok(buf)
@@ -647,7 +647,7 @@ impl PersistentState {
                     None,
                     BufferFlags::CPU_READABLE,
                 )
-                .map_err(|e| crate::Error::Shader(e.to_string()))
+                .map_err(|e| Error::Shader(e.to_string()))
         }
     }
 
