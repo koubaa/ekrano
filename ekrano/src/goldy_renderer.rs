@@ -671,10 +671,6 @@ impl PersistentState {
                 continue;
             };
             if out.width() == width && out.height() == height && out.format() == out_format {
-                log::debug!(
-                    "[RT-CACHE] HIT slot={i}: progress={progress} timeline={}",
-                    self.cached_rt_timelines[i],
-                );
                 return Some((out, layers));
             }
             log::warn!(
@@ -992,12 +988,27 @@ impl GoldyRenderer {
         prepared: PreparedFrame,
         pool: &goldy::SwapchainPool,
     ) -> Result<(FrameStats, PresentToken)> {
+        self.submit_to_swapchain_with(prepared, pool, || Ok(()))
+    }
+
+    /// Like [`Self::submit_to_swapchain`], but runs `pre_acquire` after the upload
+    /// scheme is submitted and immediately before the worker acquires its drawable
+    /// (Scheme backend only).
+    pub fn submit_to_swapchain_with<F>(
+        &mut self,
+        prepared: PreparedFrame,
+        pool: &goldy::SwapchainPool,
+        pre_acquire: F,
+    ) -> Result<(FrameStats, PresentToken)>
+    where
+        F: FnOnce() -> Result<()>,
+    {
         match self {
             Self::Classic(_) => panic!(
                 "GoldyRenderer::submit_to_swapchain called on Classic backend — \
                  use submit_to_surface(prepared, surface) instead"
             ),
-            Self::Scheme(r) => r.submit_to_swapchain(prepared, pool),
+            Self::Scheme(r) => r.submit_to_swapchain_with(prepared, pool, pre_acquire),
         }
     }
 

@@ -179,15 +179,27 @@ fn sampled_texture_handle(tex: &Texture) -> ResourceHandle {
 /// The topology comparison covers both graph-structure inputs (AA, resolution, …) *and*
 /// resource-identity inputs (`scene_bucket`, `mask_atlas_width/height`) that, if changed,
 /// mean the worker's recorded dispatch nodes bind stale `ResourceHandle`s.
+#[allow(dead_code)]
 pub(crate) fn worker_stale(
     persistent: &PersistentState,
     topology: &WorkerTopology,
     filter_effects: &[LayerFilterEffect],
     out_image: ResourceHandle,
 ) -> bool {
-    persistent.cached_worker_out_image != Some(out_image)
-        || persistent.cached_worker_topology.as_ref() != Some(topology)
-        || !layer_filter_effects_eq(&persistent.cached_worker_filter_effects, filter_effects)
+    worker_stale_reasons(persistent, topology, filter_effects, out_image)
+}
+
+pub(crate) fn worker_stale_reasons(
+    persistent: &PersistentState,
+    topology: &WorkerTopology,
+    filter_effects: &[LayerFilterEffect],
+    out_image: ResourceHandle,
+) -> bool {
+    let out_image_mismatch = persistent.cached_worker_out_image != Some(out_image);
+    let topology_mismatch = persistent.cached_worker_topology.as_ref() != Some(topology);
+    let filter_effects_mismatch =
+        !layer_filter_effects_eq(&persistent.cached_worker_filter_effects, filter_effects);
+    out_image_mismatch || topology_mismatch || filter_effects_mismatch
 }
 
 /// Retained resubmit assumes worker-bound resources keep the same GPU handles.
