@@ -288,16 +288,11 @@ struct BufferKey {
 }
 
 fn pool_key_for_return(buf: &Buffer, name: &'static str) -> BufferKey {
-    let buffer_flags = if name == "ekrano.bump_buf" || name == "ekrano.readback_host_buf" {
-        BufferFlags::CPU_READABLE
-    } else {
-        BufferFlags::empty()
-    };
     BufferKey {
         size: buf.byte_size(),
         access: BufferKind::Scattered,
         name,
-        buffer_flags,
+        buffer_flags: buf.flags(),
     }
 }
 
