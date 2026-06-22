@@ -452,22 +452,30 @@ impl SchemeRenderer {
             );
         }
 
-        let (layout, out_image) = {
+        let layout = {
             let out_image = self
                 .persistent
                 .cached_scheme_rt
                 .as_ref()
                 .map(|(t, _, _)| t)
                 .ok_or_else(|| Error::Shader("render_to_buffer: missing scheme out_image".into()))?;
-            (out_image.copy_layout(), out_image.clone())
+            out_image.copy_layout()
         };
         let host_buf = self
             .persistent
             .acquire_readback_host_buf(&self.context, layout.staging_bytes)
             .map_err(|e| Error::Readback(e.to_string()))?;
-        self.readback
-            .copy_texture(&out_image, &host_buf)
-            .map_err(|e| Error::Readback(e.to_string()))?;
+        {
+            let out_image = self
+                .persistent
+                .cached_scheme_rt
+                .as_ref()
+                .map(|(t, _, _)| t)
+                .expect("render_to_buffer: missing scheme out_image");
+            self.readback
+                .copy_texture(out_image, &host_buf)
+                .map_err(|e| Error::Readback(e.to_string()))?;
+        }
         let submission = self
             .readback
             .submit()
