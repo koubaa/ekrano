@@ -498,25 +498,6 @@ impl SchemeRenderer {
         }
         self.persistent
             .store_readback_host_buf(host_buf, layout.staging_bytes);
-        // #region agent log
-        {
-            use goldy::types::ResourceAccess;
-            use goldy::validation_env::dbg_session_log;
-            if let Some((out_image, _, _)) = self.persistent.cached_scheme_rt.as_ref() {
-                let write_idx = out_image.resource_index(ResourceAccess::Write);
-                dbg_session_log(
-                    "H3",
-                    "scheme_renderer.rs:render_to_buffer",
-                    "out_image write_idx after readback (no clone drop)",
-                    &format!(
-                        r#"{{"gpu_handle":{},"write_idx":{:?}}}"#,
-                        out_image.gpu_handle(),
-                        write_idx,
-                    ),
-                );
-            }
-        }
-        // #endregion
         Ok(output)
     }
 
@@ -697,26 +678,6 @@ impl SchemeRenderer {
                     }
                 }
             };
-            // #region agent log
-            {
-                use goldy::validation_env::dbg_session_log;
-                use goldy::types::ResourceAccess;
-                let write_idx = pipeline.out_image.resource_index(ResourceAccess::Write);
-                let read_idx = pipeline.out_image.resource_index(ResourceAccess::Read);
-                dbg_session_log(
-                    "H2",
-                    "scheme_renderer.rs:run_frame_from_prepared",
-                    "out_image before handle(Write)",
-                    &format!(
-                        r#"{{"gpu_handle":{},"access":"{:?}","write_idx":{:?},"read_idx":{:?}}}"#,
-                        pipeline.out_image.gpu_handle(),
-                        pipeline.out_image.access(),
-                        write_idx,
-                        read_idx,
-                    ),
-                );
-            }
-            // #endregion
             let out_image_handle = pipeline
                 .out_image
                 .handle(ResourceAccess::Write)
@@ -731,13 +692,14 @@ impl SchemeRenderer {
 
         let worker_stale = {
             let _tz = goldy::tracy_zone!("ekrano.worker_stale_check");
-            worker_stale_reasons(
+            let stale = worker_stale_reasons(
                 &self.persistent,
                 &topology,
                 &layer_filter_effects,
                 out_image_handle,
                 output_texture.map(|t| t.gpu_handle()),
-            )
+            );
+            stale
         };
 
         #[cfg(debug_assertions)]
@@ -756,16 +718,7 @@ impl SchemeRenderer {
         }
 
         #[cfg(debug_assertions)]
-        let debug_recorded_resources = worker_stale.then(|| {
-            worker_resource_handles(
-                &pipeline.scene,
-                &pipeline.bump,
-                &pipeline.gradient,
-                &pipeline.image_atlas,
-                &pipeline.mask_atlas,
-                &pipeline.out_image,
-            )
-        });
+        let mut debug_recorded_resources = None;
 
         if worker_stale {
             let _tz = goldy::tracy_zone!("ekrano.worker_record");
@@ -851,6 +804,17 @@ impl SchemeRenderer {
                 layer_filter_effects.clone(),
                 out_image_handle,
             ));
+            #[cfg(debug_assertions)]
+            {
+                debug_recorded_resources = Some(worker_resource_handles(
+                    &pipeline.scene,
+                    &pipeline.bump,
+                    &pipeline.gradient,
+                    &pipeline.image_atlas,
+                    &pipeline.mask_atlas,
+                    &pipeline.out_image,
+                ));
+            }
             #[cfg(test)]
             {
                 self.worker_record_epochs += 1;
@@ -1525,6 +1489,9 @@ mod tests {
     }
 
     /// Worker scheme records once and resubmits on subsequent frames with stable topology.
+    ///
+    /// `render_to_buffer` always runs a separate readback scheme that reads `out_image`,
+    /// so the worker sees a foreign reader and records twice (bootstrap + topology refresh).
     #[test]
     fn worker_scheme_retains_topology_across_frames() {
         let Some((device, _)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
@@ -1558,8 +1525,12 @@ mod tests {
 
         let stats = renderer.worker_replay_stats();
         assert_eq!(
-            stats.records, 1,
-            "worker must record exactly once for stable topology"
+            stats.records, 2,
+            "render_to_buffer: bootstrap record + one readback-induced topology refresh"
+        );
+        assert_eq!(
+            stats.topology_records, 1,
+            "foreign readback reader on out_image dirties worker topology once"
         );
         let upload_stats = renderer.upload_replay_stats();
         assert_eq!(
@@ -1612,9 +1583,68 @@ mod tests {
             "resolution change must trigger exactly one additional worker record"
         );
         assert_eq!(
-            renderer.worker_replay_stats().records, 1,
-            "retained worker at new resolution records once then resubmits"
+            renderer.worker_replay_stats().records, 2,
+            "render_to_buffer at new resolution: bootstrap + readback-induced topology refresh"
         );
+        assert_eq!(
+            renderer.worker_replay_stats().topology_records, 1,
+            "foreign readback reader on out_image dirties worker topology once per worker IR"
+        );
+    }
+
+    /// Without per-frame readback, the worker records once and resubmits.
+    #[test]
+    fn worker_scheme_render_to_texture_records_once() {
+        let Some((device, _)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
+            return;
+        };
+
+        let mut renderer = SchemeRenderer::new(&device).expect("SchemeRenderer::new");
+        let mut scene = Scene::new();
+        scene.fill(
+            peniko::Fill::NonZero,
+            peniko::kurbo::Affine::IDENTITY,
+            peniko::Color::from_rgb8(200, 100, 50),
+            None,
+            &peniko::kurbo::Circle::new((32.0, 32.0), 24.0),
+        );
+
+        let params = RenderParams {
+            base_color: peniko::color::palette::css::BLACK,
+            width: 64,
+            height: 64,
+            antialiasing_method: crate::AaConfig::Area,
+            robust: false,
+        };
+
+        let texture = {
+            use goldy::RetainedPool;
+            use std::sync::Arc;
+            RetainedPool::new(Arc::new(device.clone()))
+                .acquire_texture(
+                    params.width,
+                    params.height,
+                    TextureFormat::Rgba8Unorm,
+                    TextureKind::Direct,
+                    TextureFlags::COPY_DST,
+                    None,
+                )
+                .expect("output texture")
+        };
+
+        const FRAMES: u32 = 4;
+        for _ in 0..FRAMES {
+            renderer
+                .render_to_texture(&scene, &texture, &params)
+                .expect("render_to_texture");
+        }
+
+        let stats = renderer.worker_replay_stats();
+        assert_eq!(
+            stats.records, 1,
+            "render_to_texture has no foreign readback scheme on out_image"
+        );
+        assert_eq!(stats.topology_records, 0);
     }
 
     /// Upload scheme re-records exactly once when scene_bucket grows, and the worker also
