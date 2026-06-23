@@ -5,7 +5,7 @@
 
 use std::mem::size_of;
 
-use goldy::types::{BufferFlags, ResourceAccess, TextureFlags, TextureKind};
+use goldy::types::{BufferFlags, TextureFlags, TextureKind};
 use goldy::{Buffer, BufferKind, DispatchShape, Init, Parcel, Sampler, Texture, TextureFormat, ordinal};
 
 use crate::scheme_renderer::SchemeRecorder;
@@ -1142,7 +1142,7 @@ impl PipelineResources {
 
         // Try to reuse cached render targets from the previous frame (avoids TexturePool
         // round-trips when render dimensions are stable across frames).
-        let (out_image, filter_layers, out_image_from_cache) = {
+        let (out_image, filter_layers, _out_image_from_cache) = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.render_targets");
             if let Some((cached_out, cached_layers)) = recorder.persistent.take_scheme_render_targets(
                 recorder.context(),
@@ -1178,29 +1178,6 @@ impl PipelineResources {
                 (out, layers, false)
             }
         };
-        // #region agent log
-        {
-            use goldy::validation_env::dbg_session_log;
-            let write_idx_before = out_image.resource_index(ResourceAccess::Write);
-            let read_idx_before = out_image.resource_index(ResourceAccess::Read);
-            let owned_via_is_owned = out_image.is_owned();
-            let write_idx_after = out_image.resource_index(ResourceAccess::Write);
-            dbg_session_log(
-                "H1",
-                "scheme_gpu_resources.rs:prepare",
-                "out_image before/after is_owned()",
-                &format!(
-                    r#"{{"from_cache":{},"gpu_handle":{},"write_idx_before":{:?},"write_idx_after":{:?},"read_idx_before":{:?},"owned_via_is_owned":{}}}"#,
-                    out_image_from_cache,
-                    out_image.gpu_handle(),
-                    write_idx_before,
-                    write_idx_after,
-                    read_idx_before,
-                    owned_via_is_owned,
-                ),
-            );
-        }
-        // #endregion
 
         Ok(Self {
             gradient,
