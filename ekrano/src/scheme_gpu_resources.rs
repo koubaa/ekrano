@@ -1181,21 +1181,22 @@ impl PipelineResources {
         // #region agent log
         {
             use goldy::validation_env::dbg_session_log;
-            let write_idx = out_image.resource_index(ResourceAccess::Write);
-            let read_idx = out_image.resource_index(ResourceAccess::Read);
+            let write_idx_before = out_image.resource_index(ResourceAccess::Write);
+            let read_idx_before = out_image.resource_index(ResourceAccess::Read);
+            let owned_via_is_owned = out_image.is_owned();
+            let write_idx_after = out_image.resource_index(ResourceAccess::Write);
             dbg_session_log(
                 "H1",
                 "scheme_gpu_resources.rs:prepare",
-                "out_image after acquire",
+                "out_image before/after is_owned()",
                 &format!(
-                    r#"{{"from_cache":{},"gpu_handle":{},"access":"{:?}","flags":"{:?}","write_idx":{:?},"read_idx":{:?},"owned":{}}}"#,
+                    r#"{{"from_cache":{},"gpu_handle":{},"write_idx_before":{:?},"write_idx_after":{:?},"read_idx_before":{:?},"owned_via_is_owned":{}}}"#,
                     out_image_from_cache,
                     out_image.gpu_handle(),
-                    out_image.access(),
-                    out_image.flags(),
-                    write_idx,
-                    read_idx,
-                    out_image.is_owned(),
+                    write_idx_before,
+                    write_idx_after,
+                    read_idx_before,
+                    owned_via_is_owned,
                 ),
             );
         }
