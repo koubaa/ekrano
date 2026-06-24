@@ -1142,7 +1142,7 @@ impl PipelineResources {
 
         // Try to reuse cached render targets from the previous frame (avoids TexturePool
         // round-trips when render dimensions are stable across frames).
-        let (out_image, filter_layers, _out_image_from_cache) = {
+        let (out_image, filter_layers, _) = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.render_targets");
             if let Some((cached_out, cached_layers)) = recorder.persistent.take_scheme_render_targets(
                 recorder.context(),
