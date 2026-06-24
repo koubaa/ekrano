@@ -196,6 +196,18 @@ impl SchemeRenderer {
             );
             self.update_persistent_bump(&sanitize_bump(bump));
 
+            // #region agent log
+            goldy::validation_env::dbg_session_log(
+                "HI",
+                "scheme_renderer.rs:apply_bump_feedback",
+                "bump readback",
+                &format!(
+                    "{{\"frame\":{frame_num},\"failed\":{},\"lines\":{},\"seg_counts\":{},\"segments\":{},\"binning\":{},\"ptcl\":{},\"blend\":{},\"tile\":{}}}",
+                    bump.failed, bump.lines, bump.seg_counts, bump.segments, bump.binning, bump.ptcl, bump.blend, bump.tile
+                ),
+            );
+            // #endregion
+
             if bump.failed != 0 {
                 stats.bump_retries += 1;
                 log::info!("Previous frame bump overflow (0x{:x}), growing buffers", bump.failed);
@@ -297,6 +309,13 @@ impl SchemeRenderer {
         if let Some(robust) = env_robust_override() {
             params.robust = robust;
         }
+        // #region agent log
+        // CONS bit2: force robust=true so the bump readback/feedback loop runs and grows
+        // buffer estimates on overflow. If green vanishes -> bump overflow / failure path.
+        if goldy::validation_env::cons_knob(2) {
+            params.robust = true;
+        }
+        // #endregion
 
         let mut resolver = mem::take(&mut self.resolver);
         let mut packed = vec![];
@@ -588,6 +607,14 @@ impl SchemeRenderer {
             .begin_frame(|_, _| Ok::<(), Error>(()))
             .map_err(|e| Error::Shader(e.to_string()))?;
         self.drain_ready_bump_readbacks()?;
+        // #region agent log
+        // CONS bit0: frame-start drain — block until ALL previously-submitted GPU work
+        // (incl. the prior frame's present-copy) completes before recording this frame.
+        // Kills the present(N-1) || compute(N) overlap entirely.
+        if goldy::validation_env::cons_knob(0) {
+            let _ = self.context.wait_until(self.context.high_water_timeline());
+        }
+        // #endregion
         self.cleanup_frame_counter = self.cleanup_frame_counter.wrapping_add(1);
         if self.cleanup_frame_counter.is_multiple_of(64) {
             self.persistent.pool.cap_pool_depth(12);
@@ -650,6 +677,14 @@ impl SchemeRenderer {
             }
         }
 
+        // #region agent log
+        // CONS bit3: gate pipeline-buffer reallocation — drain all in-flight GPU work
+        // before the pool acquires/recycles ptcl/segments/scratch buffers. If green
+        // vanishes -> a buffer is being recycled while a prior frame still reads it.
+        if goldy::validation_env::cons_knob(3) {
+            let _ = self.context.wait_until(self.context.high_water_timeline());
+        }
+        // #endregion
         let (mut pipeline, out_image_handle) = {
             let mut recorder = SchemeRecorder::new(
                 &self.device,
@@ -694,6 +729,33 @@ impl SchemeRenderer {
             self.persistent.cached_upload_key = Some(upload_key);
         }
 
+        // #region agent log
+        // Stable pipeline buffers (ptcl/segments/blend_spill/tile/info_bin_data/lines/seg_counts)
+        // are bound by ResourceHandle in the retained worker dispatches. When buffer_sizes
+        // fluctuates frame-to-frame, these are reallocated (new handles) and the old ones are
+        // released — but `worker_stale_reasons` does not track them, so the retained worker
+        // binds released/recycled buffers (every-other-frame green). Force a re-record when
+        // their descriptor identities change.
+        let current_stable_ids: [i64; 7] = {
+            let idx = |b: &Buffer| {
+                b.handle(ResourceAccess::ReadWrite)
+                    .map(|h| h.index() as i64)
+                    .unwrap_or(-1)
+            };
+            [
+                idx(&pipeline.stable.ptcl),
+                idx(&pipeline.stable.segments),
+                idx(&pipeline.stable.blend_spill),
+                idx(&pipeline.stable.tile),
+                idx(&pipeline.stable.info_bin_data),
+                idx(&pipeline.stable.lines),
+                idx(&pipeline.stable.seg_counts),
+            ]
+        };
+        let stable_ids_mismatch =
+            self.persistent.cached_worker_stable_ids != Some(current_stable_ids);
+        let fix_on = std::env::var_os("EKRANO_FIX_WORKER_STALE").is_some();
+        // #endregion
         let worker_stale = {
             let _tz = goldy::tracy_zone!("ekrano.worker_stale_check");
             let stale = worker_stale_reasons(
@@ -703,6 +765,17 @@ impl SchemeRenderer {
                 out_image_handle,
                 output_texture.map(|t| t.gpu_handle()),
             );
+            // #region agent log
+            goldy::validation_env::dbg_session_log(
+                "HSTALE",
+                "scheme_renderer.rs:render",
+                "worker staleness vs stable buffer ids",
+                &format!(
+                    r#"{{"base_stale":{stale},"stable_ids_mismatch":{stable_ids_mismatch},"fix_on":{fix_on},"ids":{current_stable_ids:?},"cached":{:?}}}"#,
+                    self.persistent.cached_worker_stable_ids
+                ),
+            );
+            // #endregion
             stale
         };
 
@@ -851,6 +924,9 @@ impl SchemeRenderer {
             self.persistent.cached_present_grant = present;
             self.persistent.cached_bump_grant = bump;
             self.persistent.cached_worker_topology = Some(topology);
+            // #region agent log
+            self.persistent.cached_worker_stable_ids = Some(current_stable_ids);
+            // #endregion
             self.persistent.cached_worker_filter_effects = filter_effects;
             self.persistent.cached_worker_out_image = Some(out_image);
             self.persistent.cached_worker_output_texture = output_texture.map(|t| t.gpu_handle());
@@ -876,11 +952,12 @@ impl SchemeRenderer {
             _ => None,
         };
 
-        // On Metal, gate the orchestrator on the compute timeline to allow the
-        // present partition to overlap the next frame's CPU recording.
-        if self.device.backend_type() == goldy::BackendType::Metal {
-            self.frame_pipeline.note_presented(frame_tv);
-        }
+        // Gate the orchestrator on this frame's compute+copy completion (`frame_tv`),
+        // not the async present-boundary epoch. The latter lags high-water by ~2 frames
+        // on Vulkan and let fine(N+1) overwrite the persistent out_image while
+        // present-copy(N) was still reading it. Scanout still overlaps the next frame's
+        // compute because it runs after the copy.
+        self.frame_pipeline.note_presented(frame_tv);
 
         if cache_outcome.scheme_rt_stored {
             if let Some(entry) = self.persistent.cached_scheme_rt.as_mut() {
@@ -937,6 +1014,14 @@ impl SchemeRenderer {
             );
         }
 
+        // #region agent log
+        // CONS bit1: serialize compute frames — block until this frame's compute submit
+        // (frame_tv) retires before returning, so the next frame's recording cannot run
+        // while this frame's compute is still in flight.
+        if goldy::validation_env::cons_knob(1) {
+            let _ = self.context.wait_until(frame_tv);
+        }
+        // #endregion
         Ok((stats, present_token))
     }
 
