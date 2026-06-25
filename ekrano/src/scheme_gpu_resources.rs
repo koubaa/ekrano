@@ -8,6 +8,7 @@ use std::mem::size_of;
 use goldy::types::{BufferFlags, TextureFlags, TextureKind};
 use goldy::{Buffer, BufferKind, DispatchShape, Init, Parcel, Sampler, Texture, TextureFormat, ordinal};
 
+use crate::goldy_renderer::wait_buffer_ready_for_reuse;
 use crate::scheme_renderer::SchemeRecorder;
 use crate::worker_retention::scene_size_bucket;
 use crate::resource_proxy::BindType;
@@ -255,6 +256,7 @@ pub(crate) fn clear_gpu_buf(
 pub(crate) fn alloc_or_reuse_scene(recorder: &mut SchemeRecorder<'_>, live_bytes: usize) -> Result<Buffer, Error> {
     let bucket = scene_size_bucket(live_bytes);
     if let Some((cached_bucket, buf)) = recorder.persistent.cached_scene.take() {
+        wait_buffer_ready_for_reuse(recorder.context(), &buf);
         if cached_bucket >= bucket {
             return Ok(buf);
         }
