@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 
 use goldy::types::{BufferFlags, TextureFormat};
 use goldy::{
-    Buffer, BufferKind, ComputePipeline, Context, Device, Grant, RetainedPool,
+    Buffer, BufferKind, ComputePipeline, Context, Device, Grant, ReferenceTable, RetainedPool,
     Texture, TexturePool, TimelineValue,
 };
 
@@ -36,12 +36,44 @@ use ekrano_encoding::{BumpAllocators, Layout, RenderConfig, Resolver};
 
 pub(crate) const MAX_BUMP_RETRIES: usize = 2;
 
-/// Timeline-guarded slots for cross-frame render-target reuse.
-/// Two slots suffice at depth=1: one aging entry plus one empty install slot.
+/// Ledger-guarded slots for cross-frame render-target reuse.
 pub(crate) const RESOURCE_CACHE_SLOTS: usize = 2;
 
 pub(crate) fn find_empty_cache_slot<T>(slots: &[Option<T>]) -> Option<usize> {
     slots.iter().position(Option::is_none)
+}
+
+/// True when no in-flight GPU work on `ctx` still references any render-target texture.
+fn render_targets_settled(ctx: &Context, out: &Texture, layers: &[Texture; 4]) -> bool {
+    out.is_settled(ctx) && layers.iter().all(|layer| layer.is_settled(ctx))
+}
+
+/// Block until `out` and `layers` have no in-flight GPU references on `ctx`.
+fn wait_render_targets_settled(ctx: &Context, out: &Texture, layers: &[Texture; 4]) {
+    for tex in std::iter::once(out).chain(layers.iter()) {
+        if tex.is_settled(ctx) {
+            continue;
+        }
+        let refs = tex.last_referenced();
+        let _ = ctx.wait_until_parcel_ready(&refs);
+    }
+}
+
+/// Max referenced timeline across all entries in a parcel reference table.
+fn max_referenced(table: &ReferenceTable) -> TimelineValue {
+    table.values().copied().max().unwrap_or(0)
+}
+
+/// Ledger-sourced retirement epoch for textures and owned buffers deferred at frame end.
+fn deferred_release_epoch(textures: &[Texture], buffers: &[(Buffer, &'static str)]) -> TimelineValue {
+    let mut epoch = 0;
+    for tex in textures {
+        epoch = epoch.max(max_referenced(&tex.last_referenced()));
+    }
+    for (buf, _) in buffers {
+        epoch = epoch.max(max_referenced(&buf.last_referenced()));
+    }
+    epoch
 }
 
 /// Per-frame render statistics returned by [`GoldyRenderer::render_to_texture`].
@@ -122,7 +154,7 @@ pub(crate) static FRAME_COUNTER: AtomicU64 = AtomicU64::new(0);
 //
 // The `FrameOrchestrator` ring now carries `()` — all resource retirement
 // (render targets, pipeline buffers, owned buffers, bump readback) bypasses
-// the ring via timeline-guarded cache slots + `Device::defer_release`
+// the ring via ledger-guarded cache slots + `Device::defer_release`
 // + `PersistentState::pending_bump_readback`.  The ring is a pure scheduling
 // primitive: depth enforcement + timeline tracking only.
 
@@ -167,10 +199,6 @@ impl Drop for DeferredTextureToken {
 #[derive(Debug, Default)]
 pub(crate) struct CacheScheduleOutcome {
     pub(crate) cached_render_targets_slot: Option<usize>,
-    /// Set when the scheme path stored its single persistent `out_image` into
-    /// [`PersistentState::cached_scheme_rt`]; the post-submit step then stamps the
-    /// frame timeline so a later resize can wait before recycling.
-    pub(crate) scheme_rt_stored: bool,
 }
 
 /// Outcome of [`FrameRecorder::finish`]: orchestrator submit result plus resources
@@ -245,17 +273,24 @@ impl PreparedFrame {
     }
 }
 
-/// Defer textures and recyclable owned buffers until `tv` retires on the GPU.
+/// Defer textures and recyclable owned buffers until their parcel references settle.
 ///
 /// Uses a single [`Context::defer_release`] per frame (one mutex push) instead of
-/// multiple deferred cleanup calls.
+/// multiple deferred cleanup calls. The retirement epoch is sourced from each
+/// resource's ledger [`Texture::last_referenced`] / [`Buffer::last_referenced`],
+/// not a client frame scalar.
 pub(crate) fn defer_frame_gpu_resources(
     ctx: &Context,
     persistent: &PersistentState,
-    tv: TimelineValue,
     textures: Vec<Texture>,
     recyclable_owned: Vec<(Buffer, &'static str)>,
 ) {
+    if textures.is_empty() && recyclable_owned.is_empty() {
+        return;
+    }
+    let epoch = deferred_release_epoch(&textures, &recyclable_owned);
+    let texture_count = textures.len();
+    let owned_count = recyclable_owned.len();
     let mut payload = goldy::DeferredPayload::new();
     if !textures.is_empty() {
         payload.push(DeferredTextureToken {
@@ -269,9 +304,10 @@ pub(crate) fn defer_frame_gpu_resources(
             buffers: recyclable_owned,
         });
     }
-    if !payload.is_empty() {
-        ctx.defer_release(tv, payload);
-    }
+    log::debug!(
+        "[DEFER] ledger epoch={epoch} textures={texture_count} owned={owned_count}",
+    );
+    ctx.defer_release(epoch, payload);
 }
 
 pub(crate) struct GoldyShader {
@@ -466,19 +502,23 @@ pub(crate) struct PersistentState {
     pub(crate) nearest_clamp_sampler: Option<goldy::Sampler>,
     /// Cached render targets (`out_image` + `filter_layers`) from previous frames.
     ///
-    /// Timeline-guarded slots for cross-frame render-target reuse. Written by
-    /// `schedule_pipeline_cleanup`; readable when `context.gpu_progress() >= cached_rt_timelines[i]`.
+    /// Ledger-guarded slots for cross-frame render-target reuse. Written by
+    /// `schedule_pipeline_cleanup`; readable when every texture in the slot
+    /// [`Texture::is_settled`] on the submission context.
     pub(crate) cached_render_targets: [Option<(Texture, [Texture; 4])>; RESOURCE_CACHE_SLOTS],
-    /// Timeline of the frame that last wrote each render-target slot. `0` when empty.
-    pub(crate) cached_rt_timelines: [TimelineValue; RESOURCE_CACHE_SLOTS],
     /// Scheme-path render-target reuse: a single persistent `out_image` + filter
     /// layers, intentionally decoupled from [`RESOURCE_CACHE_SLOTS`].
+    ///
+    /// The third element is the **record gate** timeline (`frame_tv` at last submit) —
+    /// not the full ledger `last_referenced` (which includes the present-copy read one
+    /// epoch later). Reuse waits only on this scalar so it stays aligned with
+    /// [`FrameOrchestrator::begin_frame`] / `note_presented(frame_tv)`.
     pub(crate) cached_scheme_rt: Option<(Texture, [Texture; 4], TimelineValue)>,
     /// Cached pipeline buffers from the previous frame. At depth=1 only one
     /// entry exists at a time: take-then-install within a single `run_frame`.
     pub(crate) cached_pipeline: Option<crate::graph_gpu_resources::CachedPipeline>,
     /// Maps RT cache slot index → swapchain image index of the last frame that
-    /// used that slot, so [`Self::mark_rt_slot_returned`] can mark it reusable.
+    /// used that slot (for [`Self::mark_rt_slot_returned`] bookkeeping).
     pub(crate) rt_slot_swapchain_image: [Option<u32>; RESOURCE_CACHE_SLOTS],
     /// Capacity hints for `FrameRecorder` scratch allocations. Updated after each
     /// `finish()` call so that the next frame pre-allocates the right amount and
@@ -567,7 +607,6 @@ impl PersistentState {
             linear_clamp_sampler: None,
             nearest_clamp_sampler: None,
             cached_render_targets: std::array::from_fn(|_| None),
-            cached_rt_timelines: [0; RESOURCE_CACHE_SLOTS],
             cached_scheme_rt: None,
             cached_pipeline: None,
             rt_slot_swapchain_image: [None; RESOURCE_CACHE_SLOTS],
@@ -660,22 +699,23 @@ impl PersistentState {
         height: u32,
         out_format: TextureFormat,
     ) -> Option<(Texture, [Texture; 4])> {
-        let Some((out, layers, tv)) = self.cached_scheme_rt.take() else {
+        let Some((out, layers, record_tv)) = self.cached_scheme_rt.take() else {
             return None;
         };
+        let progress = ctx.gpu_progress();
         if out.width() == width && out.height() == height && out.format() == out_format {
-            if tv != 0 && ctx.gpu_progress() < tv {
-                let _ = ctx.wait_until(tv);
+            if record_tv != 0 && progress < record_tv {
+                let _ = ctx.wait_until(record_tv);
             }
             return Some((out, layers));
         }
         log::warn!(
-            "[RT-CACHE] scheme MISS (resize) timeline={tv} {}x{} vs {width}x{height} fmt={out_format:?}",
+            "[RT-CACHE] scheme MISS (resize) record_tv={record_tv} {}x{} vs {width}x{height} fmt={out_format:?}",
             out.width(),
             out.height(),
         );
-        if ctx.gpu_progress() < tv {
-            let _ = ctx.wait_until(tv);
+        if record_tv != 0 && progress < record_tv {
+            let _ = ctx.wait_until(record_tv);
         }
         self.tex_pool.release(out);
         for l in layers {
@@ -688,9 +728,15 @@ impl PersistentState {
         &mut self,
         out: Texture,
         layers: [Texture; 4],
-        timeline: TimelineValue,
+        record_tv: TimelineValue,
     ) {
-        self.cached_scheme_rt = Some((out, layers, timeline));
+        self.cached_scheme_rt = Some((out, layers, record_tv));
+    }
+
+    pub(crate) fn stamp_scheme_rt_record_timeline(&mut self, record_tv: TimelineValue) {
+        if let Some(entry) = self.cached_scheme_rt.as_mut() {
+            entry.2 = record_tv;
+        }
     }
 }
 
@@ -722,18 +768,11 @@ impl PersistentState {
             return false;
         }
 
-        let progress = ctx.gpu_progress();
-        if ctx.peek_oldest_in_flight().is_none() {
-            // GPU idle — skip the timeline scan entirely.
-        } else {
-            let oldest = (0..RESOURCE_CACHE_SLOTS)
-                .filter(|&i| self.cached_render_targets[i].is_some())
-                .map(|i| self.cached_rt_timelines[i])
-                .min();
-            if let Some(oldest) = oldest
-                && progress < oldest
-            {
-                let _ = ctx.wait_until(oldest);
+        if ctx.peek_oldest_in_flight().is_some() {
+            for i in 0..RESOURCE_CACHE_SLOTS {
+                if let Some((out, layers)) = self.cached_render_targets[i].as_ref() {
+                    wait_render_targets_settled(ctx, out, layers);
+                }
             }
         }
 
@@ -747,7 +786,6 @@ impl PersistentState {
                 for l in layers {
                     drop(l);
                 }
-                self.cached_rt_timelines[i] = 0;
             }
         }
         true
@@ -755,24 +793,24 @@ impl PersistentState {
 
     pub(crate) fn take_cached_render_targets(
         &mut self,
-        progress: TimelineValue,
+        ctx: &Context,
         width: u32,
         height: u32,
         out_format: TextureFormat,
     ) -> Option<(Texture, [Texture; 4])> {
         for i in 0..RESOURCE_CACHE_SLOTS {
-            if progress < self.cached_rt_timelines[i] {
-                continue;
-            }
-            let Some((out, layers)) = self.cached_render_targets[i].take() else {
+            let Some((out, layers)) = self.cached_render_targets[i].as_ref() else {
                 continue;
             };
+            if !render_targets_settled(ctx, out, layers) {
+                continue;
+            }
+            let (out, layers) = self.cached_render_targets[i].take().unwrap();
             if out.width() == width && out.height() == height && out.format() == out_format {
                 return Some((out, layers));
             }
             log::warn!(
-                "[RT-CACHE] MISS (resize) slot={i}: progress={progress} timeline={} {}x{} vs {}x{} fmt={out_format:?}",
-                self.cached_rt_timelines[i],
+                "[RT-CACHE] MISS (resize) slot={i}: {}x{} vs {}x{} fmt={out_format:?}",
                 out.width(),
                 out.height(),
                 width,
@@ -859,16 +897,16 @@ impl PersistentState {
         }
     }
 
-    /// Mark an RT cache slot immediately reusable when its swapchain image returns.
+    /// Clear swapchain-image bookkeeping when a cached RT slot's image returns.
     pub(crate) fn mark_rt_slot_returned(&mut self, ctx: &Context, image_index: u32) {
-        let progress = ctx.gpu_progress();
         for (i, entry) in self.rt_slot_swapchain_image.iter_mut().enumerate() {
             if *entry == Some(image_index) {
-                debug_assert!(
-                    progress >= self.cached_rt_timelines[i],
-                    "SwapchainReturned for image {image_index} before RT slot {i} timeline completed",
-                );
-                self.cached_rt_timelines[i] = 0;
+                if let Some((out, layers)) = self.cached_render_targets[i].as_ref() {
+                    debug_assert!(
+                        render_targets_settled(ctx, out, layers),
+                        "SwapchainReturned for image {image_index} before RT slot {i} parcels settled",
+                    );
+                }
                 *entry = None;
             }
         }

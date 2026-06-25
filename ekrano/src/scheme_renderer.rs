@@ -829,7 +829,7 @@ impl SchemeRenderer {
         };
 
         let t4 = Instant::now();
-        let cache_outcome = recorder.schedule_pipeline_cleanup(pipeline);
+        let _ = recorder.schedule_pipeline_cleanup(pipeline);
         let FrameFinishOutcome {
             timeline: frame_tv,
             surface_frame: _,
@@ -878,23 +878,11 @@ impl SchemeRenderer {
         // compute because it runs after the copy.
         self.frame_pipeline.note_presented(frame_tv);
 
-        if cache_outcome.scheme_rt_stored {
-            if let Some(entry) = self.persistent.cached_scheme_rt.as_mut() {
-                log::debug!("[RT-CACHE] stamp scheme out_image timeline={frame_tv}");
-                entry.2 = frame_tv;
-            }
-        }
-        if let Some(i) = cache_outcome.cached_render_targets_slot {
-            log::debug!(
-                "[RT-CACHE] stamp slot={i} timeline={frame_tv} (prev={})",
-                self.persistent.cached_rt_timelines[i],
-            );
-            self.persistent.cached_rt_timelines[i] = frame_tv;
-        }
+        self.persistent.stamp_scheme_rt_record_timeline(frame_tv);
+
         defer_frame_gpu_resources(
             &self.context,
             &self.persistent,
-            frame_tv,
             deferred_textures,
             recyclable_owned,
         );
@@ -1129,7 +1117,7 @@ impl<'a> SchemeRecorder<'a> {
         &mut self,
         pipeline: crate::scheme_gpu_resources::PipelineResources,
     ) -> CacheScheduleOutcome {
-        let mut outcome = CacheScheduleOutcome::default();
+        let outcome = CacheScheduleOutcome::default();
         let crate::scheme_gpu_resources::PipelineResources {
             gradient,
             image_atlas,
@@ -1189,7 +1177,6 @@ impl<'a> SchemeRecorder<'a> {
         log::debug!("[PIPE-CACHE] schedule: cached");
         self.persistent
             .store_scheme_render_targets(out_image, filter_layers, 0);
-        outcome.scheme_rt_stored = true;
         log::debug!("[RT-CACHE] schedule: scheme out_image stored (single slot)");
         outcome
     }
