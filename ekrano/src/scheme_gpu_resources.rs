@@ -569,7 +569,10 @@ fn al_cached_opt(
     name: &'static str,
 ) -> Result<Buffer, Error> {
     match cached {
-        Some(buf) => Ok(buf),
+        Some(buf) => {
+            wait_buffer_ready_for_reuse(recorder.context(), &buf);
+            Ok(buf)
+        }
         None => alloc_pipeline_buffer(recorder, size, stride, name, BufferFlags::empty()),
     }
 }
@@ -578,11 +581,10 @@ fn al_cached_opt(
 /// config changes — retained parcels in [`crate::goldy_renderer::PersistentState::retained_pool`].
 /// See `resource-pool.md §1` for the rationale behind this split from [`ScratchPipelineBuffers`].
 ///
-/// At [`crate::goldy_renderer::FRAME_PIPELINE_DEPTH`] = 1, `begin_frame` retires the prior
-/// submission before recording, so the same deeds can be rebound and GPU-overwritten each frame
-/// with no client-side progress gate. If pipeline depth is raised so the next frame may record
-/// while the prior frame's GPU work is still in flight on these buffers, a single retained deed
-/// is not enough — use double-buffered parcels or a transient pool instead; do not keep them in
+/// Reuse is gated by [`crate::goldy_renderer::wait_buffer_ready_for_reuse`] at take time in
+/// [`alloc_stable_buffer`]. If pipeline depth is raised so the next frame may record while the
+/// prior frame's GPU work is still in flight on these buffers, a single retained deed is not
+/// enough — use double-buffered parcels or a transient pool instead; do not keep them in
 /// [`goldy::RetainedPool`] under inter-frame overlap.
 pub(crate) struct StablePipelineBuffers {
     pub info_bin_data: Buffer,
@@ -638,6 +640,7 @@ fn alloc_stable_buffer(
     stride: u32,
 ) -> Result<Buffer, Error> {
     if let Some(buffer) = cached {
+        wait_buffer_ready_for_reuse(recorder.context(), &buffer);
         return Ok(buffer);
     }
     if std::env::var_os("EKRANO_LOG_PIPELINE_RESIZE").is_some() {
@@ -1063,9 +1066,7 @@ impl PipelineResources {
         let buffer_sizes = cpu_config_owned.buffer_sizes;
 
         // Try to reuse cached pipeline buffers from the previous frame.
-        // At depth=1, begin_frame blocks until the previous frame's GPU work is complete,
-        // so these buffers are safe to rebind immediately — ordering is via the orchestrator
-        // and task-graph barriers, not a client-side gpu_progress gate on the cache slot.
+        // Reuse gates live in alloc_stable_buffer / al_cached_opt (parcel ledger waits).
         let (cached_stable, cached_scratch) = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.pipeline_cache");
             match recorder.persistent.take_cached_pipeline() {
