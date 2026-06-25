@@ -885,8 +885,8 @@ impl PersistentState {
 
     /// Claim cached pipeline buffers for this frame.
     ///
-    /// Pipeline buffers are fully GPU-overwritten each frame. At depth=1, [`FrameOrchestrator`]
-    /// retirement in `begin_frame` provides cross-frame ordering — no `gpu_progress` gate here.
+    /// Scheme-path reuse gates run in [`crate::scheme_gpu_resources::alloc_stable_buffer`] and
+    /// [`crate::scheme_gpu_resources::al_cached_opt`] when buffers are taken from the cache.
     pub(crate) fn take_cached_pipeline(&mut self) -> Option<crate::graph_gpu_resources::CachedPipeline> {
         if let Some(c) = self.cached_pipeline.take() {
             log::debug!("[PIPE-CACHE] HIT");
