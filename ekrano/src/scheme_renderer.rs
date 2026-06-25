@@ -238,9 +238,8 @@ impl SchemeRenderer {
     pub fn poll_and_reclaim(&mut self) {
         for signal in self.context.poll_signals_and_service() {
             match signal {
-                Signal::BoundaryCrossed { epoch } => {
+                Signal::BoundaryCrossed { epoch: _ } => {
                     self.persistent.drain_pending_returns();
-                    self.frame_pipeline.note_presented(epoch);
                 }
                 Signal::Oversubscribed { .. } => {
                     if let Some(oldest) = self.context.peek_oldest_in_flight()
@@ -875,13 +874,6 @@ impl SchemeRenderer {
             _ => None,
         };
 
-        // Gate the orchestrator on this frame's compute+copy completion (`frame_tv`),
-        // not the async present-boundary epoch. The latter lags high-water by ~2 frames
-        // on Vulkan and let fine(N+1) overwrite the persistent out_image while
-        // present-copy(N) was still reading it. Scanout still overlaps the next frame's
-        // compute because it runs after the copy.
-        self.frame_pipeline.note_presented(frame_tv);
-
         self.persistent.stamp_scheme_rt_record_timeline(frame_tv);
 
         defer_frame_gpu_resources(
@@ -1327,8 +1319,9 @@ impl<'a> SchemeRecorder<'a> {
     /// Surface paths call [`goldy::Frame::submit_frame`] before returning so the
     /// timeline is valid for cache stamping before [`goldy::Frame::present`].
     /// Surface paths with deferred scanout call [`Self::finish(true)`]; headless /
-    /// render-to-texture paths call [`Self::finish(false)`].
-    pub(crate) fn finish<F>(mut self, deferred_present: bool, pre_acquire: F) -> Result<FrameFinishOutcome>
+    /// render-to-texture paths call [`Self::finish(false)`]. Both stamp the orchestrator
+    /// ring with the worker submit timeline at finish.
+    pub(crate) fn finish<F>(mut self, _deferred_present: bool, pre_acquire: F) -> Result<FrameFinishOutcome>
     where
         F: FnOnce() -> Result<()>,
     {
@@ -1367,15 +1360,11 @@ impl<'a> SchemeRecorder<'a> {
         let mut empty_graph = TaskGraph::new();
         let tv = {
             let _tz = goldy::tracy_zone!("ekrano.finish.orchestrator");
-            if deferred_present {
-                self.frame_pipeline
-                    .end_frame_for_present(frame_handle, scheme_tv, ())
-                    .map_err(|e| Error::Shader(e.to_string()))?
-            } else {
-                self.frame_pipeline
-                    .end_frame_standalone(frame_handle, &mut empty_graph, Some(scheme_tv), ())
-                    .map_err(|e| Error::Shader(e.to_string()))?
-            }
+            // Worker submit timeline is known here; stamp the ring slot directly instead of
+            // deferring to the async present-boundary epoch (see synchronization-issue.md).
+            self.frame_pipeline
+                .end_frame_standalone(frame_handle, &mut empty_graph, Some(scheme_tv), ())
+                .map_err(|e| Error::Shader(e.to_string()))?
         };
         Ok(FrameFinishOutcome {
             timeline: tv,

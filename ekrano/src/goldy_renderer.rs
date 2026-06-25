@@ -520,8 +520,7 @@ pub(crate) struct PersistentState {
     ///
     /// The third element is the **record gate** timeline (`frame_tv` at last submit) —
     /// not the full ledger `last_referenced` (which includes the present-copy read one
-    /// epoch later). Reuse waits only on this scalar so it stays aligned with
-    /// [`FrameOrchestrator::begin_frame`] / `note_presented(frame_tv)`.
+    /// epoch later). Reuse waits only on this scalar at take time.
     pub(crate) cached_scheme_rt: Option<(Texture, [Texture; 4], TimelineValue)>,
     /// Cached pipeline buffers from the previous frame. At depth=1 only one
     /// entry exists at a time: take-then-install within a single `run_frame`.
