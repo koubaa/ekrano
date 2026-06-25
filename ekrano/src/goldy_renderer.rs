@@ -59,6 +59,18 @@ fn wait_render_targets_settled(ctx: &Context, out: &Texture, layers: &[Texture; 
     }
 }
 
+/// Block until no in-flight GPU work on `ctx` still references `buf`.
+///
+/// Scheme-path per-parcel reuse gate (remediation step 3b): replaces implicit
+/// ordering from [`FrameOrchestrator::begin_frame`] for shared pipeline buffers.
+pub(crate) fn wait_buffer_ready_for_reuse(ctx: &Context, buf: &Buffer) {
+    if buf.is_settled(ctx) {
+        return;
+    }
+    let refs = buf.last_referenced();
+    let _ = ctx.wait_until_parcel_ready(&refs);
+}
+
 /// Max referenced timeline across all entries in a parcel reference table.
 fn max_referenced(table: &ReferenceTable) -> TimelineValue {
     table.values().copied().max().unwrap_or(0)
