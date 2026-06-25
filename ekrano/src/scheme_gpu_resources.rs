@@ -279,6 +279,7 @@ pub(crate) fn alloc_or_reuse_scene(recorder: &mut SchemeRecorder<'_>, live_bytes
 fn alloc_or_reuse_scene_staging(recorder: &mut SchemeRecorder<'_>, live_bytes: usize) -> Result<Buffer, Error> {
     let bucket = scene_size_bucket(live_bytes);
     if let Some((cached_bucket, buf)) = recorder.persistent.cached_scene_staging.take() {
+        wait_buffer_ready_for_reuse(recorder.context(), &buf);
         if cached_bucket >= bucket {
             return Ok(buf);
         }
@@ -300,6 +301,7 @@ fn alloc_or_reuse_scene_staging(recorder: &mut SchemeRecorder<'_>, live_bytes: u
 /// Allocate or reuse a CPU-writable staging buffer for the config uniform.
 fn alloc_or_reuse_config_staging(recorder: &mut SchemeRecorder<'_>) -> Result<Buffer, Error> {
     if let Some(buf) = recorder.persistent.cached_config_staging.take() {
+        wait_buffer_ready_for_reuse(recorder.context(), &buf);
         return Ok(buf);
     }
     recorder
