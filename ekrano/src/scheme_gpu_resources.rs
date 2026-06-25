@@ -80,13 +80,12 @@ pub(crate) fn alloc_or_reuse_scheme_indirect(
     wg_counts_gpu: &WorkgroupCountsGpu,
 ) -> Result<Buffer, Error> {
     if let Some((cached_wg, buf)) = recorder.persistent.cached_scheme_indirect.take() {
+        wait_buffer_ready_for_reuse(recorder.context(), &buf);
         if &cached_wg == wg_counts_gpu {
             return Ok(buf);
         }
         // WorkgroupCountsGpu changed (resize / topology change): drop the stale
-        // composite buffer immediately. At FRAME_PIPELINE_DEPTH=1, begin_frame has
-        // already waited for the prior frame to retire before we reach this point,
-        // so the buffer is no longer in-flight on the GPU.
+        // composite buffer after the parcel reuse gate clears in-flight GPU work.
         drop(buf);
     }
     let fields: Vec<_> = (0..N_INDIRECT_STAGES as usize)
@@ -361,6 +360,7 @@ pub(crate) fn stage_config_bytes(recorder: &mut SchemeRecorder<'_>, config: &Buf
 /// Allocate or reuse a stable bump buffer for the retained worker.
 pub(crate) fn alloc_or_reuse_bump(recorder: &mut SchemeRecorder<'_>, size: u64) -> Result<Buffer, Error> {
     if let Some((cached_size, buf)) = recorder.persistent.cached_bump.take() {
+        wait_buffer_ready_for_reuse(recorder.context(), &buf);
         if cached_size == size {
             return Ok(buf);
         }
@@ -1037,6 +1037,7 @@ impl PipelineResources {
         let config = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.config_upload");
             let config_buf = if let Some((_, buf)) = recorder.persistent.cached_config_uniform.take() {
+                wait_buffer_ready_for_reuse(recorder.context(), &buf);
                 buf
             } else {
                 recorder
