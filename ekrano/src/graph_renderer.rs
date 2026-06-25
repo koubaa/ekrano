@@ -647,11 +647,6 @@ impl GraphRenderer {
         };
 
         if let Some(i) = cache_outcome.cached_render_targets_slot {
-            log::debug!(
-                "[RT-CACHE] stamp slot={i} timeline={frame_tv} (prev={})",
-                self.persistent.cached_rt_timelines[i],
-            );
-            self.persistent.cached_rt_timelines[i] = frame_tv;
             if let Some(idx) = acquired_image_index {
                 self.persistent.rt_slot_swapchain_image[i] = Some(idx);
             }
@@ -662,7 +657,6 @@ impl GraphRenderer {
         defer_frame_gpu_resources(
             &self.context,
             &self.persistent,
-            frame_tv,
             deferred_textures,
             recyclable_owned,
         );
