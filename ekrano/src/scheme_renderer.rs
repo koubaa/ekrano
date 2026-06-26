@@ -47,6 +47,7 @@ use crate::{
         FrameFinishOutcome, FrameStats, GoldyShader, AllocatorStats,
         FRAME_PIPELINE_DEPTH, MAX_BUMP_RETRIES, PreparedFrame, PresentToken, PersistentState,
         ResourcePoolStats, defer_frame_gpu_resources, env_robust_override,
+        env_parcel_reuse_gates_enabled,
         FRAME_COUNTER, sanitize_bump, CacheScheduleOutcome,
     },
     scheme_gpu_resources::{
@@ -115,9 +116,17 @@ impl SchemeRenderer {
             .map_err(|e| Error::Gpu(e.to_string()))?;
 
         let context = device.create_context().map_err(|e| Error::Gpu(e.to_string()))?;
+        let parcel_reuse_gates = env_parcel_reuse_gates_enabled();
+        if parcel_reuse_gates {
+            log::info!(
+                "EKRANO_PARCEL_REUSE_GATES: per-parcel buffer reuse gates active; \
+                 orchestrator begin_frame GPU wait disabled"
+            );
+        }
         let frame_pipeline = {
             let _tz = goldy::tracy_zone!("ekrano.SchemeRenderer::new.frame_orchestrator");
             FrameOrchestrator::new(&context, FRAME_PIPELINE_DEPTH)
+                .with_skip_ring_gpu_wait(parcel_reuse_gates)
         };
         let worker = Scheme::new(&context);
         let upload = Scheme::new(&context);

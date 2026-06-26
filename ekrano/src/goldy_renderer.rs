@@ -486,6 +486,19 @@ pub(crate) fn env_robust_override() -> Option<bool> {
         .map(|v| !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"))
 }
 
+/// Enable scheme-path per-parcel reuse gates (remediation step 3b).
+///
+/// `EKRANO_PARCEL_REUSE_GATES=1|true|yes|on` skips the coarse
+/// [`goldy::FrameOrchestrator`] GPU wait at [`goldy::FrameOrchestrator::begin_frame`];
+/// shared pipeline buffers are serialized at take time via
+/// [`wait_buffer_ready_for_reuse`]. `out_image` record reuse still uses the
+/// `record_tv` scalar in [`PersistentState::take_scheme_render_targets`].
+pub(crate) fn env_parcel_reuse_gates_enabled() -> bool {
+    std::env::var("EKRANO_PARCEL_REUSE_GATES")
+        .ok()
+        .is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+}
+
 // -----------------------------------------------------------------------
 // PersistentState — GPU resources that survive across frames
 // -----------------------------------------------------------------------
