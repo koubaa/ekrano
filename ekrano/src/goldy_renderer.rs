@@ -61,8 +61,10 @@ fn wait_render_targets_settled(ctx: &Context, out: &Texture, layers: &[Texture; 
 
 /// Block until no in-flight GPU work on `ctx` still references `buf`.
 ///
-/// Scheme-path per-parcel reuse gate (remediation step 3b): replaces implicit
-/// ordering from [`FrameOrchestrator::begin_frame`] for shared pipeline buffers.
+/// Per-parcel reuse gate for shared pipeline buffers on the scheme path.
+///
+/// Replaces the coarse [`FrameOrchestrator::begin_frame`] GPU wait, which the
+/// scheme renderer disables via [`goldy::FrameOrchestrator::with_skip_ring_gpu_wait`].
 pub(crate) fn wait_buffer_ready_for_reuse(ctx: &Context, buf: &Buffer) {
     if buf.is_settled(ctx) {
         return;
@@ -484,19 +486,6 @@ pub(crate) fn env_robust_override() -> Option<bool> {
     std::env::var("EKRANO_ROBUST")
         .ok()
         .map(|v| !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"))
-}
-
-/// Enable scheme-path per-parcel reuse gates (remediation step 3b).
-///
-/// `EKRANO_PARCEL_REUSE_GATES=1|true|yes|on` skips the coarse
-/// [`goldy::FrameOrchestrator`] GPU wait at [`goldy::FrameOrchestrator::begin_frame`];
-/// shared pipeline buffers are serialized at take time via
-/// [`wait_buffer_ready_for_reuse`]. `out_image` record reuse still uses the
-/// `record_tv` scalar in [`PersistentState::take_scheme_render_targets`].
-pub(crate) fn env_parcel_reuse_gates_enabled() -> bool {
-    std::env::var("EKRANO_PARCEL_REUSE_GATES")
-        .ok()
-        .is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
 }
 
 // -----------------------------------------------------------------------

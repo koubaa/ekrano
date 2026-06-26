@@ -47,7 +47,6 @@ use crate::{
         FrameFinishOutcome, FrameStats, GoldyShader, AllocatorStats,
         FRAME_PIPELINE_DEPTH, MAX_BUMP_RETRIES, PreparedFrame, PresentToken, PersistentState,
         ResourcePoolStats, defer_frame_gpu_resources, env_robust_override,
-        env_parcel_reuse_gates_enabled,
         FRAME_COUNTER, sanitize_bump, CacheScheduleOutcome,
     },
     scheme_gpu_resources::{
@@ -116,17 +115,10 @@ impl SchemeRenderer {
             .map_err(|e| Error::Gpu(e.to_string()))?;
 
         let context = device.create_context().map_err(|e| Error::Gpu(e.to_string()))?;
-        let parcel_reuse_gates = env_parcel_reuse_gates_enabled();
-        if parcel_reuse_gates {
-            log::info!(
-                "EKRANO_PARCEL_REUSE_GATES: per-parcel buffer reuse gates active; \
-                 orchestrator begin_frame GPU wait disabled"
-            );
-        }
         let frame_pipeline = {
             let _tz = goldy::tracy_zone!("ekrano.SchemeRenderer::new.frame_orchestrator");
-            FrameOrchestrator::new(&context, FRAME_PIPELINE_DEPTH)
-                .with_skip_ring_gpu_wait(parcel_reuse_gates)
+            // Per-parcel reuse gates at buffer take time; skip the coarse begin_frame GPU wait.
+            FrameOrchestrator::new(&context, FRAME_PIPELINE_DEPTH).with_skip_ring_gpu_wait(true)
         };
         let worker = Scheme::new(&context);
         let upload = Scheme::new(&context);
@@ -1434,7 +1426,8 @@ mod tests {
             let ctx = device.create_context().expect("context");
             let mut worker = Scheme::new(&ctx);
             let mut upload = Scheme::new(&ctx);
-            let mut frame_pipeline = FrameOrchestrator::new(&ctx, FRAME_PIPELINE_DEPTH);
+            let mut frame_pipeline =
+                FrameOrchestrator::new(&ctx, FRAME_PIPELINE_DEPTH).with_skip_ring_gpu_wait(true);
             let frame_handle = frame_pipeline
                 .begin_frame(|_, _| Ok::<(), Error>(()))
                 .expect("begin_frame");
