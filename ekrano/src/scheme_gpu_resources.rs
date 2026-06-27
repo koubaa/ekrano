@@ -15,7 +15,33 @@ use crate::scheme_renderer::SchemeRecorder;
 use crate::worker_retention::scene_size_bucket;
 use crate::resource_proxy::BindType;
 use crate::{Error, RenderParams, Result};
-use ekrano_encoding::{BumpAllocators, CoverageMask, Images, Ramps, RenderConfig, WorkgroupCountsGpu, N_INDIRECT_STAGES, STAGE_PATH_COUNT, STAGE_PATH_TILING};
+use ekrano_encoding::{BumpAllocators, CoverageMask, Images, Ramps, RenderConfig, WorkgroupCountsGpu, N_INDIRECT_STAGES, STAGE_PATH_COUNT, STAGE_PATH_TILING, ConfigUniform};
+
+fn config_uniform_without_layout_eq(a: &ConfigUniform, b: &ConfigUniform) -> bool {
+    a.width_in_tiles == b.width_in_tiles
+        && a.height_in_tiles == b.height_in_tiles
+        && a.target_width == b.target_width
+        && a.target_height == b.target_height
+        && a.base_color == b.base_color
+        && a.lines_size == b.lines_size
+        && a.binning_size == b.binning_size
+        && a.tiles_size == b.tiles_size
+        && a.seg_counts_size == b.seg_counts_size
+        && a.segments_size == b.segments_size
+        && a.blend_size == b.blend_size
+        && a.ptcl_size == b.ptcl_size
+        && a.tile_y_offset == b.tile_y_offset
+        && a.flatten_thread_base == b.flatten_thread_base
+        && a.mask_active == b.mask_active
+}
+
+enum ConfigUniformCacheOutcome {
+    Hit(Buffer),
+    /// Packed scene unchanged since last config cache; only layout metadata drifted — refresh GPU uniform without reuse wait.
+    LayoutRefresh(Buffer),
+    MissReuse(Buffer),
+    MissAlloc,
+}
 
 /// After worker/upload submit, compare config parcel stamp vs per-partition timelines.
 ///
@@ -364,6 +390,7 @@ pub(crate) fn stage_scene_bytes(
     staging
         .write(0, bytes)
         .map_err(|e| Error::Gpu(e.to_string()))?;
+    recorder.persistent.config_scene_dirty = true;
     if recorder.upload_needs_record {
         // Copy the full staging buffer (bucket-sized) rather than bytes.len() bytes.
         // On retained frames the packed content varies within the bucket; the GPU reads
@@ -863,6 +890,8 @@ pub(crate) struct PipelineResources {
     /// `schedule_pipeline_cleanup` can stash the buffer back into
     /// `PersistentState::cached_config_uniform` without re-reading GPU memory.
     pub config_uniform_value: ekrano_encoding::ConfigUniform,
+    /// Packed scene bytes last uploaded with [`Self::cached_config_uniform`].
+    pub packed_scene_len: usize,
 }
 
 impl PipelineResources {
@@ -1072,65 +1101,115 @@ impl PipelineResources {
             }
         };
 
+        let config_uniform_value = cpu_config_owned.gpu;
+        let packed_scene_len = packed.len();
+
+        let config = {
+            let outcome = {
+                let _tz = goldy::tracy_zone!("ekrano.prepare.config_cache");
+                let cached_snapshot =
+                    recorder.persistent.cached_config_uniform.as_ref().map(|(v, _)| *v);
+                if let Some(cv) = cached_snapshot {
+                    if cv == config_uniform_value {
+                        ConfigUniformCacheOutcome::Hit(
+                            recorder.persistent.cached_config_uniform.take().unwrap().1,
+                        )
+                    } else if packed_scene_len > 0
+                        && !recorder.persistent.config_scene_dirty
+                        && packed_scene_len == recorder.persistent.cached_config_packed_len
+                        && config_uniform_without_layout_eq(&cv, &config_uniform_value)
+                    {
+                        ConfigUniformCacheOutcome::LayoutRefresh(
+                            recorder.persistent.cached_config_uniform.take().unwrap().1,
+                        )
+                    } else if let Some((_, buf)) = recorder.persistent.cached_config_uniform.take()
+                    {
+                        ConfigUniformCacheOutcome::MissReuse(buf)
+                    } else {
+                        ConfigUniformCacheOutcome::MissAlloc
+                    }
+                } else {
+                    ConfigUniformCacheOutcome::MissAlloc
+                }
+            };
+            let branch = match &outcome {
+                ConfigUniformCacheOutcome::Hit(_) => "hit",
+                ConfigUniformCacheOutcome::LayoutRefresh(_) => "layout_refresh",
+                ConfigUniformCacheOutcome::MissReuse(_) => "miss_reuse",
+                ConfigUniformCacheOutcome::MissAlloc => "miss_alloc",
+            };
+            log::trace!("ConfigUniform cache {branch}");
+            match outcome {
+                ConfigUniformCacheOutcome::Hit(buf) => {
+                    let _tz = goldy::tracy_zone!("ekrano.prepare.config_hit");
+                    buf
+                }
+                ConfigUniformCacheOutcome::LayoutRefresh(buf) => {
+                    let _tz = goldy::tracy_zone!("ekrano.prepare.config_layout_refresh");
+                    stage_config_bytes(
+                        recorder,
+                        &buf,
+                        bytemuck::bytes_of(&config_uniform_value),
+                    )?;
+                    buf
+                }
+                ConfigUniformCacheOutcome::MissReuse(buf) => {
+                    {
+                        let _tz = goldy::tracy_zone!("ekrano.prepare.config_reuse_wait");
+                        if std::env::var_os("EKRANO_LOG_CONFIG_PARTITION_STAMP").is_some() {
+                            let ctx = recorder.context();
+                            let need_tv = buf.last_referenced().values().copied().max();
+                            log::info!(
+                                "[CONFIG-STAMP] prepare reuse wait: settled={} progress={} need_tv={need_tv:?}",
+                                buf.is_settled(ctx),
+                                ctx.gpu_progress(),
+                            );
+                        }
+                        wait_buffer_ready_for_reuse(recorder.context(), &buf);
+                    }
+                    {
+                        let _tz = goldy::tracy_zone!("ekrano.prepare.config_stage");
+                        stage_config_bytes(
+                            recorder,
+                            &buf,
+                            bytemuck::bytes_of(&config_uniform_value),
+                        )?;
+                    }
+                    buf
+                }
+                ConfigUniformCacheOutcome::MissAlloc => {
+                    let config_buf = {
+                        let _tz = goldy::tracy_zone!("ekrano.prepare.config_alloc");
+                        recorder
+                            .persistent
+                            .retained_pool
+                            .acquire_buffer(
+                                size_of::<ekrano_encoding::ConfigUniform>() as u64,
+                                BufferKind::Scattered,
+                                Some(size_of::<ekrano_encoding::ConfigUniform>() as u32),
+                                BufferFlags::empty(),
+                                None,
+                            )
+                            .map_err(|e| Error::Gpu(e.to_string()))?
+                    };
+                    {
+                        let _tz = goldy::tracy_zone!("ekrano.prepare.config_stage");
+                        stage_config_bytes(
+                            recorder,
+                            &config_buf,
+                            bytemuck::bytes_of(&config_uniform_value),
+                        )?;
+                    }
+                    config_buf
+                }
+            }
+        };
+
         let scene = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.scene_upload");
             let scene_buf = alloc_or_reuse_scene(recorder, packed.len())?;
             stage_scene_bytes(recorder, &scene_buf, &packed)?;
             scene_buf
-        };
-
-        let config_uniform_value = cpu_config_owned.gpu;
-
-        let config = {
-            let _tz = goldy::tracy_zone!("ekrano.prepare.config_upload");
-            // Mirror Classic path: skip reuse wait and GPU upload when the uniform is unchanged.
-            let cache_hit = recorder
-                .persistent
-                .cached_config_uniform
-                .as_ref()
-                .is_some_and(|(v, _)| v == &config_uniform_value);
-            log::trace!(
-                "ConfigUniform cache {}",
-                if cache_hit { "HIT" } else { "MISS" }
-            );
-            if cache_hit {
-                recorder.persistent.cached_config_uniform.take().unwrap().1
-            } else if let Some((_, buf)) = recorder.persistent.cached_config_uniform.take() {
-                if std::env::var_os("EKRANO_LOG_CONFIG_PARTITION_STAMP").is_some() {
-                    let ctx = recorder.context();
-                    let need_tv = buf.last_referenced().values().copied().max();
-                    log::info!(
-                        "[CONFIG-STAMP] prepare reuse wait: settled={} progress={} need_tv={need_tv:?}",
-                        buf.is_settled(ctx),
-                        ctx.gpu_progress(),
-                    );
-                }
-                wait_buffer_ready_for_reuse(recorder.context(), &buf);
-                stage_config_bytes(
-                    recorder,
-                    &buf,
-                    bytemuck::bytes_of(&config_uniform_value),
-                )?;
-                buf
-            } else {
-                let config_buf = recorder
-                    .persistent
-                    .retained_pool
-                    .acquire_buffer(
-                        size_of::<ekrano_encoding::ConfigUniform>() as u64,
-                        BufferKind::Scattered,
-                        Some(size_of::<ekrano_encoding::ConfigUniform>() as u32),
-                        BufferFlags::empty(),
-                        None,
-                    )
-                    .map_err(|e| Error::Gpu(e.to_string()))?;
-                stage_config_bytes(
-                    recorder,
-                    &config_buf,
-                    bytemuck::bytes_of(&config_uniform_value),
-                )?;
-                config_buf
-            }
         };
 
         let buffer_sizes = cpu_config_owned.buffer_sizes;
@@ -1269,6 +1348,7 @@ impl PipelineResources {
             filter_layers,
             buffer_sizes,
             config_uniform_value,
+            packed_scene_len,
         })
     }
 }

@@ -1144,11 +1144,14 @@ impl<'a> SchemeRecorder<'a> {
             filter_layers,
             buffer_sizes,
             config_uniform_value,
+            packed_scene_len,
         } = pipeline;
 
         let _ = (gradient, image_atlas, mask_atlas);
         self.persistent.cached_scene = Some((scene.byte_size(), scene));
         self.persistent.cached_config_uniform = Some((config_uniform_value, config));
+        self.persistent.config_scene_dirty = false;
+        self.persistent.cached_config_packed_len = packed_scene_len;
         if let Some((wg_counts_gpu, indirect_buf)) = indirect {
             self.persistent.cached_scheme_indirect = Some((wg_counts_gpu, indirect_buf));
         }

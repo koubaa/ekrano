@@ -553,6 +553,10 @@ pub(crate) struct PersistentState {
     /// Cached GPU `ConfigUniform` buffer. Stable across frames once bump estimates
     /// converge; eliminates `WriteBuffer` from the dispatch graph at steady state.
     pub(crate) cached_config_uniform: Option<(ekrano_encoding::ConfigUniform, Buffer)>,
+    /// True after [`stage_scene_bytes`] writes packed scene staging; cleared when config is
+    /// cached at frame end. Used for layout-only config refresh without hot-path hashing.
+    pub(crate) config_scene_dirty: bool,
+    pub(crate) cached_config_packed_len: usize,
     /// Per-slot cached `FilterUniform` buffers, indexed by filter dispatch order.
     /// Stable for scenes with fixed filter effects (e.g. a static drop shadow).
     pub(crate) cached_filter_uniforms: Vec<Option<(ekrano_encoding::FilterUniform, Buffer)>>,
@@ -629,6 +633,8 @@ impl PersistentState {
             stable_mask_lut_msaa16: None,
             cached_wg_counts: None,
             cached_config_uniform: None,
+            config_scene_dirty: false,
+            cached_config_packed_len: 0,
             cached_filter_uniforms: Vec::new(),
             cached_scheme_indirect: None,
             cached_scene: None,
