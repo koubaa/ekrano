@@ -587,7 +587,10 @@ impl SchemeRenderer {
             .frame_pipeline
             .begin_frame(|_, _| Ok::<(), Error>(()))
             .map_err(|e| Error::Shader(e.to_string()))?;
-        self.drain_ready_bump_readbacks()?;
+        if let Err(e) = self.drain_ready_bump_readbacks() {
+            self.frame_pipeline.abort_frame(frame_handle);
+            return Err(e);
+        }
         self.cleanup_frame_counter = self.cleanup_frame_counter.wrapping_add(1);
         if self.cleanup_frame_counter.is_multiple_of(64) {
             self.persistent.pool.cap_pool_depth(12);
@@ -600,12 +603,22 @@ impl SchemeRenderer {
 
         let t1 = Instant::now();
         if self.persistent.linear_clamp_sampler.is_none() {
-            self.persistent.linear_clamp_sampler =
-                Some(goldy::Sampler::linear(&self.device).map_err(|e| Error::Gpu(e.to_string()))?);
+            match goldy::Sampler::linear(&self.device) {
+                Ok(s) => self.persistent.linear_clamp_sampler = Some(s),
+                Err(e) => {
+                    self.frame_pipeline.abort_frame(frame_handle);
+                    return Err(Error::Gpu(e.to_string()));
+                }
+            }
         }
         if self.persistent.nearest_clamp_sampler.is_none() {
-            self.persistent.nearest_clamp_sampler =
-                Some(goldy::Sampler::nearest(&self.device).map_err(|e| Error::Gpu(e.to_string()))?);
+            match goldy::Sampler::nearest(&self.device) {
+                Ok(s) => self.persistent.nearest_clamp_sampler = Some(s),
+                Err(e) => {
+                    self.frame_pipeline.abort_frame(frame_handle);
+                    return Err(Error::Gpu(e.to_string()));
+                }
+            }
         }
         self.context.flush_deferred_deletions();
         let t_pool = t1.elapsed();
@@ -672,10 +685,7 @@ impl SchemeRenderer {
                 self.resolver = resolver;
                 match pipeline_result {
                     Ok(p) => p,
-                    Err(e) => {
-                        recorder.dismiss();
-                        return Err(e);
-                    }
+                    Err(e) => return Err(e),
                 }
             };
             let out_image_handle = pipeline
@@ -1332,8 +1342,6 @@ impl<'a> SchemeRecorder<'a> {
     where
         F: FnOnce() -> Result<()>,
     {
-        self.finished = true;
-
         self.persistent.deferred_owned_cap_hint = self.deferred_owned_buffers.capacity();
         self.persistent.deferred_textures_cap_hint = self.deferred_textures.capacity();
 
@@ -1382,6 +1390,7 @@ impl<'a> SchemeRecorder<'a> {
                     .map_err(|e| Error::Shader(e.to_string()))?
             }
         };
+        self.finished = true;
         Ok(FrameFinishOutcome {
             timeline: tv,
             surface_frame: None,
