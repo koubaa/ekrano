@@ -8,12 +8,49 @@ use std::mem::size_of;
 use goldy::types::{BufferFlags, TextureFlags, TextureKind};
 use goldy::{Buffer, BufferKind, DispatchShape, Init, Parcel, Sampler, Texture, TextureFormat, ordinal};
 
+use goldy::{Context, Scheme};
+
 use crate::goldy_renderer::wait_buffer_ready_for_reuse;
 use crate::scheme_renderer::SchemeRecorder;
 use crate::worker_retention::scene_size_bucket;
 use crate::resource_proxy::BindType;
 use crate::{Error, RenderParams, Result};
 use ekrano_encoding::{BumpAllocators, CoverageMask, Images, Ramps, RenderConfig, WorkgroupCountsGpu, N_INDIRECT_STAGES, STAGE_PATH_COUNT, STAGE_PATH_TILING};
+
+/// After worker/upload submit, compare config parcel stamp vs per-partition timelines.
+///
+/// Enable with `EKRANO_LOG_CONFIG_PARTITION_STAMP=1`.
+pub(crate) fn log_config_partition_stamp(
+    worker: &Scheme,
+    upload: &Scheme,
+    ctx: &Context,
+    config: &Buffer,
+) {
+    if std::env::var_os("EKRANO_LOG_CONFIG_PARTITION_STAMP").is_none() {
+        return;
+    }
+    let config_tv = config.last_referenced().values().copied().max();
+    let progress = ctx.gpu_progress();
+    let worker_parts = worker.partition_last_tvs();
+    let upload_parts = upload.partition_last_tvs();
+    let coarse_tv = worker_parts.first().and_then(|t| *t);
+    let worker_last_tv = worker_parts.last().and_then(|t| *t);
+    log::info!(
+        "[CONFIG-STAMP] config_last_referenced={config_tv:?} gpu_progress={progress} \
+         worker_partitions={} upload_partitions={} \
+         worker_coarse_tv={coarse_tv:?} worker_last_tv={worker_last_tv:?} \
+         matches_worker_coarse={}",
+        worker_parts.len(),
+        upload_parts.len(),
+        config_tv == coarse_tv,
+    );
+    for (i, tv) in worker_parts.iter().enumerate() {
+        log::info!("[CONFIG-STAMP] worker.partition[{i}] tv={tv:?}");
+    }
+    for (i, tv) in upload_parts.iter().enumerate() {
+        log::info!("[CONFIG-STAMP] upload.partition[{i}] tv={tv:?}");
+    }
+}
 
 /// Shader binding helper for pipeline [`Buffer`] handles.
 pub(crate) trait PipelineBuffer {
@@ -342,7 +379,14 @@ pub(crate) fn stage_scene_bytes(
 }
 
 /// Write config uniform bytes into staging and copy into the device config buffer when recording.
-pub(crate) fn stage_config_bytes(recorder: &mut SchemeRecorder<'_>, config: &Buffer, bytes: &[u8]) -> Result<(), Error> {
+///
+/// When the upload scheme is retained, only the staging buffer is CPU-written; the existing
+/// retained copy node is replayed on submit (same pattern as [`stage_scene_bytes`]).
+pub(crate) fn stage_config_bytes(
+    recorder: &mut SchemeRecorder<'_>,
+    config: &Buffer,
+    bytes: &[u8],
+) -> Result<(), Error> {
     let staging = alloc_or_reuse_config_staging(recorder)?;
     staging
         .write(0, bytes)
@@ -1039,11 +1083,37 @@ impl PipelineResources {
 
         let config = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.config_upload");
-            let config_buf = if let Some((_, buf)) = recorder.persistent.cached_config_uniform.take() {
+            // Mirror Classic path: skip reuse wait and GPU upload when the uniform is unchanged.
+            let cache_hit = recorder
+                .persistent
+                .cached_config_uniform
+                .as_ref()
+                .is_some_and(|(v, _)| v == &config_uniform_value);
+            log::trace!(
+                "ConfigUniform cache {}",
+                if cache_hit { "HIT" } else { "MISS" }
+            );
+            if cache_hit {
+                recorder.persistent.cached_config_uniform.take().unwrap().1
+            } else if let Some((_, buf)) = recorder.persistent.cached_config_uniform.take() {
+                if std::env::var_os("EKRANO_LOG_CONFIG_PARTITION_STAMP").is_some() {
+                    let ctx = recorder.context();
+                    let need_tv = buf.last_referenced().values().copied().max();
+                    log::info!(
+                        "[CONFIG-STAMP] prepare reuse wait: settled={} progress={} need_tv={need_tv:?}",
+                        buf.is_settled(ctx),
+                        ctx.gpu_progress(),
+                    );
+                }
                 wait_buffer_ready_for_reuse(recorder.context(), &buf);
+                stage_config_bytes(
+                    recorder,
+                    &buf,
+                    bytemuck::bytes_of(&config_uniform_value),
+                )?;
                 buf
             } else {
-                recorder
+                let config_buf = recorder
                     .persistent
                     .retained_pool
                     .acquire_buffer(
@@ -1053,14 +1123,14 @@ impl PipelineResources {
                         BufferFlags::empty(),
                         None,
                     )
-                    .map_err(|e| Error::Gpu(e.to_string()))?
-            };
-            stage_config_bytes(
-                recorder,
-                &config_buf,
-                bytemuck::bytes_of(&config_uniform_value),
-            )?;
-            config_buf
+                    .map_err(|e| Error::Gpu(e.to_string()))?;
+                stage_config_bytes(
+                    recorder,
+                    &config_buf,
+                    bytemuck::bytes_of(&config_uniform_value),
+                )?;
+                config_buf
+            }
         };
 
         let buffer_sizes = cpu_config_owned.buffer_sizes;

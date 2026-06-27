@@ -842,6 +842,15 @@ impl SchemeRenderer {
             recorder.finish(pool.is_some(), pre_acquire)?
         };
 
+        if let Some((_, ref config)) = self.persistent.cached_config_uniform {
+            crate::scheme_gpu_resources::log_config_partition_stamp(
+                &self.worker,
+                &self.upload,
+                &self.context,
+                config,
+            );
+        }
+
         if let Some((present, bump, topology, filter_effects, out_image)) = worker_cache {
             self.persistent.cached_present_grant = present;
             self.persistent.cached_bump_grant = bump;
@@ -1317,8 +1326,9 @@ impl<'a> SchemeRecorder<'a> {
     /// timeline is valid for cache stamping before [`goldy::Frame::present`].
     /// Surface paths with deferred scanout call [`Self::finish(true)`]; headless /
     /// render-to-texture paths call [`Self::finish(false)`]. Both stamp the orchestrator
-    /// ring with the worker submit timeline at finish.
-    pub(crate) fn finish<F>(mut self, _deferred_present: bool, pre_acquire: F) -> Result<FrameFinishOutcome>
+    /// ring with the worker submit timeline at finish. Deferred present omits the Tracy
+    /// frame mark here — it is emitted at [`goldy::surface::Frame::present`] time.
+    pub(crate) fn finish<F>(mut self, deferred_present: bool, pre_acquire: F) -> Result<FrameFinishOutcome>
     where
         F: FnOnce() -> Result<()>,
     {
@@ -1357,11 +1367,20 @@ impl<'a> SchemeRecorder<'a> {
         let mut empty_graph = TaskGraph::new();
         let tv = {
             let _tz = goldy::tracy_zone!("ekrano.finish.orchestrator");
-            // Worker submit timeline is known here; stamp the ring slot directly instead of
-            // deferring to the async present-boundary epoch (see synchronization-issue.md).
-            self.frame_pipeline
-                .end_frame_standalone(frame_handle, &mut empty_graph, Some(scheme_tv), ())
-                .map_err(|e| Error::Shader(e.to_string()))?
+            if deferred_present {
+                // No Tracy frame mark — that belongs at present time (TID_PRESENT async path).
+                // Still stamp the ring with the worker submit timeline now, not the present
+                // epoch (see synchronization-issue.md).
+                self.frame_pipeline
+                    .end_frame_for_present(frame_handle, scheme_tv, ())
+                    .map_err(|e| Error::Shader(e.to_string()))?;
+                self.frame_pipeline.note_presented(scheme_tv);
+                scheme_tv
+            } else {
+                self.frame_pipeline
+                    .end_frame_standalone(frame_handle, &mut empty_graph, Some(scheme_tv), ())
+                    .map_err(|e| Error::Shader(e.to_string()))?
+            }
         };
         Ok(FrameFinishOutcome {
             timeline: tv,
