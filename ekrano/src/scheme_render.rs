@@ -121,7 +121,7 @@ impl Render {
             shaders.pathtag_reduce,
             STAGE_PATHTAG_REDUCE,
             &[
-                pipeline.config.as_binding(),
+                pipeline.coarse_config.as_binding(),
                 pipeline.scene.as_binding(),
                 pipeline.scratch.reduced.as_binding(),
             ],
@@ -153,7 +153,7 @@ impl Render {
             shaders.pathtag_scan,
             STAGE_PATHTAG_SCAN,
             &[
-                pipeline.config.as_binding(),
+                pipeline.coarse_config.as_binding(),
                 pipeline.scene.as_binding(),
                 pipeline.scratch.reduced.as_binding(),
                 pipeline.scratch.tagmonoid.as_binding(),
@@ -165,7 +165,7 @@ impl Render {
             shaders.pathtag_scan_large,
             STAGE_PATHTAG_SCAN_LARGE,
             &[
-                pipeline.config.as_binding(),
+                pipeline.coarse_config.as_binding(),
                 pipeline.scene.as_binding(),
                 pipeline.scratch.reduced_scan.as_binding(),
                 pipeline.scratch.tagmonoid.as_binding(),
@@ -177,11 +177,11 @@ impl Render {
             indirect_buf,
             shaders.bbox_clear,
             STAGE_BBOX_CLEAR,
-            &[pipeline.config.as_binding(), pipeline.scratch.path_bbox.as_binding()],
+            &[pipeline.coarse_config.as_binding(), pipeline.scratch.path_bbox.as_binding()],
         );
 
         let flatten_bindings = [
-            pipeline.config.as_binding(),
+            pipeline.coarse_config.as_binding(),
             pipeline.scene.as_binding(),
             pipeline.scratch.tagmonoid.as_binding(),
             pipeline.scratch.path_bbox.as_binding(),
@@ -207,7 +207,7 @@ impl Render {
             shaders.draw_reduce,
             STAGE_DRAW_REDUCE,
             &[
-                pipeline.config.as_binding(),
+                pipeline.coarse_config.as_binding(),
                 pipeline.scene.as_binding(),
                 pipeline.scratch.draw_reduced.as_binding(),
             ],
@@ -219,7 +219,7 @@ impl Render {
             shaders.draw_leaf,
             STAGE_DRAW_LEAF,
             &[
-                pipeline.config.as_binding(),
+                pipeline.coarse_config.as_binding(),
                 pipeline.scene.as_binding(),
                 pipeline.scratch.draw_reduced.as_binding(),
                 pipeline.scratch.path_bbox.as_binding(),
@@ -247,7 +247,7 @@ impl Render {
             shaders.clip_leaf,
             STAGE_CLIP_LEAF,
             &[
-                pipeline.config.as_binding(),
+                pipeline.coarse_config.as_binding(),
                 pipeline.scratch.clip_inp.as_binding(),
                 pipeline.scratch.path_bbox.as_binding(),
                 pipeline.scratch.clip_bic.as_binding(),
@@ -263,7 +263,7 @@ impl Render {
             shaders.binning,
             STAGE_BINNING,
             &[
-                pipeline.config.as_binding(),
+                pipeline.coarse_config.as_binding(),
                 pipeline.scene.as_binding(),
                 pipeline.scratch.draw_monoid.as_binding(),
                 pipeline.scratch.path_bbox.as_binding(),
@@ -281,7 +281,7 @@ impl Render {
             shaders.tile_alloc,
             STAGE_TILE_ALLOC,
             &[
-                pipeline.config.as_binding(),
+                pipeline.coarse_config.as_binding(),
                 pipeline.scene.as_binding(),
                 pipeline.scratch.draw_bbox.as_binding(),
                 pipeline.bump.as_binding(),
@@ -306,7 +306,7 @@ impl Render {
             shaders.path_count,
             indirect_buf.unit(STAGE_PATH_COUNT as usize),
             &[
-                pipeline.config.as_binding(),
+                pipeline.coarse_config.as_binding(),
                 pipeline.bump.as_binding(),
                 pipeline.stable.lines.as_binding(),
                 pipeline.scratch.path.as_binding(),
@@ -321,7 +321,7 @@ impl Render {
             shaders.backdrop,
             STAGE_BACKDROP,
             &[
-                pipeline.config.as_binding(),
+                pipeline.coarse_config.as_binding(),
                 pipeline.bump.as_binding(),
                 pipeline.scratch.path.as_binding(),
                 pipeline.stable.tile.as_binding(),
@@ -334,7 +334,7 @@ impl Render {
             shaders.coarse,
             STAGE_COARSE,
             &[
-                pipeline.config.as_binding(),
+                pipeline.coarse_config.as_binding(),
                 pipeline.scene.as_binding(),
                 pipeline.scratch.draw_monoid.as_binding(),
                 pipeline.scratch.bin_header.as_binding(),
@@ -464,7 +464,7 @@ impl Render {
 
         let persistent = &*recorder.persistent;
         let mut fine_resources: Vec<GpuBinding<'_>> = vec![
-            pipeline.config.as_binding(),
+            pipeline.fine_config.as_binding(),
             pipeline.stable.segments.as_binding(),
             pipeline.stable.ptcl.as_binding(),
             pipeline.stable.info_bin_data.as_binding(),

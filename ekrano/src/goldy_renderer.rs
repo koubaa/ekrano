@@ -26,6 +26,9 @@ use goldy::{
 ///
 /// Stable pipeline parcels live in [`RetainedPool`] deeds reused across frames only while
 /// depth stays at 1 (see [`StablePipelineBuffers`](crate::graph_gpu_resources::StablePipelineBuffers)).
+/// Note: this constant is used to avoid hard-coding code which used to handle multiple frames
+/// in flight. This does not imply that the code will return to that state. There is no intention to
+/// support multiple frames in flight ever again.
 pub(crate) const FRAME_PIPELINE_DEPTH: usize = 1;
 
 use crate::{
@@ -553,6 +556,9 @@ pub(crate) struct PersistentState {
     /// Cached GPU `ConfigUniform` buffer. Stable across frames once bump estimates
     /// converge; eliminates `WriteBuffer` from the dispatch graph at steady state.
     pub(crate) cached_config_uniform: Option<(ekrano_encoding::ConfigUniform, Buffer)>,
+    /// Stable device buffer for the fine-pass config uniform. Written each frame by a
+    /// GPU CopyBuffer from `coarse_config`; never CPU-written, so no reuse wait needed.
+    pub(crate) cached_fine_config: Option<Buffer>,
     /// True after [`stage_scene_bytes`] writes packed scene staging; cleared when config is
     /// cached at frame end. Used for layout-only config refresh without hot-path hashing.
     pub(crate) config_scene_dirty: bool,
@@ -633,6 +639,7 @@ impl PersistentState {
             stable_mask_lut_msaa16: None,
             cached_wg_counts: None,
             cached_config_uniform: None,
+            cached_fine_config: None,
             config_scene_dirty: false,
             cached_config_packed_len: 0,
             cached_filter_uniforms: Vec::new(),

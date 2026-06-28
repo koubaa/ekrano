@@ -852,15 +852,6 @@ impl SchemeRenderer {
             recorder.finish(pool.is_some(), pre_acquire)?
         };
 
-        if let Some((_, ref config)) = self.persistent.cached_config_uniform {
-            crate::scheme_gpu_resources::log_config_partition_stamp(
-                &self.worker,
-                &self.upload,
-                &self.context,
-                config,
-            );
-        }
-
         if let Some((present, bump, topology, filter_effects, out_image)) = worker_cache {
             self.persistent.cached_present_grant = present;
             self.persistent.cached_bump_grant = bump;
@@ -1135,7 +1126,8 @@ impl<'a> SchemeRecorder<'a> {
             image_atlas,
             mask_atlas,
             scene,
-            config,
+            coarse_config,
+            fine_config,
             indirect,
             stable,
             scratch,
@@ -1149,7 +1141,8 @@ impl<'a> SchemeRecorder<'a> {
 
         let _ = (gradient, image_atlas, mask_atlas);
         self.persistent.cached_scene = Some((scene.byte_size(), scene));
-        self.persistent.cached_config_uniform = Some((config_uniform_value, config));
+        self.persistent.cached_config_uniform = Some((config_uniform_value, coarse_config));
+        self.persistent.cached_fine_config = Some(fine_config);
         self.persistent.config_scene_dirty = false;
         self.persistent.cached_config_packed_len = packed_scene_len;
         if let Some((wg_counts_gpu, indirect_buf)) = indirect {

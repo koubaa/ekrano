@@ -8,8 +8,6 @@ use std::mem::size_of;
 use goldy::types::{BufferFlags, TextureFlags, TextureKind};
 use goldy::{Buffer, BufferKind, DispatchShape, Init, Parcel, Sampler, Texture, TextureFormat, ordinal};
 
-use goldy::{Context, Scheme};
-
 use crate::goldy_renderer::wait_buffer_ready_for_reuse;
 use crate::scheme_renderer::SchemeRecorder;
 use crate::worker_retention::scene_size_bucket;
@@ -41,41 +39,6 @@ enum ConfigUniformCacheOutcome {
     LayoutRefresh(Buffer),
     MissReuse(Buffer),
     MissAlloc,
-}
-
-/// After worker/upload submit, compare config parcel stamp vs per-partition timelines.
-///
-/// Enable with `EKRANO_LOG_CONFIG_PARTITION_STAMP=1`.
-pub(crate) fn log_config_partition_stamp(
-    worker: &Scheme,
-    upload: &Scheme,
-    ctx: &Context,
-    config: &Buffer,
-) {
-    if std::env::var_os("EKRANO_LOG_CONFIG_PARTITION_STAMP").is_none() {
-        return;
-    }
-    let config_tv = config.last_referenced().values().copied().max();
-    let progress = ctx.gpu_progress();
-    let worker_parts = worker.partition_last_tvs();
-    let upload_parts = upload.partition_last_tvs();
-    let coarse_tv = worker_parts.first().and_then(|t| *t);
-    let worker_last_tv = worker_parts.last().and_then(|t| *t);
-    log::info!(
-        "[CONFIG-STAMP] config_last_referenced={config_tv:?} gpu_progress={progress} \
-         worker_partitions={} upload_partitions={} \
-         worker_coarse_tv={coarse_tv:?} worker_last_tv={worker_last_tv:?} \
-         matches_worker_coarse={}",
-        worker_parts.len(),
-        upload_parts.len(),
-        config_tv == coarse_tv,
-    );
-    for (i, tv) in worker_parts.iter().enumerate() {
-        log::info!("[CONFIG-STAMP] worker.partition[{i}] tv={tv:?}");
-    }
-    for (i, tv) in upload_parts.iter().enumerate() {
-        log::info!("[CONFIG-STAMP] upload.partition[{i}] tv={tv:?}");
-    }
 }
 
 /// Shader binding helper for pipeline [`Buffer`] handles.
@@ -379,6 +342,26 @@ fn alloc_or_reuse_config_staging(recorder: &mut SchemeRecorder<'_>) -> Result<Bu
         .map_err(|e| Error::Gpu(e.to_string()))
 }
 
+/// Allocate or reuse the stable device buffer for the fine-pass config uniform.
+///
+/// Written each frame by a GPU `CopyBuffer` from `coarse_config`; never CPU-written.
+fn alloc_or_reuse_fine_config(recorder: &mut SchemeRecorder<'_>) -> Result<Buffer, Error> {
+    if let Some(buf) = recorder.persistent.cached_fine_config.take() {
+        return Ok(buf);
+    }
+    recorder
+        .persistent
+        .retained_pool
+        .acquire_buffer(
+            size_of::<ekrano_encoding::ConfigUniform>() as u64,
+            BufferKind::Scattered,
+            Some(size_of::<ekrano_encoding::ConfigUniform>() as u32),
+            BufferFlags::empty(),
+            None,
+        )
+        .map_err(|e| Error::Gpu(e.to_string()))
+}
+
 /// Write scene bytes into staging and copy into the device scene buffer when recording upload topology.
 pub(crate) fn stage_scene_bytes(
     recorder: &mut SchemeRecorder<'_>,
@@ -425,6 +408,32 @@ pub(crate) fn stage_config_bytes(
             .map_err(|e| Error::Shader(e.to_string()))?;
     }
     recorder.persistent.cached_config_staging = Some(staging);
+    Ok(())
+}
+
+/// Record a retained upload-scheme copy from `coarse_config` to `fine_config`.
+///
+/// Lives in the upload scheme (not the worker) so the worker never reads
+/// `coarse_config` in the fine-compute partition — only the coarse partition
+/// reads it. Upload submits before the worker, so `fine_config` is ready before
+/// the fine pass runs.
+fn record_coarse_to_fine_config_copy(
+    recorder: &mut SchemeRecorder<'_>,
+    coarse_config: &Buffer,
+    fine_config: &Buffer,
+) -> Result<(), Error> {
+    if recorder.upload_needs_record {
+        recorder
+            .upload_scheme()
+            .copy_buffer_parcel(
+                coarse_config.whole(),
+                0,
+                fine_config.whole(),
+                0,
+                size_of::<ekrano_encoding::ConfigUniform>() as u64,
+            )
+            .map_err(|e| Error::Shader(e.to_string()))?;
+    }
     Ok(())
 }
 
@@ -875,7 +884,8 @@ pub(crate) struct PipelineResources {
     pub image_atlas: Texture,
     pub mask_atlas: Texture,
     pub scene: Buffer,
-    pub config: Buffer,
+    pub coarse_config: Buffer,
+    pub fine_config: Buffer,
     /// Composite indirect buffer (one ordinal `DispatchShape` parcel per stage).
     /// Cache key and buffer live in [`crate::goldy_renderer::PersistentState::cached_scheme_indirect`].
     pub indirect: Option<(WorkgroupCountsGpu, Buffer)>,
@@ -886,7 +896,7 @@ pub(crate) struct PipelineResources {
     pub filter_layers: [Texture; 4],
     /// Buffer sizes used this frame, stored for cache-key comparison next frame.
     pub buffer_sizes: ekrano_encoding::BufferSizes,
-    /// The `ConfigUniform` value uploaded to `config`, stored so that
+    /// The `ConfigUniform` value uploaded to `coarse_config`, stored so that
     /// `schedule_pipeline_cleanup` can stash the buffer back into
     /// `PersistentState::cached_config_uniform` without re-reading GPU memory.
     pub config_uniform_value: ekrano_encoding::ConfigUniform,
@@ -1104,7 +1114,7 @@ impl PipelineResources {
         let config_uniform_value = cpu_config_owned.gpu;
         let packed_scene_len = packed.len();
 
-        let config = {
+        let coarse_config = {
             let outcome = {
                 let _tz = goldy::tracy_zone!("ekrano.prepare.config_cache");
                 let cached_snapshot =
@@ -1156,15 +1166,6 @@ impl PipelineResources {
                 ConfigUniformCacheOutcome::MissReuse(buf) => {
                     {
                         let _tz = goldy::tracy_zone!("ekrano.prepare.config_reuse_wait");
-                        if std::env::var_os("EKRANO_LOG_CONFIG_PARTITION_STAMP").is_some() {
-                            let ctx = recorder.context();
-                            let need_tv = buf.last_referenced().values().copied().max();
-                            log::info!(
-                                "[CONFIG-STAMP] prepare reuse wait: settled={} progress={} need_tv={need_tv:?}",
-                                buf.is_settled(ctx),
-                                ctx.gpu_progress(),
-                            );
-                        }
                         wait_buffer_ready_for_reuse(recorder.context(), &buf);
                     }
                     {
@@ -1204,6 +1205,9 @@ impl PipelineResources {
                 }
             }
         };
+
+        let fine_config = alloc_or_reuse_fine_config(recorder)?;
+        record_coarse_to_fine_config_copy(recorder, &coarse_config, &fine_config)?;
 
         let scene = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.scene_upload");
@@ -1339,7 +1343,8 @@ impl PipelineResources {
             image_atlas,
             mask_atlas,
             scene,
-            config,
+            coarse_config,
+            fine_config,
             indirect: None,
             stable,
             scratch,
