@@ -761,12 +761,6 @@ impl PersistentState {
     ) {
         self.cached_scheme_rt = Some((out, layers, record_tv));
     }
-
-    pub(crate) fn stamp_scheme_rt_record_timeline(&mut self, record_tv: TimelineValue) {
-        if let Some(entry) = self.cached_scheme_rt.as_mut() {
-            entry.2 = record_tv;
-        }
-    }
 }
 
 #[cfg(test)]

@@ -47,7 +47,7 @@ use crate::{
         FrameFinishOutcome, FrameStats, GoldyShader, AllocatorStats,
         FRAME_PIPELINE_DEPTH, MAX_BUMP_RETRIES, PreparedFrame, PresentToken, PersistentState,
         ResourcePoolStats, defer_frame_gpu_resources, env_robust_override,
-        FRAME_COUNTER, sanitize_bump, CacheScheduleOutcome,
+        FRAME_COUNTER, sanitize_bump,
     },
     scheme_gpu_resources::{
         GpuBinding, bind_type_to_node_access,
@@ -65,6 +65,13 @@ use ekrano_encoding::{BumpAllocators, Images, Layout, Ramps, RenderConfig, Resol
 // -----------------------------------------------------------------------
 // SchemeRenderer — Scheme-based renderer
 // -----------------------------------------------------------------------
+
+/// Pipeline from the previous frame, installed at the next [`SchemeRenderer::flush_pending_pipeline_cleanup`].
+struct PendingPipelineCleanup {
+    pipeline: crate::scheme_gpu_resources::PipelineResources,
+    /// Worker submit timeline; applied to the scheme RT record gate on flush.
+    scheme_rt_record_tv: TimelineValue,
+}
 
 /// Goldy-based 2D renderer using the retained-[`Scheme`] backend.
 ///
@@ -101,6 +108,8 @@ pub struct SchemeRenderer {
     /// Cumulative upload scheme records across upload replacements (tests / diagnostics).
     #[cfg(test)]
     upload_record_epochs: u64,
+    /// Deferred [`crate::scheme_gpu_resources::install_scheme_pipeline_cache`] from the prior frame.
+    pending_pipeline_cleanup: Option<PendingPipelineCleanup>,
 }
 
 impl SchemeRenderer {
@@ -140,6 +149,7 @@ impl SchemeRenderer {
             worker_record_epochs: 0,
             #[cfg(test)]
             upload_record_epochs: 0,
+            pending_pipeline_cleanup: None,
         };
         let shaders = {
             let _tz = goldy::tracy_zone!("ekrano.SchemeRenderer::new.compile_shaders");
@@ -157,10 +167,6 @@ impl SchemeRenderer {
 }
 
 impl SchemeRenderer {
-    // =======================================================================
-    // Internal helpers — pool sizing & bump persistence
-    // =======================================================================
-
     fn apply_bump_feedback(
         &mut self,
         prev_bump: Option<BumpAllocators>,
@@ -224,6 +230,37 @@ impl SchemeRenderer {
         p.segments = p.segments.max(bump.segments);
         p.blend = p.blend.max(bump.blend);
         p.lines = p.lines.max(bump.lines);
+    }
+
+    /// Stage pipeline handles for install at the next frame start (off the submit critical path).
+    fn stage_pipeline_cleanup(&mut self, pipeline: crate::scheme_gpu_resources::PipelineResources) {
+        assert!(
+            self.pending_pipeline_cleanup.is_none(),
+            "pending_pipeline_cleanup must be empty before staging"
+        );
+        self.pending_pipeline_cleanup = Some(PendingPipelineCleanup {
+            pipeline,
+            scheme_rt_record_tv: 0,
+        });
+    }
+
+    fn stamp_pending_pipeline_record_timeline(&mut self, record_tv: TimelineValue) {
+        if let Some(pending) = &mut self.pending_pipeline_cleanup {
+            pending.scheme_rt_record_tv = record_tv;
+        }
+    }
+
+    /// Install the prior frame's staged pipeline cache before prepare opens the recorder.
+    fn flush_pending_pipeline_cleanup(&mut self) {
+        let Some(pending) = self.pending_pipeline_cleanup.take() else {
+            return;
+        };
+        let _tz = goldy::tracy_zone!("ekrano.flush_pending_pipeline_cleanup");
+        crate::scheme_gpu_resources::install_scheme_pipeline_cache(
+            &mut self.persistent,
+            pending.pipeline,
+            pending.scheme_rt_record_tv,
+        );
     }
 
     // =======================================================================
@@ -426,6 +463,7 @@ impl SchemeRenderer {
         for _attempt in 0..=MAX_BUMP_RETRIES {
             self.poll_and_reclaim();
             self.run_frame(scene, params, None, None)?;
+            self.flush_pending_pipeline_cleanup();
             self.frame_pipeline
                 .drain_all(|_, _| Ok::<(), Error>(()))
                 .map_err(|e| Error::Shader(e.to_string()))?;
@@ -569,6 +607,7 @@ impl SchemeRenderer {
         let t_resolve = frame_start.elapsed();
 
         self.persistent.drain_pending_returns();
+        self.flush_pending_pipeline_cleanup();
 
         let out_image_format = pool
             .map(|p| p.format())
@@ -848,8 +887,8 @@ impl SchemeRenderer {
             scheme_submission,
         } = {
             let _tz_gap = goldy::tracy_zone!("ekrano.tail_to_worker_submit");
-            let _ = recorder.schedule_pipeline_cleanup(pipeline);
             let submitted = recorder.submit_schemes(pool.is_some(), pre_acquire)?;
+            self.stage_pipeline_cleanup(pipeline);
             SchemeRecorder::finalize(submitted, &mut self.frame_pipeline)?
         };
 
@@ -882,7 +921,7 @@ impl SchemeRenderer {
             _ => None,
         };
 
-        self.persistent.stamp_scheme_rt_record_timeline(frame_tv);
+        self.stamp_pending_pipeline_record_timeline(frame_tv);
 
         defer_frame_gpu_resources(
             &self.context,
@@ -1127,80 +1166,6 @@ impl<'a> SchemeRecorder<'a> {
 
     pub(crate) fn defer_texture(&mut self, tex: Texture) {
         self.deferred_textures.push(tex);
-    }
-
-    pub(crate) fn schedule_pipeline_cleanup(
-        &mut self,
-        pipeline: crate::scheme_gpu_resources::PipelineResources,
-    ) -> CacheScheduleOutcome {
-        let _tz = goldy::tracy_zone!("ekrano.schedule_pipeline_cleanup");
-        let outcome = CacheScheduleOutcome::default();
-        let crate::scheme_gpu_resources::PipelineResources {
-            gradient,
-            image_atlas,
-            mask_atlas,
-            scene,
-            coarse_config,
-            fine_config,
-            indirect,
-            stable,
-            scratch,
-            bump,
-            out_image,
-            filter_layers,
-            buffer_sizes,
-            config_uniform_value,
-            packed_scene_len,
-        } = pipeline;
-
-        let _ = (gradient, image_atlas, mask_atlas);
-        self.persistent.cached_scene = Some((scene.byte_size(), scene));
-        self.persistent.cached_config_uniform = Some((config_uniform_value, coarse_config));
-        self.persistent.cached_fine_config = Some(fine_config);
-        self.persistent.config_scene_dirty = false;
-        self.persistent.cached_config_packed_len = packed_scene_len;
-        if let Some((wg_counts_gpu, indirect_buf)) = indirect {
-            self.persistent.cached_scheme_indirect = Some((wg_counts_gpu, indirect_buf));
-        }
-        self.persistent.cached_bump = Some((bump.byte_size(), bump));
-        let pipeline_cache = crate::graph_gpu_resources::CachedPipeline {
-            stable: crate::graph_gpu_resources::StablePipelineBuffers {
-                info_bin_data: stable.info_bin_data,
-                tile: stable.tile,
-                segments: stable.segments,
-                ptcl: stable.ptcl,
-                blend_spill: stable.blend_spill,
-                lines: stable.lines,
-                seg_counts: stable.seg_counts,
-            },
-            scratch: crate::graph_gpu_resources::ScratchPipelineBuffers {
-                reduced: scratch.reduced,
-                reduced2: scratch.reduced2,
-                reduced_scan: scratch.reduced_scan,
-                tagmonoid: scratch.tagmonoid,
-                path_bbox: scratch.path_bbox,
-                draw_reduced: scratch.draw_reduced,
-                draw_monoid: scratch.draw_monoid,
-                clip_inp: scratch.clip_inp,
-                clip_el: scratch.clip_el,
-                clip_bic: scratch.clip_bic,
-                clip_bbox: scratch.clip_bbox,
-                draw_bbox: scratch.draw_bbox,
-                bin_header: scratch.bin_header,
-                path: scratch.path,
-            },
-            buffer_sizes,
-        };
-        assert!(
-            self.persistent.cached_pipeline.is_none(),
-            "cached_pipeline must be empty at schedule (prepare should have taken it)"
-        );
-        self.persistent.cached_pipeline = Some(pipeline_cache);
-        log::debug!("[PIPE-CACHE] schedule: cached");
-        self.persistent
-            .store_scheme_render_targets(out_image, filter_layers, 0);
-        log::debug!("[RT-CACHE] schedule: scheme out_image stored (single slot)");
-        outcome
     }
 
     #[cfg_attr(

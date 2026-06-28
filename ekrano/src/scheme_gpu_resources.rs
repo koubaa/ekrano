@@ -6,9 +6,9 @@
 use std::mem::size_of;
 
 use goldy::types::{BufferFlags, TextureFlags, TextureKind};
-use goldy::{Buffer, BufferKind, DispatchShape, Init, Parcel, Sampler, Texture, TextureFormat, ordinal};
+use goldy::{Buffer, BufferKind, DispatchShape, Init, Parcel, Sampler, Texture, TextureFormat, TimelineValue, ordinal};
 
-use crate::goldy_renderer::wait_buffer_ready_for_reuse;
+use crate::goldy_renderer::{CacheScheduleOutcome, PersistentState, wait_buffer_ready_for_reuse};
 use crate::scheme_renderer::SchemeRecorder;
 use crate::worker_retention::scene_size_bucket;
 use crate::resource_proxy::BindType;
@@ -902,6 +902,84 @@ pub(crate) struct PipelineResources {
     pub config_uniform_value: ConfigUniform,
     /// Packed scene bytes last uploaded with [`Self::cached_config_uniform`].
     pub packed_scene_len: usize,
+}
+
+/// Move per-frame pipeline handles into [`PersistentState`] for cross-frame reuse.
+///
+/// Called at the start of the next frame ([`SchemeRenderer::flush_pending_pipeline_cleanup`]),
+/// not on the post-`alloc_buffers` critical path.
+pub(crate) fn install_scheme_pipeline_cache(
+    persistent: &mut PersistentState,
+    pipeline: PipelineResources,
+    scheme_rt_record_tv: TimelineValue,
+) -> CacheScheduleOutcome {
+    let _tz = goldy::tracy_zone!("ekrano.schedule_pipeline_cleanup");
+    let outcome = CacheScheduleOutcome::default();
+    let PipelineResources {
+        gradient,
+        image_atlas,
+        mask_atlas,
+        scene,
+        coarse_config,
+        fine_config,
+        indirect,
+        stable,
+        scratch,
+        bump,
+        out_image,
+        filter_layers,
+        buffer_sizes,
+        config_uniform_value,
+        packed_scene_len,
+    } = pipeline;
+
+    let _ = (gradient, image_atlas, mask_atlas);
+    persistent.cached_scene = Some((scene.byte_size(), scene));
+    persistent.cached_config_uniform = Some((config_uniform_value, coarse_config));
+    persistent.cached_fine_config = Some(fine_config);
+    persistent.config_scene_dirty = false;
+    persistent.cached_config_packed_len = packed_scene_len;
+    if let Some((wg_counts_gpu, indirect_buf)) = indirect {
+        persistent.cached_scheme_indirect = Some((wg_counts_gpu, indirect_buf));
+    }
+    persistent.cached_bump = Some((bump.byte_size(), bump));
+    let pipeline_cache = crate::graph_gpu_resources::CachedPipeline {
+        stable: crate::graph_gpu_resources::StablePipelineBuffers {
+            info_bin_data: stable.info_bin_data,
+            tile: stable.tile,
+            segments: stable.segments,
+            ptcl: stable.ptcl,
+            blend_spill: stable.blend_spill,
+            lines: stable.lines,
+            seg_counts: stable.seg_counts,
+        },
+        scratch: crate::graph_gpu_resources::ScratchPipelineBuffers {
+            reduced: scratch.reduced,
+            reduced2: scratch.reduced2,
+            reduced_scan: scratch.reduced_scan,
+            tagmonoid: scratch.tagmonoid,
+            path_bbox: scratch.path_bbox,
+            draw_reduced: scratch.draw_reduced,
+            draw_monoid: scratch.draw_monoid,
+            clip_inp: scratch.clip_inp,
+            clip_el: scratch.clip_el,
+            clip_bic: scratch.clip_bic,
+            clip_bbox: scratch.clip_bbox,
+            draw_bbox: scratch.draw_bbox,
+            bin_header: scratch.bin_header,
+            path: scratch.path,
+        },
+        buffer_sizes,
+    };
+    assert!(
+        persistent.cached_pipeline.is_none(),
+        "cached_pipeline must be empty at install (prepare should have taken it)"
+    );
+    persistent.cached_pipeline = Some(pipeline_cache);
+    log::debug!("[PIPE-CACHE] schedule: cached");
+    persistent.store_scheme_render_targets(out_image, filter_layers, scheme_rt_record_tv);
+    log::debug!("[RT-CACHE] schedule: scheme out_image stored (single slot)");
+    outcome
 }
 
 impl PipelineResources {
