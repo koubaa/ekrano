@@ -333,9 +333,9 @@ fn alloc_or_reuse_config_staging(recorder: &mut SchemeRecorder<'_>) -> Result<Bu
         .persistent
         .retained_pool
         .acquire_buffer(
-            size_of::<ekrano_encoding::ConfigUniform>() as u64,
+            size_of::<ConfigUniform>() as u64,
             BufferKind::Scattered,
-            Some(size_of::<ekrano_encoding::ConfigUniform>() as u32),
+            Some(size_of::<ConfigUniform>() as u32),
             BufferFlags::CPU_WRITABLE,
             None,
         )
@@ -353,9 +353,9 @@ fn alloc_or_reuse_fine_config(recorder: &mut SchemeRecorder<'_>) -> Result<Buffe
         .persistent
         .retained_pool
         .acquire_buffer(
-            size_of::<ekrano_encoding::ConfigUniform>() as u64,
+            size_of::<ConfigUniform>() as u64,
             BufferKind::Scattered,
-            Some(size_of::<ekrano_encoding::ConfigUniform>() as u32),
+            Some(size_of::<ConfigUniform>() as u32),
             BufferFlags::empty(),
             None,
         )
@@ -430,7 +430,7 @@ fn record_coarse_to_fine_config_copy(
                 0,
                 fine_config.whole(),
                 0,
-                size_of::<ekrano_encoding::ConfigUniform>() as u64,
+                size_of::<ConfigUniform>() as u64,
             )
             .map_err(|e| Error::Shader(e.to_string()))?;
     }
@@ -899,7 +899,7 @@ pub(crate) struct PipelineResources {
     /// The `ConfigUniform` value uploaded to `coarse_config`, stored so that
     /// `schedule_pipeline_cleanup` can stash the buffer back into
     /// `PersistentState::cached_config_uniform` without re-reading GPU memory.
-    pub config_uniform_value: ekrano_encoding::ConfigUniform,
+    pub config_uniform_value: ConfigUniform,
     /// Packed scene bytes last uploaded with [`Self::cached_config_uniform`].
     pub packed_scene_len: usize,
 }
@@ -1185,9 +1185,9 @@ impl PipelineResources {
                             .persistent
                             .retained_pool
                             .acquire_buffer(
-                                size_of::<ekrano_encoding::ConfigUniform>() as u64,
+                                size_of::<ConfigUniform>() as u64,
                                 BufferKind::Scattered,
-                                Some(size_of::<ekrano_encoding::ConfigUniform>() as u32),
+                                Some(size_of::<ConfigUniform>() as u32),
                                 BufferFlags::empty(),
                                 None,
                             )
