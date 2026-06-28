@@ -578,6 +578,7 @@ impl SchemeRenderer {
     {
         let _tz = goldy::tracy_zone!("ekrano.run_frame");
         use std::time::Instant;
+        let mut trace = crate::frame_trace::FrameTrace::begin();
         let frame_start = Instant::now();
 
         let packed = prepared.packed;
@@ -605,9 +606,11 @@ impl SchemeRenderer {
         };
         let mut stats = FrameStats::default();
         let t_resolve = frame_start.elapsed();
+        trace.mark("resolve");
 
         self.persistent.drain_pending_returns();
         self.flush_pending_pipeline_cleanup();
+        trace.mark("flush_cleanup");
 
         let out_image_format = pool
             .map(|p| p.format())
@@ -636,6 +639,7 @@ impl SchemeRenderer {
             self.device.compact_overflow_heaps();
         }
         let t_drain = t_drain_start.elapsed();
+        trace.mark("begin_frame_drain");
 
         let prev_bump = self.persistent.take_last_drained_bump();
         self.apply_bump_feedback(prev_bump, &layout, &params, &mut config, &mut stats);
@@ -661,6 +665,7 @@ impl SchemeRenderer {
         }
         self.context.flush_deferred_deletions();
         let t_pool = t1.elapsed();
+        trace.mark("pool_warmup");
 
         let t2 = Instant::now();
         let scene_bucket = crate::worker_retention::scene_size_bucket(packed.len());
@@ -734,6 +739,7 @@ impl SchemeRenderer {
             recorder.dismiss();
             (pipeline, out_image_handle)
         };
+        trace.mark("prepare");
 
         if upload_needs_record {
             self.persistent.cached_upload_key = Some(upload_key);
@@ -802,6 +808,7 @@ impl SchemeRenderer {
                 );
             }
             let t_coarse = t2.elapsed();
+            trace.mark("coarse_record");
 
             let t3 = Instant::now();
             {
@@ -825,6 +832,7 @@ impl SchemeRenderer {
                 );
             }
             let t_fine_record = t3.elapsed();
+            trace.mark("fine_record");
 
             let present_grant = if let Some(pool) = pool {
                 let screen = pool.lease();
@@ -870,6 +878,7 @@ impl SchemeRenderer {
             (t_coarse, t_fine_record)
         } else {
             let _tz = goldy::tracy_zone!("ekrano.worker_retained");
+            trace.mark("worker_retained");
             // Worker retained: coarse/fine are not re-run this frame.
             // t_coarse and t_fine_record are reported as zero in FrameStats on the
             // hot retained path — the timings reflect only the recording cost, which
@@ -888,8 +897,11 @@ impl SchemeRenderer {
         } = {
             let _tz_gap = goldy::tracy_zone!("ekrano.tail_to_worker_submit");
             let submitted = recorder.submit_schemes(pool.is_some(), pre_acquire)?;
+            trace.mark("submit_schemes");
             self.stage_pipeline_cleanup(pipeline);
-            SchemeRecorder::finalize(submitted, &mut self.frame_pipeline)?
+            let outcome = SchemeRecorder::finalize(submitted, &mut self.frame_pipeline)?;
+            trace.mark("finalize");
+            outcome
         };
 
         if let Some((present, bump, topology, filter_effects, out_image)) = worker_cache {
@@ -962,6 +974,9 @@ impl SchemeRenderer {
                 transient_views,
                 transient_textures,
             );
+
+            trace.mark("post_submit");
+            trace.emit(frame_num, frame_tv);
         }
 
         Ok((stats, present_token))
@@ -1184,18 +1199,25 @@ impl<'a> SchemeRecorder<'a> {
         record_upload_bytes(self, name, size_of::<T>() as u32, bytemuck::bytes_of(data)).expect("upload_typed failed")
     }
 
-    pub fn dispatch(&mut self, shader: ShaderId, wg_size: (u32, u32, u32), bindings: &[GpuBinding<'_>]) {
-        Self::record_dispatch(self.scheme, self.shaders, shader, wg_size, bindings, &[]);
+    pub fn dispatch(
+        &mut self,
+        label: &'static str,
+        shader: ShaderId,
+        wg_size: (u32, u32, u32),
+        bindings: &[GpuBinding<'_>],
+    ) {
+        Self::record_dispatch(self.scheme, self.shaders, label, shader, wg_size, bindings, &[]);
     }
 
     pub fn dispatch_with_push_tail(
         &mut self,
+        label: &'static str,
         shader: ShaderId,
         wg_size: (u32, u32, u32),
         bindings: &[GpuBinding<'_>],
         push_tail: &[u32],
     ) {
-        Self::record_dispatch(self.scheme, self.shaders, shader, wg_size, bindings, push_tail);
+        Self::record_dispatch(self.scheme, self.shaders, label, shader, wg_size, bindings, push_tail);
     }
 
     /// Record a compute dispatch without holding `&mut SchemeRecorder`.
@@ -1206,17 +1228,19 @@ impl<'a> SchemeRecorder<'a> {
     pub(crate) fn record_dispatch(
         scheme: &mut Scheme,
         shaders: &[GoldyShader],
+        label: &'static str,
         shader_id: ShaderId,
         wg_size: (u32, u32, u32),
         bindings: &[GpuBinding<'_>],
         push_tail: &[u32],
     ) {
-        Self::dispatch_inner(scheme, shaders, shader_id, wg_size, bindings, push_tail);
+        Self::dispatch_inner(scheme, shaders, label, shader_id, wg_size, bindings, push_tail);
     }
 
     fn dispatch_inner(
         scheme: &mut Scheme,
         shaders: &[GoldyShader],
+        label: &'static str,
         shader_id: ShaderId,
         (x, y, z): (u32, u32, u32),
         bindings: &[GpuBinding<'_>],
@@ -1224,7 +1248,7 @@ impl<'a> SchemeRecorder<'a> {
     ) {
         if x == 0 || y == 0 || z == 0 {
             log::warn!(
-                "Skipping Dispatch for shader {} with zero grid dimension ({x}, {y}, {z}); \
+                "Skipping Dispatch {label} for shader {} with zero grid dimension ({x}, {y}, {z}); \
                  this may indicate a bug in the caller",
                 shader_id.0
             );
@@ -1232,7 +1256,7 @@ impl<'a> SchemeRecorder<'a> {
         }
         let bind_types = &shaders[shader_id.0].bindings;
 
-        let mut node = scheme.node("dispatch", &shaders[shader_id.0].pipeline);
+        let mut node = scheme.node(label, &shaders[shader_id.0].pipeline);
         for (i, binding) in bindings.iter().enumerate() {
             let access = bind_types
                 .get(i)
@@ -1260,12 +1284,13 @@ impl<'a> SchemeRecorder<'a> {
     /// (e.g. from `path_count_setup_scheme`) is correctly ordered before this node.
     pub fn dispatch_shape(
         &mut self,
+        label: &'static str,
         shader: ShaderId,
         shape: &goldy::Parcel,
         bindings: &[GpuBinding<'_>],
     ) {
         let bind_types = &self.shaders[shader.0].bindings;
-        let mut node = self.scheme.node("dispatch_shape", &self.shaders[shader.0].pipeline);
+        let mut node = self.scheme.node(label, &self.shaders[shader.0].pipeline);
         for (i, binding) in bindings.iter().enumerate() {
             let access = bind_types
                 .get(i)

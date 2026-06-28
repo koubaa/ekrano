@@ -63,6 +63,7 @@
 )]
 
 mod debug;
+mod frame_trace;
 mod resource_proxy;
 mod scene;
 mod shaders;

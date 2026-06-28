@@ -53,6 +53,29 @@ const MAX_FLATTEN_WG_PER_SUBMIT: u32 = 8;
 /// Must match `FLATTEN_WG` in `ekrano_encoding` (threads per flatten workgroup).
 const FLATTEN_THREADS_PER_GROUP: u32 = 256;
 
+fn coarse_stage_label(stage: u32) -> &'static str {
+    match stage {
+        STAGE_PATHTAG_REDUCE => "coarse.pathtag_reduce",
+        STAGE_PATHTAG_REDUCE2 => "coarse.pathtag_reduce2",
+        STAGE_PATHTAG_SCAN1 => "coarse.pathtag_scan1",
+        STAGE_PATHTAG_SCAN => "coarse.pathtag_scan",
+        STAGE_PATHTAG_SCAN_LARGE => "coarse.pathtag_scan_large",
+        STAGE_BBOX_CLEAR => "coarse.bbox_clear",
+        STAGE_FLATTEN => "coarse.flatten",
+        STAGE_DRAW_REDUCE => "coarse.draw_reduce",
+        STAGE_DRAW_LEAF => "coarse.draw_leaf",
+        STAGE_CLIP_REDUCE => "coarse.clip_reduce",
+        STAGE_CLIP_LEAF => "coarse.clip_leaf",
+        STAGE_BINNING => "coarse.binning",
+        STAGE_TILE_ALLOC => "coarse.tile_alloc",
+        STAGE_PATH_COUNT => "coarse.path_count",
+        STAGE_BACKDROP => "coarse.backdrop",
+        STAGE_COARSE => "coarse.raster",
+        STAGE_PATH_TILING => "coarse.path_tiling",
+        _ => "coarse.unknown",
+    }
+}
+
 fn dispatch_stage(
     recorder: &mut SchemeRecorder<'_>,
     indirect: &Buffer,
@@ -60,7 +83,12 @@ fn dispatch_stage(
     stage: u32,
     bindings: &[GpuBinding<'_>],
 ) {
-    recorder.dispatch_shape(shader, indirect.unit(stage as usize), bindings);
+    recorder.dispatch_shape(
+        coarse_stage_label(stage),
+        shader,
+        indirect.unit(stage as usize),
+        bindings,
+    );
 }
 
 impl Default for Render {
@@ -194,7 +222,13 @@ impl Render {
             while base_wg < flat_wg_x {
                 let chunk = (flat_wg_x - base_wg).min(MAX_FLATTEN_WG_PER_SUBMIT);
                 let thread_base = base_wg * FLATTEN_THREADS_PER_GROUP;
-                recorder.dispatch_with_push_tail(shaders.flatten, (chunk, 1, 1), &flatten_bindings, &[thread_base]);
+                recorder.dispatch_with_push_tail(
+                    "coarse.flatten",
+                    shaders.flatten,
+                    (chunk, 1, 1),
+                    &flatten_bindings,
+                    &[thread_base],
+                );
                 base_wg += chunk;
             }
         } else {
@@ -293,6 +327,7 @@ impl Render {
         // path_count_setup_scheme writes the workgroup count for path_count into
         // the per-stage DispatchShape buffer.
         recorder.dispatch(
+            "coarse.path_count_setup",
             shaders.path_count_setup,
             wg_counts.path_count_setup,
             &[
@@ -303,6 +338,7 @@ impl Render {
 
         // Indirect dispatch driven by the GPU-written path_count shape buffer.
         recorder.dispatch_shape(
+            "coarse.path_count",
             shaders.path_count,
             indirect_buf.unit(STAGE_PATH_COUNT as usize),
             &[
@@ -349,6 +385,7 @@ impl Render {
         // path_tiling_setup_scheme writes the workgroup count for path_tiling
         // into the per-stage DispatchShape buffer.
         recorder.dispatch(
+            "coarse.path_tiling_setup",
             shaders.path_tiling_setup,
             wg_counts.path_tiling_setup,
             &[
@@ -360,6 +397,7 @@ impl Render {
 
         // Indirect dispatch driven by the GPU-written path_tiling shape buffer.
         recorder.dispatch_shape(
+            "coarse.path_tiling",
             shaders.path_tiling,
             indirect_buf.unit(STAGE_PATH_TILING as usize),
             &[
@@ -455,7 +493,7 @@ impl Render {
                 let wg = (width_px.div_ceil(16), height_px.div_ceil(16), 1);
                 let u_clear = FilterUniform::clear_transparent(width_px, height_px);
                 for fl in &pipeline.filter_layers {
-                    filter_dispatch(recorder, fs, &u_clear, wg, out_tex, fl);
+                    filter_dispatch(recorder, "filter.clear_layer", fs, &u_clear, wg, out_tex, fl);
                 }
             } else {
                 log::warn!("filter_pass shader unavailable; cannot clear filter layer textures");
@@ -501,9 +539,15 @@ impl Render {
                 .expect("nearest_clamp_sampler must be initialised before fine pass"),
         ));
 
+        let fine_label = match self.aa_config {
+            AaConfig::Area => "fine.area",
+            AaConfig::Msaa16 => "fine.msaa16",
+            AaConfig::Msaa8 => "fine.msaa8",
+        };
         SchemeRecorder::record_dispatch(
             recorder.scheme,
             recorder.shaders,
+            fine_label,
             shader,
             (width_in_tiles, height_in_tiles, 1),
             &fine_resources,
@@ -523,6 +567,7 @@ fn premul_srgb_u32(c: PremulColor<Srgb>) -> u32 {
 
 fn filter_dispatch(
     recorder: &mut SchemeRecorder<'_>,
+    label: &'static str,
     shader: crate::ShaderId,
     uniform: &FilterUniform,
     wg: (u32, u32, u32),
@@ -563,7 +608,15 @@ fn filter_dispatch(
                 .expect("linear_clamp_sampler must be initialised before filter pass"),
         ),
     ];
-    SchemeRecorder::record_dispatch(recorder.scheme, recorder.shaders, shader, wg, &bindings, &[]);
+    SchemeRecorder::record_dispatch(
+        recorder.scheme,
+        recorder.shaders,
+        label,
+        shader,
+        wg,
+        &bindings,
+        &[],
+    );
 
     // Restore buffer to persistent cache. Do NOT call defer_owned_buffer.
     let cache = &mut recorder.persistent.cached_filter_uniforms;
@@ -582,6 +635,7 @@ fn filter_dispatch(
 /// original foreground layer are different textures.
 fn filter_dispatch_two_src(
     recorder: &mut SchemeRecorder<'_>,
+    label: &'static str,
     shader: crate::ShaderId,
     uniform: &FilterUniform,
     wg: (u32, u32, u32),
@@ -620,7 +674,15 @@ fn filter_dispatch_two_src(
                 .expect("linear_clamp_sampler must be initialised before filter pass"),
         ),
     ];
-    SchemeRecorder::record_dispatch(recorder.scheme, recorder.shaders, shader, wg, &bindings, &[]);
+    SchemeRecorder::record_dispatch(
+        recorder.scheme,
+        recorder.shaders,
+        label,
+        shader,
+        wg,
+        &bindings,
+        &[],
+    );
 
     let cache = &mut recorder.persistent.cached_filter_uniforms;
     if slot < cache.len() {
@@ -673,7 +735,7 @@ fn pyramid_blur(
         let lh = (height >> (l + 1)).max(1);
         let wg = (lw.div_ceil(16), lh.div_ceil(16), 1);
         let u = FilterUniform::downsample(lw, lh);
-        filter_dispatch(recorder, shader, &u, wg, prev_src, level);
+        filter_dispatch(recorder, "filter.pyramid.downsample", shader, &u, wg, prev_src, level);
         prev_src = level;
     }
 
@@ -689,9 +751,9 @@ fn pyramid_blur(
         .expect("pyramid bottom scratch");
 
     let u_h = FilterUniform::gaussian_blur(bw, bh, true, sigma_residual, edge_mode);
-    filter_dispatch(recorder, shader, &u_h, wg_b, bottom, &bottom_scratch);
+    filter_dispatch(recorder, "filter.pyramid.blur_h", shader, &u_h, wg_b, bottom, &bottom_scratch);
     let u_v = FilterUniform::gaussian_blur(bw, bh, false, sigma_residual, edge_mode);
-    filter_dispatch(recorder, shader, &u_v, wg_b, &bottom_scratch, bottom);
+    filter_dispatch(recorder, "filter.pyramid.blur_v", shader, &u_v, wg_b, &bottom_scratch, bottom);
 
     // Upsample: pyramid[levels-1] → ... → pyramid[0] → dst
     for l in (0..levels).rev() {
@@ -702,7 +764,7 @@ fn pyramid_blur(
         };
         let wg = (uw.div_ceil(16), uh.div_ceil(16), 1);
         let u = FilterUniform::upsample(uw, uh);
-        filter_dispatch(recorder, shader, &u, wg, &pyramid[l], dst_tex);
+        filter_dispatch(recorder, "filter.pyramid.upsample", shader, &u, wg, &pyramid[l], dst_tex);
     }
 
     // Release transient textures.
@@ -753,22 +815,22 @@ pub(crate) fn record_filter_effects(
         match &effect.primitive {
             FilterPrimitive::GaussianBlur { std_dev, edge_mode } => {
                 let u_h = FilterUniform::gaussian_blur(width, height, true, *std_dev, *edge_mode);
-                filter_dispatch(recorder, shader, &u_h, wg, ft, &scratch);
+                filter_dispatch(recorder, "filter.gaussian_blur_h", shader, &u_h, wg, ft, &scratch);
                 let u_v = FilterUniform::gaussian_blur(width, height, false, *std_dev, *edge_mode);
-                filter_dispatch(recorder, shader, &u_v, wg, &scratch, ft);
+                filter_dispatch(recorder, "filter.gaussian_blur_v", shader, &u_v, wg, &scratch, ft);
             }
             FilterPrimitive::Offset { dx, dy } => {
                 let edge = ekrano_encoding::FilterEdgeMode::Duplicate;
                 let u = FilterUniform::offset(width, height, *dx, *dy, edge);
-                filter_dispatch(recorder, shader, &u, wg, ft, &scratch);
+                filter_dispatch(recorder, "filter.offset", shader, &u, wg, ft, &scratch);
                 let u_copy = FilterUniform::copy(width, height);
-                filter_dispatch(recorder, shader, &u_copy, wg, &scratch, ft);
+                filter_dispatch(recorder, "filter.copy", shader, &u_copy, wg, &scratch, ft);
             }
             FilterPrimitive::Flood { color, clip_rect } => {
                 let u = FilterUniform::flood(width, height, premul_srgb_u32(*color), *clip_rect);
-                filter_dispatch(recorder, shader, &u, wg, ft, &scratch);
+                filter_dispatch(recorder, "filter.flood", shader, &u, wg, ft, &scratch);
                 let u_copy = FilterUniform::copy(width, height);
-                filter_dispatch(recorder, shader, &u_copy, wg, &scratch, ft);
+                filter_dispatch(recorder, "filter.copy", shader, &u_copy, wg, &scratch, ft);
             }
             FilterPrimitive::DropShadow {
                 dx,
@@ -798,7 +860,16 @@ pub(crate) fn record_filter_effects(
                             *dy,
                             premul_srgb_u32(*color),
                         );
-                        filter_dispatch_two_src(recorder, shader, &u_comp, wg, &blur_dst, inner_ft, ft);
+                        filter_dispatch_two_src(
+                            recorder,
+                            "filter.shadow_composite_nested",
+                            shader,
+                            &u_comp,
+                            wg,
+                            &blur_dst,
+                            inner_ft,
+                            ft,
+                        );
                     } else {
                         pyramid_blur(shader, recorder, ft, &blur_dst, *std_dev, *edge_mode, width, height);
                         let u_comp = FilterUniform::shadow_composite_preblurred(
@@ -808,9 +879,18 @@ pub(crate) fn record_filter_effects(
                             *dy,
                             premul_srgb_u32(*color),
                         );
-                        filter_dispatch_two_src(recorder, shader, &u_comp, wg, &blur_dst, ft, &scratch);
+                        filter_dispatch_two_src(
+                            recorder,
+                            "filter.shadow_composite",
+                            shader,
+                            &u_comp,
+                            wg,
+                            &blur_dst,
+                            ft,
+                            &scratch,
+                        );
                         let u_copy = FilterUniform::copy(width, height);
-                        filter_dispatch(recorder, shader, &u_copy, wg, &scratch, ft);
+                        filter_dispatch(recorder, "filter.copy", shader, &u_copy, wg, &scratch, ft);
                     }
                     recorder.defer_texture(blur_dst);
                 } else if effect.is_nested {
@@ -825,9 +905,9 @@ pub(crate) fn record_filter_effects(
                         premul_srgb_u32(*color),
                         *edge_mode,
                     );
-                    filter_dispatch(recorder, shader, &u, wg, inner_ft, &scratch);
+                    filter_dispatch(recorder, "filter.drop_shadow_nested", shader, &u, wg, inner_ft, &scratch);
                     let u_copy = FilterUniform::copy(width, height);
-                    filter_dispatch(recorder, shader, &u_copy, wg, &scratch, ft);
+                    filter_dispatch(recorder, "filter.copy", shader, &u_copy, wg, &scratch, ft);
                     continue;
                 } else {
                     let u = FilterUniform::drop_shadow(
@@ -839,9 +919,9 @@ pub(crate) fn record_filter_effects(
                         premul_srgb_u32(*color),
                         *edge_mode,
                     );
-                    filter_dispatch(recorder, shader, &u, wg, ft, &scratch);
+                    filter_dispatch(recorder, "filter.drop_shadow", shader, &u, wg, ft, &scratch);
                     let u_copy = FilterUniform::copy(width, height);
-                    filter_dispatch(recorder, shader, &u_copy, wg, &scratch, ft);
+                    filter_dispatch(recorder, "filter.copy", shader, &u_copy, wg, &scratch, ft);
                 }
             }
         }
@@ -851,13 +931,13 @@ pub(crate) fn record_filter_effects(
         let idx = (effect.layer_index as usize).min(3);
         let ft = &filter_layers[idx];
         let u_comp = FilterUniform::composite_filtered_layer(width, height, effect.layer_blend);
-        filter_dispatch(recorder, shader, &u_comp, wg, ft, dest);
+        filter_dispatch(recorder, "filter.composite_nested", shader, &u_comp, wg, ft, dest);
     }
     for effect in layer_filter_effects.iter().filter(|e| !e.is_nested) {
         let idx = (effect.layer_index as usize).min(3);
         let ft = &filter_layers[idx];
         let u_comp = FilterUniform::composite_filtered_layer(width, height, effect.layer_blend);
-        filter_dispatch(recorder, shader, &u_comp, wg, ft, dest);
+        filter_dispatch(recorder, "filter.composite", shader, &u_comp, wg, ft, dest);
     }
 
     recorder.defer_texture(scratch);
