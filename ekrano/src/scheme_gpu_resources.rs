@@ -6,7 +6,7 @@
 use std::mem::size_of;
 
 use goldy::types::{BufferFlags, TextureFlags, TextureKind};
-use goldy::{Buffer, BufferKind, DispatchShape, Init, Parcel, Sampler, Texture, TextureFormat, TimelineValue, ordinal};
+use goldy::{Buffer, BufferKind, DispatchShape, Init, Parcel, Sampler, Texture, TextureCopyFootprint, TextureFormat, TimelineValue, ordinal};
 
 use crate::goldy_renderer::{CacheScheduleOutcome, PersistentState, wait_buffer_ready_for_reuse};
 use crate::scheme_renderer::SchemeRecorder;
@@ -485,13 +485,25 @@ fn install_cached_texture(
     cached.as_ref().unwrap().2.borrow()
 }
 
-fn texture_flat_bytes(width: u32, height: u32) -> u64 {
-    (width as u64) * (height as u64) * 4
-}
-
 enum TextureStagingCache {
     Gradient,
     Mask,
+}
+
+/// Returns the footprint for a 2D texture upload (handles platform row-pitch differences).
+///
+/// The returned [`TextureCopyFootprint`] tells callers how to allocate and write the staging
+/// buffer so the DX12 backend can skip the intermediate repack step.  On Vulkan/Metal the
+/// footprint is always tight (`row_pitch == width * 4`), so no extra padding is needed.
+fn query_upload_footprint(
+    recorder: &SchemeRecorder<'_>,
+    width: u32,
+    height: u32,
+) -> Result<TextureCopyFootprint, Error> {
+    recorder
+        .device()
+        .texture_copy_footprint(width, height, TextureFormat::Rgba8Unorm)
+        .map_err(|e| Error::Gpu(e.to_string()))
 }
 
 fn alloc_or_reuse_full_texture_staging(
@@ -499,14 +511,15 @@ fn alloc_or_reuse_full_texture_staging(
     cached: &mut Option<(u32, u32, Buffer)>,
     width: u32,
     height: u32,
+    min_size: u64,
 ) -> Result<Buffer, Error> {
     if let Some((cw, ch, buf)) = cached.take() {
-        if cw >= width && ch >= height {
+        if cw >= width && ch >= height && buf.byte_size() >= min_size {
             return Ok(buf);
         }
         drop(buf);
     }
-    let size = texture_flat_bytes(width, height).max(4);
+    let size = min_size.max(4);
     recorder
         .persistent
         .retained_pool
@@ -542,12 +555,16 @@ fn alloc_or_reuse_region_texture_staging(
     y: u32,
     width: u32,
     height: u32,
+    min_size: u64,
 ) -> Result<Buffer, Error> {
     let key = (x, y, width, height);
     if let Some(buf) = take_region_texture_staging(recorder, key) {
-        return Ok(buf);
+        if buf.byte_size() >= min_size {
+            return Ok(buf);
+        }
+        drop(buf);
     }
-    let size = texture_flat_bytes(width, height).max(4);
+    let size = min_size.max(4);
     recorder
         .persistent
         .retained_pool
@@ -561,6 +578,27 @@ fn alloc_or_reuse_region_texture_staging(
         .map_err(|e| Error::Gpu(e.to_string()))
 }
 
+/// Write `bytes` (tight `width*height*4` layout) into `buf` using the row pitch
+/// from `footprint`, so the DX12 backend can use the buffer directly without repacking.
+///
+/// When `footprint.row_pitch == footprint.tight_row_bytes()` (Vulkan, Metal, or a
+/// perfectly aligned DX12 case) the bytes are written in a single contiguous call.
+fn write_pitched(buf: &Buffer, bytes: &[u8], footprint: &TextureCopyFootprint) -> Result<(), Error> {
+    let tight_row = footprint.tight_row_bytes() as usize;
+    let row_pitch = footprint.row_pitch as u64;
+    let base = footprint.footprint_offset;
+    if footprint.row_pitch == footprint.tight_row_bytes() {
+        buf.write(base, bytes).map_err(|e| Error::Gpu(e.to_string()))
+    } else {
+        for row in 0..footprint.height {
+            let src = &bytes[row as usize * tight_row..(row as usize + 1) * tight_row];
+            let dst_offset = base + row as u64 * row_pitch;
+            buf.write(dst_offset, src).map_err(|e| Error::Gpu(e.to_string()))?;
+        }
+        Ok(())
+    }
+}
+
 fn stage_texture_full(
     recorder: &mut SchemeRecorder<'_>,
     cached_staging: &mut Option<(u32, u32, Buffer)>,
@@ -569,14 +607,22 @@ fn stage_texture_full(
 ) -> Result<(), Error> {
     let width = texture.width();
     let height = texture.height();
-    let staging = alloc_or_reuse_full_texture_staging(recorder, cached_staging, width, height)?;
-    staging
-        .write(0, bytes)
-        .map_err(|e| Error::Gpu(e.to_string()))?;
+    let footprint = query_upload_footprint(recorder, width, height)?;
+    let staging = alloc_or_reuse_full_texture_staging(recorder, cached_staging, width, height, footprint.staging_bytes)?;
+    write_pitched(&staging, bytes, &footprint)?;
     if recorder.upload_needs_record {
         recorder
             .upload_scheme()
-            .copy_buffer_to_texture_parcel(staging.whole(), 0, texture, 0, 0, width, height)
+            .copy_buffer_to_texture_parcel(
+                staging.whole(),
+                footprint.footprint_offset,
+                footprint.row_pitch,
+                texture,
+                0,
+                0,
+                width,
+                height,
+            )
             .map_err(|e| Error::Shader(e.to_string()))?;
     }
     *cached_staging = Some((width, height, staging));
@@ -593,14 +639,22 @@ fn stage_texture_region(
     bytes: &[u8],
 ) -> Result<(), Error> {
     let key = (x, y, width, height);
-    let staging = alloc_or_reuse_region_texture_staging(recorder, x, y, width, height)?;
-    staging
-        .write(0, bytes)
-        .map_err(|e| Error::Gpu(e.to_string()))?;
+    let footprint = query_upload_footprint(recorder, width, height)?;
+    let staging = alloc_or_reuse_region_texture_staging(recorder, x, y, width, height, footprint.staging_bytes)?;
+    write_pitched(&staging, bytes, &footprint)?;
     if recorder.upload_needs_record {
         recorder
             .upload_scheme()
-            .copy_buffer_to_texture_parcel(staging.whole(), 0, texture, x, y, width, height)
+            .copy_buffer_to_texture_parcel(
+                staging.whole(),
+                footprint.footprint_offset,
+                footprint.row_pitch,
+                texture,
+                x,
+                y,
+                width,
+                height,
+            )
             .map_err(|e| Error::Shader(e.to_string()))?;
     }
     recorder

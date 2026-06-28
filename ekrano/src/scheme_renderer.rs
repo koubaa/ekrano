@@ -129,6 +129,9 @@ impl SchemeRenderer {
             // Per-parcel reuse gates at buffer take time; skip the coarse begin_frame GPU wait.
             FrameOrchestrator::new(&context, FRAME_PIPELINE_DEPTH).with_skip_ring_gpu_wait(true)
         };
+        // Upload and worker are separate schemes so staging/topology can rebuild independently
+        // (upload_key vs worker topology) and upload can submit before pre_acquire while the
+        // worker waits for a swapchain drawable — see submit_schemes.
         let worker = Scheme::new(&context);
         let upload = Scheme::new(&context);
         let readback = Scheme::new(&context);
@@ -1571,10 +1574,71 @@ mod tests {
             stats.topology_records, 1,
             "foreign readback reader on out_image dirties worker topology once"
         );
+
+        // Upload scheme records exactly twice:
+        //   1. Initial record (frame 1).
+        //   2. One partition-boundary cross-scheme topology refresh (frame 2): the
+        //      partition split that separates buffer-only waves (retainable) from
+        //      CopyBufferToTexture waves (non-retainable) triggers a cross-scheme
+        //      resource registration update, which marks the upload scheme topology dirty.
+        // Frames 3+ must be stable — no additional records.
         let upload_stats = renderer.upload_replay_stats();
         assert_eq!(
-            upload_stats.records, 1,
-            "upload scheme must record exactly once for stable topology"
+            upload_stats.records, 2,
+            "upload scheme records twice: initial record + one partition-split topology refresh"
+        );
+    }
+
+    /// Verify the upload scheme does not re-record on repeated stable frames after the
+    /// initial partition-split topology refresh settles.
+    ///
+    /// This is a regression guard for the `src_row_pitch` optimization: pre-pitched
+    /// staging buffers must not cause additional upload re-records on frames 3+.
+    #[test]
+    fn upload_scheme_stable_after_partition_split_settles() {
+        let Some((device, _)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
+            return;
+        };
+
+        let mut renderer = SchemeRenderer::new(&device).expect("SchemeRenderer::new");
+        let mut scene = Scene::new();
+        scene.fill(
+            peniko::Fill::NonZero,
+            peniko::kurbo::Affine::IDENTITY,
+            peniko::Color::from_rgb8(200, 100, 50),
+            None,
+            &peniko::kurbo::Circle::new((32.0, 32.0), 24.0),
+        );
+
+        let params = RenderParams {
+            base_color: peniko::color::palette::css::BLACK,
+            width: 64,
+            height: 64,
+            antialiasing_method: crate::AaConfig::Area,
+            robust: false,
+        };
+
+        // Warm up — let the partition split topology refresh settle (frames 1-2).
+        for _ in 0..2 {
+            renderer
+                .render_to_buffer(&scene, &params)
+                .expect("render_to_buffer");
+        }
+        let epochs_after_warmup = renderer.upload_record_epochs();
+        assert_eq!(
+            epochs_after_warmup, 1,
+            "one topology-dirty epoch after initial partition split"
+        );
+
+        // Stable phase — upload must not re-record for any additional frames.
+        for _ in 0..6 {
+            renderer
+                .render_to_buffer(&scene, &params)
+                .expect("render_to_buffer");
+        }
+        assert_eq!(
+            renderer.upload_record_epochs(), epochs_after_warmup,
+            "upload scheme must not re-record on stable frames (pre-pitched src_row_pitch is stable)"
         );
     }
 
