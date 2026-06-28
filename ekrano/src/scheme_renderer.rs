@@ -38,7 +38,7 @@ use goldy::task_graph::NodeAccess;
 use goldy::types::{ResourceAccess, TextureFlags, TextureFormat, TextureKind};
 use goldy::{
     BudgetPolicy, Buffer, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator,
-    ShaderModule, Signal, Scheme, TaskGraph, Texture,
+    ShaderModule, Signal, Scheme, TaskGraph, Texture, TimelineValue,
 };
 
 use crate::{
@@ -839,7 +839,6 @@ impl SchemeRenderer {
         };
 
         let t4 = Instant::now();
-        let _ = recorder.schedule_pipeline_cleanup(pipeline);
         let FrameFinishOutcome {
             timeline: frame_tv,
             surface_frame: _,
@@ -848,8 +847,10 @@ impl SchemeRenderer {
             recyclable_owned,
             scheme_submission,
         } = {
-            let _tz = goldy::tracy_zone!("ekrano.finish");
-            recorder.finish(pool.is_some(), pre_acquire)?
+            let _tz_gap = goldy::tracy_zone!("ekrano.tail_to_worker_submit");
+            let _ = recorder.schedule_pipeline_cleanup(pipeline);
+            let submitted = recorder.submit_schemes(pool.is_some(), pre_acquire)?;
+            SchemeRecorder::finalize(submitted, &mut self.frame_pipeline)?
         };
 
         if let Some((present, bump, topology, filter_effects, out_image)) = worker_cache {
@@ -989,6 +990,18 @@ impl SchemeRenderer {
 // SchemeRecorder — direct-execution recorder that builds Scheme nodes
 // -----------------------------------------------------------------------
 
+/// GPU work submitted; orchestrator ring not yet stamped.
+///
+/// Produced by [`SchemeRecorder::submit_schemes`]; consumed by [`SchemeRecorder::finalize`].
+pub(crate) struct SubmittedFrame {
+    scheme_tv: TimelineValue,
+    submission: goldy::Submission,
+    deferred_textures: Vec<Texture>,
+    recyclable_owned: Vec<(Buffer, &'static str)>,
+    frame_handle: FrameHandle,
+    deferred_present: bool,
+}
+
 pub(crate) struct SchemeRecorder<'a> {
     device: &'a Device,
     pub(crate) context: &'a Context,
@@ -1002,7 +1015,7 @@ pub(crate) struct SchemeRecorder<'a> {
     frame_handle: FrameHandle,
     pub(crate) persistent: &'a mut PersistentState,
     pub(crate) shaders: &'a [GoldyShader],
-    /// Set to `true` by `finish` or `abort`; the `Drop` impl aborts the open frame
+    /// Set to `true` by `submit_schemes` or `dismiss`; the `Drop` impl aborts the open frame
     /// if the recorder is dropped without being properly completed (e.g. on a `?` return).
     finished: bool,
     deferred_owned_buffers: Vec<(Buffer, &'static str)>,
@@ -1120,6 +1133,7 @@ impl<'a> SchemeRecorder<'a> {
         &mut self,
         pipeline: crate::scheme_gpu_resources::PipelineResources,
     ) -> CacheScheduleOutcome {
+        let _tz = goldy::tracy_zone!("ekrano.schedule_pipeline_cleanup");
         let outcome = CacheScheduleOutcome::default();
         let crate::scheme_gpu_resources::PipelineResources {
             gradient,
@@ -1323,18 +1337,11 @@ impl<'a> SchemeRecorder<'a> {
         self.deferred_owned_buffers.push((buf, name));
     }
 
-    /// Finish dispatch: flush the final graph and register a frame slot with
-    /// the orchestrator.
+    /// Submit upload and worker schemes; release mutable borrows on `upload` and `scheme`.
     ///
-    /// Returns the submit timeline and an optional surface frame awaiting present.
-    ///
-    /// Surface paths call [`goldy::Frame::submit_frame`] before returning so the
-    /// timeline is valid for cache stamping before [`goldy::Frame::present`].
-    /// Surface paths with deferred scanout call [`Self::finish(true)`]; headless /
-    /// render-to-texture paths call [`Self::finish(false)`]. Both stamp the orchestrator
-    /// ring with the worker submit timeline at finish. Deferred present omits the Tracy
-    /// frame mark here — it is emitted at [`goldy::surface::Frame::present`] time.
-    pub(crate) fn finish<F>(mut self, deferred_present: bool, pre_acquire: F) -> Result<FrameFinishOutcome>
+    /// Returns a [`SubmittedFrame`] token for [`Self::finalize`], which stamps the orchestrator
+    /// ring. Splitting here is the seam for overlapping N+2 prepare with N+1 finalization.
+    pub(crate) fn submit_schemes<F>(mut self, deferred_present: bool, pre_acquire: F) -> Result<SubmittedFrame>
     where
         F: FnOnce() -> Result<()>,
     {
@@ -1343,7 +1350,6 @@ impl<'a> SchemeRecorder<'a> {
 
         let deferred_textures = mem::take(&mut self.deferred_textures);
         let recyclable_owned = mem::take(&mut self.deferred_owned_buffers);
-
         let frame_handle = self.frame_handle;
 
         {
@@ -1368,6 +1374,31 @@ impl<'a> SchemeRecorder<'a> {
             self.scheme.submit().map_err(|e| Error::Shader(e.to_string()))?
         };
         let scheme_tv = submission.timeline_value();
+        self.finished = true;
+        Ok(SubmittedFrame {
+            scheme_tv,
+            submission,
+            deferred_textures,
+            recyclable_owned,
+            frame_handle,
+            deferred_present,
+        })
+    }
+
+    /// Stamp the orchestrator ring and package deferred GPU resources for the frame outcome.
+    pub(crate) fn finalize(
+        submitted: SubmittedFrame,
+        frame_pipeline: &mut FrameOrchestrator<()>,
+    ) -> Result<FrameFinishOutcome> {
+        let SubmittedFrame {
+            scheme_tv,
+            submission,
+            deferred_textures,
+            recyclable_owned,
+            frame_handle,
+            deferred_present,
+        } = submitted;
+
         let mut empty_graph = TaskGraph::new();
         let tv = {
             let _tz = goldy::tracy_zone!("ekrano.finish.orchestrator");
@@ -1375,18 +1406,17 @@ impl<'a> SchemeRecorder<'a> {
                 // No Tracy frame mark — that belongs at present time (TID_PRESENT async path).
                 // Still stamp the ring with the worker submit timeline now, not the present
                 // epoch (see synchronization-issue.md).
-                self.frame_pipeline
+                frame_pipeline
                     .end_frame_for_present(frame_handle, scheme_tv, ())
                     .map_err(|e| Error::Shader(e.to_string()))?;
-                self.frame_pipeline.note_presented(scheme_tv);
+                frame_pipeline.note_presented(scheme_tv);
                 scheme_tv
             } else {
-                self.frame_pipeline
+                frame_pipeline
                     .end_frame_standalone(frame_handle, &mut empty_graph, Some(scheme_tv), ())
                     .map_err(|e| Error::Shader(e.to_string()))?
             }
         };
-        self.finished = true;
         Ok(FrameFinishOutcome {
             timeline: tv,
             surface_frame: None,
@@ -1395,6 +1425,23 @@ impl<'a> SchemeRecorder<'a> {
             recyclable_owned,
             scheme_submission: Some(submission),
         })
+    }
+
+    /// Monolithic finish: [`Self::submit_schemes`] then [`Self::finalize`].
+    ///
+    /// Prefer the split API at call sites that can release recorder borrows before finalization.
+    #[allow(dead_code, reason = "monolithic wrapper for callers that do not need the split seam")]
+    pub(crate) fn finish<F>(
+        self,
+        deferred_present: bool,
+        pre_acquire: F,
+        frame_pipeline: &mut FrameOrchestrator<()>,
+    ) -> Result<FrameFinishOutcome>
+    where
+        F: FnOnce() -> Result<()>,
+    {
+        let submitted = self.submit_schemes(deferred_present, pre_acquire)?;
+        Self::finalize(submitted, frame_pipeline)
     }
 }
 

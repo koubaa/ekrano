@@ -72,6 +72,7 @@ pub(crate) fn wait_buffer_ready_for_reuse(ctx: &Context, buf: &Buffer) {
     if buf.is_settled(ctx) {
         return;
     }
+    let _tz = goldy::tracy_zone!("ekrano.context_wait");
     let refs = buf.last_referenced();
     let _ = ctx.wait_until_parcel_ready(&refs);
 }
@@ -731,6 +732,7 @@ impl PersistentState {
         let progress = ctx.gpu_progress();
         if out.width() == width && out.height() == height && out.format() == out_format {
             if record_tv != 0 && progress < record_tv {
+                let _tz = goldy::tracy_zone!("ekrano.render_targets_wait");
                 let _ = ctx.wait_until(record_tv);
             }
             return Some((out, layers));
@@ -741,6 +743,7 @@ impl PersistentState {
             out.height(),
         );
         if record_tv != 0 && progress < record_tv {
+            let _tz = goldy::tracy_zone!("ekrano.render_targets_wait");
             let _ = ctx.wait_until(record_tv);
         }
         self.tex_pool.release(out);
