@@ -1345,21 +1345,21 @@ impl<'a> SchemeRecorder<'a> {
         let recyclable_owned = mem::take(&mut self.deferred_owned_buffers);
         let frame_handle = self.frame_handle;
 
+        // Run the caller's pre-acquire barrier (present-ack + acquire capacity) before
+        // any scheme submit so `drain_pending_for_submit_gate` never blocks on a present
+        // easement promise that TID_PRESENT has not resolved yet (see parcel.rs).
+        // Upload *recording* still overlaps the previous present; only submit ordering
+        // is gated here.
+        {
+            let _tz = goldy::tracy_zone!("ekrano.finish.pre_acquire");
+            pre_acquire()?;
+        }
+
         {
             let _tz = goldy::tracy_zone!("ekrano.finish.upload_submit");
             self.upload
                 .submit()
                 .map_err(|e| Error::Shader(e.to_string()))?;
-        }
-
-        // The upload scheme has no dependency on the swapchain image — only the
-        // worker's present partition acquires a drawable. Run the caller's
-        // pre-acquire barrier (e.g. wait-for-present-ack) here, after the upload
-        // is submitted but before the worker acquire, so upload recording/submit
-        // overlaps the previous frame's present round-trip.
-        {
-            let _tz = goldy::tracy_zone!("ekrano.finish.pre_acquire");
-            pre_acquire()?;
         }
 
         let submission = {
