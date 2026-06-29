@@ -275,6 +275,30 @@ impl SchemeRenderer {
         self.context.clone()
     }
 
+    /// Drop retained worker/upload schemes and scheme RT cache after swapchain recreation.
+    ///
+    /// Call when the swapchain pool is resized so retained IR does not reference scratch
+    /// textures or render targets from the previous swapchain generation.
+    pub fn invalidate_swapchain_retention(&mut self) {
+        self.persistent.cached_scheme_rt = None;
+        self.persistent.cached_worker_out_image = None;
+        self.persistent.cached_worker_topology = None;
+        self.persistent.cached_worker_filter_effects.clear();
+        #[cfg(debug_assertions)]
+        {
+            self.persistent.cached_worker_resources = None;
+        }
+        self.persistent.cached_present_grant = None;
+        self.persistent.cached_bump_grant = None;
+        self.persistent.cached_upload_key = None;
+        self.pending_pipeline_cleanup = None;
+        for slot in &mut self.persistent.cached_render_targets {
+            *slot = None;
+        }
+        self.worker = Scheme::new(&self.context);
+        self.upload = Scheme::new(&self.context);
+    }
+
     /// Drain goldy signals and reclaim GPU resources tied to completed frames.
     pub fn poll_and_reclaim(&mut self) {
         for signal in self.context.poll_signals_and_service() {

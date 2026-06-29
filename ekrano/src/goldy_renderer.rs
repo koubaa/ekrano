@@ -1229,6 +1229,14 @@ impl GoldyRenderer {
         }
     }
 
+    /// Drop retained schemes and RT cache after swapchain recreation (Scheme backend only).
+    pub fn invalidate_swapchain_retention(&mut self) {
+        match self {
+            Self::Classic(_) => {}
+            Self::Scheme(r) => r.invalidate_swapchain_retention(),
+        }
+    }
+
     /// Pull-side reclamation: drain the submission context's deferred-deletion ring.
     pub fn flush_deferred_deletions(&self) {
         match self {
