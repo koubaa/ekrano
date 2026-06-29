@@ -1422,17 +1422,8 @@ impl PipelineResources {
             }
         }; // end ekrano.prepare.pipeline_cache zone
 
-        let _tz_alloc = goldy::tracy_zone!("ekrano.prepare.alloc_buffers");
-        // Reuse from cache when sizes match (no ResourcePool round-trip). These buffers
-        // are fully GPU-overwritten before first read.
-        let stable = StablePipelineBuffers::alloc(recorder, cached_stable, &buffer_sizes)?;
-        let scratch = ScratchPipelineBuffers::alloc(recorder, cached_scratch, &buffer_sizes)?;
-        let bump_size = buffer_sizes.bump_alloc.size_in_bytes().into();
-        let bump = alloc_or_reuse_bump(recorder, bump_size)?;
-        clear_gpu_buf(recorder, &bump, 0, None)?;
-
-        // Try to reuse cached render targets from the previous frame (avoids TexturePool
-        // round-trips when render dimensions are stable across frames).
+        // WAR gate on out_image runs before alloc_buffers so pipeline buffer allocation
+        // overlaps the present-copy blit that follows worker_compute(N-1) on the serial queue.
         let (out_image, filter_layers, _) = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.render_targets");
             if let Some((cached_out, cached_layers)) = recorder.persistent.take_scheme_render_targets(
@@ -1469,6 +1460,15 @@ impl PipelineResources {
                 (out, layers, false)
             }
         };
+
+        let _tz_alloc = goldy::tracy_zone!("ekrano.prepare.alloc_buffers");
+        // Reuse from cache when sizes match (no ResourcePool round-trip). These buffers
+        // are fully GPU-overwritten before first read.
+        let stable = StablePipelineBuffers::alloc(recorder, cached_stable, &buffer_sizes)?;
+        let scratch = ScratchPipelineBuffers::alloc(recorder, cached_scratch, &buffer_sizes)?;
+        let bump_size = buffer_sizes.bump_alloc.size_in_bytes().into();
+        let bump = alloc_or_reuse_bump(recorder, bump_size)?;
+        clear_gpu_buf(recorder, &bump, 0, None)?;
 
         Ok(Self {
             gradient,
