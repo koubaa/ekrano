@@ -1063,6 +1063,45 @@ impl PipelineResources {
             assert_eq!(m.height, params.height, "coverage_mask height must match render height");
         }
 
+        // Resolve render targets first: only needs frame dimensions — no scene/config/buffer
+        // dependencies. Cross-frame WAR on `out_image` is ordered by the submission-worker
+        // FIFO at worker submit (fine write after prior present-copy read).
+        let (out_image, filter_layers, _) = {
+            let _tz = goldy::tracy_zone!("ekrano.prepare.render_targets");
+            if let Some((cached_out, cached_layers)) = recorder.persistent.take_scheme_render_targets(
+                params.width,
+                params.height,
+                out_image_format,
+            ) {
+                (cached_out, cached_layers, true)
+            } else {
+                let _tz2 = goldy::tracy_zone!("ekrano.prepare.render_targets.ALLOC");
+                let out = recorder
+                    .persistent
+                    .tex_pool
+                    .acquire(
+                        recorder.device(),
+                        params.width,
+                        params.height,
+                        out_image_format,
+                        TextureKind::Direct,
+                        TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
+                    )
+                    .map_err(|e| Error::Shader(e.to_string()))?;
+                let layers = std::array::from_fn(|_| {
+                    acquire_texture_rgba(
+                        recorder,
+                        params.width,
+                        params.height,
+                        TextureKind::DirectInterpolated,
+                        TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
+                    )
+                    .expect("filter layer")
+                });
+                (out, layers, false)
+            }
+        };
+
         let gradient = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.gradient");
             if ramps.height == 0 {
@@ -1421,45 +1460,6 @@ impl PipelineResources {
                 None => (None, None),
             }
         }; // end ekrano.prepare.pipeline_cache zone
-
-        // WAR gate on out_image runs before alloc_buffers so pipeline buffer allocation
-        // overlaps the present-copy blit that follows worker_compute(N-1) on the serial queue.
-        let (out_image, filter_layers, _) = {
-            let _tz = goldy::tracy_zone!("ekrano.prepare.render_targets");
-            if let Some((cached_out, cached_layers)) = recorder.persistent.take_scheme_render_targets(
-                recorder.context(),
-                params.width,
-                params.height,
-                out_image_format,
-            ) {
-                (cached_out, cached_layers, true)
-            } else {
-                let _tz2 = goldy::tracy_zone!("ekrano.prepare.render_targets.ALLOC");
-                let out = recorder
-                    .persistent
-                    .tex_pool
-                    .acquire(
-                        recorder.device(),
-                        params.width,
-                        params.height,
-                        out_image_format,
-                        TextureKind::Direct,
-                        TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
-                    )
-                    .map_err(|e| Error::Shader(e.to_string()))?;
-                let layers = std::array::from_fn(|_| {
-                    acquire_texture_rgba(
-                        recorder,
-                        params.width,
-                        params.height,
-                        TextureKind::DirectInterpolated,
-                        TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
-                    )
-                    .expect("filter layer")
-                });
-                (out, layers, false)
-            }
-        };
 
         let _tz_alloc = goldy::tracy_zone!("ekrano.prepare.alloc_buffers");
         // Reuse from cache when sizes match (no ResourcePool round-trip). These buffers

@@ -527,9 +527,10 @@ pub(crate) struct PersistentState {
     /// Scheme-path render-target reuse: a single persistent `out_image` + filter
     /// layers, intentionally decoupled from [`RESOURCE_CACHE_SLOTS`].
     ///
-    /// The third element is the **record gate** timeline (`frame_tv` at last submit) —
-    /// not the full ledger `last_referenced` (which includes the present-copy read one
-    /// epoch later). Reuse waits only on this scalar at take time.
+    /// The third element is the worker-submit timeline (`frame_tv`) from the frame that
+    /// last used these textures — kept for diagnostics and future deferred-release
+    /// gates. Cross-frame WAR (present-copy read → fine write) is ordered by the
+    /// per-context submission-worker FIFO, not a CPU `wait_until` at take time.
     pub(crate) cached_scheme_rt: Option<(Texture, [Texture; 4], TimelineValue)>,
     /// Cached pipeline buffers from the previous frame. At depth=1 only one
     /// entry exists at a time: take-then-install within a single `run_frame`.
@@ -721,7 +722,6 @@ impl PersistentState {
 
     pub(crate) fn take_scheme_render_targets(
         &mut self,
-        ctx: &Context,
         width: u32,
         height: u32,
         out_format: TextureFormat,
@@ -729,12 +729,7 @@ impl PersistentState {
         let Some((out, layers, record_tv)) = self.cached_scheme_rt.take() else {
             return None;
         };
-        let progress = ctx.gpu_progress();
         if out.width() == width && out.height() == height && out.format() == out_format {
-            if record_tv != 0 && progress < record_tv {
-                let _tz = goldy::tracy_zone!("ekrano.render_targets_wait");
-                let _ = ctx.wait_until(record_tv);
-            }
             return Some((out, layers));
         }
         log::warn!(
@@ -742,10 +737,6 @@ impl PersistentState {
             out.width(),
             out.height(),
         );
-        if record_tv != 0 && progress < record_tv {
-            let _tz = goldy::tracy_zone!("ekrano.render_targets_wait");
-            let _ = ctx.wait_until(record_tv);
-        }
         self.tex_pool.release(out);
         for l in layers {
             self.tex_pool.release(l);
