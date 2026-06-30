@@ -124,7 +124,7 @@ impl FrameTrace {
         // cost is read directly; absolute offsets are recoverable by summing.
         let mut line = String::with_capacity(self.marks.len() * 24 + 48);
         line.push_str(&format!("[FTRACE] frame={frame_num} timeline={timeline}"));
-        let mut prev_ns = 0u64;
+        let mut prev_ns = 0_u64;
         for (label, at_ns) in &self.marks {
             let delta = at_ns.saturating_sub(prev_ns);
             line.push_str(&format!(" {label}={delta}ns"));
@@ -133,18 +133,18 @@ impl FrameTrace {
         line.push_str(&format!(" total={total_ns}ns"));
         log::info!("{line}");
 
-        if mode == Mode::LogRing {
-            if let Ok(mut ring) = RING.lock() {
-                if ring.len() == RING_CAP {
-                    ring.pop_front();
-                }
-                ring.push_back(FrameTraceRecord {
-                    frame_num,
-                    timeline,
-                    checkpoints: self.marks,
-                    total_ns,
-                });
+        if mode == Mode::LogRing
+            && let Ok(mut ring) = RING.lock()
+        {
+            if ring.len() == RING_CAP {
+                ring.pop_front();
             }
+            ring.push_back(FrameTraceRecord {
+                frame_num,
+                timeline,
+                checkpoints: self.marks,
+                total_ns,
+            });
         }
     }
 }

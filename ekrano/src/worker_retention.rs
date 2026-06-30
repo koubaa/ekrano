@@ -3,17 +3,15 @@
 
 //! Retained worker-scheme invalidation (no per-frame hashing).
 
-use goldy::types::{ResourceHandle, TextureFormat};
 #[cfg(debug_assertions)]
 use goldy::types::ResourceAccess;
+use goldy::types::{ResourceHandle, TextureFormat};
 #[cfg(debug_assertions)]
 use goldy::{Buffer, Texture};
 
-use crate::goldy_renderer::PersistentState;
 use crate::AaConfig;
-use ekrano_encoding::{
-    BufferSizes, FilterPrimitive, LayerFilterEffect, RenderConfig,
-};
+use crate::goldy_renderer::PersistentState;
+use ekrano_encoding::{BufferSizes, FilterPrimitive, LayerFilterEffect, RenderConfig};
 
 /// Inputs that change the compute/present node graph — not per-frame payload bytes.
 ///
@@ -113,10 +111,16 @@ pub(crate) fn upload_key(
     images_height: u32,
     coverage_mask_dims: Option<(u32, u32)>,
 ) -> UploadKey {
-    let (gradient_width, gradient_height) =
-        if ramps_height == 0 { (1, 1) } else { (ramps_width, ramps_height) };
-    let (image_atlas_width, image_atlas_height) =
-        if image_count == 0 { (1, 1) } else { (images_width, images_height) };
+    let (gradient_width, gradient_height) = if ramps_height == 0 {
+        (1, 1)
+    } else {
+        (ramps_width, ramps_height)
+    };
+    let (image_atlas_width, image_atlas_height) = if image_count == 0 {
+        (1, 1)
+    } else {
+        (images_width, images_height)
+    };
     let (mask_atlas_width, mask_atlas_height) = coverage_mask_dims.unwrap_or((1, 1));
     UploadKey {
         scene_bucket,
@@ -179,17 +183,6 @@ fn sampled_texture_handle(tex: &Texture) -> ResourceHandle {
 /// The topology comparison covers both graph-structure inputs (AA, resolution, …) *and*
 /// resource-identity inputs (`scene_bucket`, `mask_atlas_width/height`) that, if changed,
 /// mean the worker's recorded dispatch nodes bind stale `ResourceHandle`s.
-#[allow(dead_code)]
-pub(crate) fn worker_stale(
-    persistent: &PersistentState,
-    topology: &WorkerTopology,
-    filter_effects: &[LayerFilterEffect],
-    out_image: ResourceHandle,
-    output_texture: Option<goldy::backend::TextureHandle>,
-) -> bool {
-    worker_stale_reasons(persistent, topology, filter_effects, out_image, output_texture)
-}
-
 pub(crate) fn worker_stale_reasons(
     persistent: &PersistentState,
     topology: &WorkerTopology,
@@ -198,15 +191,10 @@ pub(crate) fn worker_stale_reasons(
     output_texture: Option<goldy::backend::TextureHandle>,
 ) -> bool {
     let out_image_mismatch = persistent.cached_worker_out_image != Some(out_image);
-    let output_texture_mismatch =
-        persistent.cached_worker_output_texture != output_texture;
+    let output_texture_mismatch = persistent.cached_worker_output_texture != output_texture;
     let topology_mismatch = persistent.cached_worker_topology.as_ref() != Some(topology);
-    let filter_effects_mismatch =
-        !layer_filter_effects_eq(&persistent.cached_worker_filter_effects, filter_effects);
-    out_image_mismatch
-        || output_texture_mismatch
-        || topology_mismatch
-        || filter_effects_mismatch
+    let filter_effects_mismatch = !layer_filter_effects_eq(&persistent.cached_worker_filter_effects, filter_effects);
+    out_image_mismatch || output_texture_mismatch || topology_mismatch || filter_effects_mismatch
 }
 
 /// Retained resubmit assumes worker-bound resources keep the same GPU handles.
@@ -263,7 +251,7 @@ fn filter_primitive_eq(a: &FilterPrimitive, b: &FilterPrimitive) -> bool {
                 color: color_b,
                 clip_rect: rect_b,
             },
-        ) => rect_a == rect_b && premul_color_eq(color_a, color_b),
+        ) => rect_a == rect_b && premul_color_eq(*color_a, *color_b),
         (
             GaussianBlur {
                 std_dev: std_a,
@@ -294,7 +282,7 @@ fn filter_primitive_eq(a: &FilterPrimitive, b: &FilterPrimitive) -> bool {
                 && (dx_a - dx_b).abs() <= f32::EPSILON
                 && (dy_a - dy_b).abs() <= f32::EPSILON
                 && (std_a - std_b).abs() <= f32::EPSILON
-                && premul_color_eq(color_a, color_b)
+                && premul_color_eq(*color_a, *color_b)
         }
         (Offset { dx: dx_a, dy: dy_a }, Offset { dx: dx_b, dy: dy_b }) => {
             (dx_a - dx_b).abs() <= f32::EPSILON && (dy_a - dy_b).abs() <= f32::EPSILON
@@ -304,8 +292,8 @@ fn filter_primitive_eq(a: &FilterPrimitive, b: &FilterPrimitive) -> bool {
 }
 
 fn premul_color_eq(
-    a: &peniko::color::PremulColor<peniko::color::Srgb>,
-    b: &peniko::color::PremulColor<peniko::color::Srgb>,
+    a: peniko::color::PremulColor<peniko::color::Srgb>,
+    b: peniko::color::PremulColor<peniko::color::Srgb>,
 ) -> bool {
     a.to_rgba8().to_u32() == b.to_rgba8().to_u32()
 }
@@ -322,7 +310,7 @@ pub(crate) fn upload_stale(persistent: &PersistentState, key: &UploadKey) -> boo
 
 /// Round `bytes` up to the next power of two (minimum 4) for stable scene buffer reuse.
 ///
-/// The scene buffer is bound by ResourceHandle in both the worker and upload schemes.
+/// The scene buffer is bound by `ResourceHandle` in both the worker and upload schemes.
 /// Bucketing prevents churn on minor scene-size fluctuations while still producing a
 /// stable handle across frames that stay within the same bucket.
 ///
@@ -338,8 +326,8 @@ mod tests {
     use super::*;
     use peniko::color::palette::css;
 
-    use peniko::color::{AlphaColor, Srgb};
     use ekrano_encoding::FilterEdgeMode;
+    use peniko::color::{AlphaColor, Srgb};
 
     fn premul_srgb(color: AlphaColor<Srgb>) -> peniko::color::PremulColor<Srgb> {
         color.premultiply()

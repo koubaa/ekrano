@@ -111,10 +111,10 @@ pub(crate) fn alloc_pipeline_buffer(
     // dispatch counts must be 0 before GPU pipelines them). Other pipeline
     // buffers are always overwritten by GPU dispatches before first read.
     if is_pool_exempt(name) {
-            recorder
-                .graph()
-                .clear_parcel(&buf, 0, size)
-                .map_err(|e| Error::Shader(e.to_string()))?;
+        recorder
+            .graph()
+            .clear_parcel(&buf, 0, size)
+            .map_err(|e| Error::Shader(e.to_string()))?;
     }
     Ok(buf)
 }
@@ -136,10 +136,10 @@ pub(crate) fn record_upload_bytes(
         Some(element_stride),
         BufferFlags::empty(),
     )?;
-        recorder
-            .graph()
-            .write_parcel(&buf, 0, bytes.to_vec())
-            .map_err(|e| Error::Shader(e.to_string()))?;
+    recorder
+        .graph()
+        .write_parcel(&buf, 0, bytes.to_vec())
+        .map_err(|e| Error::Shader(e.to_string()))?;
     Ok(buf)
 }
 
@@ -162,10 +162,10 @@ pub(crate) fn record_upload_bytes_owned(
         Some(element_stride),
         BufferFlags::empty(),
     )?;
-        recorder
-            .graph()
-            .write_parcel(&buf, 0, bytes)
-            .map_err(|e| Error::Shader(e.to_string()))?;
+    recorder
+        .graph()
+        .write_parcel(&buf, 0, bytes)
+        .map_err(|e| Error::Shader(e.to_string()))?;
     Ok(buf)
 }
 
@@ -189,10 +189,10 @@ pub(crate) fn record_upload_image(
             TextureFlags::COPY_DST,
         )
         .map_err(|e| Error::Shader(e.to_string()))?;
-        recorder
-            .graph()
-            .write_texture(&texture, bytes.to_vec())
-            .map_err(|e| Error::Shader(e.to_string()))?;
+    recorder
+        .graph()
+        .write_texture(&texture, bytes.to_vec())
+        .map_err(|e| Error::Shader(e.to_string()))?;
     Ok(texture)
 }
 
@@ -225,10 +225,10 @@ pub(crate) fn write_image_region(
         raw_bytes
     };
 
-        recorder
-            .graph()
-            .write_texture_region(tex, x, y, image_data.width, image_data.height, bytes.to_vec())
-            .map_err(|e| Error::Shader(e.to_string()))?;
+    recorder
+        .graph()
+        .write_texture_region(tex, x, y, image_data.width, image_data.height, bytes.to_vec())
+        .map_err(|e| Error::Shader(e.to_string()))?;
     Ok(())
 }
 
@@ -274,10 +274,10 @@ pub(crate) fn clear_gpu_buf(
     size: Option<u64>,
 ) -> Result<(), Error> {
     let sz = size.unwrap_or_else(|| buf.byte_size().saturating_sub(off));
-        recorder
-            .graph()
-            .clear_parcel(buf, off, sz)
-            .map_err(|e| Error::Shader(e.to_string()))?;
+    recorder
+        .graph()
+        .clear_parcel(buf, off, sz)
+        .map_err(|e| Error::Shader(e.to_string()))?;
     Ok(())
 }
 
@@ -685,10 +685,10 @@ impl PipelineResources {
                 // Buffer size is constant (sizeof ConfigUniform); reuse the allocation
                 // and just overwrite with the new value.
                 let data = bytemuck::bytes_of(&config_uniform_value).to_vec();
-                    recorder
-                        .graph()
-                        .write_parcel(&existing_buf, 0, data)
-                        .map_err(|e| Error::Shader(e.to_string()))?;
+                recorder
+                    .graph()
+                    .write_parcel(&existing_buf, 0, data)
+                    .map_err(|e| Error::Shader(e.to_string()))?;
                 existing_buf
             } else {
                 record_upload_bytes(

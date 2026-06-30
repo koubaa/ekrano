@@ -4,8 +4,8 @@
 
 //! Scheme-backend scene recording.
 
-use crate::scheme_renderer::SchemeRecorder;
 use crate::scheme_gpu_resources::{GpuBinding, PipelineBuffer, PipelineResources, alloc_or_reuse_scheme_indirect};
+use crate::scheme_renderer::SchemeRecorder;
 use crate::shaders::FullShaders;
 use crate::{AaConfig, RenderParams};
 
@@ -44,7 +44,7 @@ impl Drop for Render {
 /// Placeholder for a future CPU/debug capture path (direct resources).
 #[cfg(feature = "debug_layers")]
 pub struct CapturedBuffers {
-    pub sizes: ekrano_encoding::BufferSizes,
+    pub _sizes: ekrano_encoding::BufferSizes,
 }
 
 /// Max flatten workgroups per queue submit. Large single dispatches can exceed the
@@ -205,7 +205,10 @@ impl Render {
             indirect_buf,
             shaders.bbox_clear,
             STAGE_BBOX_CLEAR,
-            &[pipeline.coarse_config.as_binding(), pipeline.scratch.path_bbox.as_binding()],
+            &[
+                pipeline.coarse_config.as_binding(),
+                pipeline.scratch.path_bbox.as_binding(),
+            ],
         );
 
         let flatten_bindings = [
@@ -232,7 +235,13 @@ impl Render {
                 base_wg += chunk;
             }
         } else {
-            dispatch_stage(recorder, indirect_buf, shaders.flatten, STAGE_FLATTEN, &flatten_bindings);
+            dispatch_stage(
+                recorder,
+                indirect_buf,
+                shaders.flatten,
+                STAGE_FLATTEN,
+                &flatten_bindings,
+            );
         }
 
         dispatch_stage(
@@ -416,7 +425,7 @@ impl Render {
         #[cfg(feature = "debug_layers")]
         if robust {
             self.captured_buffers = Some(CapturedBuffers {
-                sizes: config.buffer_sizes,
+                _sizes: config.buffer_sizes,
             });
         }
         #[cfg(not(feature = "debug_layers"))]
@@ -608,15 +617,7 @@ fn filter_dispatch(
                 .expect("linear_clamp_sampler must be initialised before filter pass"),
         ),
     ];
-    SchemeRecorder::record_dispatch(
-        recorder.scheme,
-        recorder.shaders,
-        label,
-        shader,
-        wg,
-        &bindings,
-        &[],
-    );
+    SchemeRecorder::record_dispatch(recorder.scheme, recorder.shaders, label, shader, wg, &bindings, &[]);
 
     // Restore buffer to persistent cache. Do NOT call defer_owned_buffer.
     let cache = &mut recorder.persistent.cached_filter_uniforms;
@@ -674,15 +675,7 @@ fn filter_dispatch_two_src(
                 .expect("linear_clamp_sampler must be initialised before filter pass"),
         ),
     ];
-    SchemeRecorder::record_dispatch(
-        recorder.scheme,
-        recorder.shaders,
-        label,
-        shader,
-        wg,
-        &bindings,
-        &[],
-    );
+    SchemeRecorder::record_dispatch(recorder.scheme, recorder.shaders, label, shader, wg, &bindings, &[]);
 
     let cache = &mut recorder.persistent.cached_filter_uniforms;
     if slot < cache.len() {
@@ -751,9 +744,25 @@ fn pyramid_blur(
         .expect("pyramid bottom scratch");
 
     let u_h = FilterUniform::gaussian_blur(bw, bh, true, sigma_residual, edge_mode);
-    filter_dispatch(recorder, "filter.pyramid.blur_h", shader, &u_h, wg_b, bottom, &bottom_scratch);
+    filter_dispatch(
+        recorder,
+        "filter.pyramid.blur_h",
+        shader,
+        &u_h,
+        wg_b,
+        bottom,
+        &bottom_scratch,
+    );
     let u_v = FilterUniform::gaussian_blur(bw, bh, false, sigma_residual, edge_mode);
-    filter_dispatch(recorder, "filter.pyramid.blur_v", shader, &u_v, wg_b, &bottom_scratch, bottom);
+    filter_dispatch(
+        recorder,
+        "filter.pyramid.blur_v",
+        shader,
+        &u_v,
+        wg_b,
+        &bottom_scratch,
+        bottom,
+    );
 
     // Upsample: pyramid[levels-1] → ... → pyramid[0] → dst
     for l in (0..levels).rev() {
@@ -764,7 +773,15 @@ fn pyramid_blur(
         };
         let wg = (uw.div_ceil(16), uh.div_ceil(16), 1);
         let u = FilterUniform::upsample(uw, uh);
-        filter_dispatch(recorder, "filter.pyramid.upsample", shader, &u, wg, &pyramid[l], dst_tex);
+        filter_dispatch(
+            recorder,
+            "filter.pyramid.upsample",
+            shader,
+            &u,
+            wg,
+            &pyramid[l],
+            dst_tex,
+        );
     }
 
     // Release transient textures.
@@ -905,7 +922,15 @@ pub(crate) fn record_filter_effects(
                         premul_srgb_u32(*color),
                         *edge_mode,
                     );
-                    filter_dispatch(recorder, "filter.drop_shadow_nested", shader, &u, wg, inner_ft, &scratch);
+                    filter_dispatch(
+                        recorder,
+                        "filter.drop_shadow_nested",
+                        shader,
+                        &u,
+                        wg,
+                        inner_ft,
+                        &scratch,
+                    );
                     let u_copy = FilterUniform::copy(width, height);
                     filter_dispatch(recorder, "filter.copy", shader, &u_copy, wg, &scratch, ft);
                     continue;

@@ -9,29 +9,27 @@
 //! renderer; the two share infrastructure types from [`crate::goldy_renderer`]
 //! but have no rendering logic in common.
 
-use std::mem::size_of;
 use std::mem;
+use std::mem::size_of;
 use std::sync::Arc;
 
 use goldy::task_graph::{NodeAccess, NodeBuilder};
 use goldy::types::{BufferFlags, TextureFlags, TextureFormat, TextureKind};
 use goldy::{
-    BudgetPolicy, Buffer, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator,
-    ShaderModule, Signal, TaskGraph, Texture, TimelineValue,
+    BudgetPolicy, Buffer, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator, ShaderModule, Signal,
+    TaskGraph, Texture, TimelineValue,
 };
 
 use crate::{
     Error, RenderParams, Result, Scene,
     goldy_renderer::{
-        CacheScheduleOutcome, FrameFinishOutcome, FrameStats, GoldyShader, AllocatorStats,
-        FRAME_PIPELINE_DEPTH, PreparedFrame, PersistentState, MAX_BINDLESS_SLOTS,
-        ResourcePoolStats, defer_frame_gpu_resources, env_robust_override,
-        FRAME_COUNTER, find_empty_cache_slot, sanitize_bump,
+        AllocatorStats, CacheScheduleOutcome, FRAME_COUNTER, FRAME_PIPELINE_DEPTH, FrameFinishOutcome, FrameStats,
+        GoldyShader, MAX_BINDLESS_SLOTS, PersistentState, PreparedFrame, ResourcePoolStats, defer_frame_gpu_resources,
+        env_robust_override, find_empty_cache_slot, sanitize_bump,
     },
     graph_gpu_resources::{
-        GpuBinding, alloc_pipeline_buffer, bind_type_to_node_access,
+        GpuBinding, acquire_texture_rgba, alloc_pipeline_buffer, bind_type_to_node_access,
         collect_bindless_indices_into, record_upload_bytes, record_upload_bytes_owned,
-        acquire_texture_rgba,
     },
     graph_render::Render,
     resource_proxy::{BindType, ShaderId},
@@ -71,7 +69,7 @@ pub struct GraphRenderer {
 }
 
 impl GraphRenderer {
-    /// Create a new Classic (TaskGraph) renderer for the given device.
+    /// Create a new Classic (`TaskGraph`) renderer for the given device.
     pub fn new(device: &Device) -> Result<Self> {
         let _tz = goldy::tracy_zone!("ekrano.GraphRenderer::new");
 
@@ -391,7 +389,10 @@ impl GraphRenderer {
         }
 
         let mut output = vec![0_u8; texture.byte_size() as usize];
-        #[allow(deprecated)]
+        #[allow(
+            deprecated,
+            reason = "Texture::read_to_cpu is deprecated but still the CPU readback path"
+        )]
         let read_result = texture.read_to_cpu(&mut output);
         read_result.map_err(|e| Error::Readback(e.to_string()))?;
         Ok(output)
@@ -586,9 +587,21 @@ impl GraphRenderer {
             );
             if let Some(handle) = swapchain_handle {
                 if let Some(surface) = surface {
-                    debug_assert_eq!(pipeline.out_image.width(), surface.width());
-                    debug_assert_eq!(pipeline.out_image.height(), surface.height());
-                    debug_assert_eq!(pipeline.out_image.format(), surface.format());
+                    debug_assert_eq!(
+                        pipeline.out_image.width(),
+                        surface.width(),
+                        "swapchain copy source width must match surface"
+                    );
+                    debug_assert_eq!(
+                        pipeline.out_image.height(),
+                        surface.height(),
+                        "swapchain copy source height must match surface"
+                    );
+                    debug_assert_eq!(
+                        pipeline.out_image.format(),
+                        surface.format(),
+                        "swapchain copy source format must match surface"
+                    );
                 }
                 recorder.graph().copy_texture_to_swapchain(&pipeline.out_image, handle);
             }
@@ -616,20 +629,15 @@ impl GraphRenderer {
                 .unwrap_or(frame_tv);
             self.frame_pipeline.note_presented(gate_tv);
         }
-        if let Some(i) = cache_outcome.cached_render_targets_slot {
-            if let Some(idx) = acquired_image_index {
-                self.persistent.rt_slot_swapchain_image[i] = Some(idx);
-            }
+        if let Some(i) = cache_outcome.cached_render_targets_slot
+            && let Some(idx) = acquired_image_index
+        {
+            self.persistent.rt_slot_swapchain_image[i] = Some(idx);
         }
         if let Some(buf) = bump_readback {
             self.persistent.queue_bump_readback(frame_tv, buf);
         }
-        defer_frame_gpu_resources(
-            &self.context,
-            &self.persistent,
-            deferred_textures,
-            recyclable_owned,
-        );
+        defer_frame_gpu_resources(&self.context, &self.persistent, deferred_textures, recyclable_owned);
 
         {
             let _tz = goldy::tracy_zone!("ekrano.run_frame.post_submit");

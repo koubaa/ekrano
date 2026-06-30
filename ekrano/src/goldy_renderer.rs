@@ -18,8 +18,8 @@ use std::sync::{Arc, Mutex};
 
 use goldy::types::{BufferFlags, TextureFormat};
 use goldy::{
-    Buffer, BufferKind, ComputePipeline, Context, Device, Grant, ReferenceTable, RetainedPool,
-    Texture, TexturePool, TimelineValue,
+    Buffer, BufferKind, ComputePipeline, Context, Device, Grant, ReferenceTable, RetainedPool, Texture, TexturePool,
+    TimelineValue,
 };
 
 /// Ekrano uses a single-frame fire-and-forget model.
@@ -31,10 +31,7 @@ use goldy::{
 /// support multiple frames in flight ever again.
 pub(crate) const FRAME_PIPELINE_DEPTH: usize = 1;
 
-use crate::{
-    Error, RenderParams, Result,
-    resource_proxy::BindType,
-};
+use crate::{Error, RenderParams, Result, resource_proxy::BindType};
 use ekrano_encoding::{BumpAllocators, Layout, RenderConfig, Resolver};
 
 pub(crate) const MAX_BUMP_RETRIES: usize = 2;
@@ -66,7 +63,7 @@ fn wait_render_targets_settled(ctx: &Context, out: &Texture, layers: &[Texture; 
 ///
 /// Per-parcel reuse gate for shared pipeline buffers on the scheme path.
 ///
-/// Replaces the coarse [`FrameOrchestrator::begin_frame`] GPU wait, which the
+/// Replaces the coarse `FrameOrchestrator::begin_frame` GPU wait, which the
 /// scheme renderer disables via [`goldy::FrameOrchestrator::with_skip_ring_gpu_wait`].
 pub(crate) fn wait_buffer_ready_for_reuse(ctx: &Context, buf: &Buffer) {
     if buf.is_settled(ctx) {
@@ -110,7 +107,7 @@ pub struct FrameStats {
 /// Snapshot of frame-scheduling state, useful for tests and diagnostics.
 #[derive(Debug, Clone, Copy)]
 pub struct AllocatorStats {
-    /// Number of frames waiting in the [`FrameOrchestrator`] ring (always ≤ 1).
+    /// Number of frames waiting in the `FrameOrchestrator` ring (always ≤ 1).
     pub cleanup_ring_depth: usize,
 }
 
@@ -213,13 +210,13 @@ impl Drop for DeferredTextureToken {
 }
 
 /// Which caches received new entries during
-/// [`FrameRecorder::schedule_pipeline_cleanup`].
+/// `GraphRecorder::schedule_pipeline_cleanup`.
 #[derive(Debug, Default)]
 pub(crate) struct CacheScheduleOutcome {
     pub(crate) cached_render_targets_slot: Option<usize>,
 }
 
-/// Outcome of [`FrameRecorder::finish`]: orchestrator submit result plus resources
+/// Outcome of `GraphRecorder::finish`: orchestrator submit result plus resources
 /// that bypass the ring and are deferred via [`Device::defer_release`].
 pub(crate) struct FrameFinishOutcome {
     pub(crate) timeline: TimelineValue,
@@ -228,7 +225,7 @@ pub(crate) struct FrameFinishOutcome {
     pub(crate) deferred_textures: Vec<Texture>,
     pub(crate) recyclable_owned: Vec<(Buffer, &'static str)>,
     /// Scheme-path submission returned by [`goldy::Scheme::submit`].
-    /// `None` on the Classic (TaskGraph) path.
+    /// `None` on the Classic (`TaskGraph`) path.
     ///
     /// Held here so that `SchemeRenderer::run_frame_from_prepared` can build a
     /// [`PresentToken`] after `finish()` returns.
@@ -237,8 +234,8 @@ pub(crate) struct FrameFinishOutcome {
 
 /// Scheme-path present token — analogue of [`goldy::Frame`] on the Classic path.
 ///
-/// Produced by [`GoldyRenderer::submit_to_swapchain`]. Hand to TID_PRESENT for async
-/// scanout, or call [`Self::present`] synchronously (e.g. [`SchemeRenderer::render_to_swapchain`]).
+/// Produced by [`GoldyRenderer::submit_to_swapchain`]. Hand to `TID_PRESENT` for async
+/// scanout, or call [`Self::present`] synchronously (e.g. `SchemeRenderer::render_to_swapchain`).
 pub struct PresentToken {
     pub(crate) grant: goldy::PresentGrant,
     pub(crate) submission: goldy::Submission,
@@ -322,9 +319,7 @@ pub(crate) fn defer_frame_gpu_resources(
             buffers: recyclable_owned,
         });
     }
-    log::debug!(
-        "[DEFER] ledger epoch={epoch} textures={texture_count} owned={owned_count}",
-    );
+    log::debug!("[DEFER] ledger epoch={epoch} textures={texture_count} owned={owned_count}",);
     ctx.defer_release(epoch, payload);
 }
 
@@ -559,9 +554,9 @@ pub(crate) struct PersistentState {
     /// converge; eliminates `WriteBuffer` from the dispatch graph at steady state.
     pub(crate) cached_config_uniform: Option<(ekrano_encoding::ConfigUniform, Buffer)>,
     /// Stable device buffer for the fine-pass config uniform. Written each frame by a
-    /// GPU CopyBuffer from `coarse_config`; never CPU-written, so no reuse wait needed.
+    /// GPU `CopyBuffer` from `coarse_config`; never CPU-written, so no reuse wait needed.
     pub(crate) cached_fine_config: Option<Buffer>,
-    /// True after [`stage_scene_bytes`] writes packed scene staging; cleared when config is
+    /// True after `stage_scene_bytes` writes packed scene staging; cleared when config is
     /// cached at frame end. Used for layout-only config refresh without hot-path hashing.
     pub(crate) config_scene_dirty: bool,
     pub(crate) cached_config_packed_len: usize,
@@ -617,7 +612,7 @@ pub(crate) struct PersistentState {
     /// Owned buffers waiting to be returned to [`Self::pool`] after GPU retirement.
     /// Populated by [`DeferredOwnedBuffersToken`] drops from [`Context::defer_release`].
     pub(crate) pending_owned_returns: Arc<Mutex<Vec<(Buffer, &'static str)>>>,
-    /// Persistent host buffer parcel for [`SchemeRenderer::render_to_buffer`].
+    /// Persistent host buffer parcel for `SchemeRenderer::render_to_buffer`.
     pub(crate) readback_host_buf: Option<(Buffer, u64)>,
 }
 
@@ -672,11 +667,7 @@ impl PersistentState {
         }
     }
 
-    pub(crate) fn acquire_readback_host_buf(
-        &mut self,
-        ctx: &Context,
-        staging_bytes: u64,
-    ) -> Result<Buffer, Error> {
+    pub(crate) fn acquire_readback_host_buf(&mut self, ctx: &Context, staging_bytes: u64) -> Result<Buffer, Error> {
         let needs_new = self
             .readback_host_buf
             .as_ref()
@@ -726,9 +717,7 @@ impl PersistentState {
         height: u32,
         out_format: TextureFormat,
     ) -> Option<(Texture, [Texture; 4])> {
-        let Some((out, layers, record_tv)) = self.cached_scheme_rt.take() else {
-            return None;
-        };
+        let (out, layers, record_tv) = self.cached_scheme_rt.take()?;
         if out.width() == width && out.height() == height && out.format() == out_format {
             return Some((out, layers));
         }
@@ -744,12 +733,7 @@ impl PersistentState {
         None
     }
 
-    pub(crate) fn store_scheme_render_targets(
-        &mut self,
-        out: Texture,
-        layers: [Texture; 4],
-        record_tv: TimelineValue,
-    ) {
+    pub(crate) fn store_scheme_render_targets(&mut self, out: Texture, layers: [Texture; 4], record_tv: TimelineValue) {
         self.cached_scheme_rt = Some((out, layers, record_tv));
     }
 }
@@ -865,9 +849,7 @@ impl PersistentState {
                     return Ok(());
                 }
                 let _tz = goldy::tracy_zone!("ekrano.drain_ready_bump_readbacks.grant");
-                let loan = grant
-                    .consume(&submission)
-                    .map_err(|e| Error::Shader(e.to_string()))?;
+                let loan = grant.consume(&submission).map_err(|e| Error::Shader(e.to_string()))?;
                 read_bump_bytes(self, &loan);
                 return Ok(());
             }
@@ -887,8 +869,8 @@ impl PersistentState {
 
     /// Claim cached pipeline buffers for this frame.
     ///
-    /// Scheme-path reuse gates run in [`crate::scheme_gpu_resources::alloc_stable_buffer`] and
-    /// [`crate::scheme_gpu_resources::al_cached_opt`] when buffers are taken from the cache.
+    /// Scheme-path reuse gates run in `scheme_gpu_resources::alloc_stable_buffer` and
+    /// `scheme_gpu_resources::al_cached_opt` when buffers are taken from the cache.
     pub(crate) fn take_cached_pipeline(&mut self) -> Option<crate::graph_gpu_resources::CachedPipeline> {
         if let Some(c) = self.cached_pipeline.take() {
             log::debug!("[PIPE-CACHE] HIT");
@@ -976,7 +958,6 @@ pub enum GoldyBackend {
     Scheme,
 }
 
-
 // -----------------------------------------------------------------------
 // GoldyRenderer — thin dispatch wrapper
 // -----------------------------------------------------------------------
@@ -993,9 +974,9 @@ pub enum GoldyBackend {
 /// [`Self::render_to_texture`].
 pub enum GoldyRenderer {
     /// Classic [`TaskGraph`](goldy::TaskGraph)-based renderer.
-    Classic(crate::graph_renderer::GraphRenderer),
+    Classic(Box<crate::graph_renderer::GraphRenderer>),
     /// Retained-[`Scheme`](goldy::Scheme)-based renderer.
-    Scheme(crate::scheme_renderer::SchemeRenderer),
+    Scheme(Box<crate::scheme_renderer::SchemeRenderer>),
 }
 
 impl GoldyRenderer {
@@ -1011,8 +992,12 @@ impl GoldyRenderer {
     /// Create a renderer with an explicit backend selector.
     pub fn new_with_backend(device: &Device, backend: GoldyBackend) -> Result<Self> {
         match backend {
-            GoldyBackend::Classic => Ok(Self::Classic(crate::graph_renderer::GraphRenderer::new(device)?)),
-            GoldyBackend::Scheme => Ok(Self::Scheme(crate::scheme_renderer::SchemeRenderer::new(device)?)),
+            GoldyBackend::Classic => Ok(Self::Classic(Box::new(crate::graph_renderer::GraphRenderer::new(
+                device,
+            )?))),
+            GoldyBackend::Scheme => Ok(Self::Scheme(Box::new(crate::scheme_renderer::SchemeRenderer::new(
+                device,
+            )?))),
         }
     }
 
@@ -1062,11 +1047,7 @@ impl GoldyRenderer {
     }
 
     /// Phase 1: resolve scene encoding to CPU buffers.
-    pub fn prepare(
-        &mut self,
-        scene: &crate::Scene,
-        params: &RenderParams,
-    ) -> Result<PreparedFrame> {
+    pub fn prepare(&mut self, scene: &crate::Scene, params: &RenderParams) -> Result<PreparedFrame> {
         match self {
             Self::Classic(r) => r.prepare(scene, params),
             Self::Scheme(r) => r.prepare(scene, params),
@@ -1112,11 +1093,7 @@ impl GoldyRenderer {
     /// Phase 2: record GPU work, present, and return frame stats (Classic path).
     ///
     /// Panics if called on the Scheme backend.
-    pub fn submit_to_surface(
-        &mut self,
-        prepared: PreparedFrame,
-        surface: &goldy::Surface,
-    ) -> Result<FrameStats> {
+    pub fn submit_to_surface(&mut self, prepared: PreparedFrame, surface: &goldy::Surface) -> Result<FrameStats> {
         match self {
             Self::Classic(r) => r.submit_to_surface(prepared, surface),
             Self::Scheme(_) => panic!(
@@ -1129,7 +1106,7 @@ impl GoldyRenderer {
     /// Phase 2: record GPU work and return frame stats plus a present token (Scheme path).
     ///
     /// Does not call [`PresentToken::present`]; the caller must present synchronously or
-    /// hand the token to TID_PRESENT for async scanout.
+    /// hand the token to `TID_PRESENT` for async scanout.
     ///
     /// Panics if called on the Classic backend.
     pub fn submit_to_swapchain(
@@ -1185,11 +1162,7 @@ impl GoldyRenderer {
     }
 
     /// Render a scene and return the pixel data as RGBA bytes (synchronous).
-    pub fn render_to_buffer(
-        &mut self,
-        scene: &crate::Scene,
-        params: &RenderParams,
-    ) -> Result<Vec<u8>> {
+    pub fn render_to_buffer(&mut self, scene: &crate::Scene, params: &RenderParams) -> Result<Vec<u8>> {
         match self {
             Self::Classic(r) => r.render_to_buffer(scene, params),
             Self::Scheme(r) => r.render_to_buffer(scene, params),
@@ -1244,7 +1217,6 @@ impl GoldyRenderer {
         }
     }
 }
-
 
 #[cfg(test)]
 pub(crate) mod tests {

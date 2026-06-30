@@ -21,8 +21,8 @@
 //!    Phase 2; retained in Phase 3).
 //! 5. [`goldy::Scheme::submit`] submits all partitions, including the present-touching one.
 //! 6. [`PresentToken::present`] performs scanout — synchronously in
-//!    [`Self::render_to_swapchain`], or async on TID_PRESENT via
-//!    [`Self::submit_to_swapchain`] + velato's `Presenter`.
+//!    `SchemeRenderer::render_to_swapchain`, or async on `TID_PRESENT` via
+//!    `SchemeRenderer::submit_to_swapchain` + velato's `Presenter`.
 //!
 //! # Phase 2 notes
 //!
@@ -30,36 +30,34 @@
 //! node topology as the `TaskGraph` path). Phase 3 will retain the topology across
 //! frames and only re-record when dirty.
 
-use std::mem::size_of;
 use std::mem;
+use std::mem::size_of;
 use std::sync::Arc;
 
 use goldy::task_graph::NodeAccess;
 use goldy::types::{ResourceAccess, TextureFlags, TextureFormat, TextureKind};
 use goldy::{
-    BudgetPolicy, Buffer, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator,
-    ShaderModule, Signal, Scheme, TaskGraph, Texture, TimelineValue,
+    BudgetPolicy, Buffer, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator, Scheme, ShaderModule,
+    Signal, TaskGraph, Texture, TimelineValue,
 };
 
+#[cfg(debug_assertions)]
+use crate::worker_retention::{debug_assert_retained_worker_resources, worker_resource_handles};
 use crate::{
     Error, RenderParams, Result, Scene,
     goldy_renderer::{
-        FrameFinishOutcome, FrameStats, GoldyShader, AllocatorStats,
-        FRAME_PIPELINE_DEPTH, MAX_BUMP_RETRIES, PreparedFrame, PresentToken, PersistentState,
-        ResourcePoolStats, defer_frame_gpu_resources, env_robust_override,
-        FRAME_COUNTER, sanitize_bump,
+        AllocatorStats, FRAME_COUNTER, FRAME_PIPELINE_DEPTH, FrameFinishOutcome, FrameStats, GoldyShader,
+        MAX_BUMP_RETRIES, PersistentState, PreparedFrame, PresentToken, ResourcePoolStats, defer_frame_gpu_resources,
+        env_robust_override, sanitize_bump,
     },
+    resource_proxy::{BindType, ShaderId},
     scheme_gpu_resources::{
-        GpuBinding, bind_type_to_node_access,
-        record_upload_bytes, record_upload_bytes_owned, acquire_texture_rgba,
+        GpuBinding, acquire_texture_rgba, bind_type_to_node_access, record_upload_bytes, record_upload_bytes_owned,
     },
     scheme_render::Render,
-    worker_retention::{upload_key, worker_stale_reasons, worker_topology},
-    resource_proxy::{BindType, ShaderId},
     shaders::{self, FullShaders},
+    worker_retention::{upload_key, worker_stale_reasons, worker_topology},
 };
-#[cfg(debug_assertions)]
-use crate::worker_retention::{debug_assert_retained_worker_resources, worker_resource_handles};
 use ekrano_encoding::{BumpAllocators, Images, Layout, Ramps, RenderConfig, Resolver};
 
 // -----------------------------------------------------------------------
@@ -77,7 +75,7 @@ struct PendingPipelineCleanup {
 ///
 /// All rendering is done via Goldy's [`Scheme`] command recording.
 /// Surface presentation uses [`goldy::SwapchainPool`] + [`goldy::PresentGrant`]
-/// (scheme-native present mechanism). For the TaskGraph path see
+/// (scheme-native present mechanism). For the `TaskGraph` path see
 /// [`crate::graph_renderer::GraphRenderer`].
 ///
 /// This struct is intentionally isolated: it contains no `TaskGraph` references and
@@ -421,7 +419,8 @@ impl SchemeRenderer {
         let _tz = goldy::tracy_zone!("ekrano.submit_to_swapchain");
         self.poll_and_reclaim();
         let (stats, token) = self.run_frame_from_prepared(prepared, None, Some(pool), pre_acquire)?;
-        token.ok_or_else(|| Error::Shader("missing present grant for swapchain submit".into()))
+        token
+            .ok_or_else(|| Error::Shader("missing present grant for swapchain submit".into()))
             .map(|token| (stats, token))
     }
 
@@ -541,10 +540,7 @@ impl SchemeRenderer {
                 .copy_texture(out_image, &host_buf)
                 .map_err(|e| Error::Readback(e.to_string()))?;
         }
-        let submission = self
-            .readback
-            .submit()
-            .map_err(|e| Error::Readback(e.to_string()))?;
+        let submission = self.readback.submit().map_err(|e| Error::Readback(e.to_string()))?;
         submission
             .wait(&self.context)
             .map_err(|e| Error::Readback(e.to_string()))?;
@@ -558,11 +554,9 @@ impl SchemeRenderer {
         for row in 0..layout.height as usize {
             let src_offset = layout.footprint_offset as usize + row * pitch;
             let dst_offset = row * row_bytes;
-            output[dst_offset..dst_offset + row_bytes]
-                .copy_from_slice(&padded[src_offset..src_offset + row_bytes]);
+            output[dst_offset..dst_offset + row_bytes].copy_from_slice(&padded[src_offset..src_offset + row_bytes]);
         }
-        self.persistent
-            .store_readback_host_buf(host_buf, layout.staging_bytes);
+        self.persistent.store_readback_host_buf(host_buf, layout.staging_bytes);
         Ok(output)
     }
 
@@ -639,9 +633,7 @@ impl SchemeRenderer {
         self.flush_pending_pipeline_cleanup();
         trace.mark("flush_cleanup");
 
-        let out_image_format = pool
-            .map(|p| p.format())
-            .unwrap_or(TextureFormat::Rgba8Unorm);
+        let out_image_format = pool.map(|p| p.format()).unwrap_or(TextureFormat::Rgba8Unorm);
         self.persistent.purge_render_target_cache_if_mismatch(
             &self.context,
             params.width,
@@ -754,10 +746,7 @@ impl SchemeRenderer {
                     out_image_format,
                 );
                 self.resolver = resolver;
-                match pipeline_result {
-                    Ok(p) => p,
-                    Err(e) => return Err(e),
-                }
+                pipeline_result?
             };
             let out_image_handle = pipeline
                 .out_image
@@ -784,18 +773,16 @@ impl SchemeRenderer {
         };
 
         #[cfg(debug_assertions)]
-        if !worker_stale {
-            if let Some(recorded) = self.persistent.cached_worker_resources.as_ref() {
-                let current = worker_resource_handles(
-                    &pipeline.scene,
-                    &pipeline.bump,
-                    &pipeline.gradient,
-                    &pipeline.image_atlas,
-                    &pipeline.mask_atlas,
-                    &pipeline.out_image,
-                );
-                debug_assert_retained_worker_resources(recorded, &current);
-            }
+        if !worker_stale && let Some(recorded) = self.persistent.cached_worker_resources.as_ref() {
+            let current = worker_resource_handles(
+                &pipeline.scene,
+                &pipeline.bump,
+                &pipeline.gradient,
+                &pipeline.image_atlas,
+                &pipeline.mask_atlas,
+                &pipeline.out_image,
+            );
+            debug_assert_retained_worker_resources(recorded, &current);
         }
 
         #[cfg(debug_assertions)]
@@ -949,10 +936,11 @@ impl SchemeRenderer {
             .then(|| self.persistent.cached_present_grant.clone())
             .flatten();
 
-        if params.robust && self.persistent.cached_bump_grant.is_some() {
-            if let Some(ref submission) = scheme_submission {
-                self.persistent.queue_bump_submission(submission.clone());
-            }
+        if params.robust
+            && self.persistent.cached_bump_grant.is_some()
+            && let Some(ref submission) = scheme_submission
+        {
+            self.persistent.queue_bump_submission(submission.clone());
         }
 
         let present_token = match (present_grant, scheme_submission) {
@@ -962,12 +950,7 @@ impl SchemeRenderer {
 
         self.stamp_pending_pipeline_record_timeline(frame_tv);
 
-        defer_frame_gpu_resources(
-            &self.context,
-            &self.persistent,
-            deferred_textures,
-            recyclable_owned,
-        );
+        defer_frame_gpu_resources(&self.context, &self.persistent, deferred_textures, recyclable_owned);
 
         {
             let _tz = goldy::tracy_zone!("ekrano.run_frame.post_submit");
@@ -1210,9 +1193,9 @@ impl<'a> SchemeRecorder<'a> {
         self.deferred_textures.push(tex);
     }
 
-    #[cfg_attr(
-        not(feature = "debug_layers"),
-        allow(dead_code, reason = "debug_layers only uses SchemeRecorder::upload")
+    #[allow(
+        dead_code,
+        reason = "debug overlay uses GraphRecorder; kept for SchemeRecorder API parity"
     )]
     pub fn upload(&mut self, name: &'static str, data: impl Into<Vec<u8>>) -> Buffer {
         record_upload_bytes_owned(self, name, 1, data.into()).expect("upload failed")
@@ -1304,7 +1287,7 @@ impl<'a> SchemeRecorder<'a> {
         node.dispatch(x, y, z);
     }
 
-    /// Issue an indirect compute dispatch using a [`DispatchShape`] buffer as the
+    /// Issue an indirect compute dispatch using a `goldy::DispatchShape` buffer as the
     /// workgroup-count source.  The `shape` buffer must contain exactly one
     /// `DispatchShape` element; the scheme ordering engine automatically registers
     /// it as a read dependency so that any preceding write to the buffer
@@ -1337,6 +1320,10 @@ impl<'a> SchemeRecorder<'a> {
 
     /// Stub for debug-layer draw commands (not yet implemented in Goldy).
     #[cfg(feature = "debug_layers")]
+    #[allow(
+        dead_code,
+        reason = "debug overlay uses GraphRecorder; kept for SchemeRecorder API parity"
+    )]
     pub fn draw(&mut self, params: crate::resource_proxy::DrawParams) {
         if let Some(vb) = params.vertex_buffer {
             self.defer_owned_buffer(vb, "ekrano.debug.vertex_buffer");
@@ -1350,6 +1337,10 @@ impl<'a> SchemeRecorder<'a> {
     }
 
     #[cfg(feature = "debug_layers")]
+    #[allow(
+        dead_code,
+        reason = "debug overlay uses GraphRecorder; kept for SchemeRecorder API parity"
+    )]
     pub(crate) fn defer_owned_buffer(&mut self, buf: Buffer, name: &'static str) {
         self.deferred_owned_buffers.push((buf, name));
     }
@@ -1381,9 +1372,7 @@ impl<'a> SchemeRecorder<'a> {
 
         {
             let _tz = goldy::tracy_zone!("ekrano.finish.upload_submit");
-            self.upload
-                .submit()
-                .map_err(|e| Error::Shader(e.to_string()))?;
+            self.upload.submit().map_err(|e| Error::Shader(e.to_string()))?;
         }
 
         let submission = {
@@ -1488,9 +1477,7 @@ mod tests {
     /// present lease.
     #[test]
     fn prepare_out_image_format_matches_requested() {
-        let Some((device, mut persistent)) =
-            crate::goldy_renderer::tests::make_device_and_persistent()
-        else {
+        let Some((device, mut persistent)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
             return;
         };
 
@@ -1514,8 +1501,7 @@ mod tests {
             let ctx = device.create_context().expect("context");
             let mut worker = Scheme::new(&ctx);
             let mut upload = Scheme::new(&ctx);
-            let mut frame_pipeline =
-                FrameOrchestrator::new(&ctx, FRAME_PIPELINE_DEPTH).with_skip_ring_gpu_wait(true);
+            let mut frame_pipeline = FrameOrchestrator::new(&ctx, FRAME_PIPELINE_DEPTH).with_skip_ring_gpu_wait(true);
             let frame_handle = frame_pipeline
                 .begin_frame(|_, _| Ok::<(), Error>(()))
                 .expect("begin_frame");
@@ -1584,9 +1570,7 @@ mod tests {
 
         const FRAMES: u32 = 4;
         for _ in 0..FRAMES {
-            renderer
-                .render_to_buffer(&scene, &params)
-                .expect("render_to_buffer");
+            renderer.render_to_buffer(&scene, &params).expect("render_to_buffer");
         }
 
         let stats = renderer.worker_replay_stats();
@@ -1644,9 +1628,7 @@ mod tests {
 
         // Warm up — let the partition split topology refresh settle (frames 1-2).
         for _ in 0..2 {
-            renderer
-                .render_to_buffer(&scene, &params)
-                .expect("render_to_buffer");
+            renderer.render_to_buffer(&scene, &params).expect("render_to_buffer");
         }
         let epochs_after_warmup = renderer.upload_record_epochs();
         assert_eq!(
@@ -1656,12 +1638,11 @@ mod tests {
 
         // Stable phase — upload must not re-record for any additional frames.
         for _ in 0..6 {
-            renderer
-                .render_to_buffer(&scene, &params)
-                .expect("render_to_buffer");
+            renderer.render_to_buffer(&scene, &params).expect("render_to_buffer");
         }
         assert_eq!(
-            renderer.upload_record_epochs(), epochs_after_warmup,
+            renderer.upload_record_epochs(),
+            epochs_after_warmup,
             "upload scheme must not re-record on stable frames (pre-pitched src_row_pitch is stable)"
         );
     }
@@ -1692,29 +1673,28 @@ mod tests {
         };
 
         for _ in 0..2 {
-            renderer
-                .render_to_buffer(&scene, &params)
-                .expect("render_to_buffer");
+            renderer.render_to_buffer(&scene, &params).expect("render_to_buffer");
         }
         assert_eq!(renderer.worker_record_epochs(), 1);
 
         params.width = 128;
         params.height = 128;
         for _ in 0..2 {
-            renderer
-                .render_to_buffer(&scene, &params)
-                .expect("render_to_buffer");
+            renderer.render_to_buffer(&scene, &params).expect("render_to_buffer");
         }
         assert_eq!(
-            renderer.worker_record_epochs(), 2,
+            renderer.worker_record_epochs(),
+            2,
             "resolution change must trigger exactly one additional worker record"
         );
         assert_eq!(
-            renderer.worker_replay_stats().records, 2,
+            renderer.worker_replay_stats().records,
+            2,
             "render_to_buffer at new resolution: bootstrap + readback-induced topology refresh"
         );
         assert_eq!(
-            renderer.worker_replay_stats().topology_records, 1,
+            renderer.worker_replay_stats().topology_records,
+            1,
             "foreign readback reader on out_image dirties worker topology once per worker IR"
         );
     }
@@ -1774,10 +1754,10 @@ mod tests {
         assert_eq!(stats.topology_records, 0);
     }
 
-    /// Upload scheme re-records exactly once when scene_bucket grows, and the worker also
-    /// re-records because the scene buffer ResourceHandle changed.
+    /// Upload scheme re-records exactly once when `scene_bucket` grows, and the worker also
+    /// re-records because the scene buffer `ResourceHandle` changed.
     ///
-    /// This is a regression guard for the scene_bucket gap in the original worker_stale
+    /// This is a regression guard for the `scene_bucket` gap in the original `worker_stale`
     /// predicate: the scene buffer is bound by handle in the worker's recorded dispatches,
     /// so a bucket change (new allocation) must invalidate the worker too.
     #[test]
@@ -1856,11 +1836,13 @@ mod tests {
                 .expect("render_to_buffer large stable");
         }
         assert_eq!(
-            renderer.worker_record_epochs(), worker_epochs_stable,
+            renderer.worker_record_epochs(),
+            worker_epochs_stable,
             "worker must not re-record on repeated large-scene frames"
         );
         assert_eq!(
-            renderer.upload_record_epochs(), upload_epochs_stable,
+            renderer.upload_record_epochs(),
+            upload_epochs_stable,
             "upload must not re-record on repeated large-scene frames"
         );
     }
@@ -1894,9 +1876,7 @@ mod tests {
         };
 
         for _ in 0..2 {
-            renderer
-                .render_to_buffer(&scene, &params)
-                .expect("render_to_buffer");
+            renderer.render_to_buffer(&scene, &params).expect("render_to_buffer");
         }
         let upload_epochs_after_area = renderer.upload_record_epochs();
         let worker_epochs_after_area = renderer.worker_record_epochs();
@@ -1910,11 +1890,13 @@ mod tests {
             .expect("render_to_buffer with msaa16");
 
         assert_eq!(
-            renderer.upload_record_epochs(), upload_epochs_after_area,
+            renderer.upload_record_epochs(),
+            upload_epochs_after_area,
             "upload scheme must NOT re-record when only AA mode changes"
         );
         assert_eq!(
-            renderer.worker_record_epochs(), worker_epochs_after_area + 1,
+            renderer.worker_record_epochs(),
+            worker_epochs_after_area + 1,
             "worker scheme must re-record on AA mode change"
         );
     }

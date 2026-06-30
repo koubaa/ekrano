@@ -159,8 +159,7 @@ fn scheme_indirect_buffer_reused_across_frames() {
     let _gpu_guard = gpu_test_lock();
 
     let device = make_device();
-    let mut renderer =
-        GoldyRenderer::new_with_backend(&device, GoldyBackend::Scheme).expect("GoldyRenderer");
+    let mut renderer = GoldyRenderer::new_with_backend(&device, GoldyBackend::Scheme).expect("GoldyRenderer");
 
     let texture_a = test_alloc_texture(
         renderer.device(),

@@ -4,8 +4,8 @@
 
 //! Graph-backend scene recording.
 
-use crate::graph_renderer::GraphRecorder;
 use crate::graph_gpu_resources::{GpuBinding, PipelineBuffer, PipelineResources};
+use crate::graph_renderer::GraphRecorder;
 use crate::shaders::FullShaders;
 use crate::{AaConfig, RenderParams};
 

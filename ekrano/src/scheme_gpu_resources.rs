@@ -6,14 +6,20 @@
 use std::mem::size_of;
 
 use goldy::types::{BufferFlags, TextureFlags, TextureKind};
-use goldy::{Buffer, BufferKind, DispatchShape, Init, Parcel, Sampler, Texture, TextureCopyFootprint, TextureFormat, TimelineValue, ordinal};
+use goldy::{
+    Buffer, BufferKind, DispatchShape, Init, Parcel, Sampler, Texture, TextureCopyFootprint, TextureFormat,
+    TimelineValue, ordinal,
+};
 
 use crate::goldy_renderer::{CacheScheduleOutcome, PersistentState, wait_buffer_ready_for_reuse};
+use crate::resource_proxy::BindType;
 use crate::scheme_renderer::SchemeRecorder;
 use crate::worker_retention::scene_size_bucket;
-use crate::resource_proxy::BindType;
 use crate::{Error, RenderParams, Result};
-use ekrano_encoding::{BumpAllocators, CoverageMask, Images, Ramps, RenderConfig, WorkgroupCountsGpu, N_INDIRECT_STAGES, STAGE_PATH_COUNT, STAGE_PATH_TILING, ConfigUniform};
+use ekrano_encoding::{
+    BumpAllocators, ConfigUniform, CoverageMask, Images, N_INDIRECT_STAGES, Ramps, RenderConfig, STAGE_PATH_COUNT,
+    STAGE_PATH_TILING, WorkgroupCountsGpu,
+};
 
 fn config_uniform_without_layout_eq(a: &ConfigUniform, b: &ConfigUniform) -> bool {
     a.width_in_tiles == b.width_in_tiles
@@ -95,8 +101,8 @@ pub(crate) fn alloc_pipeline_buffer(
 
 /// Allocate or reuse a composite indirect buffer for the scheme path.
 ///
-/// One [`RetainedPool::acquire_record`] buffer holds `N_INDIRECT_STAGES` ordinal
-/// [`DispatchShape`] parcels. CPU-known stages are initialised at allocation via
+/// One `RetainedPool::acquire_record` buffer holds `N_INDIRECT_STAGES` ordinal
+/// `DispatchShape` parcels. CPU-known stages are initialised at allocation via
 /// [`Init::data`]; GPU-written stages ([`STAGE_PATH_COUNT`], [`STAGE_PATH_TILING`])
 /// use [`Init::reserve`] and are written each frame by setup shaders.
 ///
@@ -152,10 +158,10 @@ pub(crate) fn record_upload_bytes(
         Some(element_stride),
         BufferFlags::empty(),
     )?;
-        recorder
-            .upload_scheme()
-            .commit_write_parcel(&buf, 0, bytes.to_vec())
-            .map_err(|e| Error::Shader(e.to_string()))?;
+    recorder
+        .upload_scheme()
+        .commit_write_parcel(&buf, 0, bytes.to_vec())
+        .map_err(|e| Error::Shader(e.to_string()))?;
     Ok(buf)
 }
 
@@ -178,10 +184,10 @@ pub(crate) fn record_upload_bytes_owned(
         Some(element_stride),
         BufferFlags::empty(),
     )?;
-        recorder
-            .upload_scheme()
-            .commit_write_parcel(&buf, 0, bytes)
-            .map_err(|e| Error::Shader(e.to_string()))?;
+    recorder
+        .upload_scheme()
+        .commit_write_parcel(&buf, 0, bytes)
+        .map_err(|e| Error::Shader(e.to_string()))?;
     Ok(buf)
 }
 
@@ -214,15 +220,7 @@ pub(crate) fn write_image_region(
         raw_bytes
     };
 
-    upload_texture_region(
-        recorder,
-        tex,
-        x,
-        y,
-        image_data.width,
-        image_data.height,
-        bytes.to_vec(),
-    )
+    upload_texture_region(recorder, tex, x, y, image_data.width, image_data.height, bytes.to_vec())
 }
 
 /// Premultiply every RGBA8 pixel: `(r, g, b, a)` → `(r*a/255, g*a/255, b*a/255, a)`.
@@ -290,13 +288,7 @@ pub(crate) fn alloc_or_reuse_scene(recorder: &mut SchemeRecorder<'_>, live_bytes
     recorder
         .persistent
         .retained_pool
-        .acquire_buffer(
-            bucket,
-            BufferKind::Scattered,
-            Some(4),
-            BufferFlags::empty(),
-            None,
-        )
+        .acquire_buffer(bucket, BufferKind::Scattered, Some(4), BufferFlags::empty(), None)
         .map_err(|e| Error::Gpu(e.to_string()))
 }
 
@@ -313,13 +305,7 @@ fn alloc_or_reuse_scene_staging(recorder: &mut SchemeRecorder<'_>, live_bytes: u
     recorder
         .persistent
         .retained_pool
-        .acquire_buffer(
-            bucket,
-            BufferKind::Scattered,
-            Some(4),
-            BufferFlags::CPU_WRITABLE,
-            None,
-        )
+        .acquire_buffer(bucket, BufferKind::Scattered, Some(4), BufferFlags::CPU_WRITABLE, None)
         .map_err(|e| Error::Gpu(e.to_string()))
 }
 
@@ -363,16 +349,10 @@ fn alloc_or_reuse_fine_config(recorder: &mut SchemeRecorder<'_>) -> Result<Buffe
 }
 
 /// Write scene bytes into staging and copy into the device scene buffer when recording upload topology.
-pub(crate) fn stage_scene_bytes(
-    recorder: &mut SchemeRecorder<'_>,
-    scene: &Buffer,
-    bytes: &[u8],
-) -> Result<(), Error> {
+pub(crate) fn stage_scene_bytes(recorder: &mut SchemeRecorder<'_>, scene: &Buffer, bytes: &[u8]) -> Result<(), Error> {
     let bucket = scene_size_bucket(bytes.len());
     let staging = alloc_or_reuse_scene_staging(recorder, bytes.len())?;
-    staging
-        .write(0, bytes)
-        .map_err(|e| Error::Gpu(e.to_string()))?;
+    staging.write(0, bytes).map_err(|e| Error::Gpu(e.to_string()))?;
     recorder.persistent.config_scene_dirty = true;
     if recorder.upload_needs_record {
         // Copy the full staging buffer (bucket-sized) rather than bytes.len() bytes.
@@ -398,9 +378,7 @@ pub(crate) fn stage_config_bytes(
     bytes: &[u8],
 ) -> Result<(), Error> {
     let staging = alloc_or_reuse_config_staging(recorder)?;
-    staging
-        .write(0, bytes)
-        .map_err(|e| Error::Gpu(e.to_string()))?;
+    staging.write(0, bytes).map_err(|e| Error::Gpu(e.to_string()))?;
     if recorder.upload_needs_record {
         recorder
             .upload_scheme()
@@ -464,23 +442,18 @@ fn take_cached_texture(
     cached: &mut Option<(u32, u32, Texture)>,
     width: u32,
     height: u32,
-) -> Result<Texture, Option<Texture>> {
+) -> Result<Texture, Box<Option<Texture>>> {
     let Some((cw, ch, tex)) = cached.as_ref() else {
-        return Err(None);
+        return Err(Box::new(None));
     };
     if *cw == width && *ch == height {
         Ok(tex.borrow())
     } else {
-        Err(Some(cached.take().unwrap().2))
+        Err(Box::new(Some(cached.take().unwrap().2)))
     }
 }
 
-fn install_cached_texture(
-    cached: &mut Option<(u32, u32, Texture)>,
-    width: u32,
-    height: u32,
-    tex: Texture,
-) -> Texture {
+fn install_cached_texture(cached: &mut Option<(u32, u32, Texture)>, width: u32, height: u32, tex: Texture) -> Texture {
     cached.replace((width, height, tex));
     cached.as_ref().unwrap().2.borrow()
 }
@@ -523,20 +496,11 @@ fn alloc_or_reuse_full_texture_staging(
     recorder
         .persistent
         .retained_pool
-        .acquire_buffer(
-            size,
-            BufferKind::Scattered,
-            Some(4),
-            BufferFlags::CPU_WRITABLE,
-            None,
-        )
+        .acquire_buffer(size, BufferKind::Scattered, Some(4), BufferFlags::CPU_WRITABLE, None)
         .map_err(|e| Error::Gpu(e.to_string()))
 }
 
-fn take_region_texture_staging(
-    recorder: &mut SchemeRecorder<'_>,
-    key: (u32, u32, u32, u32),
-) -> Option<Buffer> {
+fn take_region_texture_staging(recorder: &mut SchemeRecorder<'_>, key: (u32, u32, u32, u32)) -> Option<Buffer> {
     if let Some(idx) = recorder
         .persistent
         .cached_image_region_stagings
@@ -568,13 +532,7 @@ fn alloc_or_reuse_region_texture_staging(
     recorder
         .persistent
         .retained_pool
-        .acquire_buffer(
-            size,
-            BufferKind::Scattered,
-            Some(4),
-            BufferFlags::CPU_WRITABLE,
-            None,
-        )
+        .acquire_buffer(size, BufferKind::Scattered, Some(4), BufferFlags::CPU_WRITABLE, None)
         .map_err(|e| Error::Gpu(e.to_string()))
 }
 
@@ -608,7 +566,8 @@ fn stage_texture_full(
     let width = texture.width();
     let height = texture.height();
     let footprint = query_upload_footprint(recorder, width, height)?;
-    let staging = alloc_or_reuse_full_texture_staging(recorder, cached_staging, width, height, footprint.staging_bytes)?;
+    let staging =
+        alloc_or_reuse_full_texture_staging(recorder, cached_staging, width, height, footprint.staging_bytes)?;
     write_pitched(&staging, bytes, &footprint)?;
     if recorder.upload_needs_record {
         recorder
@@ -657,10 +616,7 @@ fn stage_texture_region(
             )
             .map_err(|e| Error::Shader(e.to_string()))?;
     }
-    recorder
-        .persistent
-        .cached_image_region_stagings
-        .push((key, staging));
+    recorder.persistent.cached_image_region_stagings.push((key, staging));
     Ok(())
 }
 
@@ -954,13 +910,13 @@ pub(crate) struct PipelineResources {
     /// `schedule_pipeline_cleanup` can stash the buffer back into
     /// `PersistentState::cached_config_uniform` without re-reading GPU memory.
     pub config_uniform_value: ConfigUniform,
-    /// Packed scene bytes last uploaded with [`Self::cached_config_uniform`].
+    /// Packed scene bytes last uploaded with `PersistentState::cached_config_uniform`.
     pub packed_scene_len: usize,
 }
 
 /// Move per-frame pipeline handles into [`PersistentState`] for cross-frame reuse.
 ///
-/// Called at the start of the next frame ([`SchemeRenderer::flush_pending_pipeline_cleanup`]),
+/// Called at the start of the next frame (`SchemeRenderer::flush_pending_pipeline_cleanup`),
 /// not on the post-`alloc_buffers` critical path.
 pub(crate) fn install_scheme_pipeline_cache(
     persistent: &mut PersistentState,
@@ -1068,11 +1024,11 @@ impl PipelineResources {
         // FIFO at worker submit (fine write after prior present-copy read).
         let (out_image, filter_layers, _) = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.render_targets");
-            if let Some((cached_out, cached_layers)) = recorder.persistent.take_scheme_render_targets(
-                params.width,
-                params.height,
-                out_image_format,
-            ) {
+            if let Some((cached_out, cached_layers)) =
+                recorder
+                    .persistent
+                    .take_scheme_render_targets(params.width, params.height, out_image_format)
+            {
                 (cached_out, cached_layers, true)
             } else {
                 let _tz2 = goldy::tracy_zone!("ekrano.prepare.render_targets.ALLOC");
@@ -1108,28 +1064,20 @@ impl PipelineResources {
                 match take_cached_texture(&mut recorder.persistent.cached_gradient, 1, 1) {
                     Ok(tex) => tex,
                     Err(stale) => {
-                        if let Some(tex) = stale {
+                        if let Some(tex) = *stale {
                             recorder.persistent.tex_pool.release(tex);
                         }
-                        let tex = acquire_texture_rgba(
-                            recorder,
-                            1,
-                            1,
-                            TextureKind::Interpolated,
-                            TextureFlags::COPY_DST,
-                        )?;
+                        let tex =
+                            acquire_texture_rgba(recorder, 1, 1, TextureKind::Interpolated, TextureFlags::COPY_DST)?;
                         install_cached_texture(&mut recorder.persistent.cached_gradient, 1, 1, tex)
                     }
                 }
             } else {
-                let tex = match take_cached_texture(
-                    &mut recorder.persistent.cached_gradient,
-                    ramps.width,
-                    ramps.height,
-                ) {
+                let tex = match take_cached_texture(&mut recorder.persistent.cached_gradient, ramps.width, ramps.height)
+                {
                     Ok(tex) => tex,
                     Err(stale) => {
-                        if let Some(tex) = stale {
+                        if let Some(tex) = *stale {
                             recorder.persistent.tex_pool.release(tex);
                         }
                         let tex = acquire_texture_rgba(
@@ -1139,12 +1087,7 @@ impl PipelineResources {
                             TextureKind::Interpolated,
                             TextureFlags::COPY_DST,
                         )?;
-                        install_cached_texture(
-                            &mut recorder.persistent.cached_gradient,
-                            ramps.width,
-                            ramps.height,
-                            tex,
-                        )
+                        install_cached_texture(&mut recorder.persistent.cached_gradient, ramps.width, ramps.height, tex)
                     }
                 };
                 upload_texture_full(
@@ -1166,7 +1109,7 @@ impl PipelineResources {
                 let t = match take_cached_texture(&mut recorder.persistent.cached_image_atlas, 1, 1) {
                     Ok(tex) => tex,
                     Err(stale) => {
-                        if let Some(tex) = stale {
+                        if let Some(tex) = *stale {
                             recorder.persistent.tex_pool.release(tex);
                         }
                         let tex = acquire_texture_rgba(
@@ -1181,31 +1124,29 @@ impl PipelineResources {
                 };
                 (t, (1_u32, 1_u32))
             } else {
-                let t = match take_cached_texture(
-                    &mut recorder.persistent.cached_image_atlas,
-                    images.width,
-                    images.height,
-                ) {
-                    Ok(tex) => tex,
-                    Err(stale) => {
-                        if let Some(tex) = stale {
-                            recorder.persistent.tex_pool.release(tex);
+                let t =
+                    match take_cached_texture(&mut recorder.persistent.cached_image_atlas, images.width, images.height)
+                    {
+                        Ok(tex) => tex,
+                        Err(stale) => {
+                            if let Some(tex) = *stale {
+                                recorder.persistent.tex_pool.release(tex);
+                            }
+                            let tex = acquire_texture_rgba(
+                                recorder,
+                                images.width,
+                                images.height,
+                                TextureKind::Interpolated,
+                                TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
+                            )?;
+                            install_cached_texture(
+                                &mut recorder.persistent.cached_image_atlas,
+                                images.width,
+                                images.height,
+                                tex,
+                            )
                         }
-                        let tex = acquire_texture_rgba(
-                            recorder,
-                            images.width,
-                            images.height,
-                            TextureKind::Interpolated,
-                            TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
-                        )?;
-                        install_cached_texture(
-                            &mut recorder.persistent.cached_image_atlas,
-                            images.width,
-                            images.height,
-                            tex,
-                        )
-                    }
-                };
+                    };
                 for image in images.images {
                     write_image_region(recorder, &t, image.1, image.2, &image.0)?;
                 }
@@ -1217,14 +1158,10 @@ impl PipelineResources {
             let _tz = goldy::tracy_zone!("ekrano.prepare.mask_atlas");
             match coverage_mask {
                 Some(m) => {
-                    let tex = match take_cached_texture(
-                        &mut recorder.persistent.cached_mask_atlas,
-                        m.width,
-                        m.height,
-                    ) {
+                    let tex = match take_cached_texture(&mut recorder.persistent.cached_mask_atlas, m.width, m.height) {
                         Ok(tex) => tex,
                         Err(stale) => {
-                            if let Some(tex) = stale {
+                            if let Some(tex) = *stale {
                                 recorder.persistent.tex_pool.release(tex);
                             }
                             let tex = acquire_texture_rgba(
@@ -1234,31 +1171,21 @@ impl PipelineResources {
                                 TextureKind::Interpolated,
                                 TextureFlags::COPY_DST,
                             )?;
-                            install_cached_texture(
-                                &mut recorder.persistent.cached_mask_atlas,
-                                m.width,
-                                m.height,
-                                tex,
-                            )
+                            install_cached_texture(&mut recorder.persistent.cached_mask_atlas, m.width, m.height, tex)
                         }
                     };
                     let mut rgba = Vec::with_capacity(m.data.len() * 4);
                     for &b in m.data.iter() {
                         rgba.extend_from_slice(&[b, b, b, 255]);
                     }
-                    upload_texture_full(
-                        recorder,
-                        TextureStagingCache::Mask,
-                        &tex,
-                        &rgba,
-                    )?;
+                    upload_texture_full(recorder, TextureStagingCache::Mask, &tex, &rgba)?;
                     tex
                 }
                 None => {
                     let tex = match take_cached_texture(&mut recorder.persistent.cached_mask_atlas, 1, 1) {
                         Ok(tex) => tex,
                         Err(stale) => {
-                            if let Some(tex) = stale {
+                            if let Some(tex) = *stale {
                                 recorder.persistent.tex_pool.release(tex);
                             }
                             let tex = acquire_texture_rgba(
@@ -1271,12 +1198,7 @@ impl PipelineResources {
                             install_cached_texture(&mut recorder.persistent.cached_mask_atlas, 1, 1, tex)
                         }
                     };
-                    upload_texture_full(
-                        recorder,
-                        TextureStagingCache::Mask,
-                        &tex,
-                        &[255, 255, 255, 255],
-                    )?;
+                    upload_texture_full(recorder, TextureStagingCache::Mask, &tex, &[255, 255, 255, 255])?;
                     tex
                 }
             }
@@ -1288,13 +1210,10 @@ impl PipelineResources {
         let coarse_config = {
             let outcome = {
                 let _tz = goldy::tracy_zone!("ekrano.prepare.config_cache");
-                let cached_snapshot =
-                    recorder.persistent.cached_config_uniform.as_ref().map(|(v, _)| *v);
+                let cached_snapshot = recorder.persistent.cached_config_uniform.as_ref().map(|(v, _)| *v);
                 if let Some(cv) = cached_snapshot {
                     if cv == config_uniform_value {
-                        ConfigUniformCacheOutcome::Hit(
-                            recorder.persistent.cached_config_uniform.take().unwrap().1,
-                        )
+                        ConfigUniformCacheOutcome::Hit(recorder.persistent.cached_config_uniform.take().unwrap().1)
                     } else if packed_scene_len > 0
                         && !recorder.persistent.config_scene_dirty
                         && packed_scene_len == recorder.persistent.cached_config_packed_len
@@ -1303,8 +1222,7 @@ impl PipelineResources {
                         ConfigUniformCacheOutcome::LayoutRefresh(
                             recorder.persistent.cached_config_uniform.take().unwrap().1,
                         )
-                    } else if let Some((_, buf)) = recorder.persistent.cached_config_uniform.take()
-                    {
+                    } else if let Some((_, buf)) = recorder.persistent.cached_config_uniform.take() {
                         ConfigUniformCacheOutcome::MissReuse(buf)
                     } else {
                         ConfigUniformCacheOutcome::MissAlloc
@@ -1327,11 +1245,7 @@ impl PipelineResources {
                 }
                 ConfigUniformCacheOutcome::LayoutRefresh(buf) => {
                     let _tz = goldy::tracy_zone!("ekrano.prepare.config_layout_refresh");
-                    stage_config_bytes(
-                        recorder,
-                        &buf,
-                        bytemuck::bytes_of(&config_uniform_value),
-                    )?;
+                    stage_config_bytes(recorder, &buf, bytemuck::bytes_of(&config_uniform_value))?;
                     buf
                 }
                 ConfigUniformCacheOutcome::MissReuse(buf) => {
@@ -1341,11 +1255,7 @@ impl PipelineResources {
                     }
                     {
                         let _tz = goldy::tracy_zone!("ekrano.prepare.config_stage");
-                        stage_config_bytes(
-                            recorder,
-                            &buf,
-                            bytemuck::bytes_of(&config_uniform_value),
-                        )?;
+                        stage_config_bytes(recorder, &buf, bytemuck::bytes_of(&config_uniform_value))?;
                     }
                     buf
                 }
@@ -1366,11 +1276,7 @@ impl PipelineResources {
                     };
                     {
                         let _tz = goldy::tracy_zone!("ekrano.prepare.config_stage");
-                        stage_config_bytes(
-                            recorder,
-                            &config_buf,
-                            bytemuck::bytes_of(&config_uniform_value),
-                        )?;
+                        stage_config_bytes(recorder, &config_buf, bytemuck::bytes_of(&config_uniform_value))?;
                     }
                     config_buf
                 }
@@ -1497,4 +1403,3 @@ pub(crate) fn bind_type_to_node_access(bt: BindType) -> goldy::task_graph::NodeA
         BindType::Sampler => goldy::task_graph::NodeAccess::Read,
     }
 }
-

@@ -69,12 +69,12 @@ mod scene;
 mod shaders;
 
 mod goldy_renderer;
-mod graph_renderer;
-mod scheme_renderer;
 mod graph_gpu_resources;
-mod scheme_gpu_resources;
 mod graph_render;
+mod graph_renderer;
+mod scheme_gpu_resources;
 mod scheme_render;
+mod scheme_renderer;
 mod worker_retention;
 
 pub mod low_level {
@@ -97,8 +97,7 @@ pub use peniko::kurbo;
 pub use goldy::placement_heap::PlacementHeapStats;
 pub use goldy::{Frame, TimelineValue};
 pub use goldy_renderer::{
-    AllocatorStats, FrameStats, GoldyBackend, GoldyRenderer, PreparedFrame, PresentToken,
-    ResourcePoolStats,
+    AllocatorStats, FrameStats, GoldyBackend, GoldyRenderer, PreparedFrame, PresentToken, ResourcePoolStats,
 };
 pub use graph_renderer::GraphRenderer;
 pub use scheme_renderer::SchemeRenderer;
