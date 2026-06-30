@@ -76,7 +76,7 @@ pub(crate) fn wait_buffer_ready_for_reuse(ctx: &Context, buf: &Buffer) {
 
 /// Max referenced timeline across all entries in a parcel reference table.
 fn max_referenced(table: &ReferenceTable) -> TimelineValue {
-    table.values().copied().max().unwrap_or(0)
+    table.values().max().unwrap_or(0)
 }
 
 /// Ledger-sourced retirement epoch for textures and owned buffers deferred at frame end.
