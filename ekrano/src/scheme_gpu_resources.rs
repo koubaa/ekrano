@@ -124,7 +124,7 @@ pub(crate) fn alloc_or_reuse_scheme_indirect(
         }
         // WorkgroupCountsGpu changed (resize / topology change): drop the stale
         // composite buffer after the parcel reuse gate clears in-flight GPU work.
-        drop(buf);
+        defer_buffer_until_retired(recorder.context(), buf);
     }
     let fields: Vec<_> = (0..N_INDIRECT_STAGES as usize)
         .map(|i| {
@@ -289,7 +289,7 @@ pub(crate) fn alloc_or_reuse_scene(recorder: &mut SchemeRecorder<'_>, live_bytes
         if cached_bucket >= bucket {
             return Ok(buf);
         }
-        drop(buf);
+        defer_buffer_until_retired(recorder.context(), buf);
     }
     recorder
         .persistent
@@ -305,7 +305,7 @@ fn alloc_or_reuse_scene_staging(recorder: &mut SchemeRecorder<'_>, live_bytes: u
         if cached_bucket >= bucket {
             return Ok(buf);
         }
-        drop(buf);
+        defer_buffer_until_retired(recorder.context(), buf);
     }
     recorder
         .persistent
@@ -501,7 +501,7 @@ fn alloc_or_reuse_full_texture_staging(
         if cw >= width && ch >= height && buf.byte_size() >= min_size {
             return Ok(buf);
         }
-        drop(buf);
+        defer_buffer_until_retired(recorder.context(), buf);
     }
     let size = min_size.max(4);
     recorder
@@ -537,7 +537,7 @@ fn alloc_or_reuse_region_texture_staging(
         if buf.byte_size() >= min_size {
             return Ok(buf);
         }
-        drop(buf);
+        defer_buffer_until_retired(recorder.context(), buf);
     }
     let size = min_size.max(4);
     recorder
