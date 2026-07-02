@@ -14,6 +14,12 @@ use goldy::{
 use crate::goldy_renderer::{CacheScheduleOutcome, PersistentState, wait_buffer_ready_for_reuse};
 use crate::resource_proxy::BindType;
 use crate::scheme_renderer::SchemeRecorder;
+
+fn record_worker_reuse(recorder: &mut SchemeRecorder<'_>, buf: &Buffer) {
+    recorder
+        .scheme()
+        .record_reuse_epochs(&buf.last_referenced());
+}
 use crate::worker_retention::scene_size_bucket;
 use crate::{Error, RenderParams, Result};
 use ekrano_encoding::{
@@ -112,7 +118,7 @@ pub(crate) fn alloc_or_reuse_scheme_indirect(
     wg_counts_gpu: &WorkgroupCountsGpu,
 ) -> Result<Buffer, Error> {
     if let Some((cached_wg, buf)) = recorder.persistent.cached_scheme_indirect.take() {
-        wait_buffer_ready_for_reuse(recorder.context(), &buf);
+        record_worker_reuse(recorder, &buf);
         if &cached_wg == wg_counts_gpu {
             return Ok(buf);
         }
@@ -279,7 +285,7 @@ pub(crate) fn clear_gpu_buf(
 pub(crate) fn alloc_or_reuse_scene(recorder: &mut SchemeRecorder<'_>, live_bytes: usize) -> Result<Buffer, Error> {
     let bucket = scene_size_bucket(live_bytes);
     if let Some((cached_bucket, buf)) = recorder.persistent.cached_scene.take() {
-        wait_buffer_ready_for_reuse(recorder.context(), &buf);
+        record_worker_reuse(recorder, &buf);
         if cached_bucket >= bucket {
             return Ok(buf);
         }
@@ -296,7 +302,6 @@ pub(crate) fn alloc_or_reuse_scene(recorder: &mut SchemeRecorder<'_>, live_bytes
 fn alloc_or_reuse_scene_staging(recorder: &mut SchemeRecorder<'_>, live_bytes: usize) -> Result<Buffer, Error> {
     let bucket = scene_size_bucket(live_bytes);
     if let Some((cached_bucket, buf)) = recorder.persistent.cached_scene_staging.take() {
-        wait_buffer_ready_for_reuse(recorder.context(), &buf);
         if cached_bucket >= bucket {
             return Ok(buf);
         }
@@ -312,7 +317,6 @@ fn alloc_or_reuse_scene_staging(recorder: &mut SchemeRecorder<'_>, live_bytes: u
 /// Allocate or reuse a CPU-writable staging buffer for the config uniform.
 fn alloc_or_reuse_config_staging(recorder: &mut SchemeRecorder<'_>) -> Result<Buffer, Error> {
     if let Some(buf) = recorder.persistent.cached_config_staging.take() {
-        wait_buffer_ready_for_reuse(recorder.context(), &buf);
         return Ok(buf);
     }
     recorder
@@ -352,7 +356,12 @@ fn alloc_or_reuse_fine_config(recorder: &mut SchemeRecorder<'_>) -> Result<Buffe
 pub(crate) fn stage_scene_bytes(recorder: &mut SchemeRecorder<'_>, scene: &Buffer, bytes: &[u8]) -> Result<(), Error> {
     let bucket = scene_size_bucket(bytes.len());
     let staging = alloc_or_reuse_scene_staging(recorder, bytes.len())?;
-    staging.write(0, bytes).map_err(|e| Error::Gpu(e.to_string()))?;
+    recorder.upload_scheme().defer_host_write(
+        &staging.last_referenced(),
+        &staging,
+        0,
+        bytes.to_vec().into_boxed_slice(),
+    );
     recorder.persistent.config_scene_dirty = true;
     if recorder.upload_needs_record {
         // Copy the full staging buffer (bucket-sized) rather than bytes.len() bytes.
@@ -378,7 +387,12 @@ pub(crate) fn stage_config_bytes(
     bytes: &[u8],
 ) -> Result<(), Error> {
     let staging = alloc_or_reuse_config_staging(recorder)?;
-    staging.write(0, bytes).map_err(|e| Error::Gpu(e.to_string()))?;
+    recorder.upload_scheme().defer_host_write(
+        &staging.last_referenced(),
+        &staging,
+        0,
+        bytes.to_vec().into_boxed_slice(),
+    );
     if recorder.upload_needs_record {
         recorder
             .upload_scheme()
@@ -660,7 +674,7 @@ fn al_cached_opt(
 ) -> Result<Buffer, Error> {
     match cached {
         Some(buf) => {
-            wait_buffer_ready_for_reuse(recorder.context(), &buf);
+            record_worker_reuse(recorder, &buf);
             Ok(buf)
         }
         None => alloc_pipeline_buffer(recorder, size, stride, name, BufferFlags::empty()),
@@ -671,8 +685,8 @@ fn al_cached_opt(
 /// config changes — retained parcels in [`crate::goldy_renderer::PersistentState::retained_pool`].
 /// See `resource-pool.md §1` for the rationale behind this split from [`ScratchPipelineBuffers`].
 ///
-/// Reuse is gated by [`crate::goldy_renderer::wait_buffer_ready_for_reuse`] at take time in
-/// [`alloc_stable_buffer`]. If pipeline depth is raised so the next frame may record while the
+/// Reuse dependencies are recorded via [`record_worker_reuse`] at take time in
+/// [`alloc_stable_buffer`]; enforcement runs on the submission worker at execute time.
 /// prior frame's GPU work is still in flight on these buffers, a single retained deed is not
 /// enough — use double-buffered parcels or a transient pool instead; do not keep them in
 /// [`goldy::RetainedPool`] under inter-frame overlap.
@@ -730,7 +744,7 @@ fn alloc_stable_buffer(
     stride: u32,
 ) -> Result<Buffer, Error> {
     if let Some(buffer) = cached {
-        wait_buffer_ready_for_reuse(recorder.context(), &buffer);
+        record_worker_reuse(recorder, &buffer);
         return Ok(buffer);
     }
     if std::env::var_os("EKRANO_LOG_PIPELINE_RESIZE").is_some() {
@@ -1249,10 +1263,7 @@ impl PipelineResources {
                     buf
                 }
                 ConfigUniformCacheOutcome::MissReuse(buf) => {
-                    {
-                        let _tz = goldy::tracy_zone!("ekrano.prepare.config_reuse_wait");
-                        wait_buffer_ready_for_reuse(recorder.context(), &buf);
-                    }
+                    record_worker_reuse(recorder, &buf);
                     {
                         let _tz = goldy::tracy_zone!("ekrano.prepare.config_stage");
                         stage_config_bytes(recorder, &buf, bytemuck::bytes_of(&config_uniform_value))?;
