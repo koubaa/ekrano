@@ -11,7 +11,7 @@ use goldy::{
     TimelineValue, ordinal,
 };
 
-use crate::goldy_renderer::{CacheScheduleOutcome, PersistentState, wait_buffer_ready_for_reuse};
+use crate::goldy_renderer::{CacheScheduleOutcome, PersistentState, defer_buffer_until_retired};
 use crate::resource_proxy::BindType;
 use crate::scheme_renderer::SchemeRecorder;
 
@@ -432,14 +432,11 @@ fn record_coarse_to_fine_config_copy(
 /// Allocate or reuse a stable bump buffer for the retained worker.
 pub(crate) fn alloc_or_reuse_bump(recorder: &mut SchemeRecorder<'_>, size: u64) -> Result<Buffer, Error> {
     if let Some((cached_size, buf)) = recorder.persistent.cached_bump.take() {
-        wait_buffer_ready_for_reuse(recorder.context(), &buf);
-        if cached_size == size {
+        if cached_size == size {            record_worker_reuse(recorder, &buf);
             return Ok(buf);
-        }
-        recorder.persistent.cached_bump_grant = None;
-        drop(buf);
-    }
-    recorder
+        }        recorder.persistent.cached_bump_grant = None;
+        defer_buffer_until_retired(recorder.context(), buf);
+    }    recorder
         .persistent
         .retained_pool
         .acquire_buffer(

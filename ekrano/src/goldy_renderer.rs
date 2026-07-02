@@ -59,21 +59,6 @@ fn wait_render_targets_settled(ctx: &Context, out: &Texture, layers: &[Texture; 
     }
 }
 
-/// Block until no in-flight GPU work on `ctx` still references `buf`.
-///
-/// Per-parcel reuse gate for shared pipeline buffers on the scheme path.
-///
-/// Replaces the coarse `FrameOrchestrator::begin_frame` GPU wait, which the
-/// scheme renderer disables via [`goldy::FrameOrchestrator::with_skip_ring_gpu_wait`].
-pub(crate) fn wait_buffer_ready_for_reuse(ctx: &Context, buf: &Buffer) {
-    if buf.is_settled(ctx) {
-        return;
-    }
-    let _tz = goldy::tracy_zone!("ekrano.context_wait");
-    let refs = buf.last_referenced();
-    let _ = ctx.wait_until_parcel_ready(&refs);
-}
-
 /// Max referenced timeline across all entries in a parcel reference table.
 fn max_referenced(table: &ReferenceTable) -> TimelineValue {
     table.values().max().unwrap_or(0)
@@ -242,11 +227,29 @@ pub struct PresentToken {
 }
 
 impl PresentToken {
-    /// Perform scanout via [`goldy::PresentGrant::consume`].
+    /// Perform scanout via [`goldy::PresentGrant::consume`], then speculative-acquire when enabled.
     pub fn present(self) -> Result<()> {
+        let grant = self.present_scanout_and_grant()?;
+        grant.speculate_next_acquire_after_present();
+        Ok(())
+    }
+
+    /// Scanout only — resolves the present easement without acquiring the next drawable.
+    ///
+    /// Async hosts should call this, send their present ack, then
+    /// [`goldy::PresentGrant::speculate_next_acquire_after_present`].
+    pub fn present_scanout(self) -> Result<()> {
         self.grant
             .consume(&self.submission)
             .map_err(|e| Error::Shader(e.to_string()))
+    }
+
+    /// Like [`Self::present_scanout`], but returns the grant for a post-ack speculative acquire.
+    pub fn present_scanout_and_grant(self) -> Result<goldy::PresentGrant> {
+        self.grant
+            .consume(&self.submission)
+            .map_err(|e| Error::Shader(e.to_string()))?;
+        Ok(self.grant)
     }
 }
 
@@ -320,6 +323,21 @@ pub(crate) fn defer_frame_gpu_resources(
         });
     }
     log::debug!("[DEFER] ledger epoch={epoch} textures={texture_count} owned={owned_count}",);
+    ctx.defer_release(epoch, payload);
+}
+
+/// Hold `buf` until its parcel reference table has retired on `ctx`.
+///
+/// Used when abandoning a retained buffer (e.g. bump resize) without blocking the
+/// render thread for GPU completion.
+struct DeferredBufferHold {
+    _buf: Buffer,
+}
+
+pub(crate) fn defer_buffer_until_retired(ctx: &Context, buf: Buffer) {
+    let epoch = max_referenced(&buf.last_referenced());
+    let mut payload = goldy::DeferredPayload::new();
+    payload.push(DeferredBufferHold { _buf: buf });
     ctx.defer_release(epoch, payload);
 }
 
