@@ -227,29 +227,16 @@ pub struct PresentToken {
 }
 
 impl PresentToken {
-    /// Perform scanout via [`goldy::PresentGrant::consume`], then speculative-acquire when enabled.
+    /// Perform scanout via [`goldy::PresentGrant::consume`].
     pub fn present(self) -> Result<()> {
-        let grant = self.present_scanout_and_grant()?;
-        grant.speculate_next_acquire_after_present();
-        Ok(())
+        self.present_scanout()
     }
 
-    /// Scanout only — resolves the present easement without acquiring the next drawable.
-    ///
-    /// Async hosts should call this, send their present ack, then
-    /// [`goldy::PresentGrant::speculate_next_acquire_after_present`].
+    /// Scanout only — resolves the present easement.
     pub fn present_scanout(self) -> Result<()> {
         self.grant
             .consume(&self.submission)
             .map_err(|e| Error::Shader(e.to_string()))
-    }
-
-    /// Like [`Self::present_scanout`], but returns the grant for a post-ack speculative acquire.
-    pub fn present_scanout_and_grant(self) -> Result<goldy::PresentGrant> {
-        self.grant
-            .consume(&self.submission)
-            .map_err(|e| Error::Shader(e.to_string()))?;
-        Ok(self.grant)
     }
 }
 
