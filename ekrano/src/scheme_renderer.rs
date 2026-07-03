@@ -128,8 +128,8 @@ impl SchemeRenderer {
             FrameOrchestrator::new(&context, FRAME_PIPELINE_DEPTH).with_skip_ring_gpu_wait(true)
         };
         // Upload and worker are separate schemes so staging/topology can rebuild independently
-        // (upload_key vs worker topology) and upload can submit before pre_acquire while the
-        // worker waits for a swapchain drawable — see submit_schemes.
+        // (upload_key vs worker topology). Present-began gates upload submit; swapchain
+        // capacity gates worker submit — see submit_schemes.
         let worker = Scheme::new(&context);
         let upload = Scheme::new(&context);
         let readback = Scheme::new(&context);
@@ -400,25 +400,29 @@ impl SchemeRenderer {
         prepared: PreparedFrame,
         pool: &goldy::SwapchainPool,
     ) -> Result<(FrameStats, PresentToken)> {
-        self.submit_to_swapchain_with(prepared, pool, || Ok(()))
+        self.submit_to_swapchain_with(prepared, pool, || Ok(()), || Ok(()))
     }
 
-    /// Like [`Self::submit_to_swapchain`], but runs `pre_acquire` after the upload
-    /// scheme is submitted and immediately before the worker acquires its swapchain
-    /// drawable. Callers use this to defer present-ack backpressure to the acquire
-    /// boundary so upload recording/submit overlaps the previous frame's present.
-    pub fn submit_to_swapchain_with<F>(
+    /// Like [`Self::submit_to_swapchain`], but runs caller hooks at the submit seam.
+    ///
+    /// `pre_upload` runs before upload scheme submit (present-began / easement gate).
+    /// `pre_worker_acquire` runs after upload submit and before worker submit (swapchain
+    /// capacity / acquire backpressure) so upload work can overlap the return-fence wait.
+    pub fn submit_to_swapchain_with<F, G>(
         &mut self,
         prepared: PreparedFrame,
         pool: &goldy::SwapchainPool,
-        pre_acquire: F,
+        pre_upload: F,
+        pre_worker_acquire: G,
     ) -> Result<(FrameStats, PresentToken)>
     where
         F: FnOnce() -> Result<()>,
+        G: FnOnce() -> Result<()>,
     {
         let _tz = goldy::tracy_zone!("ekrano.submit_to_swapchain");
         self.poll_and_reclaim();
-        let (stats, token) = self.run_frame_from_prepared(prepared, None, Some(pool), pre_acquire)?;
+        let (stats, token) =
+            self.run_frame_from_prepared(prepared, None, Some(pool), pre_upload, pre_worker_acquire)?;
         token
             .ok_or_else(|| Error::Shader("missing present grant for swapchain submit".into()))
             .map(|token| (stats, token))
@@ -576,7 +580,8 @@ impl SchemeRenderer {
         pool: Option<&goldy::SwapchainPool>,
     ) -> Result<FrameStats> {
         let prepared = self.prepare(scene, params)?;
-        let (stats, token) = self.run_frame_from_prepared(prepared, output_texture, pool, || Ok(()))?;
+        let (stats, token) =
+            self.run_frame_from_prepared(prepared, output_texture, pool, || Ok(()), || Ok(()))?;
         if let Some(token) = token {
             token.present()?;
         }
@@ -587,15 +592,17 @@ impl SchemeRenderer {
     ///
     /// When `pool` is `Some`, records `copy_texture_to_present` + `grant_present`
     /// into the scheme, submits, and returns a [`PresentToken`] (does not present).
-    fn run_frame_from_prepared<F>(
+    fn run_frame_from_prepared<F, G>(
         &mut self,
         prepared: PreparedFrame,
         output_texture: Option<&Texture>,
         pool: Option<&goldy::SwapchainPool>,
-        pre_acquire: F,
+        pre_upload: F,
+        pre_worker_acquire: G,
     ) -> Result<(FrameStats, Option<PresentToken>)>
     where
         F: FnOnce() -> Result<()>,
+        G: FnOnce() -> Result<()>,
     {
         let _tz = goldy::tracy_zone!("ekrano.run_frame");
         use std::time::Instant;
@@ -910,7 +917,7 @@ impl SchemeRenderer {
             scheme_submission,
         } = {
             let _tz_gap = goldy::tracy_zone!("ekrano.tail_to_worker_submit");
-            let submitted = recorder.submit_schemes(pool.is_some(), pre_acquire)?;
+            let submitted = recorder.submit_schemes(pool.is_some(), pre_upload, pre_worker_acquire)?;
             trace.mark("submit_schemes");
             self.stage_pipeline_cleanup(pipeline);
             let outcome = SchemeRecorder::finalize(submitted, &mut self.frame_pipeline)?;
@@ -1349,9 +1356,15 @@ impl<'a> SchemeRecorder<'a> {
     ///
     /// Returns a [`SubmittedFrame`] token for [`Self::finalize`], which stamps the orchestrator
     /// ring. Splitting here is the seam for overlapping N+2 prepare with N+1 finalization.
-    pub(crate) fn submit_schemes<F>(mut self, deferred_present: bool, pre_acquire: F) -> Result<SubmittedFrame>
+    pub(crate) fn submit_schemes<F, G>(
+        mut self,
+        deferred_present: bool,
+        pre_upload: F,
+        pre_worker_acquire: G,
+    ) -> Result<SubmittedFrame>
     where
         F: FnOnce() -> Result<()>,
+        G: FnOnce() -> Result<()>,
     {
         self.persistent.deferred_owned_cap_hint = self.deferred_owned_buffers.capacity();
         self.persistent.deferred_textures_cap_hint = self.deferred_textures.capacity();
@@ -1360,19 +1373,25 @@ impl<'a> SchemeRecorder<'a> {
         let recyclable_owned = mem::take(&mut self.deferred_owned_buffers);
         let frame_handle = self.frame_handle;
 
-        // Run the caller's pre-acquire barrier (present-ack + acquire capacity) before
-        // any scheme submit so `drain_pending_for_submit_gate` never blocks on a present
-        // easement promise that TID_PRESENT has not resolved yet (see parcel.rs).
+        // Present-began gate before upload submit so staging writes never race a present
+        // easement the runtime has not begun releasing (see parcel.rs).
         // Upload *recording* still overlaps the previous present; only submit ordering
         // is gated here.
         {
-            let _tz = goldy::tracy_zone!("ekrano.finish.pre_acquire");
-            pre_acquire()?;
+            let _tz = goldy::tracy_zone!("ekrano.finish.pre_upload");
+            pre_upload()?;
         }
 
         {
             let _tz = goldy::tracy_zone!("ekrano.finish.upload_submit");
             self.upload.submit().map_err(|e| Error::Shader(e.to_string()))?;
+        }
+
+        // Swapchain capacity / acquire backpressure after upload submit so upload work
+        // can overlap the return-fence wait; must complete before worker acquire.
+        {
+            let _tz = goldy::tracy_zone!("ekrano.finish.pre_worker_acquire");
+            pre_worker_acquire()?;
         }
 
         let submission = {
@@ -1437,16 +1456,18 @@ impl<'a> SchemeRecorder<'a> {
     ///
     /// Prefer the split API at call sites that can release recorder borrows before finalization.
     #[allow(dead_code, reason = "monolithic wrapper for callers that do not need the split seam")]
-    pub(crate) fn finish<F>(
+    pub(crate) fn finish<F, G>(
         self,
         deferred_present: bool,
-        pre_acquire: F,
+        pre_upload: F,
+        pre_worker_acquire: G,
         frame_pipeline: &mut FrameOrchestrator<()>,
     ) -> Result<FrameFinishOutcome>
     where
         F: FnOnce() -> Result<()>,
+        G: FnOnce() -> Result<()>,
     {
-        let submitted = self.submit_schemes(deferred_present, pre_acquire)?;
+        let submitted = self.submit_schemes(deferred_present, pre_upload, pre_worker_acquire)?;
         Self::finalize(submitted, frame_pipeline)
     }
 }

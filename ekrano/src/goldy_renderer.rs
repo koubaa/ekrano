@@ -1132,27 +1132,30 @@ impl GoldyRenderer {
         prepared: PreparedFrame,
         pool: &goldy::SwapchainPool,
     ) -> Result<(FrameStats, PresentToken)> {
-        self.submit_to_swapchain_with(prepared, pool, || Ok(()))
+        self.submit_to_swapchain_with(prepared, pool, || Ok(()), || Ok(()))
     }
 
-    /// Like [`Self::submit_to_swapchain`], but runs `pre_acquire` after the upload
-    /// scheme is submitted and immediately before the worker acquires its drawable
-    /// (Scheme backend only).
-    pub fn submit_to_swapchain_with<F>(
+    /// Like [`Self::submit_to_swapchain`], but runs caller hooks at the submit seam.
+    ///
+    /// `pre_upload` runs before upload scheme submit; `pre_worker_acquire` runs after
+    /// upload submit and before worker submit (Scheme backend only).
+    pub fn submit_to_swapchain_with<F, G>(
         &mut self,
         prepared: PreparedFrame,
         pool: &goldy::SwapchainPool,
-        pre_acquire: F,
+        pre_upload: F,
+        pre_worker_acquire: G,
     ) -> Result<(FrameStats, PresentToken)>
     where
         F: FnOnce() -> Result<()>,
+        G: FnOnce() -> Result<()>,
     {
         match self {
             Self::Classic(_) => panic!(
                 "GoldyRenderer::submit_to_swapchain called on Classic backend — \
                  use submit_to_surface(prepared, surface) instead"
             ),
-            Self::Scheme(r) => r.submit_to_swapchain_with(prepared, pool, pre_acquire),
+            Self::Scheme(r) => r.submit_to_swapchain_with(prepared, pool, pre_upload, pre_worker_acquire),
         }
     }
 
