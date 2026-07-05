@@ -573,6 +573,10 @@ pub(crate) struct PersistentState {
     pub(crate) cached_scheme_indirect: Option<(ekrano_encoding::WorkgroupCountsGpu, Buffer)>,
     /// Stable scene buffer for the retained worker scheme (bucket capacity, buffer).
     pub(crate) cached_scene: Option<(u64, Buffer)>,
+    /// CPU-writable staging copied into [`Self::cached_scene`] on the retained worker CB.
+    pub(crate) cached_scene_staging: Option<(u64, Buffer)>,
+    /// CPU-writable staging copied into `cached_config_uniform` on the retained worker CB.
+    pub(crate) cached_config_staging: Option<Buffer>,
     /// Stable bump buffer keyed by byte size; read back via [`Self::cached_bump_grant`].
     pub(crate) cached_bump: Option<(u64, Buffer)>,
     /// Recorded once on the worker when `robust` is enabled.
@@ -642,6 +646,8 @@ impl PersistentState {
             cached_filter_uniforms: Vec::new(),
             cached_scheme_indirect: None,
             cached_scene: None,
+            cached_scene_staging: None,
+            cached_config_staging: None,
             cached_bump: None,
             cached_bump_grant: None,
             cached_gradient: None,

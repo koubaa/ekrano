@@ -295,6 +295,40 @@ pub(crate) fn alloc_or_reuse_scene(recorder: &mut SchemeRecorder<'_>, live_bytes
         .map_err(|e| Error::Gpu(e.to_string()))
 }
 
+/// CPU-writable staging for [`alloc_or_reuse_scene`]; copied to the device buffer on the worker CB.
+fn alloc_or_reuse_scene_staging(recorder: &mut SchemeRecorder<'_>, live_bytes: usize) -> Result<Buffer, Error> {
+    let bucket = scene_size_bucket(live_bytes);
+    if let Some((cached_bucket, buf)) = recorder.persistent.cached_scene_staging.take() {
+        if cached_bucket >= bucket {
+            return Ok(buf);
+        }
+        defer_buffer_until_retired(recorder.context(), buf);
+    }
+    recorder
+        .persistent
+        .retained_pool
+        .acquire_buffer(bucket, BufferKind::Scattered, Some(4), BufferFlags::CPU_WRITABLE, None)
+        .map_err(|e| Error::Gpu(e.to_string()))
+}
+
+/// CPU-writable staging for [`coarse_config`]; copied to the device buffer on the worker CB.
+fn alloc_or_reuse_config_staging(recorder: &mut SchemeRecorder<'_>) -> Result<Buffer, Error> {
+    if let Some(buf) = recorder.persistent.cached_config_staging.take() {
+        return Ok(buf);
+    }
+    recorder
+        .persistent
+        .retained_pool
+        .acquire_buffer(
+            size_of::<ConfigUniform>() as u64,
+            BufferKind::Scattered,
+            Some(size_of::<ConfigUniform>() as u32),
+            BufferFlags::CPU_WRITABLE,
+            None,
+        )
+        .map_err(|e| Error::Gpu(e.to_string()))
+}
+
 /// Allocate or reuse the stable device buffer for the fine-pass config uniform.
 ///
 /// Written each frame by a GPU `CopyBuffer` from `coarse_config`; never CPU-written.
@@ -320,23 +354,62 @@ fn alloc_or_reuse_fine_config(recorder: &mut SchemeRecorder<'_>) -> Result<Buffe
 /// Unlike [`crate::scheme::Scheme::commit_write_parcel`], this does not append an IR node
 /// or dirty the scheme, so the worker topology stays retained across frames while the bytes
 /// are refreshed on every submit. The reuse reference table gates the write on the CPU so
-/// the submit worker only overwrites the buffer after the prior GPU reader has retired.
-pub(crate) fn defer_scene_write_on_worker(recorder: &mut SchemeRecorder<'_>, scene: &Buffer, bytes: &[u8]) {
+/// the submit worker only overwrites staging after the prior GPU reader of `scene` has retired.
+pub(crate) fn defer_scene_write_on_worker(
+    recorder: &mut SchemeRecorder<'_>,
+    scene: &Buffer,
+    scene_staging: &Buffer,
+    bytes: &[u8],
+) {
     recorder.persistent.config_scene_dirty = true;
     let refs = scene.last_referenced();
     recorder
         .scheme()
-        .defer_host_write(&refs, scene, 0, bytes.to_vec().into_boxed_slice());
+        .defer_host_write(&refs, scene_staging, 0, bytes.to_vec().into_boxed_slice());
 }
 
 /// Re-supply config uniform bytes to the worker scheme via the host-write sidecar.
 ///
 /// See [`defer_scene_write_on_worker`]; keeps the worker IR structurally clean.
-pub(crate) fn defer_config_write_on_worker(recorder: &mut SchemeRecorder<'_>, config: &Buffer, bytes: &[u8]) {
-    let refs = config.last_referenced();
+pub(crate) fn defer_config_write_on_worker(
+    recorder: &mut SchemeRecorder<'_>,
+    coarse_config: &Buffer,
+    config_staging: &Buffer,
+    bytes: &[u8],
+) {
+    let refs = coarse_config.last_referenced();
     recorder
         .scheme()
-        .defer_host_write(&refs, config, 0, bytes.to_vec().into_boxed_slice());
+        .defer_host_write(&refs, config_staging, 0, bytes.to_vec().into_boxed_slice());
+}
+
+/// Record GPU copies from CPU-writable staging into device-local scene/config buffers.
+///
+/// Recorded once when the worker scheme is (re)built; the retained command buffer replays
+/// these copies every frame after the submit worker refreshes staging via [`defer_scene_write_on_worker`].
+pub(crate) fn record_worker_staging_copies(
+    recorder: &mut SchemeRecorder<'_>,
+    scene_staging: &Buffer,
+    scene: &Buffer,
+    scene_bytes_len: u64,
+    config_staging: &Buffer,
+    coarse_config: &Buffer,
+) -> Result<(), Error> {
+    recorder
+        .scheme()
+        .copy_buffer_parcel(scene_staging.whole(), 0, scene.whole(), 0, scene_bytes_len)
+        .map_err(|e| Error::Shader(e.to_string()))?;
+    recorder
+        .scheme()
+        .copy_buffer_parcel(
+            config_staging.whole(),
+            0,
+            coarse_config.whole(),
+            0,
+            size_of::<ConfigUniform>() as u64,
+        )
+        .map_err(|e| Error::Shader(e.to_string()))?;
+    Ok(())
 }
 
 /// Allocate or reuse a stable bump buffer for the retained worker.
@@ -815,7 +888,9 @@ pub(crate) struct PipelineResources {
     pub image_atlas: Texture,
     pub mask_atlas: Texture,
     pub scene: Buffer,
+    pub scene_staging: Buffer,
     pub coarse_config: Buffer,
+    pub config_staging: Buffer,
     pub fine_config: Buffer,
     /// Composite indirect buffer (one ordinal `DispatchShape` parcel per stage).
     /// Cache key and buffer live in [`crate::goldy_renderer::PersistentState::cached_scheme_indirect`].
@@ -850,7 +925,9 @@ pub(crate) fn install_scheme_pipeline_cache(
         image_atlas,
         mask_atlas,
         scene,
+        scene_staging,
         coarse_config,
+        config_staging,
         fine_config,
         indirect,
         stable,
@@ -865,6 +942,8 @@ pub(crate) fn install_scheme_pipeline_cache(
 
     let _ = (gradient, image_atlas, mask_atlas);
     persistent.cached_scene = Some((scene.byte_size(), scene));
+    persistent.cached_scene_staging = Some((scene_staging.byte_size(), scene_staging));
+    persistent.cached_config_staging = Some(config_staging);
     persistent.cached_config_uniform = Some((config_uniform_value, coarse_config));
     persistent.cached_fine_config = Some(fine_config);
     persistent.config_scene_dirty = false;
@@ -1207,6 +1286,8 @@ impl PipelineResources {
             recorder.persistent.config_scene_dirty = true;
             scene_buf
         };
+        let scene_staging = alloc_or_reuse_scene_staging(recorder, scene_bytes.len())?;
+        let config_staging = alloc_or_reuse_config_staging(recorder)?;
 
         let buffer_sizes = cpu_config_owned.buffer_sizes;
 
@@ -1296,7 +1377,9 @@ impl PipelineResources {
             image_atlas,
             mask_atlas,
             scene,
+            scene_staging,
             coarse_config,
+            config_staging,
             fine_config,
             indirect: None,
             stable,

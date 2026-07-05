@@ -54,7 +54,7 @@ use crate::{
     scheme_gpu_resources::{
         GpuBinding, acquire_texture_rgba, bind_type_to_node_access, clear_gpu_buf_on_worker,
         defer_config_write_on_worker, defer_scene_write_on_worker, record_upload_bytes, record_upload_bytes_owned,
-        scene_upload_bytes,
+        record_worker_staging_copies, scene_upload_bytes,
     },
     scheme_render::Render,
     shaders::{self, FullShaders},
@@ -820,10 +820,12 @@ impl SchemeRenderer {
         // node recorded once at worker-record time (below) and replayed by the retained CB.
         {
             let _tz = goldy::tracy_zone!("ekrano.worker_stage");
-            defer_scene_write_on_worker(&mut recorder, &pipeline.scene, &scene_upload_bytes(&packed));
+            let scene_bytes = scene_upload_bytes(&packed);
+            defer_scene_write_on_worker(&mut recorder, &pipeline.scene, &pipeline.scene_staging, &scene_bytes);
             defer_config_write_on_worker(
                 &mut recorder,
                 &pipeline.coarse_config,
+                &pipeline.config_staging,
                 bytemuck::bytes_of(&pipeline.config_uniform_value),
             );
         }
@@ -831,6 +833,14 @@ impl SchemeRenderer {
         let mut render = Render::new();
         let mut worker_cache = None;
         let (t_coarse, t_fine_record) = if worker_stale {
+            record_worker_staging_copies(
+                &mut recorder,
+                &pipeline.scene_staging,
+                &pipeline.scene,
+                scene_upload_bytes(&packed).len() as u64,
+                &pipeline.config_staging,
+                &pipeline.coarse_config,
+            )?;
             // Recorded once per worker (re)record; the retained command buffer replays this
             // clear every frame so bump starts zeroed before coarse without re-recording.
             clear_gpu_buf_on_worker(&mut recorder, &pipeline.bump, 0, None)?;
