@@ -1768,35 +1768,6 @@ impl GoldyRenderer {
             recorder.finish()?
         };
 
-        // On Metal (Apple Silicon unified memory), per-frame storage-buffer
-        // writes use a direct CPU memcpy into the buffer's `contents()` pointer
-        // (the fast path in goldy/src/backend/metal/compute.rs). If the CPU
-        // records frame N+1 while frame N's compute is still in flight it will
-        // clobber the bytes the GPU is reading → glitch/black frames with no
-        // command-buffer fault. We must enforce the depth-1 gate with a real
-        // fence by stamping the ring slot synchronously here rather than relying
-        // on the async fence-poller path (`BoundaryCrossed` epoch), which lands
-        // a stale low value that `gpu_progress` has already passed.
-        //
-        // Staged-copy backends (DX12, Vulkan) record the overwrite as a
-        // CopyBufferRegion / vkCmdCopyBuffer from a timeline-recycled upload
-        // belt into a DEFAULT/DEVICE_LOCAL buffer, fenced by an explicit
-        // UAV→COPY_DEST barrier. The GPU serializes the write itself, so the
-        // CPU can safely run frames ahead. Forcing a synchronous depth-1 wait
-        // on those backends destroys cross-frame pipelining for no benefit.
-        //
-        // Gate on the early (compute) partition's timeline when available: the
-        // single-buffered per-frame resources are consumed only by that pass,
-        // while the late (blit) partition reads the RT-cached `out_image`. This
-        // lets the blit + present overlap the next frame's CPU recording. Falls
-        // back to the full submit timeline when the frame was not split.
-        if self.device.backend_type() == goldy::BackendType::Metal {
-            let gate_tv = surface_frame
-                .as_ref()
-                .and_then(goldy::Frame::early_timeline)
-                .unwrap_or(frame_tv);
-            self.frame_pipeline.note_presented(gate_tv);
-        }
         if let Some(i) = cache_outcome.cached_render_targets_slot {
             log::debug!(
                 "[RT-CACHE] stamp slot={i} timeline={frame_tv} (prev={})",
