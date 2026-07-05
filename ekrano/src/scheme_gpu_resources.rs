@@ -8,7 +8,7 @@ use std::mem::size_of;
 use goldy::types::{BufferFlags, TextureFlags, TextureKind};
 use goldy::{
     Buffer, BufferKind, DispatchShape, Init, Parcel, Sampler, Texture, TextureCopyFootprint, TextureFormat,
-    TimelineValue, ordinal,
+    ordinal,
 };
 
 use crate::goldy_renderer::{CacheScheduleOutcome, PersistentState, defer_buffer_until_retired};
@@ -101,7 +101,7 @@ pub(crate) fn alloc_pipeline_buffer(
         flags,
     )?;
     // Pipeline buffers are always overwritten by GPU dispatches before first read.
-    // Per-frame clears (e.g. bump) go through `clear_gpu_buf` on the upload scheme.
+    // Per-frame bump clear is recorded once on the worker scheme (retained GPU clear node).
     Ok(buf)
 }
 
@@ -264,18 +264,15 @@ pub(crate) fn acquire_texture_rgba(
         .map_err(|e| Error::Shader(e.to_string()))
 }
 
-pub(crate) fn clear_gpu_buf(
+pub(crate) fn clear_gpu_buf_on_worker(
     recorder: &mut SchemeRecorder<'_>,
     buf: &Buffer,
     off: u64,
     size: Option<u64>,
 ) -> Result<(), Error> {
-    if !recorder.upload_needs_record {
-        return Ok(());
-    }
     let sz = size.unwrap_or_else(|| buf.byte_size().saturating_sub(off));
     recorder
-        .upload_scheme()
+        .scheme()
         .commit_clear_parcel(buf, off, sz)
         .map_err(|e| Error::Shader(e.to_string()))?;
     Ok(())
@@ -295,40 +292,6 @@ pub(crate) fn alloc_or_reuse_scene(recorder: &mut SchemeRecorder<'_>, live_bytes
         .persistent
         .retained_pool
         .acquire_buffer(bucket, BufferKind::Scattered, Some(4), BufferFlags::empty(), None)
-        .map_err(|e| Error::Gpu(e.to_string()))
-}
-
-/// Allocate or reuse a CPU-writable staging buffer for scene bytes.
-fn alloc_or_reuse_scene_staging(recorder: &mut SchemeRecorder<'_>, live_bytes: usize) -> Result<Buffer, Error> {
-    let bucket = scene_size_bucket(live_bytes);
-    if let Some((cached_bucket, buf)) = recorder.persistent.cached_scene_staging.take() {
-        if cached_bucket >= bucket {
-            return Ok(buf);
-        }
-        defer_buffer_until_retired(recorder.context(), buf);
-    }
-    recorder
-        .persistent
-        .retained_pool
-        .acquire_buffer(bucket, BufferKind::Scattered, Some(4), BufferFlags::CPU_WRITABLE, None)
-        .map_err(|e| Error::Gpu(e.to_string()))
-}
-
-/// Allocate or reuse a CPU-writable staging buffer for the config uniform.
-fn alloc_or_reuse_config_staging(recorder: &mut SchemeRecorder<'_>) -> Result<Buffer, Error> {
-    if let Some(buf) = recorder.persistent.cached_config_staging.take() {
-        return Ok(buf);
-    }
-    recorder
-        .persistent
-        .retained_pool
-        .acquire_buffer(
-            size_of::<ConfigUniform>() as u64,
-            BufferKind::Scattered,
-            Some(size_of::<ConfigUniform>() as u32),
-            BufferFlags::CPU_WRITABLE,
-            None,
-        )
         .map_err(|e| Error::Gpu(e.to_string()))
 }
 
@@ -352,81 +315,28 @@ fn alloc_or_reuse_fine_config(recorder: &mut SchemeRecorder<'_>) -> Result<Buffe
         .map_err(|e| Error::Gpu(e.to_string()))
 }
 
-/// Write scene bytes into staging and copy into the device scene buffer when recording upload topology.
-pub(crate) fn stage_scene_bytes(recorder: &mut SchemeRecorder<'_>, scene: &Buffer, bytes: &[u8]) -> Result<(), Error> {
-    let bucket = scene_size_bucket(bytes.len());
-    let staging = alloc_or_reuse_scene_staging(recorder, bytes.len())?;
-    recorder.upload_scheme().defer_host_write(
-        &staging.last_referenced(),
-        &staging,
-        0,
-        bytes.to_vec().into_boxed_slice(),
-    );
+/// Re-supply scene bytes to the worker scheme via the host-write sidecar.
+///
+/// Unlike [`crate::scheme::Scheme::commit_write_parcel`], this does not append an IR node
+/// or dirty the scheme, so the worker topology stays retained across frames while the bytes
+/// are refreshed on every submit. The reuse reference table gates the write on the CPU so
+/// the submit worker only overwrites the buffer after the prior GPU reader has retired.
+pub(crate) fn defer_scene_write_on_worker(recorder: &mut SchemeRecorder<'_>, scene: &Buffer, bytes: &[u8]) {
     recorder.persistent.config_scene_dirty = true;
-    if recorder.upload_needs_record {
-        // Copy the full staging buffer (bucket-sized) rather than bytes.len() bytes.
-        // On retained frames the packed content varies within the bucket; the GPU reads
-        // up to config.scene_size bytes (always ≤ bucket), so the tail is never accessed.
-        let copy_size = staging.byte_size();
-        recorder
-            .upload_scheme()
-            .copy_buffer_parcel(staging.whole(), 0, scene.whole(), 0, copy_size)
-            .map_err(|e| Error::Shader(e.to_string()))?;
-    }
-    recorder.persistent.cached_scene_staging = Some((bucket, staging));
-    Ok(())
+    let refs = scene.last_referenced();
+    recorder
+        .scheme()
+        .defer_host_write(&refs, scene, 0, bytes.to_vec().into_boxed_slice());
 }
 
-/// Write config uniform bytes into staging and copy into the device config buffer when recording.
+/// Re-supply config uniform bytes to the worker scheme via the host-write sidecar.
 ///
-/// When the upload scheme is retained, only the staging buffer is CPU-written; the existing
-/// retained copy node is replayed on submit (same pattern as [`stage_scene_bytes`]).
-pub(crate) fn stage_config_bytes(
-    recorder: &mut SchemeRecorder<'_>,
-    config: &Buffer,
-    bytes: &[u8],
-) -> Result<(), Error> {
-    let staging = alloc_or_reuse_config_staging(recorder)?;
-    recorder.upload_scheme().defer_host_write(
-        &staging.last_referenced(),
-        &staging,
-        0,
-        bytes.to_vec().into_boxed_slice(),
-    );
-    if recorder.upload_needs_record {
-        recorder
-            .upload_scheme()
-            .copy_buffer_parcel(staging.whole(), 0, config.whole(), 0, bytes.len() as u64)
-            .map_err(|e| Error::Shader(e.to_string()))?;
-    }
-    recorder.persistent.cached_config_staging = Some(staging);
-    Ok(())
-}
-
-/// Record a retained upload-scheme copy from `coarse_config` to `fine_config`.
-///
-/// Lives in the upload scheme (not the worker) so the worker never reads
-/// `coarse_config` in the fine-compute partition — only the coarse partition
-/// reads it. Upload submits before the worker, so `fine_config` is ready before
-/// the fine pass runs.
-fn record_coarse_to_fine_config_copy(
-    recorder: &mut SchemeRecorder<'_>,
-    coarse_config: &Buffer,
-    fine_config: &Buffer,
-) -> Result<(), Error> {
-    if recorder.upload_needs_record {
-        recorder
-            .upload_scheme()
-            .copy_buffer_parcel(
-                coarse_config.whole(),
-                0,
-                fine_config.whole(),
-                0,
-                size_of::<ConfigUniform>() as u64,
-            )
-            .map_err(|e| Error::Shader(e.to_string()))?;
-    }
-    Ok(())
+/// See [`defer_scene_write_on_worker`]; keeps the worker IR structurally clean.
+pub(crate) fn defer_config_write_on_worker(recorder: &mut SchemeRecorder<'_>, config: &Buffer, bytes: &[u8]) {
+    let refs = config.last_referenced();
+    recorder
+        .scheme()
+        .defer_host_write(&refs, config, 0, bytes.to_vec().into_boxed_slice());
 }
 
 /// Allocate or reuse a stable bump buffer for the retained worker.
@@ -932,7 +842,6 @@ pub(crate) struct PipelineResources {
 pub(crate) fn install_scheme_pipeline_cache(
     persistent: &mut PersistentState,
     pipeline: PipelineResources,
-    scheme_rt_record_tv: TimelineValue,
 ) -> CacheScheduleOutcome {
     let _tz = goldy::tracy_zone!("ekrano.schedule_pipeline_cleanup");
     let outcome = CacheScheduleOutcome::default();
@@ -998,25 +907,32 @@ pub(crate) fn install_scheme_pipeline_cache(
     );
     persistent.cached_pipeline = Some(pipeline_cache);
     log::debug!("[PIPE-CACHE] schedule: cached");
-    persistent.store_scheme_render_targets(out_image, filter_layers, scheme_rt_record_tv);
+    persistent.store_scheme_render_targets(out_image, filter_layers);
     log::debug!("[RT-CACHE] schedule: scheme out_image stored (single slot)");
     outcome
+}
+
+/// Scene bytes written to GPU; graph uses a sentinel when the CPU pack is empty.
+pub(crate) fn scene_upload_bytes(packed: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    if packed.is_empty() {
+        std::borrow::Cow::Owned(vec![u8::MAX; size_of::<u32>()])
+    } else {
+        std::borrow::Cow::Borrowed(packed)
+    }
 }
 
 impl PipelineResources {
     pub(crate) fn prepare(
         recorder: &mut SchemeRecorder<'_>,
         coverage_mask: Option<&CoverageMask>,
-        mut packed: Vec<u8>,
+        packed: &[u8],
         ramps: Ramps<'_>,
         images: Images<'_>,
         params: &RenderParams,
         config: &RenderConfig,
         out_image_format: TextureFormat,
     ) -> Result<Self, Error> {
-        if packed.is_empty() {
-            packed.resize(size_of::<u32>(), u8::MAX);
-        }
+        let scene_bytes = scene_upload_bytes(packed);
 
         let gpu_progress = recorder.context().gpu_progress();
         log::debug!("[RT-CACHE] gpu_progress={gpu_progress} at prepare entry");
@@ -1035,10 +951,11 @@ impl PipelineResources {
         // FIFO at worker submit (fine write after prior present-copy read).
         let (out_image, filter_layers, _) = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.render_targets");
-            if let Some((cached_out, cached_layers)) =
-                recorder
-                    .persistent
-                    .take_scheme_render_targets(params.width, params.height, out_image_format)
+            if let Some((cached_out, cached_layers)) = recorder.persistent.take_scheme_render_targets(
+                params.width,
+                params.height,
+                out_image_format,
+            )
             {
                 (cached_out, cached_layers, true)
             } else {
@@ -1216,7 +1133,7 @@ impl PipelineResources {
         };
 
         let config_uniform_value = cpu_config_owned.gpu;
-        let packed_scene_len = packed.len();
+        let packed_scene_len = scene_bytes.len();
 
         let coarse_config = {
             let outcome = {
@@ -1256,15 +1173,10 @@ impl PipelineResources {
                 }
                 ConfigUniformCacheOutcome::LayoutRefresh(buf) => {
                     let _tz = goldy::tracy_zone!("ekrano.prepare.config_layout_refresh");
-                    stage_config_bytes(recorder, &buf, bytemuck::bytes_of(&config_uniform_value))?;
                     buf
                 }
                 ConfigUniformCacheOutcome::MissReuse(buf) => {
                     record_worker_reuse(recorder, &buf);
-                    {
-                        let _tz = goldy::tracy_zone!("ekrano.prepare.config_stage");
-                        stage_config_bytes(recorder, &buf, bytemuck::bytes_of(&config_uniform_value))?;
-                    }
                     buf
                 }
                 ConfigUniformCacheOutcome::MissAlloc => {
@@ -1282,22 +1194,17 @@ impl PipelineResources {
                             )
                             .map_err(|e| Error::Gpu(e.to_string()))?
                     };
-                    {
-                        let _tz = goldy::tracy_zone!("ekrano.prepare.config_stage");
-                        stage_config_bytes(recorder, &config_buf, bytemuck::bytes_of(&config_uniform_value))?;
-                    }
                     config_buf
                 }
             }
         };
 
         let fine_config = alloc_or_reuse_fine_config(recorder)?;
-        record_coarse_to_fine_config_copy(recorder, &coarse_config, &fine_config)?;
 
         let scene = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.scene_upload");
-            let scene_buf = alloc_or_reuse_scene(recorder, packed.len())?;
-            stage_scene_bytes(recorder, &scene_buf, &packed)?;
+            let scene_buf = alloc_or_reuse_scene(recorder, scene_bytes.len())?;
+            recorder.persistent.config_scene_dirty = true;
             scene_buf
         };
 
@@ -1382,7 +1289,7 @@ impl PipelineResources {
         let scratch = ScratchPipelineBuffers::alloc(recorder, cached_scratch, &buffer_sizes)?;
         let bump_size = buffer_sizes.bump_alloc.size_in_bytes().into();
         let bump = alloc_or_reuse_bump(recorder, bump_size)?;
-        clear_gpu_buf(recorder, &bump, 0, None)?;
+        // Bump clear is recorded on the worker scheme before coarse/fine (see worker_stage).
 
         Ok(Self {
             gradient,

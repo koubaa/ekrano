@@ -511,7 +511,7 @@ impl Render {
 
         let persistent = &*recorder.persistent;
         let mut fine_resources: Vec<GpuBinding<'_>> = vec![
-            pipeline.fine_config.as_binding(),
+            pipeline.coarse_config.as_binding(),
             pipeline.stable.segments.as_binding(),
             pipeline.stable.ptcl.as_binding(),
             pipeline.stable.info_bin_data.as_binding(),

@@ -527,11 +527,10 @@ pub(crate) struct PersistentState {
     /// Scheme-path render-target reuse: a single persistent `out_image` + filter
     /// layers, intentionally decoupled from [`RESOURCE_CACHE_SLOTS`].
     ///
-    /// The third element is the worker-submit timeline (`frame_tv`) from the frame that
-    /// last used these textures — kept for diagnostics and future deferred-release
-    /// gates. Cross-frame WAR (present-copy read → fine write) is ordered by the
-    /// per-context submission-worker FIFO, not a CPU `wait_until` at take time.
-    pub(crate) cached_scheme_rt: Option<(Texture, [Texture; 4], TimelineValue)>,
+    /// Cross-frame GPU hazards (present-copy read → fine write on `out_image`, etc.)
+    /// are ordered at [`goldy::Scheme::submit`] via the parcel ledger and submission-worker
+    /// FIFO — not by a CPU `wait_until` when these textures are taken for recording.
+    pub(crate) cached_scheme_rt: Option<(Texture, [Texture; 4])>,
     /// Cached pipeline buffers from the previous frame. At depth=1 only one
     /// entry exists at a time: take-then-install within a single `run_frame`.
     pub(crate) cached_pipeline: Option<crate::graph_gpu_resources::CachedPipeline>,
@@ -561,8 +560,8 @@ pub(crate) struct PersistentState {
     /// Stable device buffer for the fine-pass config uniform. Written each frame by a
     /// GPU `CopyBuffer` from `coarse_config`; never CPU-written, so no reuse wait needed.
     pub(crate) cached_fine_config: Option<Buffer>,
-    /// True after `stage_scene_bytes` writes packed scene staging; cleared when config is
-    /// cached at frame end. Used for layout-only config refresh without hot-path hashing.
+    /// True after scene allocation marks a new upload; cleared when config is cached at
+    /// frame end. Used for layout-only config refresh without hot-path hashing.
     pub(crate) config_scene_dirty: bool,
     pub(crate) cached_config_packed_len: usize,
     /// Per-slot cached `FilterUniform` buffers, indexed by filter dispatch order.
@@ -574,10 +573,6 @@ pub(crate) struct PersistentState {
     pub(crate) cached_scheme_indirect: Option<(ekrano_encoding::WorkgroupCountsGpu, Buffer)>,
     /// Stable scene buffer for the retained worker scheme (bucket capacity, buffer).
     pub(crate) cached_scene: Option<(u64, Buffer)>,
-    /// CPU-writable staging for scene uploads (bucket capacity, buffer).
-    pub(crate) cached_scene_staging: Option<(u64, Buffer)>,
-    /// CPU-writable staging for config uniform uploads.
-    pub(crate) cached_config_staging: Option<Buffer>,
     /// Stable bump buffer keyed by byte size; read back via [`Self::cached_bump_grant`].
     pub(crate) cached_bump: Option<(u64, Buffer)>,
     /// Recorded once on the worker when `robust` is enabled.
@@ -647,8 +642,6 @@ impl PersistentState {
             cached_filter_uniforms: Vec::new(),
             cached_scheme_indirect: None,
             cached_scene: None,
-            cached_scene_staging: None,
-            cached_config_staging: None,
             cached_bump: None,
             cached_bump_grant: None,
             cached_gradient: None,
@@ -722,12 +715,12 @@ impl PersistentState {
         height: u32,
         out_format: TextureFormat,
     ) -> Option<(Texture, [Texture; 4])> {
-        let (out, layers, record_tv) = self.cached_scheme_rt.take()?;
+        let (out, layers) = self.cached_scheme_rt.take()?;
         if out.width() == width && out.height() == height && out.format() == out_format {
             return Some((out, layers));
         }
         log::warn!(
-            "[RT-CACHE] scheme MISS (resize) record_tv={record_tv} {}x{} vs {width}x{height} fmt={out_format:?}",
+            "[RT-CACHE] scheme MISS (resize) {}x{} vs {width}x{height} fmt={out_format:?}",
             out.width(),
             out.height(),
         );
@@ -738,8 +731,8 @@ impl PersistentState {
         None
     }
 
-    pub(crate) fn store_scheme_render_targets(&mut self, out: Texture, layers: [Texture; 4], record_tv: TimelineValue) {
-        self.cached_scheme_rt = Some((out, layers, record_tv));
+    pub(crate) fn store_scheme_render_targets(&mut self, out: Texture, layers: [Texture; 4]) {
+        self.cached_scheme_rt = Some((out, layers));
     }
 }
 

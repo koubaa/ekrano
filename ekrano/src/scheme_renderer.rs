@@ -52,7 +52,9 @@ use crate::{
     },
     resource_proxy::{BindType, ShaderId},
     scheme_gpu_resources::{
-        GpuBinding, acquire_texture_rgba, bind_type_to_node_access, record_upload_bytes, record_upload_bytes_owned,
+        GpuBinding, acquire_texture_rgba, bind_type_to_node_access, clear_gpu_buf_on_worker,
+        defer_config_write_on_worker, defer_scene_write_on_worker, record_upload_bytes, record_upload_bytes_owned,
+        scene_upload_bytes,
     },
     scheme_render::Render,
     shaders::{self, FullShaders},
@@ -67,8 +69,6 @@ use ekrano_encoding::{BumpAllocators, Images, Layout, Ramps, RenderConfig, Resol
 /// Pipeline from the previous frame, installed at the next [`SchemeRenderer::flush_pending_pipeline_cleanup`].
 struct PendingPipelineCleanup {
     pipeline: crate::scheme_gpu_resources::PipelineResources,
-    /// Worker submit timeline; applied to the scheme RT record gate on flush.
-    scheme_rt_record_tv: TimelineValue,
 }
 
 /// Goldy-based 2D renderer using the retained-[`Scheme`] backend.
@@ -124,7 +124,17 @@ impl SchemeRenderer {
         let context = device.create_context().map_err(|e| Error::Gpu(e.to_string()))?;
         let frame_pipeline = {
             let _tz = goldy::tracy_zone!("ekrano.SchemeRenderer::new.frame_orchestrator");
-            // Per-parcel reuse gates at buffer take time; skip the coarse begin_frame GPU wait.
+            // Scheme path (step 3b/2, `synchronization-issue.md`): every per-frame shared
+            // buffer this renderer reuses now carries its own ledger-based reuse gate instead
+            // of relying on this ring's coarse `wait_until` —
+            // `cached_scene`/`cached_config_uniform` via `defer_host_write`'s
+            // `host_observed_waits`, `cached_scheme_indirect`/stable/scratch pipeline buffers
+            // via `record_reuse_epochs` (`record_worker_reuse`), and `cached_scheme_rt` via
+            // ledger ordering at `Scheme::submit`. The `retire` closure passed to `begin_frame`
+            // below is a no-op (`T = ()`): this ring performs no cleanup, only depth
+            // backpressure. Skipping the coarse GPU wait here lets the render thread keep
+            // recording/enqueuing ahead of the GPU instead of blocking a full frame upfront;
+            // correctness is carried entirely by the per-parcel gates above.
             FrameOrchestrator::new(&context, FRAME_PIPELINE_DEPTH).with_skip_ring_gpu_wait(true)
         };
         // Upload and worker are separate schemes so staging/topology can rebuild independently
@@ -239,16 +249,7 @@ impl SchemeRenderer {
             self.pending_pipeline_cleanup.is_none(),
             "pending_pipeline_cleanup must be empty before staging"
         );
-        self.pending_pipeline_cleanup = Some(PendingPipelineCleanup {
-            pipeline,
-            scheme_rt_record_tv: 0,
-        });
-    }
-
-    fn stamp_pending_pipeline_record_timeline(&mut self, record_tv: TimelineValue) {
-        if let Some(pending) = &mut self.pending_pipeline_cleanup {
-            pending.scheme_rt_record_tv = record_tv;
-        }
+        self.pending_pipeline_cleanup = Some(PendingPipelineCleanup { pipeline });
     }
 
     /// Install the prior frame's staged pipeline cache before prepare opens the recorder.
@@ -257,11 +258,7 @@ impl SchemeRenderer {
             return;
         };
         let _tz = goldy::tracy_zone!("ekrano.flush_pending_pipeline_cleanup");
-        crate::scheme_gpu_resources::install_scheme_pipeline_cache(
-            &mut self.persistent,
-            pending.pipeline,
-            pending.scheme_rt_record_tv,
-        );
+        crate::scheme_gpu_resources::install_scheme_pipeline_cache(&mut self.persistent, pending.pipeline);
     }
 
     // =======================================================================
@@ -525,7 +522,7 @@ impl SchemeRenderer {
                 .persistent
                 .cached_scheme_rt
                 .as_ref()
-                .map(|(t, _, _)| t)
+                .map(|(t, _)| t)
                 .ok_or_else(|| Error::Shader("render_to_buffer: missing scheme out_image".into()))?;
             out_image.copy_layout()
         };
@@ -538,7 +535,7 @@ impl SchemeRenderer {
                 .persistent
                 .cached_scheme_rt
                 .as_ref()
-                .map(|(t, _, _)| t)
+                .map(|(t, _)| t)
                 .expect("render_to_buffer: missing scheme out_image");
             self.readback
                 .copy_texture(out_image, &host_buf)
@@ -745,7 +742,7 @@ impl SchemeRenderer {
                 let _tz = goldy::tracy_zone!("ekrano.prepare");
                 let pipeline_result = recorder.prepare_pipeline_resources(
                     coverage_mask.as_ref(),
-                    packed,
+                    &packed,
                     ramps,
                     images,
                     &params,
@@ -778,6 +775,7 @@ impl SchemeRenderer {
                 output_texture.map(|t| t.gpu_handle()),
             )
         };
+        let mut recorded_present_copy = false;
 
         #[cfg(debug_assertions)]
         if !worker_stale && let Some(recorded) = self.persistent.cached_worker_resources.as_ref() {
@@ -814,9 +812,28 @@ impl SchemeRenderer {
             &self.engine_shaders,
         );
 
+        // Scene/config bytes change every frame but the worker IR topology does not.
+        // Re-supply them via the host-write sidecar (applied on the submit worker, gated
+        // on the prior GPU reader retiring) instead of appending IR write nodes. This
+        // leaves the worker scheme structurally clean so a retained resubmit stays a cache
+        // hit — no per-frame re-record or schedule recompile. Bump is zeroed by a GPU clear
+        // node recorded once at worker-record time (below) and replayed by the retained CB.
+        {
+            let _tz = goldy::tracy_zone!("ekrano.worker_stage");
+            defer_scene_write_on_worker(&mut recorder, &pipeline.scene, &scene_upload_bytes(&packed));
+            defer_config_write_on_worker(
+                &mut recorder,
+                &pipeline.coarse_config,
+                bytemuck::bytes_of(&pipeline.config_uniform_value),
+            );
+        }
+
         let mut render = Render::new();
         let mut worker_cache = None;
         let (t_coarse, t_fine_record) = if worker_stale {
+            // Recorded once per worker (re)record; the retained command buffer replays this
+            // clear every frame so bump starts zeroed before coarse without re-recording.
+            clear_gpu_buf_on_worker(&mut recorder, &pipeline.bump, 0, None)?;
             {
                 let _tz = goldy::tracy_zone!("ekrano.coarse");
                 render.run_coarse(
@@ -858,6 +875,7 @@ impl SchemeRenderer {
             let present_grant = if let Some(pool) = pool {
                 let screen = pool.lease();
                 recorder.copy_texture_to_present(&pipeline.out_image, &screen);
+                recorded_present_copy = true;
                 Some(recorder.grant_present(&screen))
             } else {
                 None
@@ -900,7 +918,6 @@ impl SchemeRenderer {
         } else {
             let _tz = goldy::tracy_zone!("ekrano.worker_retained");
             trace.mark("worker_retained");
-            // Worker retained: coarse/fine are not re-run this frame.
             // t_coarse and t_fine_record are reported as zero in FrameStats on the
             // hot retained path — the timings reflect only the recording cost, which
             // is zero by design when the COW bit is clean.
@@ -954,8 +971,6 @@ impl SchemeRenderer {
             (Some(grant), Some(submission)) => Some(PresentToken { grant, submission }),
             _ => None,
         };
-
-        self.stamp_pending_pipeline_record_timeline(frame_tv);
 
         defer_frame_gpu_resources(&self.context, &self.persistent, deferred_textures, recyclable_owned);
 
@@ -1061,7 +1076,7 @@ impl SchemeRenderer {
 // SchemeRecorder — direct-execution recorder that builds Scheme nodes
 // -----------------------------------------------------------------------
 
-/// GPU work submitted; orchestrator ring not yet stamped.
+/// GPU work submitted; orchestrator frame slot not yet closed.
 ///
 /// Produced by [`SchemeRecorder::submit_schemes`]; consumed by [`SchemeRecorder::finalize`].
 pub(crate) struct SubmittedFrame {
@@ -1172,7 +1187,7 @@ impl<'a> SchemeRecorder<'a> {
     pub(crate) fn prepare_pipeline_resources(
         &mut self,
         coverage_mask: Option<&ekrano_encoding::CoverageMask>,
-        packed: Vec<u8>,
+        packed: &[u8],
         ramps: Ramps<'_>,
         images: Images<'_>,
         params: &RenderParams,
@@ -1354,7 +1369,7 @@ impl<'a> SchemeRecorder<'a> {
 
     /// Submit upload and worker schemes; release mutable borrows on `upload` and `scheme`.
     ///
-    /// Returns a [`SubmittedFrame`] token for [`Self::finalize`], which stamps the orchestrator
+    /// Returns a [`SubmittedFrame`] token for [`Self::finalize`], which closes the orchestrator
     /// ring. Splitting here is the seam for overlapping N+2 prepare with N+1 finalization.
     pub(crate) fn submit_schemes<F, G>(
         mut self,
@@ -1384,7 +1399,8 @@ impl<'a> SchemeRecorder<'a> {
 
         {
             let _tz = goldy::tracy_zone!("ekrano.finish.upload_submit");
-            self.upload.submit().map_err(|e| Error::Shader(e.to_string()))?;
+            let upload_sub = self.upload.submit().map_err(|e| Error::Shader(e.to_string()))?;
+            let _ = upload_sub;
         }
 
         // Swapchain capacity / acquire backpressure after upload submit so upload work
@@ -1410,7 +1426,7 @@ impl<'a> SchemeRecorder<'a> {
         })
     }
 
-    /// Stamp the orchestrator ring and package deferred GPU resources for the frame outcome.
+    /// Close the orchestrator frame slot and package deferred GPU resources for the frame outcome.
     pub(crate) fn finalize(
         submitted: SubmittedFrame,
         frame_pipeline: &mut FrameOrchestrator<()>,
@@ -1429,12 +1445,11 @@ impl<'a> SchemeRecorder<'a> {
             let _tz = goldy::tracy_zone!("ekrano.finish.orchestrator");
             if deferred_present {
                 // No Tracy frame mark — that belongs at present time (TID_PRESENT async path).
-                // Still stamp the ring with the worker submit timeline now, not the present
-                // epoch (see synchronization-issue.md).
+                // Push a depth slot only; per-parcel reuse gates (not this ring) order shared
+                // buffer reuse — see `SchemeRenderer::new` and `synchronization-issue.md`.
                 frame_pipeline
                     .end_frame_for_present(frame_handle, scheme_tv, ())
                     .map_err(|e| Error::Shader(e.to_string()))?;
-                frame_pipeline.note_presented(scheme_tv);
                 scheme_tv
             } else {
                 frame_pipeline
@@ -1522,7 +1537,7 @@ mod tests {
             let ctx = device.create_context().expect("context");
             let mut worker = Scheme::new(&ctx);
             let mut upload = Scheme::new(&ctx);
-            let mut frame_pipeline = FrameOrchestrator::new(&ctx, FRAME_PIPELINE_DEPTH).with_skip_ring_gpu_wait(true);
+            let mut frame_pipeline = FrameOrchestrator::new(&ctx, FRAME_PIPELINE_DEPTH);
             let frame_handle = frame_pipeline
                 .begin_frame(|_, _| Ok::<(), Error>(()))
                 .expect("begin_frame");
@@ -1541,7 +1556,7 @@ mod tests {
                 PipelineResources::prepare(
                     &mut recorder,
                     encoding.coverage_mask.as_ref(),
-                    packed,
+                    &packed,
                     ramps,
                     images,
                     &params,
@@ -1559,6 +1574,67 @@ mod tests {
                  to swap R and B when copying to a Bgra8Unorm present lease"
             );
         }
+    }
+
+    #[test]
+    fn classic_render_to_buffer_has_pixels() {
+        use crate::goldy_renderer::{GoldyBackend, GoldyRenderer};
+
+        let Some((device, _)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
+            return;
+        };
+
+        let mut renderer =
+            GoldyRenderer::new_with_backend(&device, GoldyBackend::Classic).expect("GoldyRenderer::new");
+        let mut scene = Scene::new();
+        scene.fill(
+            peniko::Fill::NonZero,
+            peniko::kurbo::Affine::IDENTITY,
+            peniko::Color::from_rgb8(200, 100, 50),
+            None,
+            &peniko::kurbo::Circle::new((32.0, 32.0), 24.0),
+        );
+
+        let params = RenderParams {
+            base_color: peniko::color::palette::css::BLACK,
+            width: 64,
+            height: 64,
+            antialiasing_method: crate::AaConfig::Area,
+            robust: false,
+        };
+
+        let buf = renderer.render_to_buffer(&scene, &params).expect("render_to_buffer");
+        let any = buf.chunks(4).any(|px| px != [0, 0, 0, 0]);
+        assert!(any, "classic render_to_buffer produced an all-zero out_image");
+    }
+
+    #[test]
+    fn scheme_render_to_buffer_has_pixels() {
+        let Some((device, _)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
+            return;
+        };
+
+        let mut renderer = SchemeRenderer::new(&device).expect("SchemeRenderer::new");
+        let mut scene = Scene::new();
+        scene.fill(
+            peniko::Fill::NonZero,
+            peniko::kurbo::Affine::IDENTITY,
+            peniko::Color::from_rgb8(200, 100, 50),
+            None,
+            &peniko::kurbo::Circle::new((32.0, 32.0), 24.0),
+        );
+
+        let params = RenderParams {
+            base_color: peniko::color::palette::css::BLACK,
+            width: 64,
+            height: 64,
+            antialiasing_method: crate::AaConfig::Area,
+            robust: false,
+        };
+
+        let buf = renderer.render_to_buffer(&scene, &params).expect("render_to_buffer");
+        let any = buf.chunks(4).any(|px| px != [0, 0, 0, 0]);
+        assert!(any, "render_to_buffer produced an all-zero out_image");
     }
 
     /// Worker scheme records once and resubmits on subsequent frames with stable topology.
@@ -1604,17 +1680,16 @@ mod tests {
             "foreign readback reader on out_image dirties worker topology once"
         );
 
-        // Upload scheme records exactly twice:
-        //   1. Initial record (frame 1).
-        //   2. One partition-boundary cross-scheme topology refresh (frame 2): the
-        //      partition split that separates buffer-only waves (retainable) from
-        //      CopyBufferToTexture waves (non-retainable) triggers a cross-scheme
-        //      resource registration update, which marks the upload scheme topology dirty.
-        // Frames 3+ must be stable — no additional records.
+        // Upload scheme records exactly once and stays stable across all subsequent
+        // frames. Scene/config bytes are re-supplied on the worker scheme via the
+        // host-write sidecar (`defer_host_write`) rather than an IR write node, so
+        // the worker's cross-scheme resource registration is already stable at the
+        // partition boundary on the very first record — there is no longer a
+        // second, partition-split-induced topology refresh one frame later.
         let upload_stats = renderer.upload_replay_stats();
         assert_eq!(
-            upload_stats.records, 2,
-            "upload scheme records twice: initial record + one partition-split topology refresh"
+            upload_stats.records, 1,
+            "upload scheme records once and never re-records on stable frames"
         );
     }
 
