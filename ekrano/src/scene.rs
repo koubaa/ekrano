@@ -96,10 +96,6 @@ impl Scene {
     ///
     /// **However, the transforms are *not* saved or modified by the layer stack.**
     /// That is, the `transform` argument to this function only applies a transform to the `clip` shape.
-    #[expect(
-        single_use_lifetimes,
-        reason = "False positive: https://github.com/rust-lang/rust/issues/129255"
-    )]
     #[track_caller]
     pub fn push_layer<'a>(
         &mut self,
@@ -146,10 +142,6 @@ impl Scene {
     /// This issue only occurs if there are no intermediate opaque layers, so can be worked around
     /// by drawing something opaque (or having an opaque `base_color`), then putting a layer around your entire scene
     /// with a [`Compose::SrcOver`].
-    #[expect(
-        single_use_lifetimes,
-        reason = "False positive: https://github.com/rust-lang/rust/issues/129255"
-    )]
     pub fn push_luminance_mask_layer<'a>(
         &mut self,
         clip_style: impl Into<StyleRef<'a>>,
@@ -184,10 +176,6 @@ impl Scene {
     ///
     /// **However, the transforms are *not* saved or modified by the layer stack.**
     /// That is, the `transform` argument to this function only applies a transform to the `clip` shape.
-    #[expect(
-        single_use_lifetimes,
-        reason = "False positive: https://github.com/rust-lang/rust/issues/129255"
-    )]
     pub fn push_clip_layer<'a>(&mut self, clip_style: impl Into<StyleRef<'a>>, transform: Affine, clip: &impl Shape) {
         self.push_layer_inner(DrawBeginClip::clip(), clip_style.into(), transform, clip);
     }
@@ -242,10 +230,6 @@ impl Scene {
     /// Filters are applied to the **full output texture** after rasterization, in scene order (see
     /// [`ekrano_encoding::Encoding::layer_filter_effects`]). True per-layer isolation matches
     /// `vello_cpu` when a single filtered layer fills the viewport.
-    #[expect(
-        single_use_lifetimes,
-        reason = "False positive: https://github.com/rust-lang/rust/issues/129255"
-    )]
     pub fn push_filter_layer<'a>(
         &mut self,
         filter: impl Into<Filter>,
@@ -285,10 +269,6 @@ impl Scene {
     ///
     /// GPU path: uses the same tile/layer pipeline as other clips (reuses the blend stack rather than
     /// a separate sparse clip coverage buffer).
-    #[expect(
-        single_use_lifetimes,
-        reason = "False positive: https://github.com/rust-lang/rust/issues/129255"
-    )]
     pub fn push_clip_path<'a>(&mut self, clip_style: impl Into<StyleRef<'a>>, transform: Affine, clip: &impl Shape) {
         self.push_clip_layer(clip_style, transform, clip);
     }
@@ -407,10 +387,6 @@ impl Scene {
     }
 
     /// Fills a shape using the specified style and brush.
-    #[expect(
-        single_use_lifetimes,
-        reason = "False positive: https://github.com/rust-lang/rust/issues/129255"
-    )]
     pub fn fill<'b>(
         &mut self,
         style: Fill,
@@ -437,10 +413,6 @@ impl Scene {
     }
 
     /// Strokes a shape using the specified style and brush.
-    #[expect(
-        single_use_lifetimes,
-        reason = "False positive: https://github.com/rust-lang/rust/issues/129255"
-    )]
     pub fn stroke<'b>(
         &mut self,
         style: &Stroke,

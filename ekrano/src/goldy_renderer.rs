@@ -1523,10 +1523,13 @@ impl GoldyRenderer {
             );
         }
 
-        let mut output = vec![0_u8; texture.byte_size()];
-        texture
-            .read_to_cpu(&mut output)
-            .map_err(|e| Error::Readback(e.to_string()))?;
+        let mut output = vec![0_u8; texture.byte_size() as usize];
+        #[allow(deprecated, reason = "goldy texture readback migration pending")]
+        {
+            texture
+                .read_to_cpu(&mut output)
+                .map_err(|e| Error::Readback(e.to_string()))?;
+        }
         Ok(output)
     }
 

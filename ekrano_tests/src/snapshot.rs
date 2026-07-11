@@ -117,7 +117,7 @@ impl Snapshot<'_> {
             )?;
             eprintln!(
                 "Updated result for updated test {} to {:?}",
-                self.params.name, &self.reference_path
+                self.params.name, self.reference_path
             );
         } else {
             write_png_to_file(self.params, &self.update_path, &self.raw_rendered, None, false)?;
@@ -142,7 +142,7 @@ impl Snapshot<'_> {
             eprintln!(
                 "Wrote result for failing test {} to {:?}\n\
                 Use `EKRANO_TEST_UPDATE=all` to update",
-                self.params.name, &self.update_path
+                self.params.name, self.update_path
             );
         }
         bail!("{}", message);
@@ -251,7 +251,7 @@ pub fn snapshot_test_image(
                     Some(directory.max_size_in_bytes()),
                     true,
                 )?;
-                eprintln!("Wrote result for new test {} to {:?}", params.name, &reference_path);
+                eprintln!("Wrote result for new test {} to {:?}", params.name, reference_path);
                 return Ok(Snapshot {
                     statistics: None,
                     error_map: None,
