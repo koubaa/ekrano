@@ -72,7 +72,9 @@ impl FullShaders {
     }
 }
 
-pub(crate) fn goldy_full_shaders_graph(renderer: &mut crate::graph_renderer::GraphRenderer) -> Result<FullShaders, Error> {
+pub(crate) fn goldy_full_shaders_graph(
+    renderer: &mut crate::graph_renderer::GraphRenderer,
+) -> Result<FullShaders, Error> {
     use BindType::*;
 
     let search_path = ekrano_shaders::slang::slang_search_path();
@@ -370,7 +372,9 @@ pub(crate) fn goldy_full_shaders_graph(renderer: &mut crate::graph_renderer::Gra
     })
 }
 
-pub(crate) fn goldy_full_shaders_scheme(renderer: &mut crate::scheme_renderer::SchemeRenderer) -> Result<FullShaders, Error> {
+pub(crate) fn goldy_full_shaders_scheme(
+    renderer: &mut crate::scheme_renderer::SchemeRenderer,
+) -> Result<FullShaders, Error> {
     use BindType::*;
 
     let search_path = ekrano_shaders::slang::slang_search_path();

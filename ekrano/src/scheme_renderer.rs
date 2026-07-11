@@ -28,31 +28,29 @@
 //! node topology as the `TaskGraph` path). Phase 3 will retain the topology across
 //! frames and only re-record when dirty.
 
-use std::mem::size_of;
 use std::mem;
+use std::mem::size_of;
 use std::sync::Arc;
 
 use goldy::task_graph::NodeAccess;
 use goldy::types::{TextureFlags, TextureFormat, TextureKind};
 use goldy::{
-    BudgetPolicy, Buffer, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator,
-    Grant, ShaderModule, Signal, Scheme, TaskGraph, Texture,
+    BudgetPolicy, Buffer, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator, Grant, Scheme,
+    ShaderModule, Signal, TaskGraph, Texture,
 };
 
 use crate::{
     Error, RenderParams, Result, Scene,
     goldy_renderer::{
-        FrameFinishOutcome, FrameStats, GoldyShader, AllocatorStats,
-        FRAME_PIPELINE_DEPTH, MAX_BUMP_RETRIES, PreparedFrame, PersistentState,
-        ResourcePoolStats, defer_frame_gpu_resources, env_robust_override,
-        FRAME_COUNTER, sanitize_bump, find_empty_cache_slot, CacheScheduleOutcome,
+        AllocatorStats, CacheScheduleOutcome, FRAME_COUNTER, FRAME_PIPELINE_DEPTH, FrameFinishOutcome, FrameStats,
+        GoldyShader, MAX_BUMP_RETRIES, PersistentState, PreparedFrame, ResourcePoolStats, defer_frame_gpu_resources,
+        env_robust_override, find_empty_cache_slot, sanitize_bump,
     },
+    resource_proxy::{BindType, ShaderId},
     scheme_gpu_resources::{
-        GpuBinding, bind_type_to_node_access,
-        record_upload_bytes, record_upload_bytes_owned, acquire_texture_rgba,
+        GpuBinding, acquire_texture_rgba, bind_type_to_node_access, record_upload_bytes, record_upload_bytes_owned,
     },
     scheme_render::Render,
-    resource_proxy::{BindType, ShaderId},
     shaders::{self, FullShaders},
 };
 use ekrano_encoding::{BumpAllocators, Images, Layout, Ramps, RenderConfig, Resolver};
@@ -65,7 +63,7 @@ use ekrano_encoding::{BumpAllocators, Images, Layout, Ramps, RenderConfig, Resol
 ///
 /// All rendering is done via Goldy's [`Scheme`] command recording.
 /// Surface presentation uses [`goldy::SwapchainPool`] + [`goldy::PresentGrant`]
-/// (scheme-native present mechanism). For the TaskGraph path see
+/// (scheme-native present mechanism). For the `TaskGraph` path see
 /// [`crate::graph_renderer::GraphRenderer`].
 ///
 /// This struct is intentionally isolated: it contains no `TaskGraph` references and
@@ -492,9 +490,7 @@ impl SchemeRenderer {
 
         self.persistent.drain_pending_returns();
 
-        let out_image_format = pool
-            .map(|p| p.format())
-            .unwrap_or(TextureFormat::Rgba8Unorm);
+        let out_image_format = pool.map(|p| p.format()).unwrap_or(TextureFormat::Rgba8Unorm);
         self.persistent.purge_render_target_cache_if_mismatch(
             &self.context,
             params.width,
@@ -629,9 +625,7 @@ impl SchemeRenderer {
 
         // Present using the scheme's native mechanism.
         if let (Some(grant), Some(submission)) = (present_grant, scheme_submission) {
-            grant
-                .consume(&submission)
-                .map_err(|e| Error::Shader(e.to_string()))?;
+            grant.consume(&submission).map_err(|e| Error::Shader(e.to_string()))?;
         }
 
         // On Metal, gate the orchestrator on the compute timeline to allow the
@@ -953,10 +947,7 @@ impl<'a> SchemeRecorder<'a> {
         outcome
     }
 
-    #[cfg_attr(
-        not(feature = "debug_layers"),
-        allow(dead_code, reason = "debug_layers only uses SchemeRecorder::upload")
-    )]
+    #[allow(dead_code, reason = "debug_layers uses GraphRecorder::upload, not SchemeRecorder")]
     pub fn upload(&mut self, name: &'static str, data: impl Into<Vec<u8>>) -> Buffer {
         record_upload_bytes_owned(self, name, 1, data.into()).expect("upload failed")
     }
@@ -1038,17 +1029,12 @@ impl<'a> SchemeRecorder<'a> {
         node.dispatch(x, y, z);
     }
 
-    /// Issue an indirect compute dispatch using a [`DispatchShape`] buffer as the
+    /// Issue an indirect compute dispatch using a [`goldy::DispatchShape`] buffer as the
     /// workgroup-count source.  The `shape` buffer must contain exactly one
     /// `DispatchShape` element; the scheme ordering engine automatically registers
     /// it as a read dependency so that any preceding write to the buffer
     /// (e.g. from `path_count_setup_scheme`) is correctly ordered before this node.
-    pub fn dispatch_shape(
-        &mut self,
-        shader: ShaderId,
-        shape: &goldy::Parcel,
-        bindings: &[GpuBinding<'_>],
-    ) {
+    pub fn dispatch_shape(&mut self, shader: ShaderId, shape: &goldy::Parcel, bindings: &[GpuBinding<'_>]) {
         let bind_types = &self.shaders[shader.0].bindings;
         let mut node = self.scheme.node("dispatch_shape", &self.shaders[shader.0].pipeline);
         for (i, binding) in bindings.iter().enumerate() {
@@ -1070,6 +1056,7 @@ impl<'a> SchemeRecorder<'a> {
 
     /// Stub for debug-layer draw commands (not yet implemented in Goldy).
     #[cfg(feature = "debug_layers")]
+    #[allow(dead_code, reason = "debug_layers uses GraphRecorder::draw, not SchemeRecorder")]
     pub fn draw(&mut self, params: crate::resource_proxy::DrawParams) {
         if let Some(vb) = params.vertex_buffer {
             self.defer_owned_buffer(vb, "ekrano.debug.vertex_buffer");
@@ -1149,9 +1136,7 @@ mod tests {
     /// present lease.
     #[test]
     fn prepare_out_image_format_matches_requested() {
-        let Some((device, mut persistent)) =
-            crate::goldy_renderer::tests::make_device_and_persistent()
-        else {
+        let Some((device, mut persistent)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
             return;
         };
 

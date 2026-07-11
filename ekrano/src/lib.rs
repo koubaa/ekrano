@@ -68,12 +68,12 @@ mod scene;
 mod shaders;
 
 mod goldy_renderer;
-mod graph_renderer;
-mod scheme_renderer;
 mod graph_gpu_resources;
-mod scheme_gpu_resources;
 mod graph_render;
+mod graph_renderer;
+mod scheme_gpu_resources;
 mod scheme_render;
+mod scheme_renderer;
 
 pub mod low_level {
     //! Utilities which can be used to create an alternative renderer to [`GoldyRenderer`][crate::GoldyRenderer].

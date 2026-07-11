@@ -4,8 +4,8 @@
 
 //! Scheme-backend scene recording.
 
-use crate::scheme_renderer::SchemeRecorder;
 use crate::scheme_gpu_resources::{GpuBinding, PipelineBuffer, PipelineResources, alloc_or_reuse_scheme_indirect};
+use crate::scheme_renderer::SchemeRecorder;
 use crate::shaders::FullShaders;
 use crate::{AaConfig, RenderParams};
 
@@ -44,6 +44,7 @@ impl Drop for Render {
 /// Placeholder for a future CPU/debug capture path (direct resources).
 #[cfg(feature = "debug_layers")]
 pub struct CapturedBuffers {
+    #[allow(dead_code, reason = "reserved for future scheme-path debug capture")]
     pub sizes: ekrano_encoding::BufferSizes,
 }
 
@@ -198,7 +199,13 @@ impl Render {
                 base_wg += chunk;
             }
         } else {
-            dispatch_stage(recorder, indirect_buf, shaders.flatten, STAGE_FLATTEN, &flatten_bindings);
+            dispatch_stage(
+                recorder,
+                indirect_buf,
+                shaders.flatten,
+                STAGE_FLATTEN,
+                &flatten_bindings,
+            );
         }
 
         dispatch_stage(

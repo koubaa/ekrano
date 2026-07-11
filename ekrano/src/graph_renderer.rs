@@ -9,29 +9,27 @@
 //! renderer; the two share infrastructure types from [`crate::goldy_renderer`]
 //! but have no rendering logic in common.
 
-use std::mem::size_of;
 use std::mem;
+use std::mem::size_of;
 use std::sync::Arc;
 
 use goldy::task_graph::{NodeAccess, NodeBuilder};
 use goldy::types::{BufferFlags, TextureFlags, TextureFormat, TextureKind};
 use goldy::{
-    BudgetPolicy, Buffer, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator,
-    ShaderModule, Signal, TaskGraph, Texture, TimelineValue,
+    BudgetPolicy, Buffer, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator, Scheme, ShaderModule,
+    Signal, TaskGraph, Texture, TimelineValue,
 };
 
 use crate::{
     Error, RenderParams, Result, Scene,
     goldy_renderer::{
-        CacheScheduleOutcome, FrameFinishOutcome, FrameStats, GoldyShader, AllocatorStats,
-        FRAME_PIPELINE_DEPTH, PreparedFrame, PersistentState, MAX_BINDLESS_SLOTS,
-        ResourcePoolStats, defer_frame_gpu_resources, env_robust_override,
-        FRAME_COUNTER, find_empty_cache_slot, sanitize_bump,
+        AllocatorStats, CacheScheduleOutcome, FRAME_COUNTER, FRAME_PIPELINE_DEPTH, FrameFinishOutcome, FrameStats,
+        GoldyShader, MAX_BINDLESS_SLOTS, PersistentState, PreparedFrame, ResourcePoolStats, defer_frame_gpu_resources,
+        env_robust_override, find_empty_cache_slot, sanitize_bump,
     },
     graph_gpu_resources::{
-        GpuBinding, alloc_pipeline_buffer, bind_type_to_node_access,
+        GpuBinding, acquire_texture_rgba, alloc_pipeline_buffer, bind_type_to_node_access,
         collect_bindless_indices_into, record_upload_bytes, record_upload_bytes_owned,
-        acquire_texture_rgba,
     },
     graph_render::Render,
     resource_proxy::{BindType, ShaderId},
@@ -68,10 +66,12 @@ pub struct GraphRenderer {
     /// Long-lived task graph cleared (not replaced) each frame so the schedule cache
     /// survives across frames. `GraphRecorder` borrows this mutably per frame.
     graph: TaskGraph,
+    /// Separate scheme for `render_to_buffer` texture→CPU readback.
+    readback: Scheme,
 }
 
 impl GraphRenderer {
-    /// Create a new Classic (TaskGraph) renderer for the given device.
+    /// Create a new Classic (`TaskGraph`) renderer for the given device.
     pub fn new(device: &Device) -> Result<Self> {
         let _tz = goldy::tracy_zone!("ekrano.GraphRenderer::new");
 
@@ -86,6 +86,7 @@ impl GraphRenderer {
             let _tz = goldy::tracy_zone!("ekrano.GraphRenderer::new.frame_orchestrator");
             FrameOrchestrator::new(&context, FRAME_PIPELINE_DEPTH)
         };
+        let readback = Scheme::new(&context);
         let mut renderer = Self {
             device: device.clone(),
             context,
@@ -97,6 +98,7 @@ impl GraphRenderer {
             persistent_bump: None,
             cleanup_frame_counter: 0,
             graph: TaskGraph::new(),
+            readback,
         };
         let shaders = {
             let _tz = goldy::tracy_zone!("ekrano.GraphRenderer::new.compile_shaders");
@@ -390,10 +392,31 @@ impl GraphRenderer {
             );
         }
 
-        let mut output = vec![0_u8; texture.byte_size() as usize];
-        texture
-            .read_to_cpu(&mut output)
+        let layout = texture.copy_layout();
+        let host_buf = self
+            .persistent
+            .acquire_readback_host_buf(&self.context, layout.staging_bytes)
             .map_err(|e| Error::Readback(e.to_string()))?;
+        self.readback
+            .copy_texture(&texture, &host_buf)
+            .map_err(|e| Error::Readback(e.to_string()))?;
+        let submission = self.readback.submit().map_err(|e| Error::Readback(e.to_string()))?;
+        submission
+            .wait(&self.context)
+            .map_err(|e| Error::Readback(e.to_string()))?;
+        let mut padded = vec![0_u8; layout.staging_bytes as usize];
+        host_buf
+            .read_to_cpu(&self.device, &mut padded)
+            .map_err(|e| Error::Readback(e.to_string()))?;
+        let row_bytes = layout.tight_row_bytes() as usize;
+        let pitch = layout.row_pitch as usize;
+        let mut output = vec![0_u8; layout.logical_bytes as usize];
+        for row in 0..layout.height as usize {
+            let src_offset = layout.footprint_offset as usize + row * pitch;
+            let dst_offset = row * row_bytes;
+            output[dst_offset..dst_offset + row_bytes].copy_from_slice(&padded[src_offset..src_offset + row_bytes]);
+        }
+        self.persistent.store_readback_host_buf(host_buf, layout.staging_bytes);
         Ok(output)
     }
 
@@ -586,9 +609,21 @@ impl GraphRenderer {
             );
             if let Some(handle) = swapchain_handle {
                 if let Some(surface) = surface {
-                    debug_assert_eq!(pipeline.out_image.width(), surface.width());
-                    debug_assert_eq!(pipeline.out_image.height(), surface.height());
-                    debug_assert_eq!(pipeline.out_image.format(), surface.format());
+                    debug_assert_eq!(
+                        pipeline.out_image.width(),
+                        surface.width(),
+                        "out_image width must match surface for swapchain copy"
+                    );
+                    debug_assert_eq!(
+                        pipeline.out_image.height(),
+                        surface.height(),
+                        "out_image height must match surface for swapchain copy"
+                    );
+                    debug_assert_eq!(
+                        pipeline.out_image.format(),
+                        surface.format(),
+                        "out_image format must match surface for swapchain copy"
+                    );
                 }
                 recorder.graph().copy_texture_to_swapchain(&pipeline.out_image, handle);
             }

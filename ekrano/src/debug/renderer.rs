@@ -13,8 +13,8 @@ use super::DebugLayers;
 use crate::{
     RenderParams,
     debug::validate::{LineEndpoint, validate_line_soup},
-    graph_renderer::GraphRecorder,
     graph_render::CapturedBuffers,
+    graph_renderer::GraphRecorder,
     resource_proxy::{DrawParams, ShaderId},
 };
 

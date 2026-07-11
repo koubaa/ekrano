@@ -8,10 +8,13 @@ use std::mem::size_of;
 use goldy::types::{BufferFlags, TextureFlags, TextureKind};
 use goldy::{Buffer, BufferKind, DispatchShape, Init, Parcel, Sampler, Texture, TextureFormat, ordinal};
 
-use crate::scheme_renderer::SchemeRecorder;
 use crate::resource_proxy::{BindType, ImageFormat};
+use crate::scheme_renderer::SchemeRecorder;
 use crate::{Error, RenderParams, Result};
-use ekrano_encoding::{BumpAllocators, CoverageMask, Images, Ramps, RenderConfig, WorkgroupCountsGpu, N_INDIRECT_STAGES, STAGE_PATH_COUNT, STAGE_PATH_TILING};
+use ekrano_encoding::{
+    BumpAllocators, CoverageMask, Images, N_INDIRECT_STAGES, Ramps, RenderConfig, STAGE_PATH_COUNT, STAGE_PATH_TILING,
+    WorkgroupCountsGpu,
+};
 
 /// Shader binding helper for pipeline [`Buffer`] handles.
 pub(crate) trait PipelineBuffer {
@@ -88,8 +91,8 @@ pub(crate) fn alloc_pipeline_buffer(
 
 /// Allocate or reuse a composite indirect buffer for the scheme path.
 ///
-/// One [`RetainedPool::acquire_record`] buffer holds `N_INDIRECT_STAGES` ordinal
-/// [`DispatchShape`] parcels. CPU-known stages are initialised at allocation via
+/// One [`goldy::RetainedPool::acquire_record`] buffer holds `N_INDIRECT_STAGES` ordinal
+/// [`goldy::DispatchShape`] parcels. CPU-known stages are initialised at allocation via
 /// [`Init::data`]; GPU-written stages ([`STAGE_PATH_COUNT`], [`STAGE_PATH_TILING`])
 /// use [`Init::reserve`] and are written each frame by setup shaders.
 ///
@@ -146,10 +149,10 @@ pub(crate) fn record_upload_bytes(
         Some(element_stride),
         BufferFlags::empty(),
     )?;
-        recorder
-            .scheme()
-            .commit_write_parcel(&buf, 0, bytes.to_vec())
-            .map_err(|e| Error::Shader(e.to_string()))?;
+    recorder
+        .scheme()
+        .commit_write_parcel(&buf, 0, bytes.to_vec())
+        .map_err(|e| Error::Shader(e.to_string()))?;
     Ok(buf)
 }
 
@@ -172,10 +175,10 @@ pub(crate) fn record_upload_bytes_owned(
         Some(element_stride),
         BufferFlags::empty(),
     )?;
-        recorder
-            .scheme()
-            .commit_write_parcel(&buf, 0, bytes)
-            .map_err(|e| Error::Shader(e.to_string()))?;
+    recorder
+        .scheme()
+        .commit_write_parcel(&buf, 0, bytes)
+        .map_err(|e| Error::Shader(e.to_string()))?;
     Ok(buf)
 }
 
@@ -199,10 +202,10 @@ pub(crate) fn record_upload_image(
             TextureFlags::COPY_DST,
         )
         .map_err(|e| Error::Shader(e.to_string()))?;
-        recorder
-            .scheme()
-            .commit_write_texture(&texture, bytes.to_vec())
-            .map_err(|e| Error::Shader(e.to_string()))?;
+    recorder
+        .scheme()
+        .commit_write_texture(&texture, bytes.to_vec())
+        .map_err(|e| Error::Shader(e.to_string()))?;
     Ok(texture)
 }
 
@@ -235,10 +238,10 @@ pub(crate) fn write_image_region(
         raw_bytes
     };
 
-        recorder
-            .scheme()
-            .commit_write_texture_region(tex, x, y, image_data.width, image_data.height, bytes.to_vec())
-            .map_err(|e| Error::Shader(e.to_string()))?;
+    recorder
+        .scheme()
+        .commit_write_texture_region(tex, x, y, image_data.width, image_data.height, bytes.to_vec())
+        .map_err(|e| Error::Shader(e.to_string()))?;
     Ok(())
 }
 
@@ -284,10 +287,10 @@ pub(crate) fn clear_gpu_buf(
     size: Option<u64>,
 ) -> Result<(), Error> {
     let sz = size.unwrap_or_else(|| buf.byte_size().saturating_sub(off));
-        recorder
-            .scheme()
-            .commit_clear_parcel(buf, off, sz)
-            .map_err(|e| Error::Shader(e.to_string()))?;
+    recorder
+        .scheme()
+        .commit_clear_parcel(buf, off, sz)
+        .map_err(|e| Error::Shader(e.to_string()))?;
     Ok(())
 }
 
@@ -652,10 +655,10 @@ impl PipelineResources {
                 // Buffer size is constant (sizeof ConfigUniform); reuse the allocation
                 // and just overwrite with the new value.
                 let data = bytemuck::bytes_of(&config_uniform_value).to_vec();
-                    recorder
-                        .scheme()
-                        .commit_write_parcel(&existing_buf, 0, data)
-                        .map_err(|e| Error::Shader(e.to_string()))?;
+                recorder
+                    .scheme()
+                    .commit_write_parcel(&existing_buf, 0, data)
+                    .map_err(|e| Error::Shader(e.to_string()))?;
                 existing_buf
             } else {
                 record_upload_bytes(
@@ -821,4 +824,3 @@ pub(crate) fn bind_type_to_node_access(bt: BindType) -> goldy::task_graph::NodeA
         BindType::Sampler => goldy::task_graph::NodeAccess::Read,
     }
 }
-
