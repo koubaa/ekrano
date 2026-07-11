@@ -1472,6 +1472,8 @@ mod tests {
     ///
     /// `render_to_buffer` always runs a separate readback scheme that reads `out_image`,
     /// so the worker sees a foreign reader and records twice (bootstrap + topology refresh).
+    /// The upload scheme shares parcel topology with the worker (scene/config buffers), so it
+    /// picks up one foreign-topology re-record as well.
     #[test]
     fn worker_scheme_retains_topology_across_frames() {
         let Some((device, _)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
@@ -1514,8 +1516,12 @@ mod tests {
         );
         let upload_stats = renderer.upload_replay_stats();
         assert_eq!(
-            upload_stats.records, 1,
-            "upload scheme must record exactly once for stable topology"
+            upload_stats.records, 2,
+            "render_to_buffer: bootstrap upload record + one foreign-topology refresh from readback"
+        );
+        assert_eq!(
+            upload_stats.topology_records, 1,
+            "shared-parcel topology dirtied once by the readback scheme reading out_image"
         );
     }
 

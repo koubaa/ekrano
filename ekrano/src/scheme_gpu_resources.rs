@@ -496,7 +496,7 @@ fn stage_texture_full(
     if recorder.upload_needs_record {
         recorder
             .upload_scheme()
-            .copy_buffer_to_texture_parcel(staging.whole(), 0, texture, 0, 0, width, height)
+            .copy_buffer_to_texture_parcel(staging.whole(), 0, 0, texture, 0, 0, width, height)
             .map_err(|e| Error::Shader(e.to_string()))?;
     }
     *cached_staging = Some((width, height, staging));
@@ -520,7 +520,7 @@ fn stage_texture_region(
     if recorder.upload_needs_record {
         recorder
             .upload_scheme()
-            .copy_buffer_to_texture_parcel(staging.whole(), 0, texture, x, y, width, height)
+            .copy_buffer_to_texture_parcel(staging.whole(), 0, 0, texture, x, y, width, height)
             .map_err(|e| Error::Shader(e.to_string()))?;
     }
     recorder
