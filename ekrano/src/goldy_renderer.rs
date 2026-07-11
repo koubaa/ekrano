@@ -493,6 +493,8 @@ pub(crate) struct PersistentState {
     /// Owned buffers waiting to be returned to [`Self::pool`] after GPU retirement.
     /// Populated by [`DeferredOwnedBuffersToken`] drops from [`Context::defer_release`].
     pub(crate) pending_owned_returns: Arc<Mutex<Vec<(Buffer, &'static str)>>>,
+    /// Persistent host buffer parcel for `SchemeRenderer::render_to_buffer`.
+    pub(crate) readback_host_buf: Option<(Buffer, u64)>,
 }
 
 impl PersistentState {
@@ -519,7 +521,46 @@ impl PersistentState {
             cached_scheme_indirect: None,
             pending_texture_returns: Arc::new(Mutex::new(Vec::new())),
             pending_owned_returns: Arc::new(Mutex::new(Vec::new())),
+            readback_host_buf: None,
         }
+    }
+
+    pub(crate) fn acquire_readback_host_buf(&mut self, ctx: &Context, staging_bytes: u64) -> Result<Buffer, Error> {
+        let needs_new = self
+            .readback_host_buf
+            .as_ref()
+            .map(|(_, size)| *size != staging_bytes)
+            .unwrap_or(true);
+        if needs_new {
+            if let Some((old, _)) = self.readback_host_buf.take() {
+                self.pool.return_buf(old, "ekrano.readback_host_buf");
+            }
+            self.pool.get_buf_with_stride(
+                &mut self.retained_pool,
+                ctx,
+                staging_bytes,
+                "ekrano.readback_host_buf",
+                BufferKind::Scattered,
+                None,
+                BufferFlags::CPU_READABLE,
+            )
+        } else if let Some((buf, _)) = self.readback_host_buf.take() {
+            Ok(buf)
+        } else {
+            self.pool.get_buf_with_stride(
+                &mut self.retained_pool,
+                ctx,
+                staging_bytes,
+                "ekrano.readback_host_buf",
+                BufferKind::Scattered,
+                None,
+                BufferFlags::CPU_READABLE,
+            )
+        }
+    }
+
+    pub(crate) fn store_readback_host_buf(&mut self, buf: Buffer, staging_bytes: u64) {
+        self.readback_host_buf = Some((buf, staging_bytes));
     }
 }
 

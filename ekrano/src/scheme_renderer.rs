@@ -89,6 +89,8 @@ pub struct SchemeRenderer {
     /// Rebuilt from scratch each frame in Phase 2; Phase 3 retains topology
     /// across frames for the zero-rerecord path.
     scheme: Scheme,
+    /// Separate scheme for `render_to_buffer` texture→CPU readback.
+    readback: Scheme,
 }
 
 impl SchemeRenderer {
@@ -108,6 +110,7 @@ impl SchemeRenderer {
             FrameOrchestrator::new(&context, FRAME_PIPELINE_DEPTH)
         };
         let scheme = Scheme::new(&context);
+        let readback = Scheme::new(&context);
         let mut renderer = Self {
             device: device.clone(),
             context,
@@ -119,6 +122,7 @@ impl SchemeRenderer {
             persistent_bump: None,
             cleanup_frame_counter: 0,
             scheme,
+            readback,
         };
         let shaders = {
             let _tz = goldy::tracy_zone!("ekrano.SchemeRenderer::new.compile_shaders");
@@ -398,10 +402,31 @@ impl SchemeRenderer {
             );
         }
 
-        let mut output = vec![0_u8; texture.byte_size() as usize];
-        texture
-            .read_to_cpu(&mut output)
+        let layout = texture.copy_layout();
+        let host_buf = self
+            .persistent
+            .acquire_readback_host_buf(&self.context, layout.staging_bytes)
             .map_err(|e| Error::Readback(e.to_string()))?;
+        self.readback
+            .copy_texture(&texture, &host_buf)
+            .map_err(|e| Error::Readback(e.to_string()))?;
+        let submission = self.readback.submit().map_err(|e| Error::Readback(e.to_string()))?;
+        submission
+            .wait(&self.context)
+            .map_err(|e| Error::Readback(e.to_string()))?;
+        let mut padded = vec![0_u8; layout.staging_bytes as usize];
+        host_buf
+            .read_to_cpu(&self.device, &mut padded)
+            .map_err(|e| Error::Readback(e.to_string()))?;
+        let row_bytes = layout.tight_row_bytes() as usize;
+        let pitch = layout.row_pitch as usize;
+        let mut output = vec![0_u8; layout.logical_bytes as usize];
+        for row in 0..layout.height as usize {
+            let src_offset = layout.footprint_offset as usize + row * pitch;
+            let dst_offset = row * row_bytes;
+            output[dst_offset..dst_offset + row_bytes].copy_from_slice(&padded[src_offset..src_offset + row_bytes]);
+        }
+        self.persistent.store_readback_host_buf(host_buf, layout.staging_bytes);
         Ok(output)
     }
 
