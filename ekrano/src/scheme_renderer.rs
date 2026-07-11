@@ -398,7 +398,7 @@ impl SchemeRenderer {
             );
         }
 
-        let mut output = vec![0_u8; texture.byte_size()];
+        let mut output = vec![0_u8; texture.byte_size() as usize];
         texture
             .read_to_cpu(&mut output)
             .map_err(|e| Error::Readback(e.to_string()))?;
