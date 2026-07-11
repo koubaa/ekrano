@@ -5,7 +5,7 @@
 //! Debug visualization renderer (Goldy port stub).
 //!
 //! The original wgpu-based render pipelines have been removed as part of the
-//! wgpu -> Goldy migration. The `FrameRecorder::draw` method is currently a
+//! wgpu -> Goldy migration. The `GraphRecorder::draw` method is currently a
 //! no-op, so all draw calls emitted here are silently dropped.
 //! The CPU-side validation logic (`validate_line_soup`) remains functional.
 
@@ -13,8 +13,8 @@ use super::DebugLayers;
 use crate::{
     RenderParams,
     debug::validate::{LineEndpoint, validate_line_soup},
-    goldy_renderer::FrameRecorder,
-    render::CapturedBuffers,
+    graph_render::CapturedBuffers,
+    graph_renderer::GraphRecorder,
     resource_proxy::{DrawParams, ShaderId},
 };
 
@@ -44,7 +44,7 @@ pub(crate) struct DebugRenderer {
 impl DebugRenderer {
     /// Create a new debug renderer.
     ///
-    /// Currently a no-op stub: `FrameRecorder::draw` is a no-op, so shader
+    /// Currently a no-op stub: `GraphRecorder::draw` is a no-op, so shader
     /// IDs are sentinels and no GPU resources are created here.
     pub fn new() -> Self {
         Self {
@@ -58,7 +58,7 @@ impl DebugRenderer {
 
     pub fn render(
         &self,
-        recorder: &mut FrameRecorder<'_>,
+        recorder: &mut GraphRecorder<'_>,
         _captured: &CapturedBuffers,
         bump: &BumpAllocators,
         params: &RenderParams,

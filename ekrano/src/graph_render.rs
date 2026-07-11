@@ -2,10 +2,10 @@
 // Copyright 2026 the Ekrano Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Take an encoded scene and create a graph to render it
+//! Graph-backend scene recording.
 
-use crate::goldy_renderer::FrameRecorder;
-use crate::gpu_resources::{GpuBinding, PipelineBuffer, PipelineResources};
+use crate::graph_gpu_resources::{GpuBinding, PipelineBuffer, PipelineResources};
+use crate::graph_renderer::GraphRecorder;
 use crate::shaders::FullShaders;
 use crate::{AaConfig, RenderParams};
 
@@ -56,7 +56,7 @@ const MAX_FLATTEN_WG_PER_SUBMIT: u32 = 8;
 const FLATTEN_THREADS_PER_GROUP: u32 = 256;
 
 fn dispatch_stage(
-    recorder: &mut FrameRecorder<'_>,
+    recorder: &mut GraphRecorder<'_>,
     indirect: &Buffer,
     shader: crate::ShaderId,
     stage: u32,
@@ -90,7 +90,7 @@ impl Render {
         params: &RenderParams,
         robust: bool,
         config: &ekrano_encoding::RenderConfig,
-        recorder: &mut FrameRecorder<'_>,
+        recorder: &mut GraphRecorder<'_>,
     ) {
         // HACK: The coarse workgroup counts is the number of active bins.
         if (config.workgroup_counts.coarse.0 * config.workgroup_counts.coarse.1 * config.workgroup_counts.coarse.2)
@@ -446,7 +446,7 @@ impl Render {
         shaders: &FullShaders,
         pipeline: &PipelineResources,
         output_texture: Option<&Texture>,
-        recorder: &mut FrameRecorder<'_>,
+        recorder: &mut GraphRecorder<'_>,
     ) {
         let fine_wg_count = self.fine_wg_count.take().expect("fine_wg_count");
         let width_in_tiles = fine_wg_count.0;
@@ -584,7 +584,7 @@ fn premul_srgb_u32(c: PremulColor<Srgb>) -> u32 {
     c.to_rgba8().to_u32()
 }
 
-fn linear_clamp_sampler_index(recorder: &FrameRecorder<'_>) -> u32 {
+fn linear_clamp_sampler_index(recorder: &GraphRecorder<'_>) -> u32 {
     recorder
         .persistent
         .linear_clamp_sampler
@@ -595,7 +595,7 @@ fn linear_clamp_sampler_index(recorder: &FrameRecorder<'_>) -> u32 {
 }
 
 fn filter_dispatch(
-    recorder: &mut FrameRecorder<'_>,
+    recorder: &mut GraphRecorder<'_>,
     shader: crate::ShaderId,
     uniform: &FilterUniform,
     wg: (u32, u32, u32),
@@ -652,7 +652,7 @@ fn filter_dispatch(
 /// Used by pyramid shadow composite `pass_kinds` (13/14) where the pre-blurred source and the
 /// original foreground layer are different textures.
 fn filter_dispatch_two_src(
-    recorder: &mut FrameRecorder<'_>,
+    recorder: &mut GraphRecorder<'_>,
     shader: crate::ShaderId,
     uniform: &FilterUniform,
     wg: (u32, u32, u32),
@@ -713,7 +713,7 @@ fn filter_dispatch_two_src(
 /// `DirectInterpolated` textures for each intermediate level.
 fn pyramid_blur(
     shader: crate::ShaderId,
-    recorder: &mut FrameRecorder<'_>,
+    recorder: &mut GraphRecorder<'_>,
     src: &Texture,
     dst: &Texture,
     std_dev: f32,
@@ -785,7 +785,7 @@ fn pyramid_blur(
 pub(crate) fn record_filter_effects(
     layer_filter_effects: &[LayerFilterEffect],
     shaders: &FullShaders,
-    recorder: &mut FrameRecorder<'_>,
+    recorder: &mut GraphRecorder<'_>,
     pipeline: &PipelineResources,
     output_override: Option<&Texture>,
 ) {

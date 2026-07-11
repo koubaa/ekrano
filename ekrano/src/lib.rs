@@ -63,13 +63,17 @@
 )]
 
 mod debug;
-mod render;
 mod resource_proxy;
 mod scene;
 mod shaders;
 
 mod goldy_renderer;
-mod gpu_resources;
+mod graph_gpu_resources;
+mod graph_render;
+mod graph_renderer;
+mod scheme_gpu_resources;
+mod scheme_render;
+mod scheme_renderer;
 
 pub mod low_level {
     //! Utilities which can be used to create an alternative renderer to [`GoldyRenderer`][crate::GoldyRenderer].
@@ -77,7 +81,7 @@ pub mod low_level {
     //! These APIs have not been carefully designed, and might not be powerful enough for this use case.
 
     pub use crate::debug::DebugLayers;
-    pub use crate::render::Render;
+    pub use crate::graph_render::Render;
     pub use crate::resource_proxy::{BindType, ImageFormat, ShaderId};
     pub use crate::shaders::FullShaders;
     /// Temporary export, used in `with_winit` for stats
@@ -90,7 +94,9 @@ pub use peniko::kurbo;
 
 pub use goldy::placement_heap::PlacementHeapStats;
 pub use goldy::{Frame, TimelineValue};
-pub use goldy_renderer::{AllocatorStats, FrameStats, GoldyRenderer, PreparedFrame, ResourcePoolStats};
+pub use goldy_renderer::{AllocatorStats, FrameStats, GoldyBackend, GoldyRenderer, PreparedFrame, ResourcePoolStats};
+pub use graph_renderer::GraphRenderer;
+pub use scheme_renderer::SchemeRenderer;
 
 pub use ekrano_encoding::{Glyph, NormalizedCoord};
 pub use scene::{DrawGlyphs, Scene};
