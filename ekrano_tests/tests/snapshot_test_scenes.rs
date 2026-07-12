@@ -3,7 +3,7 @@
 
 //! Snapshot tests using the test scenes from [`scenes`].
 
-use ekrano_tests::{TestParams, encode_test_scene, snapshot_test_sync};
+use ekrano_tests::{TestBackend, TestParams, encode_test_scene, snapshot_test_sync};
 use scenes::{ExampleScene, test_scenes};
 
 /// Snapshot each scene against the LFS reference PNG.
@@ -14,134 +14,274 @@ fn snapshot_test_scene(test_scene: ExampleScene, mut params: TestParams) {
         .assert_mean_less_than(0.0095);
 }
 
+fn snapshot_splash_body(backend: TestBackend) {
+    let test_scene = test_scenes::splash_with_tiger();
+    let params = TestParams::new("splash", 300, 300).with_backend(backend);
+    snapshot_test_scene(test_scene, params);
+}
 #[test]
 fn snapshot_splash() {
-    let test_scene = test_scenes::splash_with_tiger();
-    let params = TestParams::new("splash", 300, 300);
-
-    snapshot_test_scene(test_scene, params);
+    snapshot_splash_body(TestBackend::Classic);
 }
 
+#[test]
+fn scheme_snapshot_splash() {
+    snapshot_splash_body(TestBackend::Scheme);
+}
+
+fn snapshot_funky_paths_body(backend: TestBackend) {
+    let test_scene = test_scenes::funky_paths();
+    let params = TestParams::new("funky_paths", 600, 600).with_backend(backend);
+    snapshot_test_scene(test_scene, params);
+}
 #[test]
 fn snapshot_funky_paths() {
-    let test_scene = test_scenes::funky_paths();
-    let params = TestParams::new("funky_paths", 600, 600);
-
-    snapshot_test_scene(test_scene, params);
+    snapshot_funky_paths_body(TestBackend::Classic);
 }
 
+#[test]
+fn scheme_snapshot_funky_paths() {
+    snapshot_funky_paths_body(TestBackend::Scheme);
+}
+
+fn snapshot_stroke_styles_body(backend: TestBackend) {
+    let test_scene = test_scenes::stroke_styles();
+    let params = TestParams::new("stroke_styles", 600, 425).with_backend(backend);
+    snapshot_test_scene(test_scene, params);
+}
 #[test]
 fn snapshot_stroke_styles() {
-    let test_scene = test_scenes::stroke_styles();
-    let params = TestParams::new("stroke_styles", 600, 425);
-
-    snapshot_test_scene(test_scene, params);
+    snapshot_stroke_styles_body(TestBackend::Classic);
 }
 
+#[test]
+fn scheme_snapshot_stroke_styles() {
+    snapshot_stroke_styles_body(TestBackend::Scheme);
+}
+
+fn snapshot_stroke_styles_non_uniform_body(backend: TestBackend) {
+    let test_scene = test_scenes::stroke_styles_non_uniform();
+    let params = TestParams::new("stroke_styles_non_uniform", 600, 425).with_backend(backend);
+    snapshot_test_scene(test_scene, params);
+}
 #[test]
 fn snapshot_stroke_styles_non_uniform() {
-    let test_scene = test_scenes::stroke_styles_non_uniform();
-    let params = TestParams::new("stroke_styles_non_uniform", 600, 425);
-
-    snapshot_test_scene(test_scene, params);
+    snapshot_stroke_styles_non_uniform_body(TestBackend::Classic);
 }
 
+#[test]
+fn scheme_snapshot_stroke_styles_non_uniform() {
+    snapshot_stroke_styles_non_uniform_body(TestBackend::Scheme);
+}
+
+fn snapshot_stroke_styles_skew_body(backend: TestBackend) {
+    let test_scene = test_scenes::stroke_styles_skew();
+    let params = TestParams::new("stroke_styles_skew", 600, 425).with_backend(backend);
+    snapshot_test_scene(test_scene, params);
+}
 #[test]
 fn snapshot_stroke_styles_skew() {
-    let test_scene = test_scenes::stroke_styles_skew();
-    let params = TestParams::new("stroke_styles_skew", 600, 425);
-    snapshot_test_scene(test_scene, params);
+    snapshot_stroke_styles_skew_body(TestBackend::Classic);
 }
 
+#[test]
+fn scheme_snapshot_stroke_styles_skew() {
+    snapshot_stroke_styles_skew_body(TestBackend::Scheme);
+}
+
+fn snapshot_tricky_strokes_body(backend: TestBackend) {
+    let test_scene = test_scenes::tricky_strokes();
+    let params = TestParams::new("tricky_strokes", 600, 425).with_backend(backend);
+    snapshot_test_scene(test_scene, params);
+}
 #[test]
 fn snapshot_tricky_strokes() {
-    let test_scene = test_scenes::tricky_strokes();
-    let params = TestParams::new("tricky_strokes", 600, 425);
-    snapshot_test_scene(test_scene, params);
+    snapshot_tricky_strokes_body(TestBackend::Classic);
 }
 
+#[test]
+fn scheme_snapshot_tricky_strokes() {
+    snapshot_tricky_strokes_body(TestBackend::Scheme);
+}
+
+fn snapshot_fill_types_body(backend: TestBackend) {
+    let test_scene = test_scenes::fill_types();
+    let params = TestParams::new("fill_types", 700, 350).with_backend(backend);
+    snapshot_test_scene(test_scene, params);
+}
 #[test]
 fn snapshot_fill_types() {
-    let test_scene = test_scenes::fill_types();
-    let params = TestParams::new("fill_types", 700, 350);
-    snapshot_test_scene(test_scene, params);
+    snapshot_fill_types_body(TestBackend::Classic);
 }
 
+#[test]
+fn scheme_snapshot_fill_types() {
+    snapshot_fill_types_body(TestBackend::Scheme);
+}
+
+fn snapshot_deep_blend_body(backend: TestBackend) {
+    let test_scene = test_scenes::deep_blend();
+    let params = TestParams::new("deep_blend", 200, 200).with_backend(backend);
+    snapshot_test_scene(test_scene, params);
+}
 #[test]
 fn snapshot_deep_blend() {
-    let test_scene = test_scenes::deep_blend();
-    let params = TestParams::new("deep_blend", 200, 200);
-    snapshot_test_scene(test_scene, params);
+    snapshot_deep_blend_body(TestBackend::Classic);
 }
 
+#[test]
+fn scheme_snapshot_deep_blend() {
+    snapshot_deep_blend_body(TestBackend::Scheme);
+}
+
+fn snapshot_gradient_extend_body(backend: TestBackend) {
+    let test_scene = test_scenes::gradient_extend();
+    let params = TestParams::new("gradient_extend", 200, 200).with_backend(backend);
+    snapshot_test_scene(test_scene, params);
+}
 #[test]
 fn snapshot_gradient_extend() {
-    let test_scene = test_scenes::gradient_extend();
-    let params = TestParams::new("gradient_extend", 200, 200);
-    snapshot_test_scene(test_scene, params);
+    snapshot_gradient_extend_body(TestBackend::Classic);
 }
 
+#[test]
+fn scheme_snapshot_gradient_extend() {
+    snapshot_gradient_extend_body(TestBackend::Scheme);
+}
+
+fn snapshot_many_clips_body(backend: TestBackend) {
+    let test_scene = test_scenes::many_clips();
+    let params = TestParams::new("many_clips", 200, 200).with_backend(backend);
+    snapshot_test_scene(test_scene, params);
+}
 #[test]
 fn snapshot_many_clips() {
-    let test_scene = test_scenes::many_clips();
-    let params = TestParams::new("many_clips", 200, 200);
-    snapshot_test_scene(test_scene, params);
+    snapshot_many_clips_body(TestBackend::Classic);
 }
 
+#[test]
+fn scheme_snapshot_many_clips() {
+    snapshot_many_clips_body(TestBackend::Scheme);
+}
+
+fn snapshot_clip_test_body(backend: TestBackend) {
+    let test_scene = test_scenes::clip_test();
+    let params = TestParams::new("clip_test", 512, 768).with_backend(backend);
+    snapshot_test_scene(test_scene, params);
+}
 #[test]
 fn snapshot_clip_test() {
-    let test_scene = test_scenes::clip_test();
-    let params = TestParams::new("clip_test", 512, 768);
-    snapshot_test_scene(test_scene, params);
+    snapshot_clip_test_body(TestBackend::Classic);
 }
 
+#[test]
+fn scheme_snapshot_clip_test() {
+    snapshot_clip_test_body(TestBackend::Scheme);
+}
+
+fn snapshot_blurred_rounded_rect_body(backend: TestBackend) {
+    let test_scene = test_scenes::blurred_rounded_rect();
+    let params = TestParams::new("blurred_rounded_rect", 400, 400).with_backend(backend);
+    snapshot_test_scene(test_scene, params);
+}
 #[test]
 fn snapshot_blurred_rounded_rect() {
-    let test_scene = test_scenes::blurred_rounded_rect();
-    let params = TestParams::new("blurred_rounded_rect", 400, 400);
-    snapshot_test_scene(test_scene, params);
+    snapshot_blurred_rounded_rect_body(TestBackend::Classic);
 }
 
+#[test]
+fn scheme_snapshot_blurred_rounded_rect() {
+    snapshot_blurred_rounded_rect_body(TestBackend::Scheme);
+}
+
+fn snapshot_longpathdash_butt_body(backend: TestBackend) {
+    let test_scene = test_scenes::longpathdash_butt();
+    let params = TestParams::new("longpathdash_butt", 440, 80).with_backend(backend);
+    snapshot_test_scene(test_scene, params);
+}
 #[test]
 fn snapshot_longpathdash_butt() {
-    let test_scene = test_scenes::longpathdash_butt();
-    let params = TestParams::new("longpathdash_butt", 440, 80);
-    snapshot_test_scene(test_scene, params);
+    snapshot_longpathdash_butt_body(TestBackend::Classic);
 }
 
+#[test]
+fn scheme_snapshot_longpathdash_butt() {
+    snapshot_longpathdash_butt_body(TestBackend::Scheme);
+}
+
+fn snapshot_image_sampling_body(backend: TestBackend) {
+    let test_scene = test_scenes::image_sampling();
+    let params = TestParams::new("image_sampling", 400, 400).with_backend(backend);
+    snapshot_test_scene(test_scene, params);
+}
 #[test]
 fn snapshot_image_sampling() {
-    let test_scene = test_scenes::image_sampling();
-    let params = TestParams::new("image_sampling", 400, 400);
-    snapshot_test_scene(test_scene, params);
+    snapshot_image_sampling_body(TestBackend::Classic);
 }
 
+#[test]
+fn scheme_snapshot_image_sampling() {
+    snapshot_image_sampling_body(TestBackend::Scheme);
+}
+
+fn snapshot_image_extend_modes_bilinear_body(backend: TestBackend) {
+    let test_scene = test_scenes::image_extend_modes_bilinear();
+    let params = TestParams::new("image_extend_modes_bilinear", 400, 400).with_backend(backend);
+    snapshot_test_scene(test_scene, params);
+}
 #[test]
 fn snapshot_image_extend_modes_bilinear() {
-    let test_scene = test_scenes::image_extend_modes_bilinear();
-    let params = TestParams::new("image_extend_modes_bilinear", 400, 400);
-    snapshot_test_scene(test_scene, params);
+    snapshot_image_extend_modes_bilinear_body(TestBackend::Classic);
 }
 
+#[test]
+fn scheme_snapshot_image_extend_modes_bilinear() {
+    snapshot_image_extend_modes_bilinear_body(TestBackend::Scheme);
+}
+
+fn snapshot_image_extend_modes_nearest_neighbor_body(backend: TestBackend) {
+    let test_scene = test_scenes::image_extend_modes_nearest_neighbor();
+    let params = TestParams::new("image_extend_modes_nearest_neighbor", 400, 400).with_backend(backend);
+    snapshot_test_scene(test_scene, params);
+}
 #[test]
 fn snapshot_image_extend_modes_nearest_neighbor() {
-    let test_scene = test_scenes::image_extend_modes_nearest_neighbor();
-    let params = TestParams::new("image_extend_modes_nearest_neighbor", 400, 400);
-    snapshot_test_scene(test_scene, params);
+    snapshot_image_extend_modes_nearest_neighbor_body(TestBackend::Classic);
 }
 
 #[test]
-fn snapshot_luminance_mask() {
+fn scheme_snapshot_image_extend_modes_nearest_neighbor() {
+    snapshot_image_extend_modes_nearest_neighbor_body(TestBackend::Scheme);
+}
+
+fn snapshot_luminance_mask_body(backend: TestBackend) {
     let test_scene = test_scenes::luminance_mask();
     // This has been manually validated to match the example in
     // https://developer.mozilla.org/en-US/docs/Web/SVG/Reference/Attribute/mask-type
-    let params = TestParams::new("luminance_mask", 55, 55);
+    let params = TestParams::new("luminance_mask", 55, 55).with_backend(backend);
     snapshot_test_scene(test_scene, params);
+}
+#[test]
+fn snapshot_luminance_mask() {
+    snapshot_luminance_mask_body(TestBackend::Classic);
 }
 
 #[test]
-fn image_luminance_mask() {
+fn scheme_snapshot_luminance_mask() {
+    snapshot_luminance_mask_body(TestBackend::Scheme);
+}
+
+fn image_luminance_mask_body(backend: TestBackend) {
     let test_scene = test_scenes::image_luminance_mask();
-    let params = TestParams::new("image_luminance_mask", 350, 250);
+    let params = TestParams::new("image_luminance_mask", 350, 250).with_backend(backend);
     snapshot_test_scene(test_scene, params);
+}
+#[test]
+fn image_luminance_mask() {
+    image_luminance_mask_body(TestBackend::Classic);
+}
+
+#[test]
+fn scheme_image_luminance_mask() {
+    image_luminance_mask_body(TestBackend::Scheme);
 }

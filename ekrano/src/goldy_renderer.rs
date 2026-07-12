@@ -17,7 +17,9 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 use goldy::types::{BufferFlags, TextureFormat};
-use goldy::{Buffer, BufferKind, ComputePipeline, Context, Device, RetainedPool, Texture, TexturePool, TimelineValue};
+use goldy::{
+    Buffer, BufferKind, ComputePipeline, Context, Device, Grant, RetainedPool, Texture, TexturePool, TimelineValue,
+};
 
 /// Ekrano uses a single-frame fire-and-forget model.
 ///
@@ -161,6 +163,10 @@ impl Drop for DeferredTextureToken {
 #[derive(Debug, Default)]
 pub(crate) struct CacheScheduleOutcome {
     pub(crate) cached_render_targets_slot: Option<usize>,
+    /// Set when the scheme path stored its single persistent `out_image` into
+    /// [`PersistentState::cached_scheme_rt`]; the post-submit step then stamps the
+    /// frame timeline so a later resize can wait before recycling.
+    pub(crate) scheme_rt_stored: bool,
 }
 
 /// Outcome of [`crate::graph_renderer::GraphRecorder::finish`]: orchestrator submit result plus resources
@@ -174,9 +180,27 @@ pub(crate) struct FrameFinishOutcome {
     /// Scheme-path submission returned by [`goldy::Scheme::submit`].
     /// `None` on the Classic (`TaskGraph`) path.
     ///
-    /// Held here so that `SchemeRenderer::run_frame_from_prepared` can pass it to
-    /// [`goldy::Grant::consume`] on a [`goldy::PresentGrant`] after `finish()` returns.
+    /// Held here so that `SchemeRenderer::run_frame_from_prepared` can build a
+    /// [`PresentToken`] after `finish()` returns.
     pub(crate) scheme_submission: Option<goldy::Submission>,
+}
+
+/// Scheme-path present token — analogue of [`goldy::Frame`] on the Classic path.
+///
+/// Produced by [`GoldyRenderer::submit_to_swapchain`]. Hand to `TID_PRESENT` for async
+/// scanout, or call [`Self::present`] synchronously (e.g. [`crate::scheme_renderer::SchemeRenderer::render_to_swapchain`]).
+pub struct PresentToken {
+    pub(crate) grant: goldy::PresentGrant,
+    pub(crate) submission: goldy::Submission,
+}
+
+impl PresentToken {
+    /// Perform scanout via [`goldy::PresentGrant::consume`].
+    pub fn present(self) -> Result<()> {
+        self.grant
+            .consume(&self.submission)
+            .map_err(|e| Error::Shader(e.to_string()))
+    }
 }
 
 /// CPU-resolved scene data ready for GPU submission.
@@ -260,16 +284,11 @@ struct BufferKey {
 }
 
 fn pool_key_for_return(buf: &Buffer, name: &'static str) -> BufferKey {
-    let buffer_flags = if name == "ekrano.bump_buf" {
-        BufferFlags::CPU_READABLE
-    } else {
-        BufferFlags::empty()
-    };
     BufferKey {
         size: buf.byte_size(),
         access: BufferKind::Scattered,
         name,
-        buffer_flags,
+        buffer_flags: buf.flags(),
     }
 }
 
@@ -448,6 +467,9 @@ pub(crate) struct PersistentState {
     pub(crate) cached_render_targets: [Option<(Texture, [Texture; 4])>; RESOURCE_CACHE_SLOTS],
     /// Timeline of the frame that last wrote each render-target slot. `0` when empty.
     pub(crate) cached_rt_timelines: [TimelineValue; RESOURCE_CACHE_SLOTS],
+    /// Scheme-path render-target reuse: a single persistent `out_image` + filter
+    /// layers, intentionally decoupled from [`RESOURCE_CACHE_SLOTS`].
+    pub(crate) cached_scheme_rt: Option<(Texture, [Texture; 4], TimelineValue)>,
     /// Cached pipeline buffers from the previous frame. At depth=1 only one
     /// entry exists at a time: take-then-install within a single `run_frame`.
     pub(crate) cached_pipeline: Option<crate::graph_gpu_resources::CachedPipeline>,
@@ -481,13 +503,52 @@ pub(crate) struct PersistentState {
     /// Cache key is the `WorkgroupCountsGpu` that seeded the allocation.
     /// Scheme-path only; never touches `ResourcePool`.
     pub(crate) cached_scheme_indirect: Option<(ekrano_encoding::WorkgroupCountsGpu, Buffer)>,
+    /// Stable scene buffer for the retained worker scheme (bucket capacity, buffer).
+    pub(crate) cached_scene: Option<(u64, Buffer)>,
+    /// CPU-writable staging for scene uploads (bucket capacity, buffer).
+    pub(crate) cached_scene_staging: Option<(u64, Buffer)>,
+    /// CPU-writable staging for config uniform uploads.
+    pub(crate) cached_config_staging: Option<Buffer>,
+    /// Stable bump buffer keyed by byte size; read back via [`Self::cached_bump_grant`].
+    pub(crate) cached_bump: Option<(u64, Buffer)>,
+    /// Recorded once on the worker when `robust` is enabled.
+    pub(crate) cached_bump_grant: Option<goldy::ReadGrant<goldy::GrantBuffer>>,
+    /// Stable gradient atlas (width, height, texture).
+    pub(crate) cached_gradient: Option<(u32, u32, Texture)>,
+    /// Stable image atlas (width, height, texture).
+    pub(crate) cached_image_atlas: Option<(u32, u32, Texture)>,
+    /// Stable mask atlas (width, height, texture).
+    pub(crate) cached_mask_atlas: Option<(u32, u32, Texture)>,
+    /// Present grant recorded once on the worker when swapchain presentation is enabled.
+    pub(crate) cached_present_grant: Option<goldy::PresentGrant>,
+    /// `out_image` handle the worker was recorded against (RT cache rotation invalidates retention).
+    pub(crate) cached_worker_out_image: Option<goldy::types::ResourceHandle>,
+    /// Output texture handle the worker fine pass was recorded against.
+    pub(crate) cached_worker_output_texture: Option<goldy::backend::TextureHandle>,
+    /// Full worker-bound handles from the last record (debug invariant checks only).
+    #[cfg(debug_assertions)]
+    pub(crate) cached_worker_resources: Option<crate::worker_retention::WorkerResourceHandles>,
+    /// Last worker topology the retained scheme was recorded against.
+    pub(crate) cached_worker_topology: Option<crate::worker_retention::WorkerTopology>,
+    /// Filter effects from the last worker record (topology comparison).
+    pub(crate) cached_worker_filter_effects: Vec<ekrano_encoding::LayerFilterEffect>,
+    /// Worker submission from the prior frame, consumed via [`Self::cached_bump_grant`] at drain.
+    pub(crate) pending_bump_submission: Option<goldy::Submission>,
+    /// Upload key the upload scheme was recorded against (scene bucket + all atlas dims).
+    pub(crate) cached_upload_key: Option<crate::worker_retention::UploadKey>,
+    /// CPU-writable staging for gradient atlas uploads.
+    pub(crate) cached_gradient_staging: Option<(u32, u32, Buffer)>,
+    /// CPU-writable staging for mask atlas uploads.
+    pub(crate) cached_mask_staging: Option<(u32, u32, Buffer)>,
+    /// CPU-writable staging buffers for image atlas region uploads.
+    pub(crate) cached_image_region_stagings: Vec<((u32, u32, u32, u32), Buffer)>,
     /// Textures waiting to be returned to [`Self::tex_pool`] after GPU retirement.
     /// Populated by [`DeferredTextureToken`] drops from [`Context::defer_release`].
     pub(crate) pending_texture_returns: Arc<Mutex<Vec<Texture>>>,
     /// Owned buffers waiting to be returned to [`Self::pool`] after GPU retirement.
     /// Populated by [`DeferredOwnedBuffersToken`] drops from [`Context::defer_release`].
     pub(crate) pending_owned_returns: Arc<Mutex<Vec<(Buffer, &'static str)>>>,
-    /// Persistent host buffer parcel for `SchemeRenderer::render_to_buffer`.
+    /// Persistent host buffer parcel for [`crate::scheme_renderer::SchemeRenderer::render_to_buffer`].
     pub(crate) readback_host_buf: Option<(Buffer, u64)>,
 }
 
@@ -503,6 +564,7 @@ impl PersistentState {
             nearest_clamp_sampler: None,
             cached_render_targets: std::array::from_fn(|_| None),
             cached_rt_timelines: [0; RESOURCE_CACHE_SLOTS],
+            cached_scheme_rt: None,
             cached_pipeline: None,
             rt_slot_swapchain_image: [None; RESOURCE_CACHE_SLOTS],
             deferred_owned_cap_hint: 0,
@@ -513,6 +575,26 @@ impl PersistentState {
             cached_config_uniform: None,
             cached_filter_uniforms: Vec::new(),
             cached_scheme_indirect: None,
+            cached_scene: None,
+            cached_scene_staging: None,
+            cached_config_staging: None,
+            cached_bump: None,
+            cached_bump_grant: None,
+            cached_gradient: None,
+            cached_image_atlas: None,
+            cached_mask_atlas: None,
+            cached_present_grant: None,
+            cached_worker_out_image: None,
+            cached_worker_output_texture: None,
+            #[cfg(debug_assertions)]
+            cached_worker_resources: None,
+            cached_worker_topology: None,
+            cached_worker_filter_effects: Vec::new(),
+            pending_bump_submission: None,
+            cached_upload_key: None,
+            cached_gradient_staging: None,
+            cached_mask_staging: None,
+            cached_image_region_stagings: Vec::new(),
             pending_texture_returns: Arc::new(Mutex::new(Vec::new())),
             pending_owned_returns: Arc::new(Mutex::new(Vec::new())),
             readback_host_buf: None,
@@ -529,36 +611,83 @@ impl PersistentState {
             if let Some((old, _)) = self.readback_host_buf.take() {
                 self.pool.return_buf(old, "ekrano.readback_host_buf");
             }
-            self.pool.get_buf_with_stride(
-                &mut self.retained_pool,
-                ctx,
-                staging_bytes,
-                "ekrano.readback_host_buf",
-                BufferKind::Scattered,
-                None,
-                BufferFlags::CPU_READABLE,
-            )
+            let buf = self
+                .pool
+                .get_buf_with_stride(
+                    &mut self.retained_pool,
+                    ctx,
+                    staging_bytes,
+                    "ekrano.readback_host_buf",
+                    BufferKind::Scattered,
+                    None,
+                    BufferFlags::CPU_READABLE,
+                )
+                .map_err(|e| Error::Shader(e.to_string()))?;
+            Ok(buf)
         } else if let Some((buf, _)) = self.readback_host_buf.take() {
             Ok(buf)
         } else {
-            self.pool.get_buf_with_stride(
-                &mut self.retained_pool,
-                ctx,
-                staging_bytes,
-                "ekrano.readback_host_buf",
-                BufferKind::Scattered,
-                None,
-                BufferFlags::CPU_READABLE,
-            )
+            self.pool
+                .get_buf_with_stride(
+                    &mut self.retained_pool,
+                    ctx,
+                    staging_bytes,
+                    "ekrano.readback_host_buf",
+                    BufferKind::Scattered,
+                    None,
+                    BufferFlags::CPU_READABLE,
+                )
+                .map_err(|e| Error::Shader(e.to_string()))
         }
     }
 
     pub(crate) fn store_readback_host_buf(&mut self, buf: Buffer, staging_bytes: u64) {
         self.readback_host_buf = Some((buf, staging_bytes));
     }
+
+    pub(crate) fn take_scheme_render_targets(
+        &mut self,
+        ctx: &Context,
+        width: u32,
+        height: u32,
+        out_format: TextureFormat,
+    ) -> Option<(Texture, [Texture; 4])> {
+        let (out, layers, tv) = self.cached_scheme_rt.take()?;
+        if out.width() == width && out.height() == height && out.format() == out_format {
+            if tv != 0 && ctx.gpu_progress() < tv {
+                let _ = ctx.wait_until(tv);
+            }
+            return Some((out, layers));
+        }
+        log::warn!(
+            "[RT-CACHE] scheme MISS (resize) timeline={tv} {}x{} vs {width}x{height} fmt={out_format:?}",
+            out.width(),
+            out.height(),
+        );
+        if ctx.gpu_progress() < tv {
+            let _ = ctx.wait_until(tv);
+        }
+        self.tex_pool.release(out);
+        for l in layers {
+            self.tex_pool.release(l);
+        }
+        None
+    }
+
+    pub(crate) fn store_scheme_render_targets(&mut self, out: Texture, layers: [Texture; 4], timeline: TimelineValue) {
+        self.cached_scheme_rt = Some((out, layers, timeline));
+    }
 }
 
-/// Timeline-guarded render target cache.
+#[cfg(test)]
+impl PersistentState {
+    /// Minimal stub for unit tests that only inspect plain fields (no GPU resources).
+    pub(crate) fn new_test_only() -> Self {
+        let mock_device = goldy::test_support::mock_device();
+        Self::new(&mock_device)
+    }
+}
+
 impl PersistentState {
     /// Drop all cached render targets when any occupied slot no longer matches the
     /// requested dimensions. Waits for the oldest slot timeline so heap-backed textures
@@ -624,10 +753,6 @@ impl PersistentState {
                 continue;
             };
             if out.width() == width && out.height() == height && out.format() == out_format {
-                log::debug!(
-                    "[RT-CACHE] HIT slot={i}: progress={progress} timeline={}",
-                    self.cached_rt_timelines[i],
-                );
                 return Some((out, layers));
             }
             log::warn!(
@@ -660,7 +785,26 @@ impl PersistentState {
         self.pending_bump_readback = Some((timeline, buf));
     }
 
+    pub(crate) fn queue_bump_submission(&mut self, submission: goldy::Submission) {
+        self.pending_bump_submission = Some(submission);
+    }
+
     pub(crate) fn drain_ready_bump_readbacks(&mut self, device: &Device, ctx: &Context) -> Result<()> {
+        if let Some(submission) = self.pending_bump_submission.take() {
+            if let Some(grant) = self.cached_bump_grant.as_ref() {
+                let tv = submission.timeline_value();
+                if tv > ctx.gpu_progress() {
+                    self.pending_bump_submission = Some(submission);
+                    return Ok(());
+                }
+                let _tz = goldy::tracy_zone!("ekrano.drain_ready_bump_readbacks.grant");
+                let loan = grant.consume(&submission).map_err(|e| Error::Shader(e.to_string()))?;
+                read_bump_bytes(self, &loan);
+                return Ok(());
+            }
+            self.pending_bump_submission = Some(submission);
+        }
+
         let Some((timeline, buf)) = self.pending_bump_readback.take() else {
             return Ok(());
         };
@@ -714,6 +858,11 @@ impl PersistentState {
     }
 }
 
+fn read_bump_bytes(persistent: &mut PersistentState, bytes: &[u8]) {
+    let _parse = goldy::tracy_zone!("ekrano.bump_readback.parse");
+    persistent.last_drained_bump = Some(bytemuck::pod_read_unaligned(bytes));
+}
+
 fn read_bump_buffer(device: &Device, persistent: &mut PersistentState, buf: Buffer) -> Result<()> {
     let _bump = goldy::tracy_zone!("ekrano.bump_readback");
     let size = buf.byte_size() as usize;
@@ -727,8 +876,7 @@ fn read_bump_buffer(device: &Device, persistent: &mut PersistentState, buf: Buff
             .map_err(|e| Error::Shader(e.to_string()))?;
     }
     {
-        let _parse = goldy::tracy_zone!("ekrano.bump_readback.parse");
-        persistent.last_drained_bump = Some(bytemuck::pod_read_unaligned(&output));
+        read_bump_bytes(persistent, &output);
     }
     {
         let _return = goldy::tracy_zone!("ekrano.bump_readback.return_pool");
@@ -904,16 +1052,38 @@ impl GoldyRenderer {
         }
     }
 
-    /// Phase 2: record GPU work, present, and return frame stats (Scheme path).
+    /// Phase 2: record GPU work and return frame stats plus a present token (Scheme path).
+    ///
+    /// Does not call [`PresentToken::present`]; the caller must present synchronously or
+    /// hand the token to `TID_PRESENT` for async scanout.
     ///
     /// Panics if called on the Classic backend.
-    pub fn submit_to_swapchain(&mut self, prepared: PreparedFrame, pool: &goldy::SwapchainPool) -> Result<FrameStats> {
+    pub fn submit_to_swapchain(
+        &mut self,
+        prepared: PreparedFrame,
+        pool: &goldy::SwapchainPool,
+    ) -> Result<(FrameStats, PresentToken)> {
+        self.submit_to_swapchain_with(prepared, pool, || Ok(()))
+    }
+
+    /// Like [`Self::submit_to_swapchain`], but runs `pre_acquire` after the upload
+    /// scheme is submitted and immediately before the worker acquires its drawable
+    /// (Scheme backend only).
+    pub fn submit_to_swapchain_with<F>(
+        &mut self,
+        prepared: PreparedFrame,
+        pool: &goldy::SwapchainPool,
+        pre_acquire: F,
+    ) -> Result<(FrameStats, PresentToken)>
+    where
+        F: FnOnce() -> Result<()>,
+    {
         match self {
             Self::Classic(_) => panic!(
                 "GoldyRenderer::submit_to_swapchain called on Classic backend — \
                  use submit_to_surface(prepared, surface) instead"
             ),
-            Self::Scheme(r) => r.submit_to_swapchain(prepared, pool),
+            Self::Scheme(r) => r.submit_to_swapchain_with(prepared, pool, pre_acquire),
         }
     }
 

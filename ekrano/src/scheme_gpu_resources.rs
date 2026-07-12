@@ -8,8 +8,9 @@ use std::mem::size_of;
 use goldy::types::{BufferFlags, TextureFlags, TextureKind};
 use goldy::{Buffer, BufferKind, DispatchShape, Init, Parcel, Sampler, Texture, TextureFormat, ordinal};
 
-use crate::resource_proxy::{BindType, ImageFormat};
+use crate::resource_proxy::BindType;
 use crate::scheme_renderer::SchemeRecorder;
+use crate::worker_retention::scene_size_bucket;
 use crate::{Error, RenderParams, Result};
 use ekrano_encoding::{
     BumpAllocators, CoverageMask, Images, N_INDIRECT_STAGES, Ramps, RenderConfig, STAGE_PATH_COUNT, STAGE_PATH_TILING,
@@ -45,20 +46,6 @@ pub(crate) enum GpuBinding<'a> {
     PersistentBuf(&'a Buffer),
 }
 
-fn is_pool_exempt(name: &'static str) -> bool {
-    // Only the bump buffer needs to be pre-cleared each frame.
-    // The scheme indirect buffers are initialised via commit_write_parcel / GPU setup shaders,
-    // so they are NOT pre-cleared here.
-    name == "ekrano.bump_buf"
-}
-
-fn image_fmt_goldy(f: ImageFormat) -> TextureFormat {
-    match f {
-        ImageFormat::Rgba8 => TextureFormat::Rgba8Unorm,
-        ImageFormat::Bgra8 => TextureFormat::Bgra8Unorm,
-    }
-}
-
 pub(crate) fn alloc_pipeline_buffer(
     recorder: &mut SchemeRecorder<'_>,
     size: u64,
@@ -77,15 +64,8 @@ pub(crate) fn alloc_pipeline_buffer(
         Some(stride),
         flags,
     )?;
-    // Pre-clear pool-exempt buffers (bump needs zeroing each frame; indirect
-    // dispatch counts must be 0 before GPU pipelines them). Other pipeline
-    // buffers are always overwritten by GPU dispatches before first read.
-    if is_pool_exempt(name) {
-        recorder
-            .scheme()
-            .commit_clear_parcel(&buf, 0, size)
-            .map_err(|e| Error::Shader(e.to_string()))?;
-    }
+    // Pipeline buffers are always overwritten by GPU dispatches before first read.
+    // Per-frame clears (e.g. bump) go through `clear_gpu_buf` on the upload scheme.
     Ok(buf)
 }
 
@@ -150,7 +130,7 @@ pub(crate) fn record_upload_bytes(
         BufferFlags::empty(),
     )?;
     recorder
-        .scheme()
+        .upload_scheme()
         .commit_write_parcel(&buf, 0, bytes.to_vec())
         .map_err(|e| Error::Shader(e.to_string()))?;
     Ok(buf)
@@ -176,37 +156,10 @@ pub(crate) fn record_upload_bytes_owned(
         BufferFlags::empty(),
     )?;
     recorder
-        .scheme()
+        .upload_scheme()
         .commit_write_parcel(&buf, 0, bytes)
         .map_err(|e| Error::Shader(e.to_string()))?;
     Ok(buf)
-}
-
-pub(crate) fn record_upload_image(
-    recorder: &mut SchemeRecorder<'_>,
-    width: u32,
-    height: u32,
-    format: ImageFormat,
-    bytes: &[u8],
-) -> Result<Texture, Error> {
-    let format = image_fmt_goldy(format);
-    let texture = recorder
-        .persistent
-        .tex_pool
-        .acquire(
-            recorder.device(),
-            width,
-            height,
-            format,
-            TextureKind::Interpolated,
-            TextureFlags::COPY_DST,
-        )
-        .map_err(|e| Error::Shader(e.to_string()))?;
-    recorder
-        .scheme()
-        .commit_write_texture(&texture, bytes.to_vec())
-        .map_err(|e| Error::Shader(e.to_string()))?;
-    Ok(texture)
 }
 
 pub(crate) fn write_image_region(
@@ -238,11 +191,7 @@ pub(crate) fn write_image_region(
         raw_bytes
     };
 
-    recorder
-        .scheme()
-        .commit_write_texture_region(tex, x, y, image_data.width, image_data.height, bytes.to_vec())
-        .map_err(|e| Error::Shader(e.to_string()))?;
-    Ok(())
+    upload_texture_region(recorder, tex, x, y, image_data.width, image_data.height, bytes.to_vec())
 }
 
 /// Premultiply every RGBA8 pixel: `(r, g, b, a)` → `(r*a/255, g*a/255, b*a/255, a)`.
@@ -286,12 +235,277 @@ pub(crate) fn clear_gpu_buf(
     off: u64,
     size: Option<u64>,
 ) -> Result<(), Error> {
+    if !recorder.upload_needs_record {
+        return Ok(());
+    }
     let sz = size.unwrap_or_else(|| buf.byte_size().saturating_sub(off));
     recorder
-        .scheme()
+        .upload_scheme()
         .commit_clear_parcel(buf, off, sz)
         .map_err(|e| Error::Shader(e.to_string()))?;
     Ok(())
+}
+
+/// Allocate or reuse a stable scene buffer (bucketed capacity).
+pub(crate) fn alloc_or_reuse_scene(recorder: &mut SchemeRecorder<'_>, live_bytes: usize) -> Result<Buffer, Error> {
+    let bucket = scene_size_bucket(live_bytes);
+    if let Some((cached_bucket, buf)) = recorder.persistent.cached_scene.take() {
+        if cached_bucket >= bucket {
+            return Ok(buf);
+        }
+        drop(buf);
+    }
+    recorder
+        .persistent
+        .retained_pool
+        .acquire_buffer(bucket, BufferKind::Scattered, Some(4), BufferFlags::empty(), None)
+        .map_err(|e| Error::Gpu(e.to_string()))
+}
+
+/// Allocate or reuse a CPU-writable staging buffer for scene bytes.
+fn alloc_or_reuse_scene_staging(recorder: &mut SchemeRecorder<'_>, live_bytes: usize) -> Result<Buffer, Error> {
+    let bucket = scene_size_bucket(live_bytes);
+    if let Some((cached_bucket, buf)) = recorder.persistent.cached_scene_staging.take() {
+        if cached_bucket >= bucket {
+            return Ok(buf);
+        }
+        drop(buf);
+    }
+    recorder
+        .persistent
+        .retained_pool
+        .acquire_buffer(bucket, BufferKind::Scattered, Some(4), BufferFlags::CPU_WRITABLE, None)
+        .map_err(|e| Error::Gpu(e.to_string()))
+}
+
+/// Allocate or reuse a CPU-writable staging buffer for the config uniform.
+fn alloc_or_reuse_config_staging(recorder: &mut SchemeRecorder<'_>) -> Result<Buffer, Error> {
+    if let Some(buf) = recorder.persistent.cached_config_staging.take() {
+        return Ok(buf);
+    }
+    recorder
+        .persistent
+        .retained_pool
+        .acquire_buffer(
+            size_of::<ekrano_encoding::ConfigUniform>() as u64,
+            BufferKind::Scattered,
+            Some(size_of::<ekrano_encoding::ConfigUniform>() as u32),
+            BufferFlags::CPU_WRITABLE,
+            None,
+        )
+        .map_err(|e| Error::Gpu(e.to_string()))
+}
+
+/// Write scene bytes into staging and copy into the device scene buffer when recording upload topology.
+pub(crate) fn stage_scene_bytes(recorder: &mut SchemeRecorder<'_>, scene: &Buffer, bytes: &[u8]) -> Result<(), Error> {
+    let bucket = scene_size_bucket(bytes.len());
+    let staging = alloc_or_reuse_scene_staging(recorder, bytes.len())?;
+    staging.write(0, bytes).map_err(|e| Error::Gpu(e.to_string()))?;
+    if recorder.upload_needs_record {
+        // Copy the full staging buffer (bucket-sized) rather than bytes.len() bytes.
+        // On retained frames the packed content varies within the bucket; the GPU reads
+        // up to config.scene_size bytes (always ≤ bucket), so the tail is never accessed.
+        let copy_size = staging.byte_size();
+        recorder
+            .upload_scheme()
+            .copy_buffer_parcel(staging.whole(), 0, scene.whole(), 0, copy_size)
+            .map_err(|e| Error::Shader(e.to_string()))?;
+    }
+    recorder.persistent.cached_scene_staging = Some((bucket, staging));
+    Ok(())
+}
+
+/// Write config uniform bytes into staging and copy into the device config buffer when recording.
+pub(crate) fn stage_config_bytes(
+    recorder: &mut SchemeRecorder<'_>,
+    config: &Buffer,
+    bytes: &[u8],
+) -> Result<(), Error> {
+    let staging = alloc_or_reuse_config_staging(recorder)?;
+    staging.write(0, bytes).map_err(|e| Error::Gpu(e.to_string()))?;
+    if recorder.upload_needs_record {
+        recorder
+            .upload_scheme()
+            .copy_buffer_parcel(staging.whole(), 0, config.whole(), 0, bytes.len() as u64)
+            .map_err(|e| Error::Shader(e.to_string()))?;
+    }
+    recorder.persistent.cached_config_staging = Some(staging);
+    Ok(())
+}
+
+/// Allocate or reuse a stable bump buffer for the retained worker.
+pub(crate) fn alloc_or_reuse_bump(recorder: &mut SchemeRecorder<'_>, size: u64) -> Result<Buffer, Error> {
+    if let Some((cached_size, buf)) = recorder.persistent.cached_bump.take() {
+        if cached_size == size {
+            return Ok(buf);
+        }
+        recorder.persistent.cached_bump_grant = None;
+        drop(buf);
+    }
+    recorder
+        .persistent
+        .retained_pool
+        .acquire_buffer(
+            size,
+            BufferKind::Scattered,
+            Some(size_of::<BumpAllocators>() as u32),
+            BufferFlags::CPU_READABLE,
+            None,
+        )
+        .map_err(|e| Error::Gpu(e.to_string()))
+}
+
+fn take_cached_texture(
+    cached: &mut Option<(u32, u32, Texture)>,
+    width: u32,
+    height: u32,
+) -> Result<Texture, Box<Option<Texture>>> {
+    let Some((cw, ch, tex)) = cached.as_ref() else {
+        return Err(Box::new(None));
+    };
+    if *cw == width && *ch == height {
+        Ok(tex.borrow())
+    } else {
+        Err(Box::new(Some(cached.take().unwrap().2)))
+    }
+}
+
+fn install_cached_texture(cached: &mut Option<(u32, u32, Texture)>, width: u32, height: u32, tex: Texture) -> Texture {
+    cached.replace((width, height, tex));
+    cached.as_ref().unwrap().2.borrow()
+}
+
+fn texture_flat_bytes(width: u32, height: u32) -> u64 {
+    (width as u64) * (height as u64) * 4
+}
+
+enum TextureStagingCache {
+    Gradient,
+    Mask,
+}
+
+fn alloc_or_reuse_full_texture_staging(
+    recorder: &mut SchemeRecorder<'_>,
+    cached: &mut Option<(u32, u32, Buffer)>,
+    width: u32,
+    height: u32,
+) -> Result<Buffer, Error> {
+    if let Some((cw, ch, buf)) = cached.take() {
+        if cw >= width && ch >= height {
+            return Ok(buf);
+        }
+        drop(buf);
+    }
+    let size = texture_flat_bytes(width, height).max(4);
+    recorder
+        .persistent
+        .retained_pool
+        .acquire_buffer(size, BufferKind::Scattered, Some(4), BufferFlags::CPU_WRITABLE, None)
+        .map_err(|e| Error::Gpu(e.to_string()))
+}
+
+fn take_region_texture_staging(recorder: &mut SchemeRecorder<'_>, key: (u32, u32, u32, u32)) -> Option<Buffer> {
+    if let Some(idx) = recorder
+        .persistent
+        .cached_image_region_stagings
+        .iter()
+        .position(|(k, _)| *k == key)
+    {
+        Some(recorder.persistent.cached_image_region_stagings.remove(idx).1)
+    } else {
+        None
+    }
+}
+
+fn alloc_or_reuse_region_texture_staging(
+    recorder: &mut SchemeRecorder<'_>,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) -> Result<Buffer, Error> {
+    let key = (x, y, width, height);
+    if let Some(buf) = take_region_texture_staging(recorder, key) {
+        return Ok(buf);
+    }
+    let size = texture_flat_bytes(width, height).max(4);
+    recorder
+        .persistent
+        .retained_pool
+        .acquire_buffer(size, BufferKind::Scattered, Some(4), BufferFlags::CPU_WRITABLE, None)
+        .map_err(|e| Error::Gpu(e.to_string()))
+}
+
+fn stage_texture_full(
+    recorder: &mut SchemeRecorder<'_>,
+    cached_staging: &mut Option<(u32, u32, Buffer)>,
+    texture: &Texture,
+    bytes: &[u8],
+) -> Result<(), Error> {
+    let width = texture.width();
+    let height = texture.height();
+    let staging = alloc_or_reuse_full_texture_staging(recorder, cached_staging, width, height)?;
+    staging.write(0, bytes).map_err(|e| Error::Gpu(e.to_string()))?;
+    if recorder.upload_needs_record {
+        recorder
+            .upload_scheme()
+            .copy_buffer_to_texture_parcel(staging.whole(), 0, 0, texture, 0, 0, width, height)
+            .map_err(|e| Error::Shader(e.to_string()))?;
+    }
+    *cached_staging = Some((width, height, staging));
+    Ok(())
+}
+
+fn stage_texture_region(
+    recorder: &mut SchemeRecorder<'_>,
+    texture: &Texture,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    bytes: &[u8],
+) -> Result<(), Error> {
+    let key = (x, y, width, height);
+    let staging = alloc_or_reuse_region_texture_staging(recorder, x, y, width, height)?;
+    staging.write(0, bytes).map_err(|e| Error::Gpu(e.to_string()))?;
+    if recorder.upload_needs_record {
+        recorder
+            .upload_scheme()
+            .copy_buffer_to_texture_parcel(staging.whole(), 0, 0, texture, x, y, width, height)
+            .map_err(|e| Error::Shader(e.to_string()))?;
+    }
+    recorder.persistent.cached_image_region_stagings.push((key, staging));
+    Ok(())
+}
+
+fn upload_texture_full(
+    recorder: &mut SchemeRecorder<'_>,
+    cache: TextureStagingCache,
+    texture: &Texture,
+    bytes: &[u8],
+) -> Result<(), Error> {
+    let mut slot = match cache {
+        TextureStagingCache::Gradient => std::mem::take(&mut recorder.persistent.cached_gradient_staging),
+        TextureStagingCache::Mask => std::mem::take(&mut recorder.persistent.cached_mask_staging),
+    };
+    stage_texture_full(recorder, &mut slot, texture, bytes)?;
+    match cache {
+        TextureStagingCache::Gradient => recorder.persistent.cached_gradient_staging = slot,
+        TextureStagingCache::Mask => recorder.persistent.cached_mask_staging = slot,
+    }
+    Ok(())
+}
+
+fn upload_texture_region(
+    recorder: &mut SchemeRecorder<'_>,
+    texture: &Texture,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    bytes: Vec<u8>,
+) -> Result<(), Error> {
+    stage_texture_region(recorder, texture, x, y, width, height, &bytes)
 }
 
 /// Reuse a cached buffer if one is available, or allocate a fresh one from the pool.
@@ -582,32 +796,92 @@ impl PipelineResources {
         let gradient = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.gradient");
             if ramps.height == 0 {
-                acquire_texture_rgba(recorder, 1, 1, TextureKind::Interpolated, TextureFlags::COPY_DST)?
+                match take_cached_texture(&mut recorder.persistent.cached_gradient, 1, 1) {
+                    Ok(tex) => tex,
+                    Err(stale) => {
+                        if let Some(tex) = *stale {
+                            recorder.persistent.tex_pool.release(tex);
+                        }
+                        let tex =
+                            acquire_texture_rgba(recorder, 1, 1, TextureKind::Interpolated, TextureFlags::COPY_DST)?;
+                        install_cached_texture(&mut recorder.persistent.cached_gradient, 1, 1, tex)
+                    }
+                }
             } else {
-                let data: &[u8] = bytemuck::cast_slice(ramps.data);
-                record_upload_image(recorder, ramps.width, ramps.height, ImageFormat::Rgba8, data)?
+                let tex = match take_cached_texture(&mut recorder.persistent.cached_gradient, ramps.width, ramps.height)
+                {
+                    Ok(tex) => tex,
+                    Err(stale) => {
+                        if let Some(tex) = *stale {
+                            recorder.persistent.tex_pool.release(tex);
+                        }
+                        let tex = acquire_texture_rgba(
+                            recorder,
+                            ramps.width,
+                            ramps.height,
+                            TextureKind::Interpolated,
+                            TextureFlags::COPY_DST,
+                        )?;
+                        install_cached_texture(&mut recorder.persistent.cached_gradient, ramps.width, ramps.height, tex)
+                    }
+                };
+                upload_texture_full(
+                    recorder,
+                    TextureStagingCache::Gradient,
+                    &tex,
+                    bytemuck::cast_slice(ramps.data),
+                )?;
+                tex
             }
         };
 
         let (image_atlas, _) = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.image_atlas");
+            if recorder.upload_needs_record {
+                recorder.persistent.cached_image_region_stagings.clear();
+            }
             if images.images.is_empty() {
-                let t = acquire_texture_rgba(
-                    recorder,
-                    1,
-                    1,
-                    TextureKind::Interpolated,
-                    TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
-                )?;
+                let t = match take_cached_texture(&mut recorder.persistent.cached_image_atlas, 1, 1) {
+                    Ok(tex) => tex,
+                    Err(stale) => {
+                        if let Some(tex) = *stale {
+                            recorder.persistent.tex_pool.release(tex);
+                        }
+                        let tex = acquire_texture_rgba(
+                            recorder,
+                            1,
+                            1,
+                            TextureKind::Interpolated,
+                            TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
+                        )?;
+                        install_cached_texture(&mut recorder.persistent.cached_image_atlas, 1, 1, tex)
+                    }
+                };
                 (t, (1_u32, 1_u32))
             } else {
-                let t = acquire_texture_rgba(
-                    recorder,
-                    images.width,
-                    images.height,
-                    TextureKind::Interpolated,
-                    TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
-                )?;
+                let t =
+                    match take_cached_texture(&mut recorder.persistent.cached_image_atlas, images.width, images.height)
+                    {
+                        Ok(tex) => tex,
+                        Err(stale) => {
+                            if let Some(tex) = *stale {
+                                recorder.persistent.tex_pool.release(tex);
+                            }
+                            let tex = acquire_texture_rgba(
+                                recorder,
+                                images.width,
+                                images.height,
+                                TextureKind::Interpolated,
+                                TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
+                            )?;
+                            install_cached_texture(
+                                &mut recorder.persistent.cached_image_atlas,
+                                images.width,
+                                images.height,
+                                tex,
+                            )
+                        }
+                    };
                 for image in images.images {
                     write_image_region(recorder, &t, image.1, image.2, &image.0)?;
                 }
@@ -619,55 +893,80 @@ impl PipelineResources {
             let _tz = goldy::tracy_zone!("ekrano.prepare.mask_atlas");
             match coverage_mask {
                 Some(m) => {
+                    let tex = match take_cached_texture(&mut recorder.persistent.cached_mask_atlas, m.width, m.height) {
+                        Ok(tex) => tex,
+                        Err(stale) => {
+                            if let Some(tex) = *stale {
+                                recorder.persistent.tex_pool.release(tex);
+                            }
+                            let tex = acquire_texture_rgba(
+                                recorder,
+                                m.width,
+                                m.height,
+                                TextureKind::Interpolated,
+                                TextureFlags::COPY_DST,
+                            )?;
+                            install_cached_texture(&mut recorder.persistent.cached_mask_atlas, m.width, m.height, tex)
+                        }
+                    };
                     let mut rgba = Vec::with_capacity(m.data.len() * 4);
                     for &b in m.data.iter() {
                         rgba.extend_from_slice(&[b, b, b, 255]);
                     }
-                    record_upload_image(recorder, m.width, m.height, ImageFormat::Rgba8, &rgba)?
+                    upload_texture_full(recorder, TextureStagingCache::Mask, &tex, &rgba)?;
+                    tex
                 }
-                None => record_upload_image(recorder, 1, 1, ImageFormat::Rgba8, &[255, 255, 255, 255])?,
+                None => {
+                    let tex = match take_cached_texture(&mut recorder.persistent.cached_mask_atlas, 1, 1) {
+                        Ok(tex) => tex,
+                        Err(stale) => {
+                            if let Some(tex) = *stale {
+                                recorder.persistent.tex_pool.release(tex);
+                            }
+                            let tex = acquire_texture_rgba(
+                                recorder,
+                                1,
+                                1,
+                                TextureKind::Interpolated,
+                                TextureFlags::COPY_DST,
+                            )?;
+                            install_cached_texture(&mut recorder.persistent.cached_mask_atlas, 1, 1, tex)
+                        }
+                    };
+                    upload_texture_full(recorder, TextureStagingCache::Mask, &tex, &[255, 255, 255, 255])?;
+                    tex
+                }
             }
         };
 
-        // Move `packed` directly into the graph write node — avoids the redundant
-        // `to_vec()` copy that `record_upload_bytes` would perform on a borrow.
         let scene = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.scene_upload");
-            record_upload_bytes_owned(recorder, "ekrano.scene", 4, packed)?
+            let scene_buf = alloc_or_reuse_scene(recorder, packed.len())?;
+            stage_scene_bytes(recorder, &scene_buf, &packed)?;
+            scene_buf
         };
 
         let config_uniform_value = cpu_config_owned.gpu;
 
-        // Cache check: reuse the previous frame's GPU config buffer when the value is
-        // identical (steady state after bump estimates converge). On a cache hit no
-        // WriteBuffer node is added to the graph, eliminating a staging-belt round-trip.
         let config = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.config_upload");
-            let cache_hit = recorder
-                .persistent
-                .cached_config_uniform
-                .as_ref()
-                .is_some_and(|(v, _)| v == &config_uniform_value);
-            log::trace!("ConfigUniform cache {}", if cache_hit { "HIT" } else { "MISS" });
-            if cache_hit {
-                recorder.persistent.cached_config_uniform.take().unwrap().1
-            } else if let Some((_, existing_buf)) = recorder.persistent.cached_config_uniform.take() {
-                // Buffer size is constant (sizeof ConfigUniform); reuse the allocation
-                // and just overwrite with the new value.
-                let data = bytemuck::bytes_of(&config_uniform_value).to_vec();
-                recorder
-                    .scheme()
-                    .commit_write_parcel(&existing_buf, 0, data)
-                    .map_err(|e| Error::Shader(e.to_string()))?;
-                existing_buf
+            let config_buf = if let Some((_, buf)) = recorder.persistent.cached_config_uniform.take() {
+                buf
             } else {
-                record_upload_bytes(
-                    recorder,
-                    "ekrano.config",
-                    size_of::<ekrano_encoding::ConfigUniform>() as u32,
-                    bytemuck::bytes_of(&config_uniform_value),
-                )?
-            }
+                recorder
+                    .persistent
+                    .retained_pool
+                    .acquire_buffer(
+                        size_of::<ekrano_encoding::ConfigUniform>() as u64,
+                        BufferKind::Scattered,
+                        Some(size_of::<ekrano_encoding::ConfigUniform>() as u32),
+                        BufferFlags::empty(),
+                        None,
+                    )
+                    .map_err(|e| Error::Gpu(e.to_string()))?
+            };
+            stage_config_bytes(recorder, &config_buf, bytemuck::bytes_of(&config_uniform_value))?;
+            config_buf
         };
 
         let buffer_sizes = cpu_config_owned.buffer_sizes;
@@ -751,21 +1050,16 @@ impl PipelineResources {
         // are fully GPU-overwritten before first read.
         let stable = StablePipelineBuffers::alloc(recorder, cached_stable, &buffer_sizes)?;
         let scratch = ScratchPipelineBuffers::alloc(recorder, cached_scratch, &buffer_sizes)?;
-        let bump = alloc_pipeline_buffer(
-            recorder,
-            buffer_sizes.bump_alloc.size_in_bytes().into(),
-            size_of::<BumpAllocators>() as u32,
-            "ekrano.bump_buf",
-            BufferFlags::CPU_READABLE,
-        )?;
+        let bump_size = buffer_sizes.bump_alloc.size_in_bytes().into();
+        let bump = alloc_or_reuse_bump(recorder, bump_size)?;
         clear_gpu_buf(recorder, &bump, 0, None)?;
 
         // Try to reuse cached render targets from the previous frame (avoids TexturePool
         // round-trips when render dimensions are stable across frames).
         let (out_image, filter_layers) = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.render_targets");
-            if let Some((cached_out, cached_layers)) = recorder.persistent.take_cached_render_targets(
-                gpu_progress,
+            if let Some((cached_out, cached_layers)) = recorder.persistent.take_scheme_render_targets(
+                recorder.context(),
                 params.width,
                 params.height,
                 out_image_format,

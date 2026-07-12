@@ -42,7 +42,7 @@ use anyhow::{Result, anyhow, bail};
 use ekrano::kurbo::{Affine, Vec2};
 use ekrano::peniko::{Blob, Color, ImageFormat, color::palette};
 use ekrano::peniko::{ImageAlphaType, ImageData};
-use ekrano::{AaConfig, GoldyRenderer, Scene};
+use ekrano::{AaConfig, GoldyBackend, GoldyRenderer, Scene};
 use goldy::types::{TextureFlags, TextureFormat, TextureKind};
 use goldy::{Device, DeviceDescriptor, Instance, RequestAdapterOptions, Texture, TexturePool};
 use image::RgbImage;
@@ -118,6 +118,25 @@ pub(crate) fn rgba_straight_composite_black_to_rgb(width: u32, height: u32, rgba
 
 pub use snapshot::{Snapshot, SnapshotDirectory, smoke_snapshot_test_sync, snapshot_test, snapshot_test_sync};
 
+/// Goldy renderer backend used by integration tests.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TestBackend {
+    /// `TaskGraph`-based Classic renderer (default).
+    #[default]
+    Classic,
+    /// Retained-`Scheme` renderer.
+    Scheme,
+}
+
+impl TestBackend {
+    pub fn goldy_backend(self) -> GoldyBackend {
+        match self {
+            Self::Classic => GoldyBackend::Classic,
+            Self::Scheme => GoldyBackend::Scheme,
+        }
+    }
+}
+
 pub struct TestParams {
     pub width: u32,
     pub height: u32,
@@ -133,6 +152,7 @@ pub struct TestParams {
     pub render_clear_color: Option<Color>,
     pub name: String,
     pub anti_aliasing: AaConfig,
+    pub backend: TestBackend,
 }
 
 impl TestParams {
@@ -144,7 +164,14 @@ impl TestParams {
             render_clear_color: None,
             name: name.into(),
             anti_aliasing: AaConfig::Area,
+            backend: TestBackend::Classic,
         }
+    }
+
+    /// Select the renderer backend for this render.
+    pub fn with_backend(mut self, backend: TestBackend) -> Self {
+        self.backend = backend;
+        self
     }
 }
 
@@ -183,7 +210,8 @@ pub fn get_scene_image(params: &TestParams, scene: &Scene) -> Result<ImageData, 
 
     let device = test_device();
     // TODO(#179 follow-up): device-level shader cache so per-test renderer construction is cheap.
-    let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new failed");
+    let mut renderer =
+        GoldyRenderer::new_with_backend(&device, params.backend.goldy_backend()).expect("GoldyRenderer::new failed");
 
     let width = params.width;
     let height = params.height;
