@@ -40,8 +40,8 @@ fn encode_hinted_text(text: &str, font_size: f32) -> Scene {
 fn simple_hinted_body(backend: TestBackend) {
     let font_size = 12.;
     let scene = encode_hinted_text("The quick brown fox", font_size);
-    let params = TestParams::new("simple_hinted", (font_size * 10.) as _, (font_size * 1.1).ceil() as _)
-        .with_backend(backend);
+    let params =
+        TestParams::new("simple_hinted", (font_size * 10.) as _, (font_size * 1.1).ceil() as _).with_backend(backend);
     snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.02);
 }
 #[test]
@@ -60,8 +60,8 @@ fn scaled_hinted_body(backend: TestBackend) {
     let mut scene = Scene::new();
     scene.append(&text_scene, Some(Affine::scale(1.5)));
 
-    let params = TestParams::new("scaled_hinted", (font_size * 15.) as _, (font_size * 1.65).ceil() as _)
-        .with_backend(backend);
+    let params =
+        TestParams::new("scaled_hinted", (font_size * 15.) as _, (font_size * 1.65).ceil() as _).with_backend(backend);
     snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.02);
 }
 #[test]

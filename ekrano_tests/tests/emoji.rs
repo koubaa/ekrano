@@ -102,8 +102,8 @@ fn scheme_big_colr() {
 fn little_colr_body(backend: TestBackend) {
     let font_size = 10.;
     let scene = encode_noto_colr(TEXT, font_size);
-    let params = TestParams::new("little_colr", (font_size * 10.) as _, (font_size * 1.25).ceil() as _)
-        .with_backend(backend);
+    let params =
+        TestParams::new("little_colr", (font_size * 10.) as _, (font_size * 1.25).ceil() as _).with_backend(backend);
     snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.005);
 }
 #[cfg_attr(skip_slow_tests, ignore)]
@@ -122,8 +122,8 @@ fn colr_undef_body(backend: TestBackend) {
     let font_size = 10.;
     // This emoji isn't in the subset we have made
     let scene = encode_noto_colr("🤷", font_size);
-    let params = TestParams::new("colr_undef", (font_size * 10.) as _, (font_size * 1.25).ceil() as _)
-        .with_backend(backend);
+    let params =
+        TestParams::new("colr_undef", (font_size * 10.) as _, (font_size * 1.25).ceil() as _).with_backend(backend);
     // TODO: Work out why the undef glyph is nothing - is it an issue with our font subset or with our renderer?
     snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.001);
 }
@@ -145,8 +145,8 @@ fn scheme_colr_undef() {
 fn big_bitmap_body(backend: TestBackend) {
     let font_size = 48.;
     let scene = encode_noto_bitmap(TEXT, font_size);
-    let params = TestParams::new("big_bitmap", (font_size * 10.) as _, (font_size * 1.25).ceil() as _)
-        .with_backend(backend);
+    let params =
+        TestParams::new("big_bitmap", (font_size * 10.) as _, (font_size * 1.25).ceil() as _).with_backend(backend);
     snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.001);
 }
 #[cfg_attr(skip_slow_tests, ignore)]
@@ -188,8 +188,8 @@ fn scheme_big_bitmap_apple() {
 fn little_bitmap_body(backend: TestBackend) {
     let font_size = 10.;
     let scene = encode_noto_bitmap(TEXT, font_size);
-    let params = TestParams::new("little_bitmap", (font_size * 10.) as _, (font_size * 1.25).ceil() as _)
-        .with_backend(backend);
+    let params =
+        TestParams::new("little_bitmap", (font_size * 10.) as _, (font_size * 1.25).ceil() as _).with_backend(backend);
     snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.001);
 }
 #[cfg_attr(skip_slow_tests, ignore)]
@@ -208,8 +208,8 @@ fn bitmap_undef_body(backend: TestBackend) {
     let font_size = 10.;
     // This emoji isn't in the subset we have made
     let scene = encode_noto_bitmap("🤷", font_size);
-    let params = TestParams::new("bitmap_undef", (font_size * 10.) as _, (font_size * 1.25).ceil() as _)
-        .with_backend(backend);
+    let params =
+        TestParams::new("bitmap_undef", (font_size * 10.) as _, (font_size * 1.25).ceil() as _).with_backend(backend);
     // TODO: Work out why the undef glyph is nothing - is it an issue with our font subset or with our renderer?
     snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.001);
 }

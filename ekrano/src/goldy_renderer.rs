@@ -18,8 +18,7 @@ use std::sync::{Arc, Mutex};
 
 use goldy::types::{BufferFlags, TextureFormat};
 use goldy::{
-    Buffer, BufferKind, ComputePipeline, Context, Device, Grant, RetainedPool, Texture, TexturePool,
-    TimelineValue,
+    Buffer, BufferKind, ComputePipeline, Context, Device, Grant, RetainedPool, Texture, TexturePool, TimelineValue,
 };
 
 /// Ekrano uses a single-frame fire-and-forget model.
@@ -188,8 +187,8 @@ pub(crate) struct FrameFinishOutcome {
 
 /// Scheme-path present token — analogue of [`goldy::Frame`] on the Classic path.
 ///
-/// Produced by [`GoldyRenderer::submit_to_swapchain`]. Hand to TID_PRESENT for async
-/// scanout, or call [`Self::present`] synchronously (e.g. [`SchemeRenderer::render_to_swapchain`]).
+/// Produced by [`GoldyRenderer::submit_to_swapchain`]. Hand to `TID_PRESENT` for async
+/// scanout, or call [`Self::present`] synchronously (e.g. [`crate::scheme_renderer::SchemeRenderer::render_to_swapchain`]).
 pub struct PresentToken {
     pub(crate) grant: goldy::PresentGrant,
     pub(crate) submission: goldy::Submission,
@@ -549,7 +548,7 @@ pub(crate) struct PersistentState {
     /// Owned buffers waiting to be returned to [`Self::pool`] after GPU retirement.
     /// Populated by [`DeferredOwnedBuffersToken`] drops from [`Context::defer_release`].
     pub(crate) pending_owned_returns: Arc<Mutex<Vec<(Buffer, &'static str)>>>,
-    /// Persistent host buffer parcel for [`SchemeRenderer::render_to_buffer`].
+    /// Persistent host buffer parcel for [`crate::scheme_renderer::SchemeRenderer::render_to_buffer`].
     pub(crate) readback_host_buf: Option<(Buffer, u64)>,
 }
 
@@ -602,11 +601,7 @@ impl PersistentState {
         }
     }
 
-    pub(crate) fn acquire_readback_host_buf(
-        &mut self,
-        ctx: &Context,
-        staging_bytes: u64,
-    ) -> Result<Buffer, Error> {
+    pub(crate) fn acquire_readback_host_buf(&mut self, ctx: &Context, staging_bytes: u64) -> Result<Buffer, Error> {
         let needs_new = self
             .readback_host_buf
             .as_ref()
@@ -657,9 +652,7 @@ impl PersistentState {
         height: u32,
         out_format: TextureFormat,
     ) -> Option<(Texture, [Texture; 4])> {
-        let Some((out, layers, tv)) = self.cached_scheme_rt.take() else {
-            return None;
-        };
+        let (out, layers, tv) = self.cached_scheme_rt.take()?;
         if out.width() == width && out.height() == height && out.format() == out_format {
             if tv != 0 && ctx.gpu_progress() < tv {
                 let _ = ctx.wait_until(tv);
@@ -681,12 +674,7 @@ impl PersistentState {
         None
     }
 
-    pub(crate) fn store_scheme_render_targets(
-        &mut self,
-        out: Texture,
-        layers: [Texture; 4],
-        timeline: TimelineValue,
-    ) {
+    pub(crate) fn store_scheme_render_targets(&mut self, out: Texture, layers: [Texture; 4], timeline: TimelineValue) {
         self.cached_scheme_rt = Some((out, layers, timeline));
     }
 }
@@ -810,9 +798,7 @@ impl PersistentState {
                     return Ok(());
                 }
                 let _tz = goldy::tracy_zone!("ekrano.drain_ready_bump_readbacks.grant");
-                let loan = grant
-                    .consume(&submission)
-                    .map_err(|e| Error::Shader(e.to_string()))?;
+                let loan = grant.consume(&submission).map_err(|e| Error::Shader(e.to_string()))?;
                 read_bump_bytes(self, &loan);
                 return Ok(());
             }
@@ -1069,7 +1055,7 @@ impl GoldyRenderer {
     /// Phase 2: record GPU work and return frame stats plus a present token (Scheme path).
     ///
     /// Does not call [`PresentToken::present`]; the caller must present synchronously or
-    /// hand the token to TID_PRESENT for async scanout.
+    /// hand the token to `TID_PRESENT` for async scanout.
     ///
     /// Panics if called on the Classic backend.
     pub fn submit_to_swapchain(

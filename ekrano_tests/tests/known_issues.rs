@@ -196,7 +196,6 @@ fn scheme_test_layer_size() {
     test_layer_size_body(TestBackend::Scheme);
 }
 
-
 const DATA_IMAGE_PNG: &[u8] = include_bytes!("../snapshots/smoke/data_image_roundtrip.png");
 
 /// Test for <https://github.com/linebender/vello/issues/972>
@@ -209,7 +208,8 @@ fn test_data_image_roundtrip_extend_reflect_body(backend: TestBackend) {
         .with_quality(ImageQuality::Low)
         .with_extend(Extend::Reflect);
     scene.draw_image(&image, Affine::IDENTITY);
-    let mut params = TestParams::new("data_image_roundtrip", image.image.width, image.image.height).with_backend(backend);
+    let mut params =
+        TestParams::new("data_image_roundtrip", image.image.width, image.image.height).with_backend(backend);
     params.anti_aliasing = AaConfig::Area;
     smoke_snapshot_test_sync(scene, &params)
         .unwrap()
@@ -229,7 +229,6 @@ fn scheme_test_data_image_roundtrip_extend_reflect() {
     test_data_image_roundtrip_extend_reflect_body(TestBackend::Scheme);
 }
 
-
 /// Test for <https://github.com/linebender/vello/issues/972>
 fn test_data_image_roundtrip_extend_repeat_body(backend: TestBackend) {
     let mut scene = Scene::new();
@@ -240,7 +239,8 @@ fn test_data_image_roundtrip_extend_repeat_body(backend: TestBackend) {
         .with_quality(ImageQuality::Low)
         .with_extend(Extend::Repeat);
     scene.draw_image(&image, Affine::IDENTITY);
-    let mut params = TestParams::new("data_image_roundtrip", image.image.width, image.image.height).with_backend(backend);
+    let mut params =
+        TestParams::new("data_image_roundtrip", image.image.width, image.image.height).with_backend(backend);
     params.anti_aliasing = AaConfig::Area;
     smoke_snapshot_test_sync(scene, &params)
         .unwrap()
@@ -259,7 +259,6 @@ fn test_data_image_roundtrip_extend_repeat() {
 fn scheme_test_data_image_roundtrip_extend_repeat() {
     test_data_image_roundtrip_extend_repeat_body(TestBackend::Scheme);
 }
-
 
 /// <https://github.com/web-platform-tests/wpt/blob/18c64a74b1/html/canvas/element/fill-and-stroke-styles/2d.gradient.interpolate.coloralpha.html>
 /// See <https://github.com/linebender/vello/issues/1056>.
@@ -297,7 +296,6 @@ fn test_gradient_color_alpha() {
 fn scheme_test_gradient_color_alpha() {
     test_gradient_color_alpha_body(TestBackend::Scheme);
 }
-
 
 /// See <https://github.com/linebender/vello/issues/1198>
 fn clip_blends_body(backend: TestBackend) {
@@ -341,7 +339,6 @@ fn clip_blends() {
 fn scheme_clip_blends() {
     clip_blends_body(TestBackend::Scheme);
 }
-
 
 // ---------------------------------------------------------------------------
 // GPU synchronization stress tests (ekrano issue #26)
@@ -395,7 +392,6 @@ fn single_bin_red_fill() {
 fn scheme_single_bin_red_fill() {
     single_bin_red_fill_body(TestBackend::Scheme);
 }
-
 
 /// Four-bin grid: 2x2 bins with different colors per quadrant.
 ///
@@ -451,7 +447,6 @@ fn scheme_four_bin_colored_quadrants() {
     four_bin_colored_quadrants_body(TestBackend::Scheme);
 }
 
-
 /// Medium-scale fill across 4x4 bins (1024x1024).
 ///
 /// Larger than 4-bin but smaller than `many_bins_test`. Exercises more
@@ -494,7 +489,6 @@ fn medium_bins_red_fill() {
 fn scheme_medium_bins_red_fill() {
     medium_bins_red_fill_body(TestBackend::Scheme);
 }
-
 
 /// Repeated rendering: render the same scene N times and verify each time.
 ///
@@ -547,4 +541,3 @@ fn repeated_many_bins() {
 fn scheme_repeated_many_bins() {
     repeated_many_bins_body(TestBackend::Scheme);
 }
-

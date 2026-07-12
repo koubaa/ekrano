@@ -44,7 +44,8 @@ fn test_data_image_roundtrip_extend_pad_body(backend: TestBackend) {
         .with_quality(ImageQuality::Low)
         .with_extend(Extend::Pad);
     scene.draw_image(&image, Affine::IDENTITY);
-    let mut params = TestParams::new("data_image_roundtrip", image.image.width, image.image.height).with_backend(backend);
+    let mut params =
+        TestParams::new("data_image_roundtrip", image.image.width, image.image.height).with_backend(backend);
     params.anti_aliasing = AaConfig::Area;
     smoke_snapshot_test_sync(scene, &params)
         .unwrap()
