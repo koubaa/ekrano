@@ -17,6 +17,83 @@ use ekrano_encoding::{
     WorkgroupCountsGpu,
 };
 
+/// Record GPU-orderable reuse epochs on `scheme` for a buffer that will be overwritten.
+fn record_buffer_reuse(scheme: &mut goldy::Scheme, buf: &Buffer) {
+    let refs = buf.last_referenced();
+    if !refs.is_empty() {
+        scheme.record_reuse_epochs(&refs);
+    }
+}
+
+/// Record GPU-orderable reuse epochs on `scheme` for a texture that will be overwritten.
+fn record_texture_reuse(scheme: &mut goldy::Scheme, tex: &Texture) {
+    let refs = tex.last_referenced();
+    if !refs.is_empty() {
+        scheme.record_reuse_epochs(&refs);
+    }
+}
+
+/// Defer buffer drop until its last GPU reference retires (nonblocking path).
+fn defer_buffer_until_retired(ctx: &goldy::Context, buf: Buffer) {
+    let epoch = buf.last_referenced().iter().map(|(_, tv)| tv).max().unwrap_or(0);
+    if epoch == 0 {
+        drop(buf);
+        return;
+    }
+    let mut payload = goldy::DeferredPayload::new();
+    payload.push(buf);
+    ctx.defer_release(epoch, payload);
+}
+
+/// Return a texture to the texture pool immediately, or after its GPU references retire.
+fn release_or_defer_pooled_texture(recorder: &mut SchemeRecorder<'_>, tex: Texture) {
+    if !recorder.nonblocking_reuse {
+        recorder.persistent.tex_pool.release(tex);
+        return;
+    }
+    let epoch = tex.last_referenced().iter().map(|(_, tv)| tv).max().unwrap_or(0);
+    if epoch == 0 {
+        recorder.persistent.tex_pool.release(tex);
+        return;
+    }
+    let mut payload = goldy::DeferredPayload::new();
+    payload.push(DeferredPoolTextureReturn {
+        pending: std::sync::Arc::clone(&recorder.persistent.pending_texture_returns),
+        tex: Some(tex),
+    });
+    recorder.context().defer_release(epoch, payload);
+}
+
+struct DeferredPoolTextureReturn {
+    pending: std::sync::Arc<std::sync::Mutex<Vec<Texture>>>,
+    tex: Option<Texture>,
+}
+
+impl Drop for DeferredPoolTextureReturn {
+    fn drop(&mut self) {
+        if let Some(tex) = self.tex.take() {
+            if let Ok(mut pending) = self.pending.lock() {
+                pending.push(tex);
+            }
+        }
+    }
+}
+
+/// Host-visible staging write: deferred on DX12, synchronous elsewhere.
+fn stage_host_write(recorder: &mut SchemeRecorder<'_>, staging: &Buffer, bytes: &[u8]) -> Result<(), Error> {
+    if recorder.nonblocking_reuse {
+        recorder.upload_scheme().defer_host_write(
+            &staging.last_referenced(),
+            staging,
+            0,
+            bytes.to_vec().into_boxed_slice(),
+        );
+        Ok(())
+    } else {
+        staging.write(0, bytes).map_err(|e| Error::Gpu(e.to_string()))
+    }
+}
+
 /// Shader binding helper for pipeline [`Buffer`] handles.
 pub(crate) trait PipelineBuffer {
     fn as_binding(&self) -> GpuBinding<'_>;
@@ -83,13 +160,11 @@ pub(crate) fn alloc_or_reuse_scheme_indirect(
 ) -> Result<Buffer, Error> {
     if let Some((cached_wg, buf)) = recorder.persistent.cached_scheme_indirect.take() {
         if &cached_wg == wg_counts_gpu {
+            record_buffer_reuse(recorder.scheme(), &buf);
             return Ok(buf);
         }
-        // WorkgroupCountsGpu changed (resize / topology change): drop the stale
-        // composite buffer immediately. At FRAME_PIPELINE_DEPTH=1, begin_frame has
-        // already waited for the prior frame to retire before we reach this point,
-        // so the buffer is no longer in-flight on the GPU.
-        drop(buf);
+        // WorkgroupCountsGpu changed: defer drop until prior GPU use retires.
+        defer_buffer_until_retired(recorder.context(), buf);
     }
     let fields: Vec<_> = (0..N_INDIRECT_STAGES as usize)
         .map(|i| {
@@ -251,9 +326,10 @@ pub(crate) fn alloc_or_reuse_scene(recorder: &mut SchemeRecorder<'_>, live_bytes
     let bucket = scene_size_bucket(live_bytes);
     if let Some((cached_bucket, buf)) = recorder.persistent.cached_scene.take() {
         if cached_bucket >= bucket {
+            record_buffer_reuse(recorder.upload_scheme(), &buf);
             return Ok(buf);
         }
-        drop(buf);
+        defer_buffer_until_retired(recorder.context(), buf);
     }
     recorder
         .persistent
@@ -269,7 +345,7 @@ fn alloc_or_reuse_scene_staging(recorder: &mut SchemeRecorder<'_>, live_bytes: u
         if cached_bucket >= bucket {
             return Ok(buf);
         }
-        drop(buf);
+        defer_buffer_until_retired(recorder.context(), buf);
     }
     recorder
         .persistent
@@ -300,7 +376,7 @@ fn alloc_or_reuse_config_staging(recorder: &mut SchemeRecorder<'_>) -> Result<Bu
 pub(crate) fn stage_scene_bytes(recorder: &mut SchemeRecorder<'_>, scene: &Buffer, bytes: &[u8]) -> Result<(), Error> {
     let bucket = scene_size_bucket(bytes.len());
     let staging = alloc_or_reuse_scene_staging(recorder, bytes.len())?;
-    staging.write(0, bytes).map_err(|e| Error::Gpu(e.to_string()))?;
+    stage_host_write(recorder, &staging, bytes)?;
     if recorder.upload_needs_record {
         // Copy the full staging buffer (bucket-sized) rather than bytes.len() bytes.
         // On retained frames the packed content varies within the bucket; the GPU reads
@@ -322,7 +398,7 @@ pub(crate) fn stage_config_bytes(
     bytes: &[u8],
 ) -> Result<(), Error> {
     let staging = alloc_or_reuse_config_staging(recorder)?;
-    staging.write(0, bytes).map_err(|e| Error::Gpu(e.to_string()))?;
+    stage_host_write(recorder, &staging, bytes)?;
     if recorder.upload_needs_record {
         recorder
             .upload_scheme()
@@ -337,10 +413,11 @@ pub(crate) fn stage_config_bytes(
 pub(crate) fn alloc_or_reuse_bump(recorder: &mut SchemeRecorder<'_>, size: u64) -> Result<Buffer, Error> {
     if let Some((cached_size, buf)) = recorder.persistent.cached_bump.take() {
         if cached_size == size {
+            record_buffer_reuse(recorder.scheme(), &buf);
             return Ok(buf);
         }
         recorder.persistent.cached_bump_grant = None;
-        drop(buf);
+        defer_buffer_until_retired(recorder.context(), buf);
     }
     recorder
         .persistent
@@ -394,7 +471,7 @@ fn alloc_or_reuse_full_texture_staging(
         if cw >= width && ch >= height {
             return Ok(buf);
         }
-        drop(buf);
+        defer_buffer_until_retired(recorder.context(), buf);
     }
     let size = texture_flat_bytes(width, height).max(4);
     recorder
@@ -444,8 +521,9 @@ fn stage_texture_full(
 ) -> Result<(), Error> {
     let width = texture.width();
     let height = texture.height();
+    record_texture_reuse(recorder.upload_scheme(), texture);
     let staging = alloc_or_reuse_full_texture_staging(recorder, cached_staging, width, height)?;
-    staging.write(0, bytes).map_err(|e| Error::Gpu(e.to_string()))?;
+    stage_host_write(recorder, &staging, bytes)?;
     if recorder.upload_needs_record {
         recorder
             .upload_scheme()
@@ -466,8 +544,9 @@ fn stage_texture_region(
     bytes: &[u8],
 ) -> Result<(), Error> {
     let key = (x, y, width, height);
+    record_texture_reuse(recorder.upload_scheme(), texture);
     let staging = alloc_or_reuse_region_texture_staging(recorder, x, y, width, height)?;
-    staging.write(0, bytes).map_err(|e| Error::Gpu(e.to_string()))?;
+    stage_host_write(recorder, &staging, bytes)?;
     if recorder.upload_needs_record {
         recorder
             .upload_scheme()
@@ -517,7 +596,10 @@ fn al_cached_opt(
     name: &'static str,
 ) -> Result<Buffer, Error> {
     match cached {
-        Some(buf) => Ok(buf),
+        Some(buf) => {
+            record_buffer_reuse(recorder.scheme(), &buf);
+            Ok(buf)
+        }
         None => alloc_pipeline_buffer(recorder, size, stride, name, BufferFlags::empty()),
     }
 }
@@ -526,12 +608,11 @@ fn al_cached_opt(
 /// config changes — retained parcels in [`crate::goldy_renderer::PersistentState::retained_pool`].
 /// See `resource-pool.md §1` for the rationale behind this split from [`ScratchPipelineBuffers`].
 ///
-/// At [`crate::goldy_renderer::FRAME_PIPELINE_DEPTH`] = 1, `begin_frame` retires the prior
-/// submission before recording, so the same deeds can be rebound and GPU-overwritten each frame
-/// with no client-side progress gate. If pipeline depth is raised so the next frame may record
-/// while the prior frame's GPU work is still in flight on these buffers, a single retained deed
-/// is not enough — use double-buffered parcels or a transient pool instead; do not keep them in
-/// [`goldy::RetainedPool`] under inter-frame overlap.
+/// Cross-frame reuse is ordered by [`goldy::Scheme::record_reuse_epochs`] on the worker
+/// scheme (DX12) or by the frame-orchestrator begin_frame wait (Vulkan/Metal). If pipeline
+/// depth is raised so the next frame may record while the prior frame's GPU work is still in
+/// flight without those gates, a single retained deed is not enough — use double-buffered
+/// parcels or a transient pool instead.
 pub(crate) struct StablePipelineBuffers {
     pub info_bin_data: Buffer,
     pub tile: Buffer,
@@ -586,6 +667,7 @@ fn alloc_stable_buffer(
     stride: u32,
 ) -> Result<Buffer, Error> {
     if let Some(buffer) = cached {
+        record_buffer_reuse(recorder.scheme(), &buffer);
         return Ok(buffer);
     }
     if std::env::var_os("EKRANO_LOG_PIPELINE_RESIZE").is_some() {
@@ -800,7 +882,7 @@ impl PipelineResources {
                     Ok(tex) => tex,
                     Err(stale) => {
                         if let Some(tex) = *stale {
-                            recorder.persistent.tex_pool.release(tex);
+                            release_or_defer_pooled_texture(recorder, tex);
                         }
                         let tex =
                             acquire_texture_rgba(recorder, 1, 1, TextureKind::Interpolated, TextureFlags::COPY_DST)?;
@@ -813,7 +895,7 @@ impl PipelineResources {
                     Ok(tex) => tex,
                     Err(stale) => {
                         if let Some(tex) = *stale {
-                            recorder.persistent.tex_pool.release(tex);
+                            release_or_defer_pooled_texture(recorder, tex);
                         }
                         let tex = acquire_texture_rgba(
                             recorder,
@@ -838,14 +920,17 @@ impl PipelineResources {
         let (image_atlas, _) = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.image_atlas");
             if recorder.upload_needs_record {
-                recorder.persistent.cached_image_region_stagings.clear();
+                let stale = std::mem::take(&mut recorder.persistent.cached_image_region_stagings);
+                for (_, buf) in stale {
+                    defer_buffer_until_retired(recorder.context(), buf);
+                }
             }
             if images.images.is_empty() {
                 let t = match take_cached_texture(&mut recorder.persistent.cached_image_atlas, 1, 1) {
                     Ok(tex) => tex,
                     Err(stale) => {
                         if let Some(tex) = *stale {
-                            recorder.persistent.tex_pool.release(tex);
+                            release_or_defer_pooled_texture(recorder, tex);
                         }
                         let tex = acquire_texture_rgba(
                             recorder,
@@ -865,7 +950,7 @@ impl PipelineResources {
                         Ok(tex) => tex,
                         Err(stale) => {
                             if let Some(tex) = *stale {
-                                recorder.persistent.tex_pool.release(tex);
+                                release_or_defer_pooled_texture(recorder, tex);
                             }
                             let tex = acquire_texture_rgba(
                                 recorder,
@@ -897,7 +982,7 @@ impl PipelineResources {
                         Ok(tex) => tex,
                         Err(stale) => {
                             if let Some(tex) = *stale {
-                                recorder.persistent.tex_pool.release(tex);
+                                release_or_defer_pooled_texture(recorder, tex);
                             }
                             let tex = acquire_texture_rgba(
                                 recorder,
@@ -921,7 +1006,7 @@ impl PipelineResources {
                         Ok(tex) => tex,
                         Err(stale) => {
                             if let Some(tex) = *stale {
-                                recorder.persistent.tex_pool.release(tex);
+                                release_or_defer_pooled_texture(recorder, tex);
                             }
                             let tex = acquire_texture_rgba(
                                 recorder,
@@ -951,6 +1036,7 @@ impl PipelineResources {
         let config = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.config_upload");
             let config_buf = if let Some((_, buf)) = recorder.persistent.cached_config_uniform.take() {
+                record_buffer_reuse(recorder.upload_scheme(), &buf);
                 buf
             } else {
                 recorder
@@ -972,9 +1058,8 @@ impl PipelineResources {
         let buffer_sizes = cpu_config_owned.buffer_sizes;
 
         // Try to reuse cached pipeline buffers from the previous frame.
-        // At depth=1, begin_frame blocks until the previous frame's GPU work is complete,
-        // so these buffers are safe to rebind immediately — ordering is via the orchestrator
-        // and task-graph barriers, not a client-side gpu_progress gate on the cache slot.
+        // On DX12, ordering is via submit-side reuse epochs / deferred host writes.
+        // On Vulkan/Metal, begin_frame still retires the prior frame before reuse.
         let (cached_stable, cached_scratch) = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.pipeline_cache");
             match recorder.persistent.take_cached_pipeline() {
@@ -1022,23 +1107,52 @@ impl PipelineResources {
                         c.stable.lines,
                         c.stable.seg_counts,
                     ] {
+                        // RetainedPool adopts with ready_after = last_referenced.
                         pool.release_buffer(ctx, buffer);
                     }
-                    let ppool = &mut recorder.persistent.pool;
-                    ppool.return_buf(c.scratch.reduced, "ekrano.reduced_buf");
-                    ppool.return_buf(c.scratch.reduced2, "ekrano.reduced2_buf");
-                    ppool.return_buf(c.scratch.reduced_scan, "ekrano.reduced_scan_buf");
-                    ppool.return_buf(c.scratch.tagmonoid, "ekrano.tagmonoid_buf");
-                    ppool.return_buf(c.scratch.path_bbox, "ekrano.path_bbox_buf");
-                    ppool.return_buf(c.scratch.draw_reduced, "ekrano.draw_reduced_buf");
-                    ppool.return_buf(c.scratch.draw_monoid, "ekrano.draw_monoid_buf");
-                    ppool.return_buf(c.scratch.clip_inp, "ekrano.clip_inp_buf");
-                    ppool.return_buf(c.scratch.clip_el, "ekrano.clip_el_buf");
-                    ppool.return_buf(c.scratch.clip_bic, "ekrano.clip_bic_buf");
-                    ppool.return_buf(c.scratch.clip_bbox, "ekrano.clip_bbox_buf");
-                    ppool.return_buf(c.scratch.draw_bbox, "ekrano.draw_bbox_buf");
-                    ppool.return_buf(c.scratch.bin_header, "ekrano.bin_header_buf");
-                    ppool.return_buf(c.scratch.path, "ekrano.path_buf");
+                    let scratch_returns = vec![
+                        (c.scratch.reduced, "ekrano.reduced_buf"),
+                        (c.scratch.reduced2, "ekrano.reduced2_buf"),
+                        (c.scratch.reduced_scan, "ekrano.reduced_scan_buf"),
+                        (c.scratch.tagmonoid, "ekrano.tagmonoid_buf"),
+                        (c.scratch.path_bbox, "ekrano.path_bbox_buf"),
+                        (c.scratch.draw_reduced, "ekrano.draw_reduced_buf"),
+                        (c.scratch.draw_monoid, "ekrano.draw_monoid_buf"),
+                        (c.scratch.clip_inp, "ekrano.clip_inp_buf"),
+                        (c.scratch.clip_el, "ekrano.clip_el_buf"),
+                        (c.scratch.clip_bic, "ekrano.clip_bic_buf"),
+                        (c.scratch.clip_bbox, "ekrano.clip_bbox_buf"),
+                        (c.scratch.draw_bbox, "ekrano.draw_bbox_buf"),
+                        (c.scratch.bin_header, "ekrano.bin_header_buf"),
+                        (c.scratch.path, "ekrano.path_buf"),
+                    ];
+                    if recorder.nonblocking_reuse {
+                        let mut epoch = 0u64;
+                        for (buf, _) in &scratch_returns {
+                            for (_, tv) in buf.last_referenced().iter() {
+                                epoch = epoch.max(tv);
+                            }
+                        }
+                        if epoch > 0 {
+                            crate::goldy_renderer::defer_frame_gpu_resources(
+                                ctx,
+                                recorder.persistent,
+                                epoch,
+                                Vec::new(),
+                                scratch_returns,
+                            );
+                        } else {
+                            let ppool = &mut recorder.persistent.pool;
+                            for (buf, name) in scratch_returns {
+                                ppool.return_buf(buf, name);
+                            }
+                        }
+                    } else {
+                        let ppool = &mut recorder.persistent.pool;
+                        for (buf, name) in scratch_returns {
+                            ppool.return_buf(buf, name);
+                        }
+                    }
                     (None, None)
                 }
                 None => (None, None),
@@ -1064,6 +1178,10 @@ impl PipelineResources {
                 params.height,
                 out_image_format,
             ) {
+                record_texture_reuse(recorder.scheme(), &cached_out);
+                for layer in &cached_layers {
+                    record_texture_reuse(recorder.scheme(), layer);
+                }
                 (cached_out, cached_layers)
             } else {
                 let _tz2 = goldy::tracy_zone!("ekrano.prepare.render_targets.ALLOC");

@@ -13,21 +13,15 @@
 use ekrano::kurbo::{Affine, Rect};
 use ekrano::peniko::{Fill, color::palette};
 use ekrano::{AaConfig, GoldyRenderer, RenderParams, Scene};
-use ekrano_tests::test_alloc_texture;
+use ekrano_tests::{test_alloc_texture, test_device, SharedTestDevice};
 use goldy::types::{TextureFlags, TextureFormat, TextureKind};
-use goldy::{Device, DeviceDescriptor, Instance, RequestAdapterOptions};
 
 const FRAME_COUNT: usize = 300;
 const WIDTH: u32 = 64;
 const HEIGHT: u32 = 64;
 
-fn make_device() -> Device {
-    let instance = Instance::new().expect("Instance::new");
-    instance
-        .request_adapter(&RequestAdapterOptions::default())
-        .expect("adapter")
-        .request_device(&DeviceDescriptor::default())
-        .expect("No Goldy device")
+fn make_device() -> SharedTestDevice {
+    test_device()
 }
 
 fn tiny_scene() -> Scene {
@@ -48,7 +42,8 @@ fn tiny_scene() -> Scene {
 fn placement_heap_paged_stable() {
     env_logger::try_init().ok();
 
-    let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
+    let device = make_device();
+    let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new");
     let texture = test_alloc_texture(
         renderer.device(),
         WIDTH,
@@ -122,7 +117,8 @@ fn placement_heap_paged_stable() {
 fn placement_heap_capacity_sized_correctly() {
     env_logger::try_init().ok();
 
-    let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
+    let device = make_device();
+    let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new");
     let texture = test_alloc_texture(
         renderer.device(),
         WIDTH,

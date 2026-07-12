@@ -33,8 +33,9 @@
 
 use std::env;
 use std::io::ErrorKind;
+use std::ops::Deref;
 use std::path::Path;
-use std::sync::{Arc, Once};
+use std::sync::{Arc, Mutex, MutexGuard, Once, OnceLock};
 
 use log as _;
 
@@ -44,24 +45,10 @@ use ekrano::peniko::{Blob, Color, ImageFormat, color::palette};
 use ekrano::peniko::{ImageAlphaType, ImageData};
 use ekrano::{AaConfig, GoldyBackend, GoldyRenderer, Scene};
 use goldy::types::{TextureFlags, TextureFormat, TextureKind};
-use goldy::{Device, DeviceDescriptor, Instance, RequestAdapterOptions, Texture, TexturePool};
+use goldy::{BackendType, Device, DeviceDescriptor, Instance, RequestAdapterOptions, Texture, TexturePool};
 use image::RgbImage;
 use scenes::{ExampleScene, ImageCache, SceneParams, SimpleText};
 
-/// A fresh, independent GPU `Device` for a single test render.
-///
-/// Tests run concurrently (cargo's default thread pool). A `Device` owns device-global
-/// GPU state — most importantly the bindless descriptor heap and resource registry —
-/// that is not safe to mutate from multiple concurrent renders: index allocation/free/
-/// reuse on one thread can rewrite a descriptor slot while another thread's submitted
-/// GPU work still references it, producing intermittent, partial (tiled) corruption.
-///
-/// Giving each test its own device makes tests truly independent (no shared device-global
-/// state), which eliminates that race and, as a bonus, removes the device-lock contention
-/// that serialized concurrent renders.
-///
-/// TODO: this papers over a legitimate problem with ekrano - each test should have its
-/// own context and therefore never race if the runtime is implemented correctly.
 /// Allocate a standalone texture for integration tests (via [`TexturePool`]).
 pub fn test_alloc_texture(
     device: &Device,
@@ -76,13 +63,71 @@ pub fn test_alloc_texture(
         .expect("acquire texture")
 }
 
-fn test_device() -> Device {
-    let instance = Instance::new().expect("Instance::new failed");
+enum SharedDeviceInit {
+    Ready(Device),
+    Unavailable,
+}
+
+static SHARED_DEVICE: OnceLock<SharedDeviceInit> = OnceLock::new();
+static WARP_TEST_SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn try_create_device() -> Option<Device> {
+    let instance = Instance::new().ok()?;
     instance
         .request_adapter(&RequestAdapterOptions::default())
-        .expect("request_adapter failed")
-        .request_device(&DeviceDescriptor::default())
-        .expect("No Goldy device available")
+        .and_then(|a| a.request_device(&DeviceDescriptor::default()))
+        .ok()
+}
+
+fn is_dx12_warp(device: &Device) -> bool {
+    // goldy::WARP_ADAPTER_ID is u32::MAX.
+    device.backend_type() == BackendType::Dx12 && device.adapter_id() == u32::MAX
+}
+
+/// Process-lifetime shared GPU device for ordinary integration tests.
+///
+/// One device is shared across tests in this process. On DX12 WARP, concurrent test
+/// bodies are serialized via a mutex held for the guard's lifetime. Hardware backends
+/// skip the lock so cargo's thread pool can overlap work.
+///
+/// Hold this guard for the full test body. Device create/destroy lifetime tests must
+/// construct their own [`Device`] and must not use this helper.
+pub struct SharedTestDevice {
+    device: &'static Device,
+    _warp_guard: Option<MutexGuard<'static, ()>>,
+}
+
+impl Deref for SharedTestDevice {
+    type Target = Device;
+
+    fn deref(&self) -> &Device {
+        self.device
+    }
+}
+
+/// Borrow the process-shared device (WARP-serialized when applicable).
+pub fn test_device() -> SharedTestDevice {
+    let init = SHARED_DEVICE.get_or_init(|| match try_create_device() {
+        Some(device) => SharedDeviceInit::Ready(device),
+        None => SharedDeviceInit::Unavailable,
+    });
+    let SharedDeviceInit::Ready(device) = init else {
+        panic!("No Goldy device available");
+    };
+    let _warp_guard = if is_dx12_warp(device) {
+        Some(
+            WARP_TEST_SERIAL
+                .get_or_init(|| Mutex::new(()))
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+        )
+    } else {
+        None
+    };
+    SharedTestDevice {
+        device,
+        _warp_guard,
+    }
 }
 
 mod snapshot;

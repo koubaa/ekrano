@@ -21,9 +21,8 @@
 use ekrano::kurbo::{Affine, Circle, Line, Rect, Stroke};
 use ekrano::peniko::{Fill, color::palette};
 use ekrano::{AaConfig, GoldyRenderer, RenderParams, Scene};
-use ekrano_tests::test_alloc_texture;
+use ekrano_tests::{test_alloc_texture, test_device, SharedTestDevice};
 use goldy::types::{TextureFlags, TextureFormat, TextureKind};
-use goldy::{Device, DeviceDescriptor, Instance, RequestAdapterOptions};
 
 #[cfg(target_os = "windows")]
 fn gpu_test_lock() -> Option<std::sync::MutexGuard<'static, ()>> {
@@ -48,13 +47,8 @@ fn gpu_test_lock() -> Option<()> {
 const WIDTH: u32 = 64;
 const HEIGHT: u32 = 64;
 
-fn make_device() -> Device {
-    let instance = Instance::new().expect("Instance::new");
-    instance
-        .request_adapter(&RequestAdapterOptions::default())
-        .expect("adapter")
-        .request_device(&DeviceDescriptor::default())
-        .expect("No Goldy device")
+fn make_device() -> SharedTestDevice {
+    test_device()
 }
 
 fn tiny_scene() -> Scene {
@@ -117,7 +111,8 @@ fn render_n_frames(renderer: &mut GoldyRenderer, scene: &Scene, params: &RenderP
 fn default_strategy_survives_200_frames_tiny_scene() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
-    let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
+    let device = make_device();
+    let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new");
     let scene = tiny_scene();
     let params = RenderParams {
         base_color: palette::css::BLACK,
@@ -134,7 +129,8 @@ fn default_strategy_survives_200_frames_tiny_scene() {
 fn default_strategy_survives_200_frames_complex_scene() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
-    let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
+    let device = make_device();
+    let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new");
     let scene = complex_scene();
     let params = RenderParams {
         base_color: palette::css::BLACK,
@@ -155,7 +151,8 @@ fn default_strategy_survives_200_frames_complex_scene() {
 fn robust_mode_survives_200_frames() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
-    let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
+    let device = make_device();
+    let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new");
     let scene = tiny_scene();
     let params = RenderParams {
         base_color: palette::css::BLACK,
@@ -176,7 +173,8 @@ fn robust_mode_survives_200_frames() {
 fn complex_scene_area_aa_survives_100_frames() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
-    let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
+    let device = make_device();
+    let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new");
     let scene = complex_scene();
     let params = RenderParams {
         base_color: palette::css::BLACK,
@@ -203,7 +201,8 @@ fn complex_scene_area_aa_survives_100_frames() {
 fn complex_scene_msaa16_survives_100_frames() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
-    let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
+    let device = make_device();
+    let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new");
     let scene = complex_scene();
     let params = RenderParams {
         base_color: palette::css::BLACK,
@@ -224,7 +223,8 @@ fn complex_scene_msaa16_survives_100_frames() {
 fn resource_pool_stabilizes_after_warmup() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
-    let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
+    let device = make_device();
+    let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new");
     let texture = test_alloc_texture(
         renderer.device(),
         WIDTH,
@@ -280,7 +280,8 @@ fn resource_pool_stabilizes_after_warmup() {
 fn overflow_heaps_compact_to_zero_in_steady_state() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
-    let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
+    let device = make_device();
+    let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new");
     let texture = test_alloc_texture(
         renderer.device(),
         WIDTH,
@@ -327,7 +328,8 @@ fn overflow_heaps_compact_to_zero_in_steady_state() {
 fn growing_scene_survives_without_heap_exhaustion() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
-    let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
+    let device = make_device();
+    let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new");
     let texture = test_alloc_texture(
         renderer.device(),
         WIDTH,
@@ -372,7 +374,8 @@ fn growing_scene_survives_without_heap_exhaustion() {
 fn shrinking_scene_does_not_leak_buffers() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
-    let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
+    let device = make_device();
+    let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new");
     let texture = test_alloc_texture(
         renderer.device(),
         WIDTH,
@@ -424,7 +427,8 @@ fn shrinking_scene_does_not_leak_buffers() {
 fn deferred_ring_does_not_grow_unbounded() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
-    let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
+    let device = make_device();
+    let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new");
     let texture = test_alloc_texture(
         renderer.device(),
         WIDTH,
@@ -468,7 +472,8 @@ fn deferred_ring_does_not_grow_unbounded() {
 fn large_resolution_survives_50_frames() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
-    let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
+    let device = make_device();
+    let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new");
     let w = 512;
     let h = 512;
     let texture = test_alloc_texture(
