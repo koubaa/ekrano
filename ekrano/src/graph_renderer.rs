@@ -532,6 +532,8 @@ impl GraphRenderer {
                 Some(goldy::Sampler::nearest(&self.device).map_err(|e| Error::Gpu(e.to_string()))?);
         }
         self.context.flush_deferred_deletions();
+        // Reclaim owned buffers whose defer epoch just retired during the begin_frame wait.
+        self.persistent.drain_pending_returns();
         let t_pool = t1.elapsed();
 
         let t2 = Instant::now();

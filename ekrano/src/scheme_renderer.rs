@@ -526,6 +526,10 @@ impl SchemeRenderer {
                 Some(goldy::Sampler::nearest(&self.device).map_err(|e| Error::Gpu(e.to_string()))?);
         }
         self.context.flush_deferred_deletions();
+        // Reclaim owned buffers whose defer epoch just retired during the begin_frame wait.
+        // Without this, prepare() pool-misses and allocates duplicates (scene+bump) while
+        // the prior frame's buffers sit in pending_owned_returns.
+        self.persistent.drain_pending_returns();
         let t_pool = t1.elapsed();
 
         let t2 = Instant::now();

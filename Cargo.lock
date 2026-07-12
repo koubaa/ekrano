@@ -766,6 +766,7 @@ dependencies = [
  "metal",
  "objc",
  "raw-window-handle",
+ "rustc-hash",
  "scopeguard",
  "serde",
  "thiserror",
