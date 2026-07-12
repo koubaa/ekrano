@@ -10,7 +10,7 @@
 use ekrano::kurbo::{Affine, Rect};
 use ekrano::peniko::{Fill, color::palette};
 use ekrano::{AaConfig, GoldyBackend, GoldyRenderer, RenderParams, Scene};
-use ekrano_tests::test_alloc_texture;
+use ekrano_tests::{TestBackend, test_alloc_texture};
 use goldy::types::{TextureFlags, TextureFormat, TextureKind};
 use goldy::{Device, DeviceDescriptor, Instance, RequestAdapterOptions};
 
@@ -48,6 +48,10 @@ fn make_device() -> Device {
         .expect("No Goldy device")
 }
 
+fn make_renderer(backend: TestBackend) -> GoldyRenderer {
+    GoldyRenderer::new_with_backend(&make_device(), backend.goldy_backend()).expect("GoldyRenderer")
+}
+
 fn tiny_scene() -> Scene {
     let mut scene = Scene::new();
     scene.fill(
@@ -61,12 +65,11 @@ fn tiny_scene() -> Scene {
 }
 
 /// Render many frames and verify the frame-orchestrator ring stays at depth=1.
-#[test]
-fn single_frame_ring_depth_bounded() {
+fn single_frame_ring_depth_bounded_body(backend: TestBackend) {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
 
-    let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
+    let mut renderer = make_renderer(backend);
     let texture = test_alloc_texture(
         renderer.device(),
         WIDTH,
@@ -96,14 +99,22 @@ fn single_frame_ring_depth_bounded() {
         );
     }
 }
+#[test]
+fn single_frame_ring_depth_bounded() {
+    single_frame_ring_depth_bounded_body(TestBackend::Classic);
+}
+
+#[test]
+fn scheme_single_frame_ring_depth_bounded() {
+    single_frame_ring_depth_bounded_body(TestBackend::Scheme);
+}
 
 /// Verify the resource pool stabilises after warmup under the single-frame model.
-#[test]
-fn resource_pool_stable_under_single_frame() {
+fn resource_pool_stable_under_single_frame_body(backend: TestBackend) {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
 
-    let mut renderer = GoldyRenderer::new(&make_device()).expect("GoldyRenderer::new");
+    let mut renderer = make_renderer(backend);
     let texture = test_alloc_texture(
         renderer.device(),
         WIDTH,
@@ -143,6 +154,15 @@ fn resource_pool_stable_under_single_frame() {
         "resource pool grew excessively after warmup: baseline={} max_seen={max_pooled} growth={growth}",
         baseline.total_pooled_buffers,
     );
+}
+#[test]
+fn resource_pool_stable_under_single_frame() {
+    resource_pool_stable_under_single_frame_body(TestBackend::Classic);
+}
+
+#[test]
+fn scheme_resource_pool_stable_under_single_frame() {
+    resource_pool_stable_under_single_frame_body(TestBackend::Scheme);
 }
 
 /// Verify the composite indirect buffer is reused (not reallocated) across frames when the

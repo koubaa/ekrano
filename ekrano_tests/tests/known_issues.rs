@@ -17,7 +17,7 @@ use ekrano::{
     kurbo::{Affine, Rect, Triangle},
     peniko::{Color, ColorStop, Extend, Gradient, ImageFormat, ImageQuality, Mix, color::palette},
 };
-use ekrano_tests::{TestParams, smoke_snapshot_test_sync, snapshot_test_sync};
+use ekrano_tests::{TestBackend, TestParams, smoke_snapshot_test_sync, snapshot_test_sync};
 use scenes::ImageCache;
 
 /// A reproduction of <https://github.com/linebender/vello/issues/680>
@@ -72,7 +72,7 @@ use scenes::ImageCache;
 /// 3. **goldy vulkan buffer.rs**: Added `TRANSFER_WRITE → COMPUTE_SHADER` memory
 ///    barriers after `cmd_fill_buffer` and `cmd_copy_buffer` in `Buffer::clear`.
 ///
-fn many_bins() {
+fn many_bins_body(backend: TestBackend) {
     let mut scene = Scene::new();
     scene.fill(
         ekrano::peniko::Fill::NonZero,
@@ -81,7 +81,7 @@ fn many_bins() {
         None,
         &Rect::new(-5., -5., 256. * 20., 256. * 20.),
     );
-    let params = TestParams::new("many_bins", 256 * 17, 256 * 17);
+    let params = TestParams::new("many_bins", 256 * 17, 256 * 17).with_backend(backend);
     // To view, use EKRANO_DEBUG_TEST=many_bins
     let image = ekrano_tests::render_then_debug_sync(&scene, &params).unwrap();
     assert_eq!(image.format, ImageFormat::Rgba8);
@@ -139,13 +139,21 @@ fn many_bins() {
 
 #[test]
 fn many_bins_test() {
-    many_bins();
+    many_bins_test_body(TestBackend::Classic);
+}
+
+#[test]
+fn scheme_many_bins_test() {
+    many_bins_test_body(TestBackend::Scheme);
+}
+
+fn many_bins_test_body(backend: TestBackend) {
+    many_bins_body(backend);
 }
 
 /// Regression test for <https://github.com/linebender/vello/issues/1061>
 /// (Fixed in ekrano by the `END_CLIP` draw-data encoding fix.)
-#[test]
-fn test_layer_size() {
+fn test_layer_size_body(backend: TestBackend) {
     let mut scene = Scene::new();
     scene.fill(
         ekrano::peniko::Fill::NonZero,
@@ -172,20 +180,27 @@ fn test_layer_size() {
     // Compose::Clear makes the layer region transparent; compositing over white
     // makes the hole visible as white.  The reference was generated on a white-
     // surface renderer (vello-sparse), so we match that here.
-    let mut params = TestParams::new("layer_size", 60, 60);
+    let mut params = TestParams::new("layer_size", 60, 60).with_backend(backend);
     params.base_color = Some(palette::css::WHITE);
     smoke_snapshot_test_sync(scene, &params)
         .unwrap()
         .assert_mean_less_than(0.001);
 }
+#[test]
+fn test_layer_size() {
+    test_layer_size_body(TestBackend::Classic);
+}
+
+#[test]
+fn scheme_test_layer_size() {
+    test_layer_size_body(TestBackend::Scheme);
+}
+
 
 const DATA_IMAGE_PNG: &[u8] = include_bytes!("../snapshots/smoke/data_image_roundtrip.png");
 
 /// Test for <https://github.com/linebender/vello/issues/972>
-#[test]
-#[ignore = "CI runs these tests on a CPU, leading to them having unrealistic precision"] // Uncomment below line when removing this.
-#[should_panic]
-fn test_data_image_roundtrip_extend_reflect() {
+fn test_data_image_roundtrip_extend_reflect_body(backend: TestBackend) {
     let mut scene = Scene::new();
     let mut images = ImageCache::new();
     let image = images
@@ -194,18 +209,29 @@ fn test_data_image_roundtrip_extend_reflect() {
         .with_quality(ImageQuality::Low)
         .with_extend(Extend::Reflect);
     scene.draw_image(&image, Affine::IDENTITY);
-    let mut params = TestParams::new("data_image_roundtrip", image.image.width, image.image.height);
+    let mut params = TestParams::new("data_image_roundtrip", image.image.width, image.image.height).with_backend(backend);
     params.anti_aliasing = AaConfig::Area;
     smoke_snapshot_test_sync(scene, &params)
         .unwrap()
         .assert_mean_less_than(0.001);
 }
+#[ignore = "CI runs these tests on a CPU, leading to them having unrealistic precision"]
+#[should_panic]
+#[test]
+fn test_data_image_roundtrip_extend_reflect() {
+    test_data_image_roundtrip_extend_reflect_body(TestBackend::Classic);
+}
+
+#[ignore = "CI runs these tests on a CPU, leading to them having unrealistic precision"]
+#[should_panic]
+#[test]
+fn scheme_test_data_image_roundtrip_extend_reflect() {
+    test_data_image_roundtrip_extend_reflect_body(TestBackend::Scheme);
+}
+
 
 /// Test for <https://github.com/linebender/vello/issues/972>
-#[test]
-#[ignore = "CI runs these tests on a CPU, leading to them having unrealistic precision"] // Uncomment below line when removing this.
-#[should_panic]
-fn test_data_image_roundtrip_extend_repeat() {
+fn test_data_image_roundtrip_extend_repeat_body(backend: TestBackend) {
     let mut scene = Scene::new();
     let mut images = ImageCache::new();
     let image = images
@@ -214,17 +240,30 @@ fn test_data_image_roundtrip_extend_repeat() {
         .with_quality(ImageQuality::Low)
         .with_extend(Extend::Repeat);
     scene.draw_image(&image, Affine::IDENTITY);
-    let mut params = TestParams::new("data_image_roundtrip", image.image.width, image.image.height);
+    let mut params = TestParams::new("data_image_roundtrip", image.image.width, image.image.height).with_backend(backend);
     params.anti_aliasing = AaConfig::Area;
     smoke_snapshot_test_sync(scene, &params)
         .unwrap()
         .assert_mean_less_than(0.001);
 }
+#[ignore = "CI runs these tests on a CPU, leading to them having unrealistic precision"]
+#[should_panic]
+#[test]
+fn test_data_image_roundtrip_extend_repeat() {
+    test_data_image_roundtrip_extend_repeat_body(TestBackend::Classic);
+}
+
+#[ignore = "CI runs these tests on a CPU, leading to them having unrealistic precision"]
+#[should_panic]
+#[test]
+fn scheme_test_data_image_roundtrip_extend_repeat() {
+    test_data_image_roundtrip_extend_repeat_body(TestBackend::Scheme);
+}
+
 
 /// <https://github.com/web-platform-tests/wpt/blob/18c64a74b1/html/canvas/element/fill-and-stroke-styles/2d.gradient.interpolate.coloralpha.html>
 /// See <https://github.com/linebender/vello/issues/1056>.
-#[test]
-fn test_gradient_color_alpha() {
+fn test_gradient_color_alpha_body(backend: TestBackend) {
     let mut scene = Scene::new();
     let viewport = Rect::new(0., 0., 100., 50.);
     scene.fill(
@@ -243,16 +282,25 @@ fn test_gradient_color_alpha() {
         None,
         &viewport,
     );
-    let mut params = TestParams::new("gradient_color_alpha", 100, 50);
+    let mut params = TestParams::new("gradient_color_alpha", 100, 50).with_backend(backend);
     params.base_color = Some(palette::css::WHITE);
     smoke_snapshot_test_sync(scene, &params)
         .unwrap()
         .assert_mean_less_than(0.001);
 }
+#[test]
+fn test_gradient_color_alpha() {
+    test_gradient_color_alpha_body(TestBackend::Classic);
+}
+
+#[test]
+fn scheme_test_gradient_color_alpha() {
+    test_gradient_color_alpha_body(TestBackend::Scheme);
+}
+
 
 /// See <https://github.com/linebender/vello/issues/1198>
-#[test]
-fn clip_blends() {
+fn clip_blends_body(backend: TestBackend) {
     let mut scene = Scene::new();
 
     scene.fill(
@@ -281,9 +329,19 @@ fn clip_blends() {
     scene.pop_layer();
     scene.pop_layer();
 
-    let params = TestParams::new("clip_blends", 100, 100);
+    let params = TestParams::new("clip_blends", 100, 100).with_backend(backend);
     snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.001);
 }
+#[test]
+fn clip_blends() {
+    clip_blends_body(TestBackend::Classic);
+}
+
+#[test]
+fn scheme_clip_blends() {
+    clip_blends_body(TestBackend::Scheme);
+}
+
 
 // ---------------------------------------------------------------------------
 // GPU synchronization stress tests (ekrano issue #26)
@@ -300,8 +358,7 @@ fn clip_blends() {
 /// barrier chain has a hole, the output may contain stale pixels. Unlike
 /// `many_bins_test` which needs 17x17 bins to trigger the race, this test
 /// checks whether even the minimal one-bin path is solid.
-#[test]
-fn single_bin_red_fill() {
+fn single_bin_red_fill_body(backend: TestBackend) {
     let mut scene = Scene::new();
     scene.fill(
         ekrano::peniko::Fill::NonZero,
@@ -310,7 +367,7 @@ fn single_bin_red_fill() {
         None,
         &Rect::new(0., 0., 256., 256.),
     );
-    let params = TestParams::new("single_bin_red_fill", 256, 256);
+    let params = TestParams::new("single_bin_red_fill", 256, 256).with_backend(backend);
     let image = ekrano_tests::render_then_debug_sync(&scene, &params).unwrap();
     assert_eq!(image.format, ImageFormat::Rgba8);
 
@@ -329,14 +386,23 @@ fn single_bin_red_fill() {
         total - red_count
     );
 }
+#[test]
+fn single_bin_red_fill() {
+    single_bin_red_fill_body(TestBackend::Classic);
+}
+
+#[test]
+fn scheme_single_bin_red_fill() {
+    single_bin_red_fill_body(TestBackend::Scheme);
+}
+
 
 /// Four-bin grid: 2x2 bins with different colors per quadrant.
 ///
 /// Uses a 512x512 viewport (2x2 bins). Each quadrant is filled with a distinct
 /// color. Verifies that inter-bin boundaries don't lose pixels due to
 /// synchronization issues in the coarse rasterizer.
-#[test]
-fn four_bin_colored_quadrants() {
+fn four_bin_colored_quadrants_body(backend: TestBackend) {
     let mut scene = Scene::new();
     let colors = [
         palette::css::RED,
@@ -356,7 +422,7 @@ fn four_bin_colored_quadrants() {
             &Rect::new(x, y, x + half, y + half),
         );
     }
-    let params = TestParams::new("four_bin_quadrants", 512, 512);
+    let params = TestParams::new("four_bin_quadrants", 512, 512).with_backend(backend);
     let image = ekrano_tests::render_then_debug_sync(&scene, &params).unwrap();
     assert_eq!(image.format, ImageFormat::Rgba8);
 
@@ -375,14 +441,23 @@ fn four_bin_colored_quadrants() {
         total - non_black_count
     );
 }
+#[test]
+fn four_bin_colored_quadrants() {
+    four_bin_colored_quadrants_body(TestBackend::Classic);
+}
+
+#[test]
+fn scheme_four_bin_colored_quadrants() {
+    four_bin_colored_quadrants_body(TestBackend::Scheme);
+}
+
 
 /// Medium-scale fill across 4x4 bins (1024x1024).
 ///
 /// Larger than 4-bin but smaller than `many_bins_test`. Exercises more
 /// workgroups in the coarse shader. A synchronization bug that loses a
 /// fraction of bins should be visible here.
-#[test]
-fn medium_bins_red_fill() {
+fn medium_bins_red_fill_body(backend: TestBackend) {
     let mut scene = Scene::new();
     scene.fill(
         ekrano::peniko::Fill::NonZero,
@@ -391,7 +466,7 @@ fn medium_bins_red_fill() {
         None,
         &Rect::new(-5., -5., 1030., 1030.),
     );
-    let params = TestParams::new("medium_bins_red_fill", 1024, 1024);
+    let params = TestParams::new("medium_bins_red_fill", 1024, 1024).with_backend(backend);
     let image = ekrano_tests::render_then_debug_sync(&scene, &params).unwrap();
     assert_eq!(image.format, ImageFormat::Rgba8);
 
@@ -410,14 +485,23 @@ fn medium_bins_red_fill() {
         total - red_count
     );
 }
+#[test]
+fn medium_bins_red_fill() {
+    medium_bins_red_fill_body(TestBackend::Classic);
+}
+
+#[test]
+fn scheme_medium_bins_red_fill() {
+    medium_bins_red_fill_body(TestBackend::Scheme);
+}
+
 
 /// Repeated rendering: render the same scene N times and verify each time.
 ///
 /// Catches flakiness that only manifests occasionally due to GPU timing
 /// variations. Uses the same viewport size as `many_bins_test` but renders
 /// repeatedly to amplify the failure probability.
-#[test]
-fn repeated_many_bins() {
+fn repeated_many_bins_body(backend: TestBackend) {
     const ITERATIONS: u32 = 10;
     let mut failures = Vec::new();
 
@@ -430,7 +514,7 @@ fn repeated_many_bins() {
             None,
             &Rect::new(-5., -5., 256. * 20., 256. * 20.),
         );
-        let params = TestParams::new("repeated_many_bins", 256 * 17, 256 * 17);
+        let params = TestParams::new("repeated_many_bins", 256 * 17, 256 * 17).with_backend(backend);
         let image = ekrano_tests::render_then_debug_sync(&scene, &params).unwrap();
 
         let mut red_count = 0_u32;
@@ -454,3 +538,13 @@ fn repeated_many_bins() {
         failures
     );
 }
+#[test]
+fn repeated_many_bins() {
+    repeated_many_bins_body(TestBackend::Classic);
+}
+
+#[test]
+fn scheme_repeated_many_bins() {
+    repeated_many_bins_body(TestBackend::Scheme);
+}
+
