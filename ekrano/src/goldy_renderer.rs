@@ -505,10 +505,10 @@ pub(crate) struct PersistentState {
     pub(crate) cached_scheme_indirect: Option<(ekrano_encoding::WorkgroupCountsGpu, Buffer)>,
     /// Stable scene buffer for the retained worker scheme (bucket capacity, buffer).
     pub(crate) cached_scene: Option<(u64, Buffer)>,
-    /// CPU-writable staging for scene uploads (bucket capacity, buffer).
-    pub(crate) cached_scene_staging: Option<(u64, Buffer)>,
-    /// CPU-writable staging for config uniform uploads.
-    pub(crate) cached_config_staging: Option<Buffer>,
+    /// Logical upload buffer for scene staging (bucket capacity, declaration).
+    pub(crate) cached_scene_upload: Option<(u64, goldy::UploadBuffer)>,
+    /// Logical upload buffer for config uniform staging.
+    pub(crate) cached_config_upload: Option<goldy::UploadBuffer>,
     /// Stable bump buffer keyed by byte size; read back via [`Self::cached_bump_grant`].
     pub(crate) cached_bump: Option<(u64, Buffer)>,
     /// Recorded once on the worker when `robust` is enabled.
@@ -536,12 +536,12 @@ pub(crate) struct PersistentState {
     pub(crate) pending_bump_submission: Option<goldy::Submission>,
     /// Upload key the upload scheme was recorded against (scene bucket + all atlas dims).
     pub(crate) cached_upload_key: Option<crate::worker_retention::UploadKey>,
-    /// CPU-writable staging for gradient atlas uploads.
-    pub(crate) cached_gradient_staging: Option<(u32, u32, Buffer)>,
-    /// CPU-writable staging for mask atlas uploads.
-    pub(crate) cached_mask_staging: Option<(u32, u32, Buffer)>,
-    /// CPU-writable staging buffers for image atlas region uploads.
-    pub(crate) cached_image_region_stagings: Vec<((u32, u32, u32, u32), Buffer)>,
+    /// Logical upload buffer for gradient atlas staging (width, height, capacity, declaration).
+    pub(crate) cached_gradient_upload: Option<(u32, u32, u64, goldy::UploadBuffer)>,
+    /// Logical upload buffer for mask atlas staging (width, height, capacity, declaration).
+    pub(crate) cached_mask_upload: Option<(u32, u32, u64, goldy::UploadBuffer)>,
+    /// Logical upload buffers for image atlas region uploads.
+    pub(crate) cached_image_region_uploads: Vec<((u32, u32, u32, u32), goldy::UploadBuffer)>,
     /// Textures waiting to be returned to [`Self::tex_pool`] after GPU retirement.
     /// Populated by [`DeferredTextureToken`] drops from [`Context::defer_release`].
     pub(crate) pending_texture_returns: Arc<Mutex<Vec<Texture>>>,
@@ -576,8 +576,8 @@ impl PersistentState {
             cached_filter_uniforms: Vec::new(),
             cached_scheme_indirect: None,
             cached_scene: None,
-            cached_scene_staging: None,
-            cached_config_staging: None,
+            cached_scene_upload: None,
+            cached_config_upload: None,
             cached_bump: None,
             cached_bump_grant: None,
             cached_gradient: None,
@@ -592,9 +592,9 @@ impl PersistentState {
             cached_worker_filter_effects: Vec::new(),
             pending_bump_submission: None,
             cached_upload_key: None,
-            cached_gradient_staging: None,
-            cached_mask_staging: None,
-            cached_image_region_stagings: Vec::new(),
+            cached_gradient_upload: None,
+            cached_mask_upload: None,
+            cached_image_region_uploads: Vec::new(),
             pending_texture_returns: Arc::new(Mutex::new(Vec::new())),
             pending_owned_returns: Arc::new(Mutex::new(Vec::new())),
             readback_host_buf: None,

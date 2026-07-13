@@ -79,19 +79,40 @@ impl Drop for DeferredPoolTextureReturn {
     }
 }
 
-/// Host-visible staging write: deferred on DX12, synchronous elsewhere.
-fn stage_host_write(recorder: &mut SchemeRecorder<'_>, staging: &Buffer, bytes: &[u8]) -> Result<(), Error> {
-    if recorder.nonblocking_reuse {
-        recorder.upload_scheme().defer_host_write(
-            &staging.last_referenced(),
-            staging,
-            0,
-            bytes.to_vec().into_boxed_slice(),
-        );
-        Ok(())
-    } else {
-        staging.write(0, bytes).map_err(|e| Error::Gpu(e.to_string()))
+/// Host-visible staging write into a scheme [`UploadBuffer`] (never waits).
+fn stage_upload(
+    recorder: &mut SchemeRecorder<'_>,
+    upload: goldy::UploadBuffer,
+    bytes: &[u8],
+    what: &'static str,
+) -> Result<(), Error> {
+    recorder
+        .upload_scheme()
+        .stage_upload_buffer(&upload, 0, bytes)
+        .map_err(|e| {
+            Error::Gpu(format!(
+                "{e} (what={what}, upload_id={}, bytes={}, needs_record={})",
+                upload.id(),
+                bytes.len(),
+                recorder.upload_needs_record,
+            ))
+        })
+}
+
+/// Pack tightly-packed RGBA rows into a footprint-pitched staging layout.
+fn pack_rgba_to_pitch(src: &[u8], width: u32, height: u32, row_pitch: u32) -> Vec<u8> {
+    let tight = (width as usize).saturating_mul(4);
+    let pitch = row_pitch as usize;
+    let mut out = vec![0u8; pitch.saturating_mul(height as usize)];
+    for y in 0..height as usize {
+        let src_off = y * tight;
+        let dst_off = y * pitch;
+        let end = src_off + tight;
+        if end <= src.len() && dst_off + tight <= out.len() {
+            out[dst_off..dst_off + tight].copy_from_slice(&src[src_off..end]);
+        }
     }
+    out
 }
 
 /// Shader binding helper for pipeline [`Buffer`] handles.
@@ -338,56 +359,57 @@ pub(crate) fn alloc_or_reuse_scene(recorder: &mut SchemeRecorder<'_>, live_bytes
         .map_err(|e| Error::Gpu(e.to_string()))
 }
 
-/// Allocate or reuse a CPU-writable staging buffer for scene bytes.
-fn alloc_or_reuse_scene_staging(recorder: &mut SchemeRecorder<'_>, live_bytes: usize) -> Result<Buffer, Error> {
+/// Allocate or reuse a logical upload buffer for scene bytes.
+fn alloc_or_reuse_scene_upload(
+    recorder: &mut SchemeRecorder<'_>,
+    live_bytes: usize,
+) -> Result<goldy::UploadBuffer, Error> {
     let bucket = scene_size_bucket(live_bytes);
-    if let Some((cached_bucket, buf)) = recorder.persistent.cached_scene_staging.take() {
-        if cached_bucket >= bucket {
-            return Ok(buf);
+    if !recorder.upload_needs_record {
+        if let Some((cached_bucket, ub)) = recorder.persistent.cached_scene_upload {
+            if cached_bucket >= bucket {
+                return Ok(ub);
+            }
         }
-        defer_buffer_until_retired(recorder.context(), buf);
     }
-    recorder
-        .persistent
-        .retained_pool
-        .acquire_buffer(bucket, BufferKind::Scattered, Some(4), BufferFlags::CPU_WRITABLE, None)
-        .map_err(|e| Error::Gpu(e.to_string()))
+    let ub = recorder
+        .upload_scheme()
+        .declare_upload_buffer(bucket)
+        .map_err(|e| Error::Gpu(e.to_string()))?;
+    recorder.persistent.cached_scene_upload = Some((bucket, ub));
+    Ok(ub)
 }
 
-/// Allocate or reuse a CPU-writable staging buffer for the config uniform.
-fn alloc_or_reuse_config_staging(recorder: &mut SchemeRecorder<'_>) -> Result<Buffer, Error> {
-    if let Some(buf) = recorder.persistent.cached_config_staging.take() {
-        return Ok(buf);
+/// Allocate or reuse a logical upload buffer for the config uniform.
+fn alloc_or_reuse_config_upload(recorder: &mut SchemeRecorder<'_>) -> Result<goldy::UploadBuffer, Error> {
+    let size = size_of::<ekrano_encoding::ConfigUniform>() as u64;
+    if !recorder.upload_needs_record {
+        if let Some(ub) = recorder.persistent.cached_config_upload {
+            return Ok(ub);
+        }
     }
-    recorder
-        .persistent
-        .retained_pool
-        .acquire_buffer(
-            size_of::<ekrano_encoding::ConfigUniform>() as u64,
-            BufferKind::Scattered,
-            Some(size_of::<ekrano_encoding::ConfigUniform>() as u32),
-            BufferFlags::CPU_WRITABLE,
-            None,
-        )
-        .map_err(|e| Error::Gpu(e.to_string()))
+    let ub = recorder
+        .upload_scheme()
+        .declare_upload_buffer(size)
+        .map_err(|e| Error::Gpu(e.to_string()))?;
+    recorder.persistent.cached_config_upload = Some(ub);
+    Ok(ub)
 }
 
 /// Write scene bytes into staging and copy into the device scene buffer when recording upload topology.
 pub(crate) fn stage_scene_bytes(recorder: &mut SchemeRecorder<'_>, scene: &Buffer, bytes: &[u8]) -> Result<(), Error> {
     let bucket = scene_size_bucket(bytes.len());
-    let staging = alloc_or_reuse_scene_staging(recorder, bytes.len())?;
-    stage_host_write(recorder, &staging, bytes)?;
+    let upload = alloc_or_reuse_scene_upload(recorder, bytes.len())?;
+    stage_upload(recorder, upload, bytes, "scene")?;
     if recorder.upload_needs_record {
         // Copy the full staging buffer (bucket-sized) rather than bytes.len() bytes.
         // On retained frames the packed content varies within the bucket; the GPU reads
         // up to config.scene_size bytes (always ≤ bucket), so the tail is never accessed.
-        let copy_size = staging.byte_size();
         recorder
             .upload_scheme()
-            .copy_buffer_parcel(staging.whole(), 0, scene.whole(), 0, copy_size)
+            .copy_upload_buffer(&upload, 0, scene.whole(), 0, bucket)
             .map_err(|e| Error::Shader(e.to_string()))?;
     }
-    recorder.persistent.cached_scene_staging = Some((bucket, staging));
     Ok(())
 }
 
@@ -397,15 +419,14 @@ pub(crate) fn stage_config_bytes(
     config: &Buffer,
     bytes: &[u8],
 ) -> Result<(), Error> {
-    let staging = alloc_or_reuse_config_staging(recorder)?;
-    stage_host_write(recorder, &staging, bytes)?;
+    let upload = alloc_or_reuse_config_upload(recorder)?;
+    stage_upload(recorder, upload, bytes, "config")?;
     if recorder.upload_needs_record {
         recorder
             .upload_scheme()
-            .copy_buffer_parcel(staging.whole(), 0, config.whole(), 0, bytes.len() as u64)
+            .copy_upload_buffer(&upload, 0, config.whole(), 0, bytes.len() as u64)
             .map_err(|e| Error::Shader(e.to_string()))?;
     }
-    recorder.persistent.cached_config_staging = Some(staging);
     Ok(())
 }
 
@@ -452,85 +473,105 @@ fn install_cached_texture(cached: &mut Option<(u32, u32, Texture)>, width: u32, 
     cached.as_ref().unwrap().2.borrow()
 }
 
-fn texture_flat_bytes(width: u32, height: u32) -> u64 {
-    (width as u64) * (height as u64) * 4
-}
-
 enum TextureStagingCache {
     Gradient,
     Mask,
 }
 
-fn alloc_or_reuse_full_texture_staging(
+fn alloc_or_reuse_full_texture_upload(
     recorder: &mut SchemeRecorder<'_>,
-    cached: &mut Option<(u32, u32, Buffer)>,
+    cached: &mut Option<(u32, u32, u64, goldy::UploadBuffer)>,
     width: u32,
     height: u32,
-) -> Result<Buffer, Error> {
-    if let Some((cw, ch, buf)) = cached.take() {
-        if cw >= width && ch >= height {
-            return Ok(buf);
+    staging_bytes: u64,
+) -> Result<goldy::UploadBuffer, Error> {
+    let need = staging_bytes.max(4);
+    if !recorder.upload_needs_record {
+        if let Some((cw, ch, cap, ub)) = *cached {
+            if cw >= width && ch >= height && cap >= need {
+                return Ok(ub);
+            }
         }
-        defer_buffer_until_retired(recorder.context(), buf);
     }
-    let size = texture_flat_bytes(width, height).max(4);
+    let ub = recorder
+        .upload_scheme()
+        .declare_upload_buffer(need)
+        .map_err(|e| Error::Gpu(e.to_string()))?;
+    *cached = Some((width, height, need, ub));
+    Ok(ub)
+}
+
+fn take_region_texture_upload(
+    recorder: &mut SchemeRecorder<'_>,
+    key: (u32, u32, u32, u32),
+) -> Option<goldy::UploadBuffer> {
+    if recorder.upload_needs_record {
+        return None;
+    }
     recorder
         .persistent
-        .retained_pool
-        .acquire_buffer(size, BufferKind::Scattered, Some(4), BufferFlags::CPU_WRITABLE, None)
-        .map_err(|e| Error::Gpu(e.to_string()))
-}
-
-fn take_region_texture_staging(recorder: &mut SchemeRecorder<'_>, key: (u32, u32, u32, u32)) -> Option<Buffer> {
-    if let Some(idx) = recorder
-        .persistent
-        .cached_image_region_stagings
+        .cached_image_region_uploads
         .iter()
-        .position(|(k, _)| *k == key)
-    {
-        Some(recorder.persistent.cached_image_region_stagings.remove(idx).1)
-    } else {
-        None
-    }
+        .find(|(k, _)| *k == key)
+        .map(|(_, ub)| *ub)
 }
 
-fn alloc_or_reuse_region_texture_staging(
+fn alloc_or_reuse_region_texture_upload(
     recorder: &mut SchemeRecorder<'_>,
     x: u32,
     y: u32,
     width: u32,
     height: u32,
-) -> Result<Buffer, Error> {
+    staging_bytes: u64,
+) -> Result<goldy::UploadBuffer, Error> {
     let key = (x, y, width, height);
-    if let Some(buf) = take_region_texture_staging(recorder, key) {
-        return Ok(buf);
+    if let Some(ub) = take_region_texture_upload(recorder, key) {
+        return Ok(ub);
     }
-    let size = texture_flat_bytes(width, height).max(4);
-    recorder
-        .persistent
-        .retained_pool
-        .acquire_buffer(size, BufferKind::Scattered, Some(4), BufferFlags::CPU_WRITABLE, None)
-        .map_err(|e| Error::Gpu(e.to_string()))
+    let ub = recorder
+        .upload_scheme()
+        .declare_upload_buffer(staging_bytes.max(4))
+        .map_err(|e| Error::Gpu(e.to_string()))?;
+    recorder.persistent.cached_image_region_uploads.push((key, ub));
+    Ok(ub)
 }
 
 fn stage_texture_full(
     recorder: &mut SchemeRecorder<'_>,
-    cached_staging: &mut Option<(u32, u32, Buffer)>,
+    cached_upload: &mut Option<(u32, u32, u64, goldy::UploadBuffer)>,
     texture: &Texture,
     bytes: &[u8],
 ) -> Result<(), Error> {
     let width = texture.width();
     let height = texture.height();
     record_texture_reuse(recorder.upload_scheme(), texture);
-    let staging = alloc_or_reuse_full_texture_staging(recorder, cached_staging, width, height)?;
-    stage_host_write(recorder, &staging, bytes)?;
+    let layout = recorder
+        .device()
+        .texture_copy_footprint(width, height, texture.format())
+        .map_err(|e| Error::Gpu(e.to_string()))?;
+    let pitched = if layout.row_pitch == layout.tight_row_bytes() {
+        bytes.to_vec()
+    } else {
+        pack_rgba_to_pitch(bytes, width, height, layout.row_pitch)
+    };
+    let staging_bytes = layout.staging_bytes.max(pitched.len() as u64);
+    let upload = alloc_or_reuse_full_texture_upload(recorder, cached_upload, width, height, staging_bytes)?;
+    stage_upload(recorder, upload, &pitched, "texture_full")?;
     if recorder.upload_needs_record {
         recorder
             .upload_scheme()
-            .copy_buffer_to_texture_parcel(staging.whole(), 0, 0, texture, 0, 0, width, height)
+            .copy_upload_buffer_to_texture(
+                &upload,
+                layout.footprint_offset,
+                layout.row_pitch,
+                texture,
+                0,
+                0,
+                width,
+                height,
+            )
             .map_err(|e| Error::Shader(e.to_string()))?;
     }
-    *cached_staging = Some((width, height, staging));
     Ok(())
 }
 
@@ -543,17 +584,34 @@ fn stage_texture_region(
     height: u32,
     bytes: &[u8],
 ) -> Result<(), Error> {
-    let key = (x, y, width, height);
     record_texture_reuse(recorder.upload_scheme(), texture);
-    let staging = alloc_or_reuse_region_texture_staging(recorder, x, y, width, height)?;
-    stage_host_write(recorder, &staging, bytes)?;
+    let layout = recorder
+        .device()
+        .texture_copy_footprint(width, height, texture.format())
+        .map_err(|e| Error::Gpu(e.to_string()))?;
+    let pitched = if layout.row_pitch == layout.tight_row_bytes() {
+        bytes.to_vec()
+    } else {
+        pack_rgba_to_pitch(bytes, width, height, layout.row_pitch)
+    };
+    let staging_bytes = layout.staging_bytes.max(pitched.len() as u64);
+    let upload = alloc_or_reuse_region_texture_upload(recorder, x, y, width, height, staging_bytes)?;
+    stage_upload(recorder, upload, &pitched, "texture_region")?;
     if recorder.upload_needs_record {
         recorder
             .upload_scheme()
-            .copy_buffer_to_texture_parcel(staging.whole(), 0, 0, texture, x, y, width, height)
+            .copy_upload_buffer_to_texture(
+                &upload,
+                layout.footprint_offset,
+                layout.row_pitch,
+                texture,
+                x,
+                y,
+                width,
+                height,
+            )
             .map_err(|e| Error::Shader(e.to_string()))?;
     }
-    recorder.persistent.cached_image_region_stagings.push((key, staging));
     Ok(())
 }
 
@@ -564,13 +622,13 @@ fn upload_texture_full(
     bytes: &[u8],
 ) -> Result<(), Error> {
     let mut slot = match cache {
-        TextureStagingCache::Gradient => std::mem::take(&mut recorder.persistent.cached_gradient_staging),
-        TextureStagingCache::Mask => std::mem::take(&mut recorder.persistent.cached_mask_staging),
+        TextureStagingCache::Gradient => std::mem::take(&mut recorder.persistent.cached_gradient_upload),
+        TextureStagingCache::Mask => std::mem::take(&mut recorder.persistent.cached_mask_upload),
     };
     stage_texture_full(recorder, &mut slot, texture, bytes)?;
     match cache {
-        TextureStagingCache::Gradient => recorder.persistent.cached_gradient_staging = slot,
-        TextureStagingCache::Mask => recorder.persistent.cached_mask_staging = slot,
+        TextureStagingCache::Gradient => recorder.persistent.cached_gradient_upload = slot,
+        TextureStagingCache::Mask => recorder.persistent.cached_mask_upload = slot,
     }
     Ok(())
 }
@@ -920,10 +978,7 @@ impl PipelineResources {
         let (image_atlas, _) = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.image_atlas");
             if recorder.upload_needs_record {
-                let stale = std::mem::take(&mut recorder.persistent.cached_image_region_stagings);
-                for (_, buf) in stale {
-                    defer_buffer_until_retired(recorder.context(), buf);
-                }
+                recorder.persistent.cached_image_region_uploads.clear();
             }
             if images.images.is_empty() {
                 let t = match take_cached_texture(&mut recorder.persistent.cached_image_atlas, 1, 1) {

@@ -645,6 +645,12 @@ impl SchemeRenderer {
             coverage_mask_dims,
         );
 
+        let mut image_regions: Vec<(u32, u32, u32, u32)> = image_entries
+            .iter()
+            .map(|(img, x, y)| (*x, *y, img.width, img.height))
+            .collect();
+        image_regions.sort_unstable();
+        image_regions.dedup();
         let upload_key = upload_key(
             scene_bucket,
             ramps_width,
@@ -653,10 +659,17 @@ impl SchemeRenderer {
             images_width,
             images_height,
             coverage_mask_dims,
+            &image_regions,
         );
         let upload_needs_record = crate::worker_retention::upload_stale(&self.persistent, &upload_key);
         if upload_needs_record {
             self.upload = Scheme::new(&self.context);
+            // Logical upload declarations live on the scheme; drop cached handles.
+            self.persistent.cached_scene_upload = None;
+            self.persistent.cached_config_upload = None;
+            self.persistent.cached_gradient_upload = None;
+            self.persistent.cached_mask_upload = None;
+            self.persistent.cached_image_region_uploads.clear();
             #[cfg(test)]
             {
                 self.upload_record_epochs += 1;
