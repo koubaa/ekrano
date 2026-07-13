@@ -1542,6 +1542,9 @@ mod tests {
     /// invalidation / partition-local retention).
     #[test]
     fn worker_scheme_retains_topology_across_frames() {
+        // Goldy topology dirty + retention records require CB replay; ignore
+        // GOLDY_DISABLE_CB_REUSE=1 from the developer shell.
+        let _cb = goldy::test_support::CbReuseOverride::force_enabled();
         let Some((gpu, _)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
             return;
         };
@@ -1593,6 +1596,7 @@ mod tests {
     /// Resolution change invalidates worker retention and triggers exactly one re-record.
     #[test]
     fn worker_scheme_rerecords_on_topology_change() {
+        let _cb = goldy::test_support::CbReuseOverride::force_enabled();
         let Some((gpu, _)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
             return;
         };
@@ -1645,6 +1649,7 @@ mod tests {
     /// Without per-frame readback, the worker records once and resubmits.
     #[test]
     fn worker_scheme_render_to_texture_records_once() {
+        let _cb = goldy::test_support::CbReuseOverride::force_enabled();
         let Some((gpu, _)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
             return;
         };
