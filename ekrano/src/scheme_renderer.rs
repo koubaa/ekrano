@@ -19,7 +19,9 @@
 //!    from `out_image` to the present lease.
 //! 4. [`goldy::Scheme::grant_present`] records the present easement (once per frame in
 //!    Phase 2; retained in Phase 3).
-//! 5. [`goldy::Scheme::submit`] submits all partitions, including the present-touching one.
+//! 5. [`goldy::Scheme::submit_with_acquired_presents`] submits all partitions using a
+//!    drawable acquired at frame start (classic-like timing); fall back to
+//!    [`goldy::Scheme::submit`] only when no swapchain pool is bound.
 //! 6. [`PresentToken::present`] performs scanout — synchronously in
 //!    [`SchemeRenderer::render_to_swapchain`], or async on `TID_PRESENT` via
 //!    [`SchemeRenderer::submit_to_swapchain`] + velato's `Presenter`.
@@ -596,6 +598,19 @@ impl SchemeRenderer {
         let prev_bump = self.persistent.take_last_drained_bump();
         self.apply_bump_feedback(prev_bump, &layout, &params, &mut config, &mut stats);
 
+        // Match classic task-graph timing: acquire the swapchain drawable immediately
+        // after begin_frame, before prepare/coarse/fine recording.
+        let mut early_present = if let Some(pool) = pool {
+            let _tz = goldy::tracy_zone!("ekrano.surface.acquire_early");
+            let lease = pool.lease();
+            Some(
+                pool.acquire_present(&lease)
+                    .map_err(|e| Error::Shader(e.to_string()))?,
+            )
+        } else {
+            None
+        };
+
         let t1 = Instant::now();
         if self.persistent.linear_clamp_sampler.is_none() {
             self.persistent.linear_clamp_sampler =
@@ -841,7 +856,7 @@ impl SchemeRenderer {
             scheme_submission,
         } = {
             let _tz = goldy::tracy_zone!("ekrano.finish");
-            recorder.finish(pool.is_some(), pre_acquire)?
+            recorder.finish(pool.is_some(), pre_acquire, early_present.take())?
         };
 
         if let Some((present, bump, topology, filter_effects, out_image)) = worker_cache {
@@ -1337,7 +1352,12 @@ impl<'a> SchemeRecorder<'a> {
     /// timeline is valid for cache stamping before [`goldy::Frame::present`].
     /// Surface paths with deferred scanout call `finish` with `deferred_present: true`; headless /
     /// render-to-texture paths call `finish` with `deferred_present: false`.
-    pub(crate) fn finish<F>(mut self, deferred_present: bool, pre_acquire: F) -> Result<FrameFinishOutcome>
+    pub(crate) fn finish<F>(
+        mut self,
+        deferred_present: bool,
+        pre_acquire: F,
+        early_present: Option<goldy::AcquiredPresent>,
+    ) -> Result<FrameFinishOutcome>
     where
         F: FnOnce() -> Result<()>,
     {
@@ -1356,11 +1376,10 @@ impl<'a> SchemeRecorder<'a> {
             self.upload.submit().map_err(|e| Error::Shader(e.to_string()))?;
         }
 
-        // The upload scheme has no dependency on the swapchain image — only the
-        // worker's present partition acquires a drawable. Run the caller's
-        // pre-acquire barrier (e.g. wait-for-present-ack) here, after the upload
-        // is submitted but before the worker acquire, so upload recording/submit
-        // overlaps the previous frame's present round-trip.
+        // The upload scheme has no dependency on the swapchain image. Run the caller's
+        // pre-acquire barrier (e.g. wait-for-present-ack) here after upload submit.
+        // Drawable acquire itself is done earlier (`ekrano.surface.acquire_early`) when
+        // an `AcquiredPresent` was supplied.
         {
             let _tz = goldy::tracy_zone!("ekrano.finish.pre_acquire");
             pre_acquire()?;
@@ -1368,7 +1387,13 @@ impl<'a> SchemeRecorder<'a> {
 
         let submission = {
             let _tz = goldy::tracy_zone!("ekrano.finish.worker_submit");
-            self.scheme.submit().map_err(|e| Error::Shader(e.to_string()))?
+            match early_present {
+                Some(claim) => self
+                    .scheme
+                    .submit_with_acquired_presents(vec![claim])
+                    .map_err(|e| Error::Shader(e.to_string()))?,
+                None => self.scheme.submit().map_err(|e| Error::Shader(e.to_string()))?,
+            }
         };
         let scheme_tv = submission.timeline_value();
         let mut empty_graph = TaskGraph::new();
