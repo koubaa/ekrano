@@ -112,6 +112,55 @@ pub(crate) fn sanitize_bump(bump: &BumpAllocators) -> BumpAllocators {
 /// in practice there's only one.
 pub(crate) static FRAME_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Log total GPU memory usage at most once every 5 seconds.
+///
+/// Prefers DXGI `CurrentUsage` (true process GPU residency) when available, and
+/// always includes Goldy's live tracked allocator bytes (allocations − frees).
+pub(crate) fn maybe_log_gpu_memory(device: &Device, backend: &'static str) {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    static LAST_CLASSIC: Mutex<Option<Instant>> = Mutex::new(None);
+    static LAST_SCHEME: Mutex<Option<Instant>> = Mutex::new(None);
+    let last_slot = if backend == "classic" {
+        &LAST_CLASSIC
+    } else {
+        &LAST_SCHEME
+    };
+    {
+        let mut last = last_slot.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(t) = *last {
+            if t.elapsed() < Duration::from_secs(5) {
+                return;
+            }
+        }
+        *last = Some(Instant::now());
+    }
+
+    fn fmt_mib(bytes: u64) -> String {
+        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+    }
+
+    let tracked = device.tracked_vram_bytes();
+    match device.video_memory_info() {
+        Some(info) => {
+            log::info!(
+                "[GPU-MEM] backend={backend} dxgi_local={} / budget={} dxgi_non_local={} tracked={}",
+                fmt_mib(info.local_current_bytes),
+                fmt_mib(info.local_budget_bytes),
+                fmt_mib(info.non_local_current_bytes),
+                fmt_mib(tracked),
+            );
+        }
+        None => {
+            log::info!(
+                "[GPU-MEM] backend={backend} tracked={} (no DXGI video-memory query on this backend)",
+                fmt_mib(tracked),
+            );
+        }
+    }
+}
+
 // -----------------------------------------------------------------------
 // Deferred per-frame work
 // -----------------------------------------------------------------------

@@ -702,6 +702,8 @@ impl GraphRenderer {
             );
         }
 
+        crate::goldy_renderer::maybe_log_gpu_memory(&self.device, "classic");
+
         let surface_frame = surface_frame.map(|frame| (frame, frame_tv));
         Ok((stats, surface_frame))
     }

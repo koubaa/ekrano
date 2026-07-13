@@ -964,6 +964,8 @@ impl SchemeRenderer {
             );
         }
 
+        crate::goldy_renderer::maybe_log_gpu_memory(&self.device, "scheme");
+
         Ok((stats, present_token))
     }
 
