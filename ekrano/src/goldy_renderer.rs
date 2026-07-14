@@ -129,10 +129,10 @@ pub(crate) fn maybe_log_gpu_memory(device: &Device, backend: &'static str) {
     };
     {
         let mut last = last_slot.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(t) = *last {
-            if t.elapsed() < Duration::from_secs(5) {
-                return;
-            }
+        if let Some(t) = *last
+            && t.elapsed() < Duration::from_secs(5)
+        {
+            return;
         }
         *last = Some(Instant::now());
     }
@@ -214,7 +214,7 @@ pub(crate) struct CacheScheduleOutcome {
     pub(crate) cached_render_targets_slot: Option<usize>,
     /// Set when the scheme path stored its single persistent `out_image` into
     /// [`PersistentState::cached_scheme_rt`]; the post-submit step then stamps the
-    /// frame timeline as a cache/reclamation marker (not a begin_frame GPU wait).
+    /// frame timeline as a cache/reclamation marker (not a `begin_frame` GPU wait).
     pub(crate) scheme_rt_stored: bool,
 }
 
@@ -718,13 +718,7 @@ impl PersistentState {
     }
 
     /// Release scheme render targets to the texture pool, deferring until `tv` retires.
-    fn reclaim_scheme_render_targets(
-        &mut self,
-        ctx: &Context,
-        out: Texture,
-        layers: [Texture; 4],
-        tv: TimelineValue,
-    ) {
+    fn reclaim_scheme_render_targets(&mut self, ctx: &Context, out: Texture, layers: [Texture; 4], tv: TimelineValue) {
         if tv != 0 && ctx.gpu_progress() < tv {
             let mut textures = Vec::with_capacity(5);
             textures.push(out);
@@ -1299,16 +1293,13 @@ pub(crate) mod tests {
         } else {
             None
         };
-        Some(SharedGpuTest {
-            device,
-            _warp_guard,
-        })
+        Some(SharedGpuTest { device, _warp_guard })
     }
 
     /// Fresh device for tests that assert device create/destroy lifetime.
     ///
     /// Do not use for ordinary GPU lib tests — prefer [`shared_gpu_test`].
-    #[allow(dead_code)] // Escape hatch for future device-lifetime tests.
+    #[allow(dead_code, reason = "Escape hatch for future device-lifetime tests.")]
     pub(crate) fn exclusive_gpu_device() -> Option<Device> {
         try_create_device()
     }

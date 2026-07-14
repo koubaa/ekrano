@@ -10,7 +10,7 @@
 use ekrano::kurbo::{Affine, Rect};
 use ekrano::peniko::{Fill, color::palette};
 use ekrano::{AaConfig, GoldyBackend, GoldyRenderer, RenderParams, Scene};
-use ekrano_tests::{TestBackend, test_alloc_texture, test_device, SharedTestDevice};
+use ekrano_tests::{SharedTestDevice, TestBackend, test_alloc_texture, test_device};
 use goldy::types::{TextureFlags, TextureFormat, TextureKind};
 
 /// Serialize GPU tests when the D3D12 debug layer is active.
@@ -44,8 +44,7 @@ fn make_device() -> SharedTestDevice {
 
 fn make_renderer(backend: TestBackend) -> (SharedTestDevice, GoldyRenderer) {
     let device = make_device();
-    let renderer =
-        GoldyRenderer::new_with_backend(&device, backend.goldy_backend()).expect("GoldyRenderer");
+    let renderer = GoldyRenderer::new_with_backend(&device, backend.goldy_backend()).expect("GoldyRenderer");
     (device, renderer)
 }
 
@@ -291,9 +290,14 @@ fn scheme_dx12_resize_churn_keeps_ring_empty_and_pool_bounded() {
 
     let mut renderer = GoldyRenderer::new_with_backend(&device, GoldyBackend::Scheme).expect("GoldyRenderer");
     let scene = tiny_scene();
-    let sizes = [(WIDTH, HEIGHT), (WIDTH * 2, HEIGHT), (WIDTH, HEIGHT * 2), (WIDTH, HEIGHT)];
+    let sizes = [
+        (WIDTH, HEIGHT),
+        (WIDTH * 2, HEIGHT),
+        (WIDTH, HEIGHT * 2),
+        (WIDTH, HEIGHT),
+    ];
 
-    let mut max_retained = 0u64;
+    let mut max_retained = 0_u64;
     for (i, &(w, h)) in sizes.iter().cycle().take(40).enumerate() {
         let texture = test_alloc_texture(
             renderer.device(),
@@ -322,10 +326,7 @@ fn scheme_dx12_resize_churn_keeps_ring_empty_and_pool_bounded() {
         max_retained = max_retained.max(renderer.resource_pool_stats().retained_pool_buffer_bytes);
     }
 
-    assert!(
-        max_retained > 0,
-        "retained pool never allocated during resize churn"
-    );
+    assert!(max_retained > 0, "retained pool never allocated during resize churn");
     // Bound growth: after cycling sizes, bytes should stay within a few scene/config buckets.
     let final_bytes = renderer.resource_pool_stats().retained_pool_buffer_bytes;
     assert!(

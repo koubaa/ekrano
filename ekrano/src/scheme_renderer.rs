@@ -603,10 +603,7 @@ impl SchemeRenderer {
         let mut early_present = if let Some(pool) = pool {
             let _tz = goldy::tracy_zone!("ekrano.surface.acquire_early");
             let lease = pool.lease();
-            Some(
-                pool.acquire_present(&lease)
-                    .map_err(|e| Error::Shader(e.to_string()))?,
-            )
+            Some(pool.acquire_present(&lease).map_err(|e| Error::Shader(e.to_string()))?)
         } else {
             None
         };

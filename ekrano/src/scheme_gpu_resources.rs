@@ -71,15 +71,15 @@ struct DeferredPoolTextureReturn {
 
 impl Drop for DeferredPoolTextureReturn {
     fn drop(&mut self) {
-        if let Some(tex) = self.tex.take() {
-            if let Ok(mut pending) = self.pending.lock() {
-                pending.push(tex);
-            }
+        if let Some(tex) = self.tex.take()
+            && let Ok(mut pending) = self.pending.lock()
+        {
+            pending.push(tex);
         }
     }
 }
 
-/// Host-visible staging write into a scheme [`UploadBuffer`] (never waits).
+/// Host-visible staging write into a scheme [`goldy::UploadBuffer`] (never waits).
 fn stage_upload(
     recorder: &mut SchemeRecorder<'_>,
     upload: goldy::UploadBuffer,
@@ -103,7 +103,7 @@ fn stage_upload(
 fn pack_rgba_to_pitch(src: &[u8], width: u32, height: u32, row_pitch: u32) -> Vec<u8> {
     let tight = (width as usize).saturating_mul(4);
     let pitch = row_pitch as usize;
-    let mut out = vec![0u8; pitch.saturating_mul(height as usize)];
+    let mut out = vec![0_u8; pitch.saturating_mul(height as usize)];
     for y in 0..height as usize {
         let src_off = y * tight;
         let dst_off = y * pitch;
@@ -365,12 +365,11 @@ fn alloc_or_reuse_scene_upload(
     live_bytes: usize,
 ) -> Result<goldy::UploadBuffer, Error> {
     let bucket = scene_size_bucket(live_bytes);
-    if !recorder.upload_needs_record {
-        if let Some((cached_bucket, ub)) = recorder.persistent.cached_scene_upload {
-            if cached_bucket >= bucket {
-                return Ok(ub);
-            }
-        }
+    if !recorder.upload_needs_record
+        && let Some((cached_bucket, ub)) = recorder.persistent.cached_scene_upload
+        && cached_bucket >= bucket
+    {
+        return Ok(ub);
     }
     let ub = recorder
         .upload_scheme()
@@ -383,10 +382,10 @@ fn alloc_or_reuse_scene_upload(
 /// Allocate or reuse a logical upload buffer for the config uniform.
 fn alloc_or_reuse_config_upload(recorder: &mut SchemeRecorder<'_>) -> Result<goldy::UploadBuffer, Error> {
     let size = size_of::<ekrano_encoding::ConfigUniform>() as u64;
-    if !recorder.upload_needs_record {
-        if let Some(ub) = recorder.persistent.cached_config_upload {
-            return Ok(ub);
-        }
+    if !recorder.upload_needs_record
+        && let Some(ub) = recorder.persistent.cached_config_upload
+    {
+        return Ok(ub);
     }
     let ub = recorder
         .upload_scheme()
@@ -486,12 +485,13 @@ fn alloc_or_reuse_full_texture_upload(
     staging_bytes: u64,
 ) -> Result<goldy::UploadBuffer, Error> {
     let need = staging_bytes.max(4);
-    if !recorder.upload_needs_record {
-        if let Some((cw, ch, cap, ub)) = *cached {
-            if cw >= width && ch >= height && cap >= need {
-                return Ok(ub);
-            }
-        }
+    if !recorder.upload_needs_record
+        && let Some((cw, ch, cap, ub)) = *cached
+        && cw >= width
+        && ch >= height
+        && cap >= need
+    {
+        return Ok(ub);
     }
     let ub = recorder
         .upload_scheme()
@@ -667,7 +667,7 @@ fn al_cached_opt(
 /// See `resource-pool.md §1` for the rationale behind this split from [`ScratchPipelineBuffers`].
 ///
 /// Cross-frame reuse is ordered by [`goldy::Scheme::record_reuse_epochs`] on the worker
-/// scheme (DX12) or by the frame-orchestrator begin_frame wait (Vulkan/Metal). If pipeline
+/// scheme (DX12) or by the frame-orchestrator `begin_frame` wait (Vulkan/Metal). If pipeline
 /// depth is raised so the next frame may record while the prior frame's GPU work is still in
 /// flight without those gates, a single retained deed is not enough — use double-buffered
 /// parcels or a transient pool instead.
@@ -1182,7 +1182,7 @@ impl PipelineResources {
                         (c.scratch.path, "ekrano.path_buf"),
                     ];
                     if recorder.nonblocking_reuse {
-                        let mut epoch = 0u64;
+                        let mut epoch = 0_u64;
                         for (buf, _) in &scratch_returns {
                             for (_, tv) in buf.last_referenced().iter() {
                                 epoch = epoch.max(tv);

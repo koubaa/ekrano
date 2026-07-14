@@ -473,16 +473,7 @@ mod tests {
     fn upload_stale_true_on_image_region_layout_change() {
         let mut p = PersistentState::new_test_only();
         let k1 = upload_key(256, 8, 4, 2, 256, 256, None, &[(0, 0, 32, 32)]);
-        let k2 = upload_key(
-            256,
-            8,
-            4,
-            2,
-            256,
-            256,
-            None,
-            &[(0, 0, 32, 32), (40, 0, 16, 16)],
-        );
+        let k2 = upload_key(256, 8, 4, 2, 256, 256, None, &[(0, 0, 32, 32), (40, 0, 16, 16)]);
         p.cached_upload_key = Some(k1);
         assert!(upload_stale(&p, &k2));
     }

@@ -124,10 +124,7 @@ pub fn test_device() -> SharedTestDevice {
     } else {
         None
     };
-    SharedTestDevice {
-        device,
-        _warp_guard,
-    }
+    SharedTestDevice { device, _warp_guard }
 }
 
 mod snapshot;
