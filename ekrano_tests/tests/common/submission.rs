@@ -1,3 +1,6 @@
+// Copyright 2026 the Ekrano Authors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Shared-device harness helpers for `libtest_mimic` integration tests.
 
 use goldy::{Device, types::BackendType};
@@ -9,7 +12,8 @@ use goldy::{Device, types::BackendType};
 /// pool size so cargo's default thread count cannot oversubscribe. DX12 WARP stays
 /// forced to a single thread (known contention; also covered by [`ekrano_tests::test_device`]).
 pub(crate) fn clamp_test_threads(args: &mut libtest_mimic::Arguments, device: &Device) {
-    if device.backend_type() == BackendType::Dx12 && device.adapter_id() == goldy::WARP_ADAPTER_ID {
+    // goldy::WARP_ADAPTER_ID is u32::MAX; ekrano does not gate on goldy's `dx12` feature.
+    if device.backend_type() == BackendType::Dx12 && device.adapter_id() == u32::MAX {
         args.test_threads = Some(1);
         return;
     }
