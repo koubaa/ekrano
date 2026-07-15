@@ -65,8 +65,8 @@ fn tiny_scene() -> Scene {
 
 /// Render many frames and verify the frame-orchestrator ring stays at depth=1.
 ///
-/// On DX12 scheme (nonblocking reuse), frames close with
-/// `end_frame_externally_ordered` and leave **no** retirement-ring slot, so
+/// On scheme backends with nonblocking reuse (`host_sidecar_on_submit_worker`), frames
+/// close with `end_frame_externally_ordered` and leave **no** retirement-ring slot, so
 /// `cleanup_ring_depth` stays 0 after each frame.
 fn single_frame_ring_depth_bounded_body(backend: TestBackend) {
     env_logger::try_init().ok();
@@ -101,7 +101,7 @@ fn single_frame_ring_depth_bounded_body(backend: TestBackend) {
         if nonblocking {
             assert_eq!(
                 depth, 0,
-                "frame {i}: DX12 scheme nonblocking path must not create a retirement-ring slot (depth={depth})"
+                "frame {i}: scheme nonblocking path must not create a retirement-ring slot (depth={depth})"
             );
         } else {
             assert!(
@@ -273,15 +273,15 @@ fn scheme_indirect_buffer_reused_across_frames() {
     }
 }
 
-/// DX12 scheme head-chases-tail: resize churn must not force orchestrator retirement
-/// slots or unbounded retained-pool growth.
-fn scheme_dx12_resize_churn_keeps_ring_empty_and_pool_bounded() {
+/// Scheme head-chases-tail: resize churn must not force orchestrator retirement
+/// slots or unbounded retained-pool growth (DX12/Vulkan with host sidecar).
+fn scheme_resize_churn_keeps_ring_empty_and_pool_bounded() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
 
     let device = make_device();
     if !device.capabilities().host_sidecar_on_submit_worker {
-        // Vulkan/Metal still use the blocking orchestrator path.
+        // Metal still uses the blocking orchestrator path.
         return;
     }
 
@@ -370,8 +370,8 @@ fn main() {
         .with_ignored_flag(false),
     );
     trials.push(
-        libtest_mimic::Trial::test("scheme_dx12_resize_churn_keeps_ring_empty_and_pool_bounded", || {
-            scheme_dx12_resize_churn_keeps_ring_empty_and_pool_bounded();
+        libtest_mimic::Trial::test("scheme_resize_churn_keeps_ring_empty_and_pool_bounded", || {
+            scheme_resize_churn_keeps_ring_empty_and_pool_bounded();
             Ok(())
         })
         .with_ignored_flag(false),

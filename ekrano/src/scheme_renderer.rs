@@ -85,9 +85,9 @@ pub struct SchemeRenderer {
     persistent: PersistentState,
     /// Pipelined frame scheduling: depth enforcement and timeline tracking.
     frame_pipeline: FrameOrchestrator<()>,
-    /// When true (DX12), reuse ordering is enforced via scheme submit sidecars and
+    /// When true (DX12/Vulkan), reuse ordering is enforced via scheme submit sidecars and
     /// frames close with [`FrameOrchestrator::end_frame_externally_ordered`] — no
-    /// coarse `begin_frame` GPU wait. Vulkan/Metal keep the blocking ring path.
+    /// coarse `begin_frame` GPU wait. Metal keeps the blocking ring path.
     nonblocking_reuse: bool,
     /// Persistent bump estimates: running max across frames.
     persistent_bump: Option<BumpAllocators>,
@@ -899,8 +899,8 @@ impl SchemeRenderer {
             _ => None,
         };
 
-        // On Vulkan/Metal the ring stamps compute+copy completion so begin_frame waits.
-        // On DX12 (nonblocking_reuse) ordering lives in submit sidecars + present easement;
+        // On Metal the ring stamps compute+copy completion so begin_frame waits.
+        // On DX12/Vulkan (nonblocking_reuse) ordering lives in submit sidecars + present easement;
         // no retirement slot is created, so note_presented is a no-op / unused.
         if !self.nonblocking_reuse {
             self.frame_pipeline.note_presented(frame_tv);
