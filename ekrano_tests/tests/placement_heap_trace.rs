@@ -10,10 +10,13 @@
 //!   `Buffer::new`).
 //! - Capacity does not grow unboundedly.
 
+#[path = "common/submission.rs"]
+mod submission;
+
 use ekrano::kurbo::{Affine, Rect};
 use ekrano::peniko::{Fill, color::palette};
 use ekrano::{AaConfig, GoldyRenderer, RenderParams, Scene};
-use ekrano_tests::{SharedTestDevice, test_alloc_texture, test_device};
+use ekrano_tests::{SharedTestDevice, test_alloc_texture, test_device, shared_test_device};
 use goldy::types::{TextureFlags, TextureFormat, TextureKind};
 
 const FRAME_COUNT: usize = 300;
@@ -38,7 +41,6 @@ fn tiny_scene() -> Scene {
 
 /// Collect per-frame placement heap capacity over many frames and verify
 /// the backing buffer is allocated once and never resized.
-#[test]
 fn placement_heap_paged_stable() {
     env_logger::try_init().ok();
 
@@ -113,7 +115,6 @@ fn placement_heap_paged_stable() {
 }
 
 /// Verify that the placement heap's backing buffer is sized correctly and allocated once.
-#[test]
 fn placement_heap_capacity_sized_correctly() {
     env_logger::try_init().ok();
 
@@ -169,4 +170,28 @@ fn placement_heap_capacity_sized_correctly() {
         eprintln!("  PASS: capacity {cap_mb:.2} MiB, allocated once");
         eprintln!();
     }
+}
+
+fn main() {
+    let mut trials = Vec::new();
+    trials.push(
+        libtest_mimic::Trial::test("placement_heap_paged_stable", || {
+            placement_heap_paged_stable();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("placement_heap_capacity_sized_correctly", || {
+            placement_heap_capacity_sized_correctly();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+
+    let mut args = libtest_mimic::Arguments::from_args();
+    if let Some(device) = shared_test_device() {
+        submission::clamp_test_threads(&mut args, device);
+    }
+    libtest_mimic::run(&args, trials).exit()
 }

@@ -7,10 +7,13 @@
 //! tests verify that many frames through `render_to_texture` keep the
 //! [`FrameOrchestrator`] ring bounded and the resource pool stable.
 
+#[path = "common/submission.rs"]
+mod submission;
+
 use ekrano::kurbo::{Affine, Rect};
 use ekrano::peniko::{Fill, color::palette};
 use ekrano::{AaConfig, GoldyBackend, GoldyRenderer, RenderParams, Scene};
-use ekrano_tests::{SharedTestDevice, TestBackend, test_alloc_texture, test_device};
+use ekrano_tests::{SharedTestDevice, TestBackend, test_alloc_texture, test_device, shared_test_device};
 use goldy::types::{TextureFlags, TextureFormat, TextureKind};
 
 /// Serialize GPU tests when the D3D12 debug layer is active.
@@ -108,12 +111,10 @@ fn single_frame_ring_depth_bounded_body(backend: TestBackend) {
         }
     }
 }
-#[test]
 fn single_frame_ring_depth_bounded() {
     single_frame_ring_depth_bounded_body(TestBackend::Classic);
 }
 
-#[test]
 fn scheme_single_frame_ring_depth_bounded() {
     single_frame_ring_depth_bounded_body(TestBackend::Scheme);
 }
@@ -164,12 +165,10 @@ fn resource_pool_stable_under_single_frame_body(backend: TestBackend) {
         baseline.total_pooled_buffers,
     );
 }
-#[test]
 fn resource_pool_stable_under_single_frame() {
     resource_pool_stable_under_single_frame_body(TestBackend::Classic);
 }
 
-#[test]
 fn scheme_resource_pool_stable_under_single_frame() {
     resource_pool_stable_under_single_frame_body(TestBackend::Scheme);
 }
@@ -182,7 +181,6 @@ fn scheme_resource_pool_stable_under_single_frame() {
 /// Failure modes this catches:
 /// - `alloc_or_reuse_scheme_indirect` ignoring the cache and allocating every frame.
 /// - The cache key being stale so topology changes don't trigger a fresh allocation.
-#[test]
 fn scheme_indirect_buffer_reused_across_frames() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
@@ -277,7 +275,6 @@ fn scheme_indirect_buffer_reused_across_frames() {
 
 /// DX12 scheme head-chases-tail: resize churn must not force orchestrator retirement
 /// slots or unbounded retained-pool growth.
-#[test]
 fn scheme_dx12_resize_churn_keeps_ring_empty_and_pool_bounded() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
@@ -333,4 +330,56 @@ fn scheme_dx12_resize_churn_keeps_ring_empty_and_pool_bounded() {
         final_bytes <= max_retained,
         "retained pool bytes regress after churn: final={final_bytes} max_seen={max_retained}"
     );
+}
+
+fn main() {
+    let mut trials = Vec::new();
+    trials.push(
+        libtest_mimic::Trial::test("single_frame_ring_depth_bounded", || {
+            single_frame_ring_depth_bounded();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("scheme_single_frame_ring_depth_bounded", || {
+            scheme_single_frame_ring_depth_bounded();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("resource_pool_stable_under_single_frame", || {
+            resource_pool_stable_under_single_frame();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("scheme_resource_pool_stable_under_single_frame", || {
+            scheme_resource_pool_stable_under_single_frame();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("scheme_indirect_buffer_reused_across_frames", || {
+            scheme_indirect_buffer_reused_across_frames();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("scheme_dx12_resize_churn_keeps_ring_empty_and_pool_bounded", || {
+            scheme_dx12_resize_churn_keeps_ring_empty_and_pool_bounded();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+
+    let mut args = libtest_mimic::Arguments::from_args();
+    if let Some(device) = shared_test_device() {
+        submission::clamp_test_threads(&mut args, device);
+    }
+    libtest_mimic::run(&args, trials).exit()
 }

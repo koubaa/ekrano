@@ -18,10 +18,13 @@
 //! ekrano production paths run with [`NoPolicy`](goldy::NoPolicy) unless the caller installs
 //! one via [`Device::set_allocation_policy`](goldy::Device::set_allocation_policy).
 
+#[path = "common/submission.rs"]
+mod submission;
+
 use ekrano::kurbo::{Affine, Circle, Line, Rect, Stroke};
 use ekrano::peniko::{Fill, color::palette};
 use ekrano::{AaConfig, GoldyRenderer, RenderParams, Scene};
-use ekrano_tests::{SharedTestDevice, test_alloc_texture, test_device};
+use ekrano_tests::{SharedTestDevice, test_alloc_texture, test_device, shared_test_device};
 use goldy::types::{TextureFlags, TextureFormat, TextureKind};
 
 #[cfg(target_os = "windows")]
@@ -106,8 +109,6 @@ fn render_n_frames(renderer: &mut GoldyRenderer, scene: &Scene, params: &RenderP
 // Survival tests: single-frame model survives many frames
 // ===========================================================================
 
-#[test]
-#[ignore = "archive reclamation at dispatch boundaries not wired correctly (gpu_progress stale)"]
 fn default_strategy_survives_200_frames_tiny_scene() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
@@ -124,8 +125,6 @@ fn default_strategy_survives_200_frames_tiny_scene() {
     render_n_frames(&mut renderer, &scene, &params, 200);
 }
 
-#[test]
-#[ignore = "archive reclamation at dispatch boundaries not wired correctly (gpu_progress stale)"]
 fn default_strategy_survives_200_frames_complex_scene() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
@@ -146,8 +145,6 @@ fn default_strategy_survives_200_frames_complex_scene() {
 // Robust mode
 // ===========================================================================
 
-#[test]
-#[ignore = "archive reclamation at dispatch boundaries not wired correctly (gpu_progress stale)"]
 fn robust_mode_survives_200_frames() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
@@ -168,8 +165,6 @@ fn robust_mode_survives_200_frames() {
 // Complex scene under various AA configs
 // ===========================================================================
 
-#[test]
-#[ignore = "archive reclamation at dispatch boundaries not wired correctly (gpu_progress stale)"]
 fn complex_scene_area_aa_survives_100_frames() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
@@ -196,8 +191,6 @@ fn complex_scene_area_aa_survives_100_frames() {
 /// readback or overflow in a growth calculation). Left unfixed deliberately:
 /// this path is slated for replacement by the retained-scheme lease design
 /// (`docu/.../diwan/in-progress/retained-scheme/design.md`, phases 2-3 of its project).
-#[test]
-#[ignore = "128 GiB host alloc abort in old ResourcePool path under MSAA16; superseded by retained-scheme design (see comment)"]
 fn complex_scene_msaa16_survives_100_frames() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
@@ -218,8 +211,6 @@ fn complex_scene_msaa16_survives_100_frames() {
 // Resource pool convergence: no new allocations in steady state
 // ===========================================================================
 
-#[test]
-#[ignore = "archive reclamation at dispatch boundaries not wired correctly (gpu_progress stale)"]
 fn resource_pool_stabilizes_after_warmup() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
@@ -274,9 +265,7 @@ fn resource_pool_stabilizes_after_warmup() {
 // Overflow heap compaction after warmup
 // ===========================================================================
 
-#[test]
 #[cfg(target_os = "macos")]
-#[ignore = "archive reclamation at dispatch boundaries not wired correctly (gpu_progress stale)"]
 fn overflow_heaps_compact_to_zero_in_steady_state() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
@@ -323,8 +312,6 @@ fn overflow_heaps_compact_to_zero_in_steady_state() {
 // Growing scene: scene complexity increases each frame
 // ===========================================================================
 
-#[test]
-#[ignore = "archive reclamation at dispatch boundaries not wired correctly (gpu_progress stale)"]
 fn growing_scene_survives_without_heap_exhaustion() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
@@ -369,8 +356,6 @@ fn growing_scene_survives_without_heap_exhaustion() {
 // Shrinking scene: scene complexity decreases (tests unused memory release)
 // ===========================================================================
 
-#[test]
-#[ignore = "archive reclamation at dispatch boundaries not wired correctly (gpu_progress stale)"]
 fn shrinking_scene_does_not_leak_buffers() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
@@ -422,8 +407,6 @@ fn shrinking_scene_does_not_leak_buffers() {
 // Deferred ring depth bounded
 // ===========================================================================
 
-#[test]
-#[ignore = "archive reclamation at dispatch boundaries not wired correctly (gpu_progress stale)"]
 fn deferred_ring_does_not_grow_unbounded() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
@@ -467,8 +450,6 @@ fn deferred_ring_does_not_grow_unbounded() {
 // Larger resolution
 // ===========================================================================
 
-#[test]
-#[ignore = "archive reclamation at dispatch boundaries not wired correctly (gpu_progress stale)"]
 fn large_resolution_survives_50_frames() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
@@ -503,8 +484,6 @@ fn large_resolution_survives_50_frames() {
 // Re-creation resilience: destroy and recreate renderer
 // ===========================================================================
 
-#[test]
-#[ignore = "archive reclamation at dispatch boundaries not wired correctly (gpu_progress stale)"]
 fn recreate_renderer_after_warmup_survives() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
@@ -548,4 +527,99 @@ fn recreate_renderer_after_warmup_survives() {
                 .unwrap_or_else(|e| panic!("second renderer frame {i}: {e}"));
         }
     }
+}
+
+fn main() {
+    let mut trials = Vec::new();
+    trials.push(
+        libtest_mimic::Trial::test("default_strategy_survives_200_frames_tiny_scene", || {
+            default_strategy_survives_200_frames_tiny_scene();
+            Ok(())
+        })
+        .with_ignored_flag(true),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("default_strategy_survives_200_frames_complex_scene", || {
+            default_strategy_survives_200_frames_complex_scene();
+            Ok(())
+        })
+        .with_ignored_flag(true),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("robust_mode_survives_200_frames", || {
+            robust_mode_survives_200_frames();
+            Ok(())
+        })
+        .with_ignored_flag(true),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("complex_scene_area_aa_survives_100_frames", || {
+            complex_scene_area_aa_survives_100_frames();
+            Ok(())
+        })
+        .with_ignored_flag(true),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("complex_scene_msaa16_survives_100_frames", || {
+            complex_scene_msaa16_survives_100_frames();
+            Ok(())
+        })
+        .with_ignored_flag(true),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("resource_pool_stabilizes_after_warmup", || {
+            resource_pool_stabilizes_after_warmup();
+            Ok(())
+        })
+        .with_ignored_flag(true),
+    );
+    #[cfg(target_os = "macos")]
+    trials.push(
+        libtest_mimic::Trial::test("overflow_heaps_compact_to_zero_in_steady_state", || {
+            overflow_heaps_compact_to_zero_in_steady_state();
+            Ok(())
+        })
+        .with_ignored_flag(true),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("growing_scene_survives_without_heap_exhaustion", || {
+            growing_scene_survives_without_heap_exhaustion();
+            Ok(())
+        })
+        .with_ignored_flag(true),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("shrinking_scene_does_not_leak_buffers", || {
+            shrinking_scene_does_not_leak_buffers();
+            Ok(())
+        })
+        .with_ignored_flag(true),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("deferred_ring_does_not_grow_unbounded", || {
+            deferred_ring_does_not_grow_unbounded();
+            Ok(())
+        })
+        .with_ignored_flag(true),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("large_resolution_survives_50_frames", || {
+            large_resolution_survives_50_frames();
+            Ok(())
+        })
+        .with_ignored_flag(true),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("recreate_renderer_after_warmup_survives", || {
+            recreate_renderer_after_warmup_survives();
+            Ok(())
+        })
+        .with_ignored_flag(true),
+    );
+
+    let mut args = libtest_mimic::Arguments::from_args();
+    if let Some(device) = shared_test_device() {
+        submission::clamp_test_threads(&mut args, device);
+    }
+    libtest_mimic::run(&args, trials).exit()
 }

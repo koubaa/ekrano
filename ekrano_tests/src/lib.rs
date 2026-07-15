@@ -105,13 +105,28 @@ impl Deref for SharedTestDevice {
     }
 }
 
-/// Borrow the process-shared device (WARP-serialized when applicable).
-pub fn test_device() -> SharedTestDevice {
+fn ensure_shared_device() -> Option<&'static Device> {
     let init = SHARED_DEVICE.get_or_init(|| match try_create_device() {
         Some(device) => SharedDeviceInit::Ready(device),
         None => SharedDeviceInit::Unavailable,
     });
-    let SharedDeviceInit::Ready(device) = init else {
+    match init {
+        SharedDeviceInit::Ready(device) => Some(device),
+        SharedDeviceInit::Unavailable => None,
+    }
+}
+
+/// Process-shared device without the WARP serial lock.
+///
+/// For custom harness setup (e.g. clamping `libtest_mimic` thread counts). Test bodies
+/// that render should use [`test_device`] so WARP stays serialized.
+pub fn shared_test_device() -> Option<&'static Device> {
+    ensure_shared_device()
+}
+
+/// Borrow the process-shared device (WARP-serialized when applicable).
+pub fn test_device() -> SharedTestDevice {
+    let Some(device) = ensure_shared_device() else {
         panic!("No Goldy device available");
     };
     let _warp_guard = if is_dx12_warp(device) {

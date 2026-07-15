@@ -3,12 +3,15 @@
 
 //! Tests to ensure that certain issues which don't deserve a test scene don't regress
 
+#[path = "common/submission.rs"]
+mod submission;
+
 use ekrano::{
     AaConfig, Scene,
     kurbo::{Affine, Rect, RoundedRect, Stroke},
     peniko::{Extend, ImageQuality, color::palette},
 };
-use ekrano_tests::{TestBackend, TestParams, smoke_snapshot_test_sync, snapshot_test_sync};
+use ekrano_tests::{TestBackend, TestParams, smoke_snapshot_test_sync, snapshot_test_sync, shared_test_device};
 use scenes::ImageCache;
 use scenes::SimpleText;
 
@@ -22,12 +25,10 @@ fn rounded_rectangle_watertight_body(backend: TestBackend) {
     params.anti_aliasing = AaConfig::Msaa16;
     snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.001);
 }
-#[test]
 fn rounded_rectangle_watertight() {
     rounded_rectangle_watertight_body(TestBackend::Classic);
 }
 
-#[test]
 fn scheme_rounded_rectangle_watertight() {
     rounded_rectangle_watertight_body(TestBackend::Scheme);
 }
@@ -51,12 +52,10 @@ fn test_data_image_roundtrip_extend_pad_body(backend: TestBackend) {
         .unwrap()
         .assert_mean_less_than(0.001);
 }
-#[test]
 fn test_data_image_roundtrip_extend_pad() {
     test_data_image_roundtrip_extend_pad_body(TestBackend::Classic);
 }
 
-#[test]
 fn scheme_test_data_image_roundtrip_extend_pad() {
     test_data_image_roundtrip_extend_pad_body(TestBackend::Scheme);
 }
@@ -72,12 +71,10 @@ fn stroke_width_zero_body(backend: TestBackend) {
     params.anti_aliasing = AaConfig::Msaa16;
     snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.001);
 }
-#[test]
 fn stroke_width_zero() {
     stroke_width_zero_body(TestBackend::Classic);
 }
 
-#[test]
 fn scheme_stroke_width_zero() {
     stroke_width_zero_body(TestBackend::Scheme);
 }
@@ -105,12 +102,76 @@ fn text_stroke_width_zero_body(backend: TestBackend) {
     .with_backend(backend);
     snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.001);
 }
-#[test]
 fn text_stroke_width_zero() {
     text_stroke_width_zero_body(TestBackend::Classic);
 }
 
-#[test]
 fn scheme_text_stroke_width_zero() {
     text_stroke_width_zero_body(TestBackend::Scheme);
+}
+
+fn main() {
+    let mut trials = Vec::new();
+    trials.push(
+        libtest_mimic::Trial::test("rounded_rectangle_watertight", || {
+            rounded_rectangle_watertight();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("scheme_rounded_rectangle_watertight", || {
+            scheme_rounded_rectangle_watertight();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("test_data_image_roundtrip_extend_pad", || {
+            test_data_image_roundtrip_extend_pad();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("scheme_test_data_image_roundtrip_extend_pad", || {
+            scheme_test_data_image_roundtrip_extend_pad();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("stroke_width_zero", || {
+            stroke_width_zero();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("scheme_stroke_width_zero", || {
+            scheme_stroke_width_zero();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("text_stroke_width_zero", || {
+            text_stroke_width_zero();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("scheme_text_stroke_width_zero", || {
+            scheme_text_stroke_width_zero();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+
+    let mut args = libtest_mimic::Arguments::from_args();
+    if let Some(device) = shared_test_device() {
+        submission::clamp_test_threads(&mut args, device);
+    }
+    libtest_mimic::run(&args, trials).exit()
 }

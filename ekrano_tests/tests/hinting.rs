@@ -8,12 +8,15 @@
 // Feel free to send a PR that solves one or more of these.
 #![allow(clippy::cast_possible_truncation, clippy::allow_attributes_without_reason)]
 
+#[path = "common/submission.rs"]
+mod submission;
+
 use ekrano::{
     Scene,
     kurbo::Affine,
     peniko::{Brush, Fill, color::palette},
 };
-use ekrano_tests::{TestBackend, TestParams, snapshot_test_sync};
+use ekrano_tests::{TestBackend, TestParams, snapshot_test_sync, shared_test_device};
 use scenes::SimpleText;
 
 fn encode_hinted_text(text: &str, font_size: f32) -> Scene {
@@ -44,12 +47,10 @@ fn simple_hinted_body(backend: TestBackend) {
         TestParams::new("simple_hinted", (font_size * 10.) as _, (font_size * 1.1).ceil() as _).with_backend(backend);
     snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.02);
 }
-#[test]
 fn simple_hinted() {
     simple_hinted_body(TestBackend::Classic);
 }
 
-#[test]
 fn scheme_simple_hinted() {
     simple_hinted_body(TestBackend::Scheme);
 }
@@ -64,12 +65,10 @@ fn scaled_hinted_body(backend: TestBackend) {
         TestParams::new("scaled_hinted", (font_size * 15.) as _, (font_size * 1.65).ceil() as _).with_backend(backend);
     snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.02);
 }
-#[test]
 fn scaled_hinted() {
     scaled_hinted_body(TestBackend::Classic);
 }
 
-#[test]
 fn scheme_scaled_hinted() {
     scaled_hinted_body(TestBackend::Scheme);
 }
@@ -88,14 +87,10 @@ fn integer_translation_body(backend: TestBackend) {
     .with_backend(backend);
     snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.02);
 }
-#[cfg_attr(skip_slow_tests, ignore)]
-#[test]
 fn integer_translation() {
     integer_translation_body(TestBackend::Classic);
 }
 
-#[cfg_attr(skip_slow_tests, ignore)]
-#[test]
 fn scheme_integer_translation() {
     integer_translation_body(TestBackend::Scheme);
 }
@@ -114,14 +109,78 @@ fn non_integer_translation_body(backend: TestBackend) {
     .with_backend(backend);
     snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.02);
 }
-#[cfg_attr(skip_slow_tests, ignore)]
-#[test]
 fn non_integer_translation() {
     non_integer_translation_body(TestBackend::Classic);
 }
 
-#[cfg_attr(skip_slow_tests, ignore)]
-#[test]
 fn scheme_non_integer_translation() {
     non_integer_translation_body(TestBackend::Scheme);
+}
+
+fn main() {
+    let mut trials = Vec::new();
+    let ignore_slow = cfg!(skip_slow_tests);
+
+    trials.push(
+        libtest_mimic::Trial::test("simple_hinted", || {
+            simple_hinted();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("scheme_simple_hinted", || {
+            scheme_simple_hinted();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("scaled_hinted", || {
+            scaled_hinted();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("scheme_scaled_hinted", || {
+            scheme_scaled_hinted();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("integer_translation", || {
+            integer_translation();
+            Ok(())
+        })
+        .with_ignored_flag(ignore_slow),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("scheme_integer_translation", || {
+            scheme_integer_translation();
+            Ok(())
+        })
+        .with_ignored_flag(ignore_slow),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("non_integer_translation", || {
+            non_integer_translation();
+            Ok(())
+        })
+        .with_ignored_flag(ignore_slow),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("scheme_non_integer_translation", || {
+            scheme_non_integer_translation();
+            Ok(())
+        })
+        .with_ignored_flag(ignore_slow),
+    );
+
+    let mut args = libtest_mimic::Arguments::from_args();
+    if let Some(device) = shared_test_device() {
+        submission::clamp_test_threads(&mut args, device);
+    }
+    libtest_mimic::run(&args, trials).exit()
 }
