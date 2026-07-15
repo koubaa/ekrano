@@ -16,7 +16,7 @@ mod submission;
 use ekrano::kurbo::{Affine, Rect};
 use ekrano::peniko::{Fill, color::palette};
 use ekrano::{AaConfig, GoldyRenderer, RenderParams, Scene};
-use ekrano_tests::{SharedTestDevice, test_alloc_texture, test_device, shared_test_device};
+use ekrano_tests::{SharedTestDevice, shared_test_device, test_alloc_texture, test_device};
 use goldy::types::{TextureFlags, TextureFormat, TextureKind};
 
 const FRAME_COUNT: usize = 300;

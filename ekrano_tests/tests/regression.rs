@@ -11,7 +11,7 @@ use ekrano::{
     kurbo::{Affine, Rect, RoundedRect, Stroke},
     peniko::{Extend, ImageQuality, color::palette},
 };
-use ekrano_tests::{TestBackend, TestParams, smoke_snapshot_test_sync, snapshot_test_sync, shared_test_device};
+use ekrano_tests::{TestBackend, TestParams, shared_test_device, smoke_snapshot_test_sync, snapshot_test_sync};
 use scenes::ImageCache;
 use scenes::SimpleText;
 

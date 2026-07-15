@@ -82,7 +82,6 @@ fn filter_gaussian_blur_no_decimation_body(backend: TestBackend) {
         .assert_mean_less_than(0.0095);
 }
 
-
 /// Gaussian blur with larger radius (`std_dev` = 4.0, uses decimation).
 fn filter_gaussian_blur_with_decimation_body(backend: TestBackend) {
     let mut scene = Scene::new();
@@ -106,7 +105,6 @@ fn filter_gaussian_blur_with_decimation_body(backend: TestBackend) {
         .assert_mean_less_than(0.0095);
 }
 
-
 /// Zero blur acts as identity (no-op).
 fn filter_gaussian_blur_zero_body(backend: TestBackend) {
     let mut scene = Scene::new();
@@ -129,7 +127,6 @@ fn filter_gaussian_blur_zero_body(backend: TestBackend) {
         .unwrap()
         .assert_mean_less_than(0.0095);
 }
-
 
 /// Blur with very large `std_dev` (= 20.0) — shape barely visible.
 ///
@@ -185,7 +182,6 @@ fn filter_extreme_blur_body(backend: TestBackend) {
         .assert_mean_less_than(0.0095);
 }
 
-
 /// Blur on semi-transparent shapes — fully-opaque (left) and 50%-transparent (right).
 fn filter_transparent_shapes_body(backend: TestBackend) {
     let mut scene = Scene::new();
@@ -220,7 +216,6 @@ fn filter_transparent_shapes_body(backend: TestBackend) {
         .unwrap()
         .assert_mean_less_than(0.0095);
 }
-
 
 // ─── Gaussian blur edge modes ─────────────────────────────────────────────────
 //
@@ -271,7 +266,6 @@ fn filter_gaussian_blur_edge_mode_duplicate_body(backend: TestBackend) {
         .assert_mean_less_than(0.04);
 }
 
-
 fn filter_gaussian_blur_edge_mode_wrap_body(backend: TestBackend) {
     let mut params = TestParams::new("filter_gaussian_blur_edge_mode_wrap", 256, 100).with_backend(backend);
     params.base_color = Some(WHITE);
@@ -280,7 +274,6 @@ fn filter_gaussian_blur_edge_mode_wrap_body(backend: TestBackend) {
         .assert_mean_less_than(0.06);
 }
 
-
 fn filter_gaussian_blur_edge_mode_mirror_body(backend: TestBackend) {
     let mut params = TestParams::new("filter_gaussian_blur_edge_mode_mirror", 256, 100).with_backend(backend);
     params.base_color = Some(WHITE);
@@ -288,7 +281,6 @@ fn filter_gaussian_blur_edge_mode_mirror_body(backend: TestBackend) {
         .unwrap()
         .assert_mean_less_than(0.04);
 }
-
 
 // ─── Flood filter ─────────────────────────────────────────────────────────────
 
@@ -319,7 +311,6 @@ fn filter_flood_body(backend: TestBackend) {
         .assert_mean_less_than(0.0095);
 }
 
-
 /// Flood filter on a star-shaped fill (no extra clip wrapper).
 fn filter_flood_star_body(backend: TestBackend) {
     let mut scene = Scene::new();
@@ -342,7 +333,6 @@ fn filter_flood_star_body(backend: TestBackend) {
         .unwrap()
         .assert_mean_less_than(0.0095);
 }
-
 
 // ─── Drop shadow ─────────────────────────────────────────────────────────────
 
@@ -372,7 +362,6 @@ fn filter_drop_shadow_fractional_offset_body(backend: TestBackend) {
         .assert_mean_less_than(0.0095);
 }
 
-
 /// Drop shadow with zero offset (shadow directly behind).
 fn filter_drop_shadow_zero_offset_body(backend: TestBackend) {
     let mut scene = Scene::new();
@@ -398,7 +387,6 @@ fn filter_drop_shadow_zero_offset_body(backend: TestBackend) {
         .unwrap()
         .assert_mean_less_than(0.0095);
 }
-
 
 // ─── Offset filter ────────────────────────────────────────────────────────────
 
@@ -435,7 +423,6 @@ fn filter_offset_body(backend: TestBackend) {
         .unwrap()
         .assert_mean_less_than(0.0095);
 }
-
 
 // ─── Layer structure tests ───────────────────────────────────────────────────
 
@@ -500,7 +487,6 @@ fn filter_nested_layers_body(backend: TestBackend) {
         .assert_mean_less_than(0.0095);
 }
 
-
 /// Three nested filter layers with no content drawn — white background is all that shows.
 ///
 /// TODO: nested filter layers require multi-pass fine, not yet implemented.
@@ -538,36 +524,99 @@ fn main() {
         }};
     }
 
-    case!("filter_gaussian_blur_no_decimation", filter_gaussian_blur_no_decimation_body(TestBackend::Classic));
-    case!("scheme_filter_gaussian_blur_no_decimation", filter_gaussian_blur_no_decimation_body(TestBackend::Scheme));
-    case!("filter_gaussian_blur_with_decimation", filter_gaussian_blur_with_decimation_body(TestBackend::Classic));
-    case!("scheme_filter_gaussian_blur_with_decimation", filter_gaussian_blur_with_decimation_body(TestBackend::Scheme));
-    case!("filter_gaussian_blur_zero", filter_gaussian_blur_zero_body(TestBackend::Classic));
-    case!("scheme_filter_gaussian_blur_zero", filter_gaussian_blur_zero_body(TestBackend::Scheme));
+    case!(
+        "filter_gaussian_blur_no_decimation",
+        filter_gaussian_blur_no_decimation_body(TestBackend::Classic)
+    );
+    case!(
+        "scheme_filter_gaussian_blur_no_decimation",
+        filter_gaussian_blur_no_decimation_body(TestBackend::Scheme)
+    );
+    case!(
+        "filter_gaussian_blur_with_decimation",
+        filter_gaussian_blur_with_decimation_body(TestBackend::Classic)
+    );
+    case!(
+        "scheme_filter_gaussian_blur_with_decimation",
+        filter_gaussian_blur_with_decimation_body(TestBackend::Scheme)
+    );
+    case!(
+        "filter_gaussian_blur_zero",
+        filter_gaussian_blur_zero_body(TestBackend::Classic)
+    );
+    case!(
+        "scheme_filter_gaussian_blur_zero",
+        filter_gaussian_blur_zero_body(TestBackend::Scheme)
+    );
     case!("filter_extreme_blur", filter_extreme_blur_body(TestBackend::Classic));
-    case!("scheme_filter_extreme_blur", filter_extreme_blur_body(TestBackend::Scheme));
-    case!("filter_transparent_shapes", filter_transparent_shapes_body(TestBackend::Classic));
-    case!("scheme_filter_transparent_shapes", filter_transparent_shapes_body(TestBackend::Scheme));
-    case!("filter_gaussian_blur_edge_mode_duplicate", filter_gaussian_blur_edge_mode_duplicate_body(TestBackend::Classic));
-    case!("scheme_filter_gaussian_blur_edge_mode_duplicate", filter_gaussian_blur_edge_mode_duplicate_body(TestBackend::Scheme));
-    case!("filter_gaussian_blur_edge_mode_wrap", filter_gaussian_blur_edge_mode_wrap_body(TestBackend::Classic));
-    case!("scheme_filter_gaussian_blur_edge_mode_wrap", filter_gaussian_blur_edge_mode_wrap_body(TestBackend::Scheme));
-    case!("filter_gaussian_blur_edge_mode_mirror", filter_gaussian_blur_edge_mode_mirror_body(TestBackend::Classic));
-    case!("scheme_filter_gaussian_blur_edge_mode_mirror", filter_gaussian_blur_edge_mode_mirror_body(TestBackend::Scheme));
+    case!(
+        "scheme_filter_extreme_blur",
+        filter_extreme_blur_body(TestBackend::Scheme)
+    );
+    case!(
+        "filter_transparent_shapes",
+        filter_transparent_shapes_body(TestBackend::Classic)
+    );
+    case!(
+        "scheme_filter_transparent_shapes",
+        filter_transparent_shapes_body(TestBackend::Scheme)
+    );
+    case!(
+        "filter_gaussian_blur_edge_mode_duplicate",
+        filter_gaussian_blur_edge_mode_duplicate_body(TestBackend::Classic)
+    );
+    case!(
+        "scheme_filter_gaussian_blur_edge_mode_duplicate",
+        filter_gaussian_blur_edge_mode_duplicate_body(TestBackend::Scheme)
+    );
+    case!(
+        "filter_gaussian_blur_edge_mode_wrap",
+        filter_gaussian_blur_edge_mode_wrap_body(TestBackend::Classic)
+    );
+    case!(
+        "scheme_filter_gaussian_blur_edge_mode_wrap",
+        filter_gaussian_blur_edge_mode_wrap_body(TestBackend::Scheme)
+    );
+    case!(
+        "filter_gaussian_blur_edge_mode_mirror",
+        filter_gaussian_blur_edge_mode_mirror_body(TestBackend::Classic)
+    );
+    case!(
+        "scheme_filter_gaussian_blur_edge_mode_mirror",
+        filter_gaussian_blur_edge_mode_mirror_body(TestBackend::Scheme)
+    );
     case!("filter_flood", filter_flood_body(TestBackend::Classic));
     case!("scheme_filter_flood", filter_flood_body(TestBackend::Scheme));
     case!("filter_flood_star", filter_flood_star_body(TestBackend::Classic));
     case!("scheme_filter_flood_star", filter_flood_star_body(TestBackend::Scheme));
-    case!("filter_drop_shadow_fractional_offset", filter_drop_shadow_fractional_offset_body(TestBackend::Classic));
-    case!("scheme_filter_drop_shadow_fractional_offset", filter_drop_shadow_fractional_offset_body(TestBackend::Scheme));
-    case!("filter_drop_shadow_zero_offset", filter_drop_shadow_zero_offset_body(TestBackend::Classic));
-    case!("scheme_filter_drop_shadow_zero_offset", filter_drop_shadow_zero_offset_body(TestBackend::Scheme));
+    case!(
+        "filter_drop_shadow_fractional_offset",
+        filter_drop_shadow_fractional_offset_body(TestBackend::Classic)
+    );
+    case!(
+        "scheme_filter_drop_shadow_fractional_offset",
+        filter_drop_shadow_fractional_offset_body(TestBackend::Scheme)
+    );
+    case!(
+        "filter_drop_shadow_zero_offset",
+        filter_drop_shadow_zero_offset_body(TestBackend::Classic)
+    );
+    case!(
+        "scheme_filter_drop_shadow_zero_offset",
+        filter_drop_shadow_zero_offset_body(TestBackend::Scheme)
+    );
     case!("filter_offset", filter_offset_body(TestBackend::Classic));
     case!("scheme_filter_offset", filter_offset_body(TestBackend::Scheme));
     case!("filter_nested_layers", filter_nested_layers_body(TestBackend::Classic));
-    case!("scheme_filter_nested_layers", filter_nested_layers_body(TestBackend::Scheme));
+    case!(
+        "scheme_filter_nested_layers",
+        filter_nested_layers_body(TestBackend::Scheme)
+    );
     case!("filter_empty_layers", filter_empty_layers_body(TestBackend::Classic));
-    case!("scheme_filter_empty_layers", filter_empty_layers_body(TestBackend::Scheme));
+    case!(
+        "scheme_filter_empty_layers",
+        filter_empty_layers_body(TestBackend::Scheme)
+    );
 
     let mut args = libtest_mimic::Arguments::from_args();
     if let Some(device) = shared_test_device() {

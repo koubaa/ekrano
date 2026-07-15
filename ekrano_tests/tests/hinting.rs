@@ -16,7 +16,7 @@ use ekrano::{
     kurbo::Affine,
     peniko::{Brush, Fill, color::palette},
 };
-use ekrano_tests::{TestBackend, TestParams, snapshot_test_sync, shared_test_device};
+use ekrano_tests::{TestBackend, TestParams, shared_test_device, snapshot_test_sync};
 use scenes::SimpleText;
 
 fn encode_hinted_text(text: &str, font_size: f32) -> Scene {

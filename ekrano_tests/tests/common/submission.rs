@@ -1,6 +1,6 @@
 //! Shared-device harness helpers for `libtest_mimic` integration tests.
 
-use goldy::{types::BackendType, Device};
+use goldy::{Device, types::BackendType};
 
 /// Clamp libtest parallelism so concurrent trials cannot exhaust Vulkan's fixed
 /// per-device compute-queue pool (shared [`Device`] across trials).

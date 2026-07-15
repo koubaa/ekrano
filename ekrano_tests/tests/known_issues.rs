@@ -20,7 +20,7 @@ use ekrano::{
     kurbo::{Affine, Rect, Triangle},
     peniko::{Color, ColorStop, Extend, Gradient, ImageFormat, ImageQuality, Mix, color::palette},
 };
-use ekrano_tests::{TestBackend, TestParams, smoke_snapshot_test_sync, snapshot_test_sync, shared_test_device};
+use ekrano_tests::{TestBackend, TestParams, shared_test_device, smoke_snapshot_test_sync, snapshot_test_sync};
 use scenes::ImageCache;
 
 /// A reproduction of <https://github.com/linebender/vello/issues/680>

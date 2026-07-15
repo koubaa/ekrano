@@ -29,7 +29,7 @@ use ekrano::{
     kurbo::{Affine, Rect},
     peniko::{BlendMode, Color, Compose, Fill, Mix, color::palette::css::*},
 };
-use ekrano_tests::{TestBackend, TestParams, snapshot_test_sync, shared_test_device};
+use ekrano_tests::{TestBackend, TestParams, shared_test_device, snapshot_test_sync};
 
 /// Helper: full-viewport rect for use as a layer clip.
 fn viewport(width: f64, height: f64) -> Rect {

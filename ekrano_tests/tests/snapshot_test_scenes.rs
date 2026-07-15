@@ -6,7 +6,7 @@
 #[path = "common/submission.rs"]
 mod submission;
 
-use ekrano_tests::{TestBackend, TestParams, encode_test_scene, snapshot_test_sync, shared_test_device};
+use ekrano_tests::{TestBackend, TestParams, encode_test_scene, shared_test_device, snapshot_test_sync};
 use scenes::{ExampleScene, test_scenes};
 
 /// Snapshot each scene against the LFS reference PNG.

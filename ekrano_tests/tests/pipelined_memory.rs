@@ -13,7 +13,7 @@ mod submission;
 use ekrano::kurbo::{Affine, Rect};
 use ekrano::peniko::{Fill, color::palette};
 use ekrano::{AaConfig, GoldyBackend, GoldyRenderer, RenderParams, Scene};
-use ekrano_tests::{SharedTestDevice, TestBackend, test_alloc_texture, test_device, shared_test_device};
+use ekrano_tests::{SharedTestDevice, TestBackend, shared_test_device, test_alloc_texture, test_device};
 use goldy::types::{TextureFlags, TextureFormat, TextureKind};
 
 /// Serialize GPU tests when the D3D12 debug layer is active.

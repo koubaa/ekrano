@@ -11,7 +11,7 @@ use ekrano::{
     kurbo::{Affine, Circle, Rect},
     peniko::{Brush, Fill, color::palette},
 };
-use ekrano_tests::{TestBackend, TestParams, smoke_snapshot_test_sync, shared_test_device};
+use ekrano_tests::{TestBackend, TestParams, shared_test_device, smoke_snapshot_test_sync};
 use scenes::SimpleText;
 
 fn filled_square_body(backend: TestBackend) {
