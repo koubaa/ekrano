@@ -48,6 +48,10 @@ env:
 # can share a process-lifetime Device and serialize only on DX12 WARP. cargo-nextest runs each
 # test in its own process, which defeats that model.
 #
+# Windows: DX12 on WARP via GOLDY_DX12_FORCE_WARP, redistributable
+# WARP DLL from NuGet, and `-j 1 -- --test-threads=1` because hosted WARP is unstable under
+# parallel GPU work across processes or libtest threads.
+#
 # The MSRV jobs run only cargo check because different clippy versions can disagree on goals and
 # running tests introduces dev dependencies which may require a higher MSRV than the bare package.
 #
@@ -114,8 +118,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        # TODO: re-enable windows-latest when Windows CI is green again
-        os: [macos-latest, ubuntu-latest]
+        os: [windows-latest, macos-latest, ubuntu-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -175,14 +178,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # TODO: re-enable windows-latest when Windows CI is green again
-        os: [macos-latest, ubuntu-24.04]
+        os: [windows-latest, macos-latest, ubuntu-24.04]
         include:
           - os: ubuntu-24.04
             runner: linux-gpu
             gpu: 'yes'
           - os: macos-latest
             runner: macos-latest
+            gpu: 'yes'
+          - os: windows-latest
+            runner: windows-latest
+            # GPU snapshot tests use DX12 on WARP (software rasterizer)
             gpu: 'yes'
     steps:
       - uses: actions/checkout@v4
@@ -305,6 +311,7 @@ jobs:
       - name: cargo test
         # TODO: Maybe use --release; the CPU shaders are extremely slow when unoptimised
         # One process per test binary enables process-lifetime shared Device + WARP mutex.
+        #run: cargo test --workspace --locked --all-features --no-fail-fast ${{ matrix.os == 'windows-latest' && '-j 1 -- --test-threads=1' || '' }}
         run: cargo test --workspace --locked --all-features --no-fail-fast
         env:
           EKRANO_CI_GPU_SUPPORT: ${{ matrix.gpu }}
@@ -336,8 +343,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        # TODO: re-enable windows-latest when Windows CI is green again
-        os: [macos-latest, ubuntu-latest]
+        os: [windows-latest, macos-latest, ubuntu-latest]
     steps:
       - uses: actions/checkout@v4
 
