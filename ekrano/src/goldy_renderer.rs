@@ -768,9 +768,10 @@ impl PersistentState {
             slot.as_ref()
                 .is_some_and(|(out, _)| out.width() != width || out.height() != height || out.format() != out_format)
         });
-        let scheme_mismatch = self.cached_scheme_rt.as_ref().is_some_and(|(out, _, _)| {
-            out.width() != width || out.height() != height || out.format() != out_format
-        });
+        let scheme_mismatch = self
+            .cached_scheme_rt
+            .as_ref()
+            .is_some_and(|(out, _, _)| out.width() != width || out.height() != height || out.format() != out_format);
         if !classic_mismatch && !scheme_mismatch {
             return false;
         }
