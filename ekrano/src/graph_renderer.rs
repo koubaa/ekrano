@@ -508,20 +508,6 @@ impl GraphRenderer {
         let prev_bump = self.persistent.take_last_drained_bump();
         self.apply_bump_feedback(prev_bump, &layout, &params, &mut config, &mut stats);
 
-        let preacquired_frame = if let Some(surface) = surface {
-            let _tz = goldy::tracy_zone!("ekrano.surface.acquire_early");
-            match surface.begin() {
-                Ok(frame) => Some(frame),
-                Err(e) => {
-                    self.frame_pipeline.abort_frame(frame_handle);
-                    return Err(Error::Shader(e.to_string()));
-                }
-            }
-        } else {
-            None
-        };
-        let acquired_image_index = preacquired_frame.as_ref().map(goldy::Frame::image_index);
-
         let t1 = Instant::now();
         if self.persistent.linear_clamp_sampler.is_none() {
             self.persistent.linear_clamp_sampler =
@@ -546,7 +532,7 @@ impl GraphRenderer {
             &mut self.persistent,
             &self.engine_shaders,
             surface,
-            preacquired_frame,
+            None,
         );
 
         let swapchain_handle = if surface.is_some() {
@@ -652,7 +638,7 @@ impl GraphRenderer {
                 self.persistent.cached_rt_timelines[i],
             );
             self.persistent.cached_rt_timelines[i] = frame_tv;
-            if let Some(idx) = acquired_image_index {
+            if let Some(idx) = surface_frame.as_ref().map(goldy::Frame::image_index) {
                 self.persistent.rt_slot_swapchain_image[i] = Some(idx);
             }
         }
@@ -1079,6 +1065,9 @@ impl<'a> GraphRecorder<'a> {
     ///
     /// Surface paths call [`goldy::Frame::submit_frame`] before returning so the
     /// timeline is valid for cache stamping before [`goldy::Frame::present`].
+    /// Swapchain frames use [`FrameOrchestrator::end_frame_for_surface`], which
+    /// submits non-present partitions first and acquires the drawable inside
+    /// [`goldy::Surface::submit_graph`] when the present partition is reached.
     pub(crate) fn finish(mut self) -> Result<FrameFinishOutcome> {
         self.finished = true;
 

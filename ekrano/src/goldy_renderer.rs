@@ -1131,8 +1131,8 @@ impl GoldyRenderer {
     }
 
     /// Like [`Self::submit_to_swapchain`], but runs `pre_acquire` after the upload
-    /// scheme is submitted and immediately before the worker acquires its drawable
-    /// (Scheme backend only).
+    /// scheme is submitted and immediately before the worker scheme submits (including
+    /// deferred swapchain acquire at the present partition; Scheme backend only).
     pub fn submit_to_swapchain_with<F>(
         &mut self,
         prepared: PreparedFrame,

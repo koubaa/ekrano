@@ -19,9 +19,9 @@
 //!    from `out_image` to the present lease.
 //! 4. [`goldy::Scheme::grant_present`] records the present easement (once per frame in
 //!    Phase 2; retained in Phase 3).
-//! 5. [`goldy::Scheme::submit_with_acquired_presents`] submits all partitions using a
-//!    drawable acquired at frame start (classic-like timing); fall back to
-//!    [`goldy::Scheme::submit`] only when no swapchain pool is bound.
+//! 5. [`goldy::Scheme::submit`] submits non-present partitions first, then acquires the
+//!    drawable when the present partition is about to run (deferred acquire); fall back
+//!    to headless [`goldy::Scheme::submit`] only when no swapchain pool is bound.
 //! 6. [`PresentToken::present`] performs scanout — synchronously in
 //!    [`SchemeRenderer::render_to_swapchain`], or async on `TID_PRESENT` via
 //!    [`SchemeRenderer::submit_to_swapchain`] + velato's `Presenter`.
@@ -349,9 +349,10 @@ impl SchemeRenderer {
     }
 
     /// Like [`Self::submit_to_swapchain`], but runs `pre_acquire` after the upload
-    /// scheme is submitted and immediately before the worker acquires its swapchain
-    /// drawable. Callers use this to defer present-ack backpressure to the acquire
-    /// boundary so upload recording/submit overlaps the previous frame's present.
+    /// scheme is submitted and immediately before the worker scheme submits (including
+    /// deferred swapchain acquire at the present partition). Callers use this to defer
+    /// present-ack backpressure to that boundary so upload recording/submit overlaps the
+    /// previous frame's present.
     pub fn submit_to_swapchain_with<F>(
         &mut self,
         prepared: PreparedFrame,
@@ -598,16 +599,6 @@ impl SchemeRenderer {
 
         let prev_bump = self.persistent.take_last_drained_bump();
         self.apply_bump_feedback(prev_bump, &layout, &params, &mut config, &mut stats);
-
-        // Match classic task-graph timing: acquire the swapchain drawable immediately
-        // after begin_frame, before prepare/coarse/fine recording.
-        let mut early_present = if let Some(pool) = pool {
-            let _tz = goldy::tracy_zone!("ekrano.surface.acquire_early");
-            let lease = pool.lease();
-            Some(pool.acquire_present(&lease).map_err(|e| Error::Shader(e.to_string()))?)
-        } else {
-            None
-        };
 
         let t1 = Instant::now();
         if self.persistent.linear_clamp_sampler.is_none() {
@@ -867,7 +858,7 @@ impl SchemeRenderer {
             scheme_submission,
         } = {
             let _tz = goldy::tracy_zone!("ekrano.finish");
-            recorder.finish(pool.is_some(), pre_acquire, early_present.take())?
+            recorder.finish(pool.is_some(), pre_acquire, None)?
         };
 
         if let Some((present, bump, topology, filter_effects, out_image)) = worker_cache {
@@ -1392,8 +1383,8 @@ impl<'a> SchemeRecorder<'a> {
 
         // The upload scheme has no dependency on the swapchain image. Run the caller's
         // pre-acquire barrier (e.g. wait-for-present-ack) here after upload submit.
-        // Drawable acquire itself is done earlier (`ekrano.surface.acquire_early`) when
-        // an `AcquiredPresent` was supplied.
+        // Swapchain drawable acquire is deferred inside [`goldy::Scheme::submit`] until
+        // the first present-touching partition is about to run.
         {
             let _tz = goldy::tracy_zone!("ekrano.finish.pre_acquire");
             pre_acquire()?;
