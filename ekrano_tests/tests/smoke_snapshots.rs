@@ -3,12 +3,15 @@
 
 //! Tests to validate our snapshot testing ability
 
+#[path = "common/submission.rs"]
+mod submission;
+
 use ekrano::{
     Scene,
     kurbo::{Affine, Circle, Rect},
     peniko::{Brush, Fill, color::palette},
 };
-use ekrano_tests::{TestBackend, TestParams, smoke_snapshot_test_sync};
+use ekrano_tests::{TestBackend, TestParams, shared_test_device, smoke_snapshot_test_sync};
 use scenes::SimpleText;
 
 fn filled_square_body(backend: TestBackend) {
@@ -25,12 +28,10 @@ fn filled_square_body(backend: TestBackend) {
         .unwrap()
         .assert_mean_less_than(0.01);
 }
-#[test]
 fn filled_square() {
     filled_square_body(TestBackend::Classic);
 }
 
-#[test]
 fn scheme_filled_square() {
     filled_square_body(TestBackend::Scheme);
 }
@@ -49,12 +50,10 @@ fn filled_circle_body(backend: TestBackend) {
         .unwrap()
         .assert_mean_less_than(0.01);
 }
-#[test]
 fn filled_circle() {
     filled_circle_body(TestBackend::Classic);
 }
 
-#[test]
 fn scheme_filled_circle() {
     filled_circle_body(TestBackend::Scheme);
 }
@@ -76,12 +75,62 @@ fn two_emoji_body(backend: TestBackend) {
         .unwrap()
         .assert_mean_less_than(0.01);
 }
-#[test]
 fn two_emoji() {
     two_emoji_body(TestBackend::Classic);
 }
 
-#[test]
 fn scheme_two_emoji() {
     two_emoji_body(TestBackend::Scheme);
+}
+
+fn main() {
+    let mut trials = Vec::new();
+    trials.push(
+        libtest_mimic::Trial::test("filled_square", || {
+            filled_square();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("scheme_filled_square", || {
+            scheme_filled_square();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("filled_circle", || {
+            filled_circle();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("scheme_filled_circle", || {
+            scheme_filled_circle();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("two_emoji", || {
+            two_emoji();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("scheme_two_emoji", || {
+            scheme_two_emoji();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+
+    let mut args = libtest_mimic::Arguments::from_args();
+    if let Some(device) = shared_test_device() {
+        submission::clamp_test_threads(&mut args, device);
+    }
+    libtest_mimic::run(&args, trials).exit()
 }

@@ -21,12 +21,15 @@
 //! `push_layer(SrcOver)` so that the dark-grey background fill and the per-cell
 //! fills are inside a real layer and therefore get rendered.
 
+#[path = "common/submission.rs"]
+mod submission;
+
 use ekrano::{
     Scene,
     kurbo::{Affine, Rect},
     peniko::{BlendMode, Color, Compose, Fill, Mix, color::palette::css::*},
 };
-use ekrano_tests::{TestBackend, TestParams, snapshot_test_sync};
+use ekrano_tests::{TestBackend, TestParams, shared_test_device, snapshot_test_sync};
 
 /// Helper: full-viewport rect for use as a layer clip.
 fn viewport(width: f64, height: f64) -> Rect {
@@ -74,12 +77,10 @@ fn mix_non_isolated_difference_body(backend: TestBackend) {
         .unwrap()
         .assert_mean_less_than(0.0095);
 }
-#[test]
 fn mix_non_isolated_difference() {
     mix_non_isolated_difference_body(TestBackend::Classic);
 }
 
-#[test]
 fn scheme_mix_non_isolated_difference() {
     mix_non_isolated_difference_body(TestBackend::Scheme);
 }
@@ -92,12 +93,10 @@ fn mix_non_isolated_soft_light_body(backend: TestBackend) {
         .unwrap()
         .assert_mean_less_than(0.0095);
 }
-#[test]
 fn mix_non_isolated_soft_light() {
     mix_non_isolated_soft_light_body(TestBackend::Classic);
 }
 
-#[test]
 fn scheme_mix_non_isolated_soft_light() {
     mix_non_isolated_soft_light_body(TestBackend::Scheme);
 }
@@ -110,12 +109,10 @@ fn mix_non_isolated_color_dodge_body(backend: TestBackend) {
         .unwrap()
         .assert_mean_less_than(0.0095);
 }
-#[test]
 fn mix_non_isolated_color_dodge() {
     mix_non_isolated_color_dodge_body(TestBackend::Classic);
 }
 
-#[test]
 fn scheme_mix_non_isolated_color_dodge() {
     mix_non_isolated_color_dodge_body(TestBackend::Scheme);
 }
@@ -232,12 +229,76 @@ fn mix_modes_non_gradient_test_matrix_body(backend: TestBackend) {
         .unwrap()
         .assert_mean_less_than(0.0095);
 }
-#[test]
 fn mix_modes_non_gradient_test_matrix() {
     mix_modes_non_gradient_test_matrix_body(TestBackend::Classic);
 }
 
-#[test]
 fn scheme_mix_modes_non_gradient_test_matrix() {
     mix_modes_non_gradient_test_matrix_body(TestBackend::Scheme);
+}
+
+fn main() {
+    let mut trials = Vec::new();
+    trials.push(
+        libtest_mimic::Trial::test("mix_non_isolated_difference", || {
+            mix_non_isolated_difference();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("scheme_mix_non_isolated_difference", || {
+            scheme_mix_non_isolated_difference();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("mix_non_isolated_soft_light", || {
+            mix_non_isolated_soft_light();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("scheme_mix_non_isolated_soft_light", || {
+            scheme_mix_non_isolated_soft_light();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("mix_non_isolated_color_dodge", || {
+            mix_non_isolated_color_dodge();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("scheme_mix_non_isolated_color_dodge", || {
+            scheme_mix_non_isolated_color_dodge();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("mix_modes_non_gradient_test_matrix", || {
+            mix_modes_non_gradient_test_matrix();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("scheme_mix_modes_non_gradient_test_matrix", || {
+            scheme_mix_modes_non_gradient_test_matrix();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+
+    let mut args = libtest_mimic::Arguments::from_args();
+    if let Some(device) = shared_test_device() {
+        submission::clamp_test_threads(&mut args, device);
+    }
+    libtest_mimic::run(&args, trials).exit()
 }

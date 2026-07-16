@@ -78,7 +78,7 @@ impl GraphRenderer {
         let device = device.clone();
 
         device
-            .set_allocation_policy(Arc::new(BudgetPolicy::new()))
+            .ensure_allocation_policy(Arc::new(BudgetPolicy::new()))
             .map_err(|e| Error::Gpu(e.to_string()))?;
 
         let context = device.create_context().map_err(|e| Error::Gpu(e.to_string()))?;
@@ -701,6 +701,8 @@ impl GraphRenderer {
                 transient_textures,
             );
         }
+
+        crate::goldy_renderer::maybe_log_gpu_memory(&self.device, "classic");
 
         let surface_frame = surface_frame.map(|frame| (frame, frame_tv));
         Ok((stats, surface_frame))

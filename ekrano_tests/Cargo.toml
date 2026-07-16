@@ -31,3 +31,52 @@ log = { workspace = true }
 # `unused_crate_dependencies` lint on the library compilation unit.
 [dev-dependencies]
 ekrano_encoding = { workspace = true }
+libtest-mimic = "0.8"
+
+[[test]]
+name = "blend_modes"
+harness = false
+
+[[test]]
+name = "emoji"
+harness = false
+
+[[test]]
+name = "filters"
+harness = false
+
+[[test]]
+name = "heap_self_regulation"
+harness = false
+
+[[test]]
+name = "hinting"
+harness = false
+
+[[test]]
+name = "known_issues"
+harness = false
+
+[[test]]
+name = "pipelined_memory"
+harness = false
+
+[[test]]
+name = "placement_heap_trace"
+harness = false
+
+[[test]]
+name = "property"
+harness = false
+
+[[test]]
+name = "regression"
+harness = false
+
+[[test]]
+name = "smoke_snapshots"
+harness = false
+
+[[test]]
+name = "snapshot_test_scenes"
+harness = false

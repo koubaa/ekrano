@@ -19,7 +19,9 @@
 //!    from `out_image` to the present lease.
 //! 4. [`goldy::Scheme::grant_present`] records the present easement (once per frame in
 //!    Phase 2; retained in Phase 3).
-//! 5. [`goldy::Scheme::submit`] submits all partitions, including the present-touching one.
+//! 5. [`goldy::Scheme::submit_with_acquired_presents`] submits all partitions using a
+//!    drawable acquired at frame start (classic-like timing); fall back to
+//!    [`goldy::Scheme::submit`] only when no swapchain pool is bound.
 //! 6. [`PresentToken::present`] performs scanout — synchronously in
 //!    [`SchemeRenderer::render_to_swapchain`], or async on `TID_PRESENT` via
 //!    [`SchemeRenderer::submit_to_swapchain`] + velato's `Presenter`.
@@ -83,6 +85,10 @@ pub struct SchemeRenderer {
     persistent: PersistentState,
     /// Pipelined frame scheduling: depth enforcement and timeline tracking.
     frame_pipeline: FrameOrchestrator<()>,
+    /// When true (DX12), reuse ordering is enforced via scheme submit sidecars and
+    /// frames close with [`FrameOrchestrator::end_frame_externally_ordered`] — no
+    /// coarse `begin_frame` GPU wait. Vulkan/Metal keep the blocking ring path.
+    nonblocking_reuse: bool,
     /// Persistent bump estimates: running max across frames.
     persistent_bump: Option<BumpAllocators>,
     /// Frame counter for rate-limiting housekeeping operations.
@@ -109,7 +115,7 @@ impl SchemeRenderer {
         let device = device.clone();
 
         device
-            .set_allocation_policy(Arc::new(BudgetPolicy::new()))
+            .ensure_allocation_policy(Arc::new(BudgetPolicy::new()))
             .map_err(|e| Error::Gpu(e.to_string()))?;
 
         let context = device.create_context().map_err(|e| Error::Gpu(e.to_string()))?;
@@ -117,6 +123,7 @@ impl SchemeRenderer {
             let _tz = goldy::tracy_zone!("ekrano.SchemeRenderer::new.frame_orchestrator");
             FrameOrchestrator::new(&context, FRAME_PIPELINE_DEPTH)
         };
+        let nonblocking_reuse = device.capabilities().host_sidecar_on_submit_worker;
         let worker = Scheme::new(&context);
         let upload = Scheme::new(&context);
         let readback = Scheme::new(&context);
@@ -128,6 +135,7 @@ impl SchemeRenderer {
             engine_shaders: Vec::new(),
             persistent: PersistentState::new(&device),
             frame_pipeline,
+            nonblocking_reuse,
             persistent_bump: None,
             cleanup_frame_counter: 0,
             worker,
@@ -590,6 +598,16 @@ impl SchemeRenderer {
         let prev_bump = self.persistent.take_last_drained_bump();
         self.apply_bump_feedback(prev_bump, &layout, &params, &mut config, &mut stats);
 
+        // Match classic task-graph timing: acquire the swapchain drawable immediately
+        // after begin_frame, before prepare/coarse/fine recording.
+        let mut early_present = if let Some(pool) = pool {
+            let _tz = goldy::tracy_zone!("ekrano.surface.acquire_early");
+            let lease = pool.lease();
+            Some(pool.acquire_present(&lease).map_err(|e| Error::Shader(e.to_string()))?)
+        } else {
+            None
+        };
+
         let t1 = Instant::now();
         if self.persistent.linear_clamp_sampler.is_none() {
             self.persistent.linear_clamp_sampler =
@@ -624,6 +642,12 @@ impl SchemeRenderer {
             coverage_mask_dims,
         );
 
+        let mut image_regions: Vec<(u32, u32, u32, u32)> = image_entries
+            .iter()
+            .map(|(img, x, y)| (*x, *y, img.width, img.height))
+            .collect();
+        image_regions.sort_unstable();
+        image_regions.dedup();
         let upload_key = upload_key(
             scene_bucket,
             ramps_width,
@@ -632,10 +656,17 @@ impl SchemeRenderer {
             images_width,
             images_height,
             coverage_mask_dims,
+            &image_regions,
         );
         let upload_needs_record = crate::worker_retention::upload_stale(&self.persistent, &upload_key);
         if upload_needs_record {
             self.upload = Scheme::new(&self.context);
+            // Logical upload declarations live on the scheme; drop cached handles.
+            self.persistent.cached_scene_upload = None;
+            self.persistent.cached_config_upload = None;
+            self.persistent.cached_gradient_upload = None;
+            self.persistent.cached_mask_upload = None;
+            self.persistent.cached_image_region_uploads.clear();
             #[cfg(test)]
             {
                 self.upload_record_epochs += 1;
@@ -649,6 +680,7 @@ impl SchemeRenderer {
                 &mut self.worker,
                 &mut self.upload,
                 upload_needs_record,
+                self.nonblocking_reuse,
                 &mut self.frame_pipeline,
                 frame_handle,
                 &mut self.persistent,
@@ -726,6 +758,7 @@ impl SchemeRenderer {
             &mut self.worker,
             &mut self.upload,
             upload_needs_record,
+            self.nonblocking_reuse,
             &mut self.frame_pipeline,
             frame_handle,
             &mut self.persistent,
@@ -833,7 +866,7 @@ impl SchemeRenderer {
             scheme_submission,
         } = {
             let _tz = goldy::tracy_zone!("ekrano.finish");
-            recorder.finish(pool.is_some(), pre_acquire)?
+            recorder.finish(pool.is_some(), pre_acquire, early_present.take())?
         };
 
         if let Some((present, bump, topology, filter_effects, out_image)) = worker_cache {
@@ -866,12 +899,12 @@ impl SchemeRenderer {
             _ => None,
         };
 
-        // Gate the orchestrator on this frame's compute+copy completion (`frame_tv`),
-        // not the async present-boundary epoch. The latter lags high-water by ~2 frames
-        // on Vulkan and let fine(N+1) overwrite the persistent out_image while
-        // present-copy(N) was still reading it. Scanout still overlaps the next frame's
-        // compute because it runs after the copy.
-        self.frame_pipeline.note_presented(frame_tv);
+        // On Vulkan/Metal the ring stamps compute+copy completion so begin_frame waits.
+        // On DX12 (nonblocking_reuse) ordering lives in submit sidecars + present easement;
+        // no retirement slot is created, so note_presented is a no-op / unused.
+        if !self.nonblocking_reuse {
+            self.frame_pipeline.note_presented(frame_tv);
+        }
 
         if cache_outcome.scheme_rt_stored
             && let Some(entry) = self.persistent.cached_scheme_rt.as_mut()
@@ -927,6 +960,8 @@ impl SchemeRenderer {
                 transient_textures,
             );
         }
+
+        crate::goldy_renderer::maybe_log_gpu_memory(&self.device, "scheme");
 
         Ok((stats, present_token))
     }
@@ -1002,6 +1037,8 @@ pub(crate) struct SchemeRecorder<'a> {
     upload: &'a mut Scheme,
     /// When true, the upload scheme IR is empty and copy/upload nodes must be recorded this frame.
     pub(crate) upload_needs_record: bool,
+    /// DX12 head-chases-tail path: deferred host writes + reuse epochs; no ring wait.
+    pub(crate) nonblocking_reuse: bool,
     frame_pipeline: &'a mut FrameOrchestrator<()>,
     frame_handle: FrameHandle,
     pub(crate) persistent: &'a mut PersistentState,
@@ -1048,6 +1085,7 @@ impl<'a> SchemeRecorder<'a> {
         scheme: &'a mut Scheme,
         upload: &'a mut Scheme,
         upload_needs_record: bool,
+        nonblocking_reuse: bool,
         frame_pipeline: &'a mut FrameOrchestrator<()>,
         frame_handle: FrameHandle,
         persistent: &'a mut PersistentState,
@@ -1063,6 +1101,7 @@ impl<'a> SchemeRecorder<'a> {
             scheme,
             upload,
             upload_needs_record,
+            nonblocking_reuse,
             frame_pipeline,
             frame_handle,
             persistent,
@@ -1325,7 +1364,12 @@ impl<'a> SchemeRecorder<'a> {
     /// timeline is valid for cache stamping before [`goldy::Frame::present`].
     /// Surface paths with deferred scanout call `finish` with `deferred_present: true`; headless /
     /// render-to-texture paths call `finish` with `deferred_present: false`.
-    pub(crate) fn finish<F>(mut self, deferred_present: bool, pre_acquire: F) -> Result<FrameFinishOutcome>
+    pub(crate) fn finish<F>(
+        mut self,
+        deferred_present: bool,
+        pre_acquire: F,
+        early_present: Option<goldy::AcquiredPresent>,
+    ) -> Result<FrameFinishOutcome>
     where
         F: FnOnce() -> Result<()>,
     {
@@ -1344,11 +1388,10 @@ impl<'a> SchemeRecorder<'a> {
             self.upload.submit().map_err(|e| Error::Shader(e.to_string()))?;
         }
 
-        // The upload scheme has no dependency on the swapchain image — only the
-        // worker's present partition acquires a drawable. Run the caller's
-        // pre-acquire barrier (e.g. wait-for-present-ack) here, after the upload
-        // is submitted but before the worker acquire, so upload recording/submit
-        // overlaps the previous frame's present round-trip.
+        // The upload scheme has no dependency on the swapchain image. Run the caller's
+        // pre-acquire barrier (e.g. wait-for-present-ack) here after upload submit.
+        // Drawable acquire itself is done earlier (`ekrano.surface.acquire_early`) when
+        // an `AcquiredPresent` was supplied.
         {
             let _tz = goldy::tracy_zone!("ekrano.finish.pre_acquire");
             pre_acquire()?;
@@ -1356,13 +1399,25 @@ impl<'a> SchemeRecorder<'a> {
 
         let submission = {
             let _tz = goldy::tracy_zone!("ekrano.finish.worker_submit");
-            self.scheme.submit().map_err(|e| Error::Shader(e.to_string()))?
+            match early_present {
+                Some(claim) => self
+                    .scheme
+                    .submit_with_acquired_presents(vec![claim])
+                    .map_err(|e| Error::Shader(e.to_string()))?,
+                None => self.scheme.submit().map_err(|e| Error::Shader(e.to_string()))?,
+            }
         };
         let scheme_tv = submission.timeline_value();
         let mut empty_graph = TaskGraph::new();
         let tv = {
             let _tz = goldy::tracy_zone!("ekrano.finish.orchestrator");
-            if deferred_present {
+            if self.nonblocking_reuse {
+                // Ordering is enforced by reuse epochs / deferred host writes / present easement.
+                self.frame_pipeline
+                    .end_frame_externally_ordered(frame_handle)
+                    .map_err(|e| Error::Shader(e.to_string()))?;
+                scheme_tv
+            } else if deferred_present {
                 self.frame_pipeline
                     .end_frame_for_present(frame_handle, scheme_tv, ())
                     .map_err(|e| Error::Shader(e.to_string()))?
@@ -1409,7 +1464,7 @@ mod tests {
     /// present lease.
     #[test]
     fn prepare_out_image_format_matches_requested() {
-        let Some((device, mut persistent)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
+        let Some((gpu, mut persistent)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
             return;
         };
 
@@ -1430,7 +1485,7 @@ mod tests {
             let (layout, ramps, images) = resolver.resolve(encoding, &mut packed);
             let config = RenderConfig::new(&layout, params.width, params.height, &params.base_color);
 
-            let ctx = device.create_context().expect("context");
+            let ctx = gpu.create_context().expect("context");
             let mut worker = Scheme::new(&ctx);
             let mut upload = Scheme::new(&ctx);
             let mut frame_pipeline = FrameOrchestrator::new(&ctx, FRAME_PIPELINE_DEPTH);
@@ -1439,11 +1494,12 @@ mod tests {
                 .expect("begin_frame");
             let pipeline = {
                 let mut recorder = SchemeRecorder::new(
-                    &device,
+                    &gpu,
                     &ctx,
                     &mut worker,
                     &mut upload,
                     true,
+                    false,
                     &mut frame_pipeline,
                     frame_handle,
                     &mut persistent,
@@ -1483,11 +1539,14 @@ mod tests {
     /// invalidation / partition-local retention).
     #[test]
     fn worker_scheme_retains_topology_across_frames() {
-        let Some((device, _)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
+        // Goldy topology dirty + retention records require CB replay; ignore
+        // GOLDY_DISABLE_CB_REUSE=1 from the developer shell.
+        let _cb = goldy::test_support::CbReuseOverride::force_enabled();
+        let Some((gpu, _)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
             return;
         };
 
-        let mut renderer = SchemeRenderer::new(&device).expect("SchemeRenderer::new");
+        let mut renderer = SchemeRenderer::new(&gpu).expect("SchemeRenderer::new");
         let mut scene = Scene::new();
         scene.fill(
             peniko::Fill::NonZero,
@@ -1534,11 +1593,12 @@ mod tests {
     /// Resolution change invalidates worker retention and triggers exactly one re-record.
     #[test]
     fn worker_scheme_rerecords_on_topology_change() {
-        let Some((device, _)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
+        let _cb = goldy::test_support::CbReuseOverride::force_enabled();
+        let Some((gpu, _)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
             return;
         };
 
-        let mut renderer = SchemeRenderer::new(&device).expect("SchemeRenderer::new");
+        let mut renderer = SchemeRenderer::new(&gpu).expect("SchemeRenderer::new");
         let mut scene = Scene::new();
         scene.fill(
             peniko::Fill::NonZero,
@@ -1586,11 +1646,12 @@ mod tests {
     /// Without per-frame readback, the worker records once and resubmits.
     #[test]
     fn worker_scheme_render_to_texture_records_once() {
-        let Some((device, _)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
+        let _cb = goldy::test_support::CbReuseOverride::force_enabled();
+        let Some((gpu, _)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
             return;
         };
 
-        let mut renderer = SchemeRenderer::new(&device).expect("SchemeRenderer::new");
+        let mut renderer = SchemeRenderer::new(&gpu).expect("SchemeRenderer::new");
         let mut scene = Scene::new();
         scene.fill(
             peniko::Fill::NonZero,
@@ -1611,7 +1672,7 @@ mod tests {
         let texture = {
             use goldy::RetainedPool;
             use std::sync::Arc;
-            RetainedPool::new(Arc::new(device.clone()))
+            RetainedPool::new(Arc::new(gpu.clone()))
                 .acquire_texture(
                     params.width,
                     params.height,
@@ -1646,11 +1707,11 @@ mod tests {
     /// so a bucket change (new allocation) must invalidate the worker too.
     #[test]
     fn worker_and_upload_rerecord_on_scene_bucket_growth() {
-        let Some((device, _)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
+        let Some((gpu, _)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
             return;
         };
 
-        let mut renderer = SchemeRenderer::new(&device).expect("SchemeRenderer::new");
+        let mut renderer = SchemeRenderer::new(&gpu).expect("SchemeRenderer::new");
 
         let mut small_scene = Scene::new();
         small_scene.fill(
@@ -1737,11 +1798,11 @@ mod tests {
     /// (scene bucket + atlas dims) is unchanged, so the upload scheme must NOT re-record.
     #[test]
     fn upload_scheme_stable_when_only_worker_topology_changes() {
-        let Some((device, _)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
+        let Some((gpu, _)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
             return;
         };
 
-        let mut renderer = SchemeRenderer::new(&device).expect("SchemeRenderer::new");
+        let mut renderer = SchemeRenderer::new(&gpu).expect("SchemeRenderer::new");
         let mut scene = Scene::new();
         scene.fill(
             peniko::Fill::NonZero,

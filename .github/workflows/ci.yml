@@ -44,9 +44,9 @@ env:
 # Using cargo-hack also allows us to more easily test the feature matrix of our packages.
 # We use --each-feature & --optional-deps which will run a separate check for every feature.
 #
-# We use cargo-nextest, which has a faster concurrency model for running tests.
-# However cargo-nextest does not support running doc tests, so we also have a cargo test --doc step.
-# For more information see https://github.com/nextest-rs/nextest/issues/16
+# GPU tests use idiomatic `cargo test` (one process per test binary) so lib/integration suites
+# can share a process-lifetime Device and serialize only on DX12 WARP. cargo-nextest runs each
+# test in its own process, which defeats that model.
 #
 # The MSRV jobs run only cargo check because different clippy versions can disagree on goals and
 # running tests introduces dev dependencies which may require a higher MSRV than the bare package.
@@ -241,11 +241,6 @@ jobs:
           echo "Using NVIDIA Vulkan ICD: $NVIDIA_VK_ICD"
           VK_ICD_FILENAMES="$NVIDIA_VK_ICD" vulkaninfo --summary
       
-      - name: install cargo-nextest
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest
-
       - name: restore cache
         uses: Swatinem/rust-cache@v2
         with:
@@ -276,8 +271,8 @@ jobs:
       # windows-latest uses the OS d3d10warp.dll (older Windows Server build),
       # which has compute-shader codegen bugs that corrupt the snapshot_many_clips
       # render. d3d12.dll probes the EXE directory for d3d10warp.dll before
-      # falling back to System32, so dropping it in target\debug\deps\ (where
-      # nextest launches test binaries from) takes precedence.
+      # falling back to System32, so dropping it in target\debug\deps\ and
+      # target\debug\ takes precedence for cargo test binaries.
       - name: Install redistributable WARP (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
@@ -307,9 +302,10 @@ jobs:
           Copy-Item $warpDll.FullName target\debug\d3d10warp.dll      -Force
           "WARP_DLL=$($warpDll.FullName)" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
 
-      - name: cargo nextest
+      - name: cargo test
         # TODO: Maybe use --release; the CPU shaders are extremely slow when unoptimised
-        run: cargo nextest run --workspace --locked --all-features --no-fail-fast
+        # One process per test binary enables process-lifetime shared Device + WARP mutex.
+        run: cargo test --workspace --locked --all-features --no-fail-fast
         env:
           EKRANO_CI_GPU_SUPPORT: ${{ matrix.gpu }}
           # Skip tests that are too slow on software-emulated GPUs (lavapipe, WARP).

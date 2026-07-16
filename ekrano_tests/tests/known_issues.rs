@@ -12,12 +12,15 @@
     clippy::allow_attributes_without_reason
 )]
 
+#[path = "common/submission.rs"]
+mod submission;
+
 use ekrano::{
     AaConfig, Scene,
     kurbo::{Affine, Rect, Triangle},
     peniko::{Color, ColorStop, Extend, Gradient, ImageFormat, ImageQuality, Mix, color::palette},
 };
-use ekrano_tests::{TestBackend, TestParams, smoke_snapshot_test_sync, snapshot_test_sync};
+use ekrano_tests::{TestBackend, TestParams, shared_test_device, smoke_snapshot_test_sync, snapshot_test_sync};
 use scenes::ImageCache;
 
 /// A reproduction of <https://github.com/linebender/vello/issues/680>
@@ -137,12 +140,10 @@ fn many_bins_body(backend: TestBackend) {
     assert!(black_count > 0);
 }
 
-#[test]
 fn many_bins_test() {
     many_bins_test_body(TestBackend::Classic);
 }
 
-#[test]
 fn scheme_many_bins_test() {
     many_bins_test_body(TestBackend::Scheme);
 }
@@ -186,12 +187,10 @@ fn test_layer_size_body(backend: TestBackend) {
         .unwrap()
         .assert_mean_less_than(0.001);
 }
-#[test]
 fn test_layer_size() {
     test_layer_size_body(TestBackend::Classic);
 }
 
-#[test]
 fn scheme_test_layer_size() {
     test_layer_size_body(TestBackend::Scheme);
 }
@@ -215,16 +214,10 @@ fn test_data_image_roundtrip_extend_reflect_body(backend: TestBackend) {
         .unwrap()
         .assert_mean_less_than(0.001);
 }
-#[ignore = "CI runs these tests on a CPU, leading to them having unrealistic precision"]
-#[should_panic]
-#[test]
 fn test_data_image_roundtrip_extend_reflect() {
     test_data_image_roundtrip_extend_reflect_body(TestBackend::Classic);
 }
 
-#[ignore = "CI runs these tests on a CPU, leading to them having unrealistic precision"]
-#[should_panic]
-#[test]
 fn scheme_test_data_image_roundtrip_extend_reflect() {
     test_data_image_roundtrip_extend_reflect_body(TestBackend::Scheme);
 }
@@ -246,16 +239,10 @@ fn test_data_image_roundtrip_extend_repeat_body(backend: TestBackend) {
         .unwrap()
         .assert_mean_less_than(0.001);
 }
-#[ignore = "CI runs these tests on a CPU, leading to them having unrealistic precision"]
-#[should_panic]
-#[test]
 fn test_data_image_roundtrip_extend_repeat() {
     test_data_image_roundtrip_extend_repeat_body(TestBackend::Classic);
 }
 
-#[ignore = "CI runs these tests on a CPU, leading to them having unrealistic precision"]
-#[should_panic]
-#[test]
 fn scheme_test_data_image_roundtrip_extend_repeat() {
     test_data_image_roundtrip_extend_repeat_body(TestBackend::Scheme);
 }
@@ -287,12 +274,10 @@ fn test_gradient_color_alpha_body(backend: TestBackend) {
         .unwrap()
         .assert_mean_less_than(0.001);
 }
-#[test]
 fn test_gradient_color_alpha() {
     test_gradient_color_alpha_body(TestBackend::Classic);
 }
 
-#[test]
 fn scheme_test_gradient_color_alpha() {
     test_gradient_color_alpha_body(TestBackend::Scheme);
 }
@@ -330,12 +315,10 @@ fn clip_blends_body(backend: TestBackend) {
     let params = TestParams::new("clip_blends", 100, 100).with_backend(backend);
     snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.001);
 }
-#[test]
 fn clip_blends() {
     clip_blends_body(TestBackend::Classic);
 }
 
-#[test]
 fn scheme_clip_blends() {
     clip_blends_body(TestBackend::Scheme);
 }
@@ -383,12 +366,10 @@ fn single_bin_red_fill_body(backend: TestBackend) {
         total - red_count
     );
 }
-#[test]
 fn single_bin_red_fill() {
     single_bin_red_fill_body(TestBackend::Classic);
 }
 
-#[test]
 fn scheme_single_bin_red_fill() {
     single_bin_red_fill_body(TestBackend::Scheme);
 }
@@ -437,12 +418,10 @@ fn four_bin_colored_quadrants_body(backend: TestBackend) {
         total - non_black_count
     );
 }
-#[test]
 fn four_bin_colored_quadrants() {
     four_bin_colored_quadrants_body(TestBackend::Classic);
 }
 
-#[test]
 fn scheme_four_bin_colored_quadrants() {
     four_bin_colored_quadrants_body(TestBackend::Scheme);
 }
@@ -480,12 +459,10 @@ fn medium_bins_red_fill_body(backend: TestBackend) {
         total - red_count
     );
 }
-#[test]
 fn medium_bins_red_fill() {
     medium_bins_red_fill_body(TestBackend::Classic);
 }
 
-#[test]
 fn scheme_medium_bins_red_fill() {
     medium_bins_red_fill_body(TestBackend::Scheme);
 }
@@ -532,12 +509,160 @@ fn repeated_many_bins_body(backend: TestBackend) {
         failures
     );
 }
-#[test]
 fn repeated_many_bins() {
     repeated_many_bins_body(TestBackend::Classic);
 }
 
-#[test]
 fn scheme_repeated_many_bins() {
     repeated_many_bins_body(TestBackend::Scheme);
+}
+
+fn main() {
+    let mut trials = Vec::new();
+    trials.push(
+        libtest_mimic::Trial::test("many_bins_test", || {
+            many_bins_test();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("scheme_many_bins_test", || {
+            scheme_many_bins_test();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("test_layer_size", || {
+            test_layer_size();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("scheme_test_layer_size", || {
+            scheme_test_layer_size();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("test_data_image_roundtrip_extend_reflect", || {
+            test_data_image_roundtrip_extend_reflect();
+            Ok(())
+        })
+        .with_ignored_flag(true),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("scheme_test_data_image_roundtrip_extend_reflect", || {
+            scheme_test_data_image_roundtrip_extend_reflect();
+            Ok(())
+        })
+        .with_ignored_flag(true),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("test_data_image_roundtrip_extend_repeat", || {
+            test_data_image_roundtrip_extend_repeat();
+            Ok(())
+        })
+        .with_ignored_flag(true),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("scheme_test_data_image_roundtrip_extend_repeat", || {
+            scheme_test_data_image_roundtrip_extend_repeat();
+            Ok(())
+        })
+        .with_ignored_flag(true),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("test_gradient_color_alpha", || {
+            test_gradient_color_alpha();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("scheme_test_gradient_color_alpha", || {
+            scheme_test_gradient_color_alpha();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("clip_blends", || {
+            clip_blends();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("scheme_clip_blends", || {
+            scheme_clip_blends();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("single_bin_red_fill", || {
+            single_bin_red_fill();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("scheme_single_bin_red_fill", || {
+            scheme_single_bin_red_fill();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("four_bin_colored_quadrants", || {
+            four_bin_colored_quadrants();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("scheme_four_bin_colored_quadrants", || {
+            scheme_four_bin_colored_quadrants();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("medium_bins_red_fill", || {
+            medium_bins_red_fill();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("scheme_medium_bins_red_fill", || {
+            scheme_medium_bins_red_fill();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("repeated_many_bins", || {
+            repeated_many_bins();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("scheme_repeated_many_bins", || {
+            scheme_repeated_many_bins();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+
+    let mut args = libtest_mimic::Arguments::from_args();
+    if let Some(device) = shared_test_device() {
+        submission::clamp_test_threads(&mut args, device);
+    }
+    libtest_mimic::run(&args, trials).exit()
 }

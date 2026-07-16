@@ -8,12 +8,15 @@
 // Feel free to send a PR that solves one or more of these.
 #![allow(clippy::missing_assert_message, clippy::allow_attributes_without_reason)]
 
+#[path = "common/submission.rs"]
+mod submission;
+
 use ekrano::Scene;
 use ekrano::kurbo::{Affine, Rect};
 use ekrano::peniko::color::palette::css::TRANSPARENT;
 use ekrano::peniko::{Brush, Color, ImageFormat, color::palette};
 use ekrano::peniko::{ImageAlphaType, ImageData, ImageSampler};
-use ekrano_tests::{TestBackend, TestParams};
+use ekrano_tests::{TestBackend, TestParams, shared_test_device};
 
 fn simple_square_test_body(backend: TestBackend) {
     let mut scene = Scene::new();
@@ -46,12 +49,10 @@ fn simple_square_test_body(backend: TestBackend) {
     assert_eq!(red_count, 50 * 50);
     assert_eq!(black_count, 150 * 150 - 50 * 50);
 }
-#[test]
 fn simple_square_test() {
     simple_square_test_body(TestBackend::Classic);
 }
 
-#[test]
 fn scheme_simple_square_test() {
     simple_square_test_body(TestBackend::Scheme);
 }
@@ -75,12 +76,10 @@ fn empty_scene_test_body(backend: TestBackend) {
         }
     }
 }
-#[test]
 fn empty_scene_test() {
     empty_scene_test_body(TestBackend::Classic);
 }
 
-#[test]
 fn scheme_empty_scene_test() {
     empty_scene_test_body(TestBackend::Scheme);
 }
@@ -108,12 +107,10 @@ fn tiny_red_2x2_test_body(backend: TestBackend) {
     }
     assert_eq!(red_count, 4, "expected 4 red pixels in 2x2, got {red_count}");
 }
-#[test]
 fn tiny_red_2x2_test() {
     tiny_red_2x2_test_body(TestBackend::Classic);
 }
 
-#[test]
 fn scheme_tiny_red_2x2_test() {
     tiny_red_2x2_test_body(TestBackend::Scheme);
 }
@@ -159,12 +156,10 @@ fn bgra_image_body(backend: TestBackend) {
         }
     }
 }
-#[test]
 fn bgra_image() {
     bgra_image_body(TestBackend::Classic);
 }
 
-#[test]
 fn scheme_bgra_image() {
     bgra_image_body(TestBackend::Scheme);
 }
@@ -205,12 +200,10 @@ fn premultiplied_image_body(backend: TestBackend) {
         }
     }
 }
-#[test]
 fn premultiplied_image() {
     premultiplied_image_body(TestBackend::Classic);
 }
 
-#[test]
 fn scheme_premultiplied_image() {
     premultiplied_image_body(TestBackend::Scheme);
 }
@@ -281,12 +274,10 @@ fn straight_alpha_equals_premultiplied_body(backend: TestBackend) {
          after atlas premultiplication"
     );
 }
-#[test]
 fn straight_alpha_equals_premultiplied() {
     straight_alpha_equals_premultiplied_body(TestBackend::Classic);
 }
 
-#[test]
 fn scheme_straight_alpha_equals_premultiplied() {
     straight_alpha_equals_premultiplied_body(TestBackend::Scheme);
 }
@@ -329,12 +320,118 @@ fn fully_opaque_straight_alpha_unchanged_body(backend: TestBackend) {
         );
     }
 }
-#[test]
 fn fully_opaque_straight_alpha_unchanged() {
     fully_opaque_straight_alpha_unchanged_body(TestBackend::Classic);
 }
 
-#[test]
 fn scheme_fully_opaque_straight_alpha_unchanged() {
     fully_opaque_straight_alpha_unchanged_body(TestBackend::Scheme);
+}
+
+fn main() {
+    let mut trials = Vec::new();
+    trials.push(
+        libtest_mimic::Trial::test("simple_square_test", || {
+            simple_square_test();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("scheme_simple_square_test", || {
+            scheme_simple_square_test();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("empty_scene_test", || {
+            empty_scene_test();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("scheme_empty_scene_test", || {
+            scheme_empty_scene_test();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("tiny_red_2x2_test", || {
+            tiny_red_2x2_test();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("scheme_tiny_red_2x2_test", || {
+            scheme_tiny_red_2x2_test();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("bgra_image", || {
+            bgra_image();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("scheme_bgra_image", || {
+            scheme_bgra_image();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("premultiplied_image", || {
+            premultiplied_image();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("scheme_premultiplied_image", || {
+            scheme_premultiplied_image();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("straight_alpha_equals_premultiplied", || {
+            straight_alpha_equals_premultiplied();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("scheme_straight_alpha_equals_premultiplied", || {
+            scheme_straight_alpha_equals_premultiplied();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("fully_opaque_straight_alpha_unchanged", || {
+            fully_opaque_straight_alpha_unchanged();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("scheme_fully_opaque_straight_alpha_unchanged", || {
+            scheme_fully_opaque_straight_alpha_unchanged();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+
+    let mut args = libtest_mimic::Arguments::from_args();
+    if let Some(device) = shared_test_device() {
+        submission::clamp_test_threads(&mut args, device);
+    }
+    libtest_mimic::run(&args, trials).exit()
 }

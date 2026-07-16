@@ -86,6 +86,9 @@ pub(crate) fn worker_topology(
 /// Dimensions are normalised to the actual texture sizes allocated by
 /// `prepare_pipeline_resources` (e.g. 1×1 for an empty atlas) so that the key matches
 /// what is stored in `PersistentState::cached_gradient` etc.
+///
+/// `image_regions` captures every region copy shape so retained upload topology cannot
+/// silently mismatch when atlas dims stay fixed but region layout changes.
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct UploadKey {
     pub scene_bucket: u64,
@@ -95,6 +98,8 @@ pub(crate) struct UploadKey {
     pub image_atlas_height: u32,
     pub mask_atlas_width: u32,
     pub mask_atlas_height: u32,
+    /// Sorted unique `(x, y, width, height)` region copy keys for the image atlas.
+    pub image_regions: Vec<(u32, u32, u32, u32)>,
 }
 
 /// Build an [`UploadKey`] from the per-frame inputs visible before `prepare_pipeline_resources`.
@@ -110,6 +115,7 @@ pub(crate) fn upload_key(
     images_width: u32,
     images_height: u32,
     coverage_mask_dims: Option<(u32, u32)>,
+    image_regions: &[(u32, u32, u32, u32)],
 ) -> UploadKey {
     let (gradient_width, gradient_height) = if ramps_height == 0 {
         (1, 1)
@@ -122,6 +128,9 @@ pub(crate) fn upload_key(
         (images_width, images_height)
     };
     let (mask_atlas_width, mask_atlas_height) = coverage_mask_dims.unwrap_or((1, 1));
+    let mut image_regions = image_regions.to_vec();
+    image_regions.sort_unstable();
+    image_regions.dedup();
     UploadKey {
         scene_bucket,
         gradient_width,
@@ -130,6 +139,7 @@ pub(crate) fn upload_key(
         image_atlas_height,
         mask_atlas_width,
         mask_atlas_height,
+        image_regions,
     }
 }
 
@@ -334,7 +344,7 @@ mod tests {
     }
 
     fn base_upload_key() -> UploadKey {
-        upload_key(256, 8, 4, 0, 0, 0, None)
+        upload_key(256, 8, 4, 0, 0, 0, None, &[])
     }
 
     // -----------------------------------------------------------------------
@@ -343,37 +353,37 @@ mod tests {
 
     #[test]
     fn upload_key_empty_gradient_normalises_to_1x1() {
-        let k = upload_key(64, 32, 0, 0, 0, 0, None);
+        let k = upload_key(64, 32, 0, 0, 0, 0, None, &[]);
         assert_eq!((k.gradient_width, k.gradient_height), (1, 1));
     }
 
     #[test]
     fn upload_key_nonempty_gradient_uses_raw_dims() {
-        let k = upload_key(64, 32, 4, 0, 0, 0, None);
+        let k = upload_key(64, 32, 4, 0, 0, 0, None, &[]);
         assert_eq!((k.gradient_width, k.gradient_height), (32, 4));
     }
 
     #[test]
     fn upload_key_empty_image_atlas_normalises_to_1x1() {
-        let k = upload_key(64, 8, 4, 0, 512, 512, None);
+        let k = upload_key(64, 8, 4, 0, 512, 512, None, &[]);
         assert_eq!((k.image_atlas_width, k.image_atlas_height), (1, 1));
     }
 
     #[test]
     fn upload_key_nonempty_image_atlas_uses_raw_dims() {
-        let k = upload_key(64, 8, 4, 3, 512, 256, None);
+        let k = upload_key(64, 8, 4, 3, 512, 256, None, &[]);
         assert_eq!((k.image_atlas_width, k.image_atlas_height), (512, 256));
     }
 
     #[test]
     fn upload_key_no_coverage_mask_normalises_to_1x1() {
-        let k = upload_key(64, 8, 4, 0, 0, 0, None);
+        let k = upload_key(64, 8, 4, 0, 0, 0, None, &[]);
         assert_eq!((k.mask_atlas_width, k.mask_atlas_height), (1, 1));
     }
 
     #[test]
     fn upload_key_coverage_mask_uses_mask_dims() {
-        let k = upload_key(64, 8, 4, 0, 0, 0, Some((128, 64)));
+        let k = upload_key(64, 8, 4, 0, 0, 0, Some((128, 64)), &[]);
         assert_eq!((k.mask_atlas_width, k.mask_atlas_height), (128, 64));
     }
 
@@ -399,8 +409,8 @@ mod tests {
     #[test]
     fn upload_stale_true_on_scene_bucket_growth() {
         let mut p = PersistentState::new_test_only();
-        let k1 = upload_key(256, 8, 4, 0, 0, 0, None);
-        let k2 = upload_key(512, 8, 4, 0, 0, 0, None);
+        let k1 = upload_key(256, 8, 4, 0, 0, 0, None, &[]);
+        let k2 = upload_key(512, 8, 4, 0, 0, 0, None, &[]);
         p.cached_upload_key = Some(k1);
         assert!(upload_stale(&p, &k2));
     }
@@ -408,8 +418,8 @@ mod tests {
     #[test]
     fn upload_stale_true_on_gradient_dim_change() {
         let mut p = PersistentState::new_test_only();
-        let k1 = upload_key(256, 8, 4, 0, 0, 0, None);
-        let k2 = upload_key(256, 8, 16, 0, 0, 0, None);
+        let k1 = upload_key(256, 8, 4, 0, 0, 0, None, &[]);
+        let k2 = upload_key(256, 8, 16, 0, 0, 0, None, &[]);
         p.cached_upload_key = Some(k1);
         assert!(upload_stale(&p, &k2));
     }
@@ -417,8 +427,8 @@ mod tests {
     #[test]
     fn upload_stale_true_when_gradient_appears() {
         let mut p = PersistentState::new_test_only();
-        let k1 = upload_key(256, 0, 0, 0, 0, 0, None);
-        let k2 = upload_key(256, 8, 4, 0, 0, 0, None);
+        let k1 = upload_key(256, 0, 0, 0, 0, 0, None, &[]);
+        let k2 = upload_key(256, 8, 4, 0, 0, 0, None, &[]);
         p.cached_upload_key = Some(k1);
         assert!(upload_stale(&p, &k2));
     }
@@ -426,8 +436,8 @@ mod tests {
     #[test]
     fn upload_stale_true_on_image_atlas_dim_change() {
         let mut p = PersistentState::new_test_only();
-        let k1 = upload_key(256, 8, 4, 3, 512, 256, None);
-        let k2 = upload_key(256, 8, 4, 3, 512, 512, None);
+        let k1 = upload_key(256, 8, 4, 3, 512, 256, None, &[]);
+        let k2 = upload_key(256, 8, 4, 3, 512, 512, None, &[]);
         p.cached_upload_key = Some(k1);
         assert!(upload_stale(&p, &k2));
     }
@@ -435,8 +445,8 @@ mod tests {
     #[test]
     fn upload_stale_true_when_image_atlas_appears() {
         let mut p = PersistentState::new_test_only();
-        let k1 = upload_key(256, 8, 4, 0, 0, 0, None);
-        let k2 = upload_key(256, 8, 4, 2, 256, 256, None);
+        let k1 = upload_key(256, 8, 4, 0, 0, 0, None, &[]);
+        let k2 = upload_key(256, 8, 4, 2, 256, 256, None, &[]);
         p.cached_upload_key = Some(k1);
         assert!(upload_stale(&p, &k2));
     }
@@ -444,8 +454,8 @@ mod tests {
     #[test]
     fn upload_stale_true_on_mask_atlas_dim_change() {
         let mut p = PersistentState::new_test_only();
-        let k1 = upload_key(256, 8, 4, 0, 0, 0, Some((64, 64)));
-        let k2 = upload_key(256, 8, 4, 0, 0, 0, Some((128, 64)));
+        let k1 = upload_key(256, 8, 4, 0, 0, 0, Some((64, 64)), &[]);
+        let k2 = upload_key(256, 8, 4, 0, 0, 0, Some((128, 64)), &[]);
         p.cached_upload_key = Some(k1);
         assert!(upload_stale(&p, &k2));
     }
@@ -453,8 +463,17 @@ mod tests {
     #[test]
     fn upload_stale_true_when_mask_appears() {
         let mut p = PersistentState::new_test_only();
-        let k1 = upload_key(256, 8, 4, 0, 0, 0, None);
-        let k2 = upload_key(256, 8, 4, 0, 0, 0, Some((64, 64)));
+        let k1 = upload_key(256, 8, 4, 0, 0, 0, None, &[]);
+        let k2 = upload_key(256, 8, 4, 0, 0, 0, Some((64, 64)), &[]);
+        p.cached_upload_key = Some(k1);
+        assert!(upload_stale(&p, &k2));
+    }
+
+    #[test]
+    fn upload_stale_true_on_image_region_layout_change() {
+        let mut p = PersistentState::new_test_only();
+        let k1 = upload_key(256, 8, 4, 2, 256, 256, None, &[(0, 0, 32, 32)]);
+        let k2 = upload_key(256, 8, 4, 2, 256, 256, None, &[(0, 0, 32, 32), (40, 0, 16, 16)]);
         p.cached_upload_key = Some(k1);
         assert!(upload_stale(&p, &k2));
     }

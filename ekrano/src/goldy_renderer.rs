@@ -112,6 +112,55 @@ pub(crate) fn sanitize_bump(bump: &BumpAllocators) -> BumpAllocators {
 /// in practice there's only one.
 pub(crate) static FRAME_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Log total GPU memory usage at most once every 5 seconds.
+///
+/// Prefers DXGI `CurrentUsage` (true process GPU residency) when available, and
+/// always includes Goldy's live tracked allocator bytes (allocations − frees).
+pub(crate) fn maybe_log_gpu_memory(device: &Device, backend: &'static str) {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    static LAST_CLASSIC: Mutex<Option<Instant>> = Mutex::new(None);
+    static LAST_SCHEME: Mutex<Option<Instant>> = Mutex::new(None);
+    let last_slot = if backend == "classic" {
+        &LAST_CLASSIC
+    } else {
+        &LAST_SCHEME
+    };
+    {
+        let mut last = last_slot.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(t) = *last
+            && t.elapsed() < Duration::from_secs(5)
+        {
+            return;
+        }
+        *last = Some(Instant::now());
+    }
+
+    fn fmt_mib(bytes: u64) -> String {
+        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+    }
+
+    let tracked = device.tracked_vram_bytes();
+    match device.video_memory_info() {
+        Some(info) => {
+            log::info!(
+                "[GPU-MEM] backend={backend} dxgi_local={} / budget={} dxgi_non_local={} tracked={}",
+                fmt_mib(info.local_current_bytes),
+                fmt_mib(info.local_budget_bytes),
+                fmt_mib(info.non_local_current_bytes),
+                fmt_mib(tracked),
+            );
+        }
+        None => {
+            log::info!(
+                "[GPU-MEM] backend={backend} tracked={} (no DXGI video-memory query on this backend)",
+                fmt_mib(tracked),
+            );
+        }
+    }
+}
+
 // -----------------------------------------------------------------------
 // Deferred per-frame work
 // -----------------------------------------------------------------------
@@ -165,7 +214,7 @@ pub(crate) struct CacheScheduleOutcome {
     pub(crate) cached_render_targets_slot: Option<usize>,
     /// Set when the scheme path stored its single persistent `out_image` into
     /// [`PersistentState::cached_scheme_rt`]; the post-submit step then stamps the
-    /// frame timeline so a later resize can wait before recycling.
+    /// frame timeline as a cache/reclamation marker (not a `begin_frame` GPU wait).
     pub(crate) scheme_rt_stored: bool,
 }
 
@@ -505,10 +554,10 @@ pub(crate) struct PersistentState {
     pub(crate) cached_scheme_indirect: Option<(ekrano_encoding::WorkgroupCountsGpu, Buffer)>,
     /// Stable scene buffer for the retained worker scheme (bucket capacity, buffer).
     pub(crate) cached_scene: Option<(u64, Buffer)>,
-    /// CPU-writable staging for scene uploads (bucket capacity, buffer).
-    pub(crate) cached_scene_staging: Option<(u64, Buffer)>,
-    /// CPU-writable staging for config uniform uploads.
-    pub(crate) cached_config_staging: Option<Buffer>,
+    /// Logical upload buffer for scene staging (bucket capacity, declaration).
+    pub(crate) cached_scene_upload: Option<(u64, goldy::UploadBuffer)>,
+    /// Logical upload buffer for config uniform staging.
+    pub(crate) cached_config_upload: Option<goldy::UploadBuffer>,
     /// Stable bump buffer keyed by byte size; read back via [`Self::cached_bump_grant`].
     pub(crate) cached_bump: Option<(u64, Buffer)>,
     /// Recorded once on the worker when `robust` is enabled.
@@ -536,12 +585,12 @@ pub(crate) struct PersistentState {
     pub(crate) pending_bump_submission: Option<goldy::Submission>,
     /// Upload key the upload scheme was recorded against (scene bucket + all atlas dims).
     pub(crate) cached_upload_key: Option<crate::worker_retention::UploadKey>,
-    /// CPU-writable staging for gradient atlas uploads.
-    pub(crate) cached_gradient_staging: Option<(u32, u32, Buffer)>,
-    /// CPU-writable staging for mask atlas uploads.
-    pub(crate) cached_mask_staging: Option<(u32, u32, Buffer)>,
-    /// CPU-writable staging buffers for image atlas region uploads.
-    pub(crate) cached_image_region_stagings: Vec<((u32, u32, u32, u32), Buffer)>,
+    /// Logical upload buffer for gradient atlas staging (width, height, capacity, declaration).
+    pub(crate) cached_gradient_upload: Option<(u32, u32, u64, goldy::UploadBuffer)>,
+    /// Logical upload buffer for mask atlas staging (width, height, capacity, declaration).
+    pub(crate) cached_mask_upload: Option<(u32, u32, u64, goldy::UploadBuffer)>,
+    /// Logical upload buffers for image atlas region uploads.
+    pub(crate) cached_image_region_uploads: Vec<((u32, u32, u32, u32), goldy::UploadBuffer)>,
     /// Textures waiting to be returned to [`Self::tex_pool`] after GPU retirement.
     /// Populated by [`DeferredTextureToken`] drops from [`Context::defer_release`].
     pub(crate) pending_texture_returns: Arc<Mutex<Vec<Texture>>>,
@@ -576,8 +625,8 @@ impl PersistentState {
             cached_filter_uniforms: Vec::new(),
             cached_scheme_indirect: None,
             cached_scene: None,
-            cached_scene_staging: None,
-            cached_config_staging: None,
+            cached_scene_upload: None,
+            cached_config_upload: None,
             cached_bump: None,
             cached_bump_grant: None,
             cached_gradient: None,
@@ -592,9 +641,9 @@ impl PersistentState {
             cached_worker_filter_effects: Vec::new(),
             pending_bump_submission: None,
             cached_upload_key: None,
-            cached_gradient_staging: None,
-            cached_mask_staging: None,
-            cached_image_region_stagings: Vec::new(),
+            cached_gradient_upload: None,
+            cached_mask_upload: None,
+            cached_image_region_uploads: Vec::new(),
             pending_texture_returns: Arc::new(Mutex::new(Vec::new())),
             pending_owned_returns: Arc::new(Mutex::new(Vec::new())),
             readback_host_buf: None,
@@ -654,9 +703,9 @@ impl PersistentState {
     ) -> Option<(Texture, [Texture; 4])> {
         let (out, layers, tv) = self.cached_scheme_rt.take()?;
         if out.width() == width && out.height() == height && out.format() == out_format {
-            if tv != 0 && ctx.gpu_progress() < tv {
-                let _ = ctx.wait_until(tv);
-            }
+            // `tv` is only a cache/reclamation stamp. Ordering for reuse is either
+            // submit-side (DX12 nonblocking) or the orchestrator ring (Vulkan/Metal).
+            let _ = tv;
             return Some((out, layers));
         }
         log::warn!(
@@ -664,14 +713,28 @@ impl PersistentState {
             out.width(),
             out.height(),
         );
-        if ctx.gpu_progress() < tv {
-            let _ = ctx.wait_until(tv);
+        self.reclaim_scheme_render_targets(ctx, out, layers, tv);
+        None
+    }
+
+    /// Release scheme render targets to the texture pool, deferring until `tv` retires.
+    fn reclaim_scheme_render_targets(&mut self, ctx: &Context, out: Texture, layers: [Texture; 4], tv: TimelineValue) {
+        if tv != 0 && ctx.gpu_progress() < tv {
+            let mut textures = Vec::with_capacity(5);
+            textures.push(out);
+            textures.extend(layers);
+            let mut payload = goldy::DeferredPayload::new();
+            payload.push(DeferredTextureToken {
+                pending: Arc::clone(&self.pending_texture_returns),
+                textures,
+            });
+            ctx.defer_release(tv, payload);
+            return;
         }
         self.tex_pool.release(out);
         for l in layers {
             self.tex_pool.release(l);
         }
-        None
     }
 
     pub(crate) fn store_scheme_render_targets(&mut self, out: Texture, layers: [Texture; 4], timeline: TimelineValue) {
@@ -1166,21 +1229,91 @@ pub(crate) mod tests {
     use crate::graph_renderer::GraphRecorder;
     use crate::{RenderParams, Scene};
     use ekrano_encoding::{RenderConfig, Resolver};
-    use goldy::{Device, FrameOrchestrator, Instance, TaskGraph};
+    use goldy::{BackendType, DeviceDescriptor, FrameOrchestrator, Instance, RequestAdapterOptions, TaskGraph};
+    use std::ops::Deref;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
 
-    /// Shared test helper: acquire a GPU device and a wired-up [`PersistentState`].
-    ///
-    /// Returns `None` when no GPU adapter is available (CI without hardware).
-    pub(crate) fn make_device_and_persistent() -> Option<(Device, PersistentState)> {
+    enum SharedDeviceInit {
+        Ready(Device),
+        Unavailable,
+    }
+
+    static SHARED_DEVICE: OnceLock<SharedDeviceInit> = OnceLock::new();
+    static WARP_LIB_TEST_SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn try_create_device() -> Option<Device> {
         let instance = Instance::new().ok()?;
-        let device = instance
-            .request_adapter(&goldy::RequestAdapterOptions::default())
-            .and_then(|a| a.request_device(&goldy::DeviceDescriptor::default()))
-            .ok()?;
-        let mut persistent = PersistentState::new(&device);
+        instance
+            .request_adapter(&RequestAdapterOptions::default())
+            .and_then(|a| a.request_device(&DeviceDescriptor::default()))
+            .ok()
+    }
+
+    fn is_dx12_warp(device: &Device) -> bool {
+        // goldy::WARP_ADAPTER_ID is u32::MAX; ekrano does not gate on goldy's `dx12` feature.
+        device.backend_type() == BackendType::Dx12 && device.adapter_id() == u32::MAX
+    }
+
+    /// Process-lifetime shared GPU device for ordinary lib tests.
+    ///
+    /// On DX12 WARP, holds a mutex for the guard's lifetime so parallel `cargo test --lib`
+    /// trials do not interleave WARP work. Hardware/Vulkan/Metal skip the lock.
+    ///
+    /// Device-lifetime / create-destroy tests must use [`exclusive_gpu_device`] instead —
+    /// they must not touch the shared [`OnceLock`].
+    pub(crate) struct SharedGpuTest {
+        device: &'static Device,
+        _warp_guard: Option<MutexGuard<'static, ()>>,
+    }
+
+    impl Deref for SharedGpuTest {
+        type Target = Device;
+
+        fn deref(&self) -> &Device {
+            self.device
+        }
+    }
+
+    /// Borrow the process-shared device; serialize only on DX12 WARP.
+    pub(crate) fn shared_gpu_test() -> Option<SharedGpuTest> {
+        let init = SHARED_DEVICE.get_or_init(|| match try_create_device() {
+            Some(device) => SharedDeviceInit::Ready(device),
+            None => SharedDeviceInit::Unavailable,
+        });
+        let SharedDeviceInit::Ready(device) = init else {
+            return None;
+        };
+        let _warp_guard = if is_dx12_warp(device) {
+            Some(
+                WARP_LIB_TEST_SERIAL
+                    .get_or_init(|| Mutex::new(()))
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()),
+            )
+        } else {
+            None
+        };
+        Some(SharedGpuTest { device, _warp_guard })
+    }
+
+    /// Fresh device for tests that assert device create/destroy lifetime.
+    ///
+    /// Do not use for ordinary GPU lib tests — prefer [`shared_gpu_test`].
+    #[allow(dead_code, reason = "Escape hatch for future device-lifetime tests.")]
+    pub(crate) fn exclusive_gpu_device() -> Option<Device> {
+        try_create_device()
+    }
+
+    /// Shared test helper: process-shared GPU device plus a fresh [`PersistentState`].
+    ///
+    /// Returns `None` when no GPU adapter is available. Hold the returned
+    /// [`SharedGpuTest`] for the full test body so WARP serialization stays active.
+    pub(crate) fn make_device_and_persistent() -> Option<(SharedGpuTest, PersistentState)> {
+        let gpu = shared_gpu_test()?;
+        let mut persistent = PersistentState::new(&gpu);
         let pending = persistent.pending_owned_returns.clone();
         persistent.pool.set_pending_returns(pending);
-        Some((device, persistent))
+        Some((gpu, persistent))
     }
 
     /// Regression test: `PipelineResources::prepare` must create `out_image` with
@@ -1197,7 +1330,7 @@ pub(crate) mod tests {
     /// surface (BGRA) and headless (RGBA) paths.
     #[test]
     fn prepare_out_image_format_matches_requested() {
-        let Some((device, mut persistent)) = make_device_and_persistent() else {
+        let Some((gpu, mut persistent)) = make_device_and_persistent() else {
             return;
         };
 
@@ -1219,14 +1352,14 @@ pub(crate) mod tests {
             let config = RenderConfig::new(&layout, params.width, params.height, &params.base_color);
             let mut graph = TaskGraph::new();
 
-            let ctx = device.create_context().expect("context");
+            let ctx = gpu.create_context().expect("context");
             let mut frame_pipeline = FrameOrchestrator::new(&ctx, FRAME_PIPELINE_DEPTH);
             let frame_handle = frame_pipeline
                 .begin_frame(|_, _| Ok::<(), Error>(()))
                 .expect("begin_frame");
             let pipeline = {
                 let mut recorder = GraphRecorder::new(
-                    &device,
+                    &gpu,
                     &ctx,
                     &mut graph,
                     &mut frame_pipeline,
