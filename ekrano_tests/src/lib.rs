@@ -84,16 +84,18 @@ fn is_dx12_warp(device: &Device) -> bool {
     device.backend_type() == BackendType::Dx12 && device.adapter_id() == u32::MAX
 }
 
-/// Process-lifetime shared GPU device for ordinary integration tests.
+/// GPU device handle for one integration-test body.
 ///
-/// One device is shared across tests in this process. On DX12 WARP, concurrent test
-/// bodies are serialized via a mutex held for the guard's lifetime. Hardware backends
-/// skip the lock so cargo's thread pool can overlap work.
+/// - **Metal**: owned, freshly created device (isolation under parallel
+///   `libtest_mimic` trials — shared-device concurrent submits trip the macOS GPU
+///   watchdog).
+/// - **DX12 WARP / Vulkan / DX12 hardware**: clone of the process-shared device.
+///   WARP also holds a serial mutex for the guard's lifetime.
 ///
 /// Hold this guard for the full test body. Device create/destroy lifetime tests must
 /// construct their own [`Device`] and must not use this helper.
 pub struct SharedTestDevice {
-    device: &'static Device,
+    device: Device,
     _warp_guard: Option<MutexGuard<'static, ()>>,
 }
 
@@ -101,7 +103,7 @@ impl Deref for SharedTestDevice {
     type Target = Device;
 
     fn deref(&self) -> &Device {
-        self.device
+        &self.device
     }
 }
 
@@ -119,17 +121,30 @@ fn ensure_shared_device() -> Option<&'static Device> {
 /// Process-shared device without the WARP serial lock.
 ///
 /// For custom harness setup (e.g. clamping `libtest_mimic` thread counts). Test bodies
-/// that render should use [`test_device`] so WARP stays serialized.
+/// that render should use [`test_device`] so Metal gets a fresh device and WARP stays
+/// serialized.
 pub fn shared_test_device() -> Option<&'static Device> {
     ensure_shared_device()
 }
 
-/// Borrow the process-shared device (WARP-serialized when applicable).
+/// Device for one test body: fresh on Metal, process-shared (WARP-serialized) elsewhere.
 pub fn test_device() -> SharedTestDevice {
-    let Some(device) = ensure_shared_device() else {
+    let Some(shared) = ensure_shared_device() else {
         panic!("No Goldy device available");
     };
-    let _warp_guard = if is_dx12_warp(device) {
+
+    // Metal: one device per trial. Concurrent libtest_mimic trials on a single shared
+    // Metal device oversubscribe the GPU; command buffers that wait behind large
+    // sibling work hit the ~5s macOS watchdog and fail unrelated assertions.
+    if shared.backend_type() == BackendType::Metal {
+        let device = try_create_device().expect("No Goldy device available");
+        return SharedTestDevice {
+            device,
+            _warp_guard: None,
+        };
+    }
+
+    let _warp_guard = if is_dx12_warp(shared) {
         Some(
             WARP_TEST_SERIAL
                 .get_or_init(|| Mutex::new(()))
@@ -139,7 +154,10 @@ pub fn test_device() -> SharedTestDevice {
     } else {
         None
     };
-    SharedTestDevice { device, _warp_guard }
+    SharedTestDevice {
+        device: shared.clone(),
+        _warp_guard,
+    }
 }
 
 mod snapshot;
