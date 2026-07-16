@@ -704,7 +704,8 @@ impl PersistentState {
         let (out, layers, tv) = self.cached_scheme_rt.take()?;
         if out.width() == width && out.height() == height && out.format() == out_format {
             // `tv` is only a cache/reclamation stamp. Ordering for reuse is either
-            // submit-side (DX12/Vulkan nonblocking) or the orchestrator ring (Metal).
+            // submit-side (DX12/Vulkan/Metal nonblocking) or the orchestrator ring
+            // (backends without host_sidecar_on_submit_worker).
             let _ = tv;
             return Some((out, layers));
         }

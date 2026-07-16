@@ -281,7 +281,7 @@ fn scheme_resize_churn_keeps_ring_empty_and_pool_bounded() {
 
     let device = make_device();
     if !device.capabilities().host_sidecar_on_submit_worker {
-        // Metal still uses the blocking orchestrator path.
+        // Backends without host_sidecar_on_submit_worker still use the blocking path.
         return;
     }
 

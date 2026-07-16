@@ -85,9 +85,10 @@ pub struct SchemeRenderer {
     persistent: PersistentState,
     /// Pipelined frame scheduling: depth enforcement and timeline tracking.
     frame_pipeline: FrameOrchestrator<()>,
-    /// When true (DX12/Vulkan), reuse ordering is enforced via scheme submit sidecars and
+    /// When true (DX12/Vulkan/Metal), reuse ordering is enforced via scheme submit sidecars and
     /// frames close with [`FrameOrchestrator::end_frame_externally_ordered`] — no
-    /// coarse `begin_frame` GPU wait. Metal keeps the blocking ring path.
+    /// coarse `begin_frame` GPU wait. Backends without `host_sidecar_on_submit_worker`
+    /// keep the blocking ring path.
     nonblocking_reuse: bool,
     /// Persistent bump estimates: running max across frames.
     persistent_bump: Option<BumpAllocators>,
@@ -899,8 +900,9 @@ impl SchemeRenderer {
             _ => None,
         };
 
-        // On Metal the ring stamps compute+copy completion so begin_frame waits.
-        // On DX12/Vulkan (nonblocking_reuse) ordering lives in submit sidecars + present easement;
+        // On backends without nonblocking_reuse the ring stamps compute+copy completion
+        // so begin_frame waits. On DX12/Vulkan/Metal (nonblocking_reuse) ordering lives in
+        // submit sidecars + present easement;
         // no retirement slot is created, so note_presented is a no-op / unused.
         if !self.nonblocking_reuse {
             self.frame_pipeline.note_presented(frame_tv);
@@ -1037,7 +1039,7 @@ pub(crate) struct SchemeRecorder<'a> {
     upload: &'a mut Scheme,
     /// When true, the upload scheme IR is empty and copy/upload nodes must be recorded this frame.
     pub(crate) upload_needs_record: bool,
-    /// DX12 head-chases-tail path: deferred host writes + reuse epochs; no ring wait.
+    /// Nonblocking head-chases-tail path: deferred host writes + reuse epochs; no ring wait.
     pub(crate) nonblocking_reuse: bool,
     frame_pipeline: &'a mut FrameOrchestrator<()>,
     frame_handle: FrameHandle,
