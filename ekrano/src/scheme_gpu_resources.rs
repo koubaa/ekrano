@@ -667,7 +667,7 @@ fn al_cached_opt(
 /// See `resource-pool.md §1` for the rationale behind this split from [`ScratchPipelineBuffers`].
 ///
 /// Cross-frame reuse is ordered by [`goldy::Scheme::record_reuse_epochs`] on the worker
-/// scheme (DX12) or by the frame-orchestrator `begin_frame` wait (Vulkan/Metal). If pipeline
+/// scheme (DX12/Vulkan) or by the frame-orchestrator `begin_frame` wait (Metal). If pipeline
 /// depth is raised so the next frame may record while the prior frame's GPU work is still in
 /// flight without those gates, a single retained deed is not enough — use double-buffered
 /// parcels or a transient pool instead.
@@ -1113,8 +1113,8 @@ impl PipelineResources {
         let buffer_sizes = cpu_config_owned.buffer_sizes;
 
         // Try to reuse cached pipeline buffers from the previous frame.
-        // On DX12, ordering is via submit-side reuse epochs / deferred host writes.
-        // On Vulkan/Metal, begin_frame still retires the prior frame before reuse.
+        // On DX12/Vulkan, ordering is via submit-side reuse epochs / deferred host writes.
+        // On Metal, begin_frame still retires the prior frame before reuse.
         let (cached_stable, cached_scratch) = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.pipeline_cache");
             match recorder.persistent.take_cached_pipeline() {

@@ -704,7 +704,7 @@ impl PersistentState {
         let (out, layers, tv) = self.cached_scheme_rt.take()?;
         if out.width() == width && out.height() == height && out.format() == out_format {
             // `tv` is only a cache/reclamation stamp. Ordering for reuse is either
-            // submit-side (DX12 nonblocking) or the orchestrator ring (Vulkan/Metal).
+            // submit-side (DX12/Vulkan nonblocking) or the orchestrator ring (Metal).
             let _ = tv;
             return Some((out, layers));
         }
@@ -1229,87 +1229,65 @@ pub(crate) mod tests {
     use crate::graph_renderer::GraphRecorder;
     use crate::{RenderParams, Scene};
     use ekrano_encoding::{RenderConfig, Resolver};
-    use goldy::{BackendType, DeviceDescriptor, FrameOrchestrator, Instance, RequestAdapterOptions, TaskGraph};
+    use goldy::{
+        Adapter, BackendType, Device, DeviceDescriptor, FrameOrchestrator, Instance, RequestAdapterOptions, TaskGraph,
+    };
     use std::ops::Deref;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
-    enum SharedDeviceInit {
-        Ready(Device),
-        Unavailable,
-    }
-
-    static SHARED_DEVICE: OnceLock<SharedDeviceInit> = OnceLock::new();
     static WARP_LIB_TEST_SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
 
-    fn try_create_device() -> Option<Device> {
-        let instance = Instance::new().ok()?;
-        instance
-            .request_adapter(&RequestAdapterOptions::default())
-            .and_then(|a| a.request_device(&DeviceDescriptor::default()))
-            .ok()
-    }
-
-    fn is_dx12_warp(device: &Device) -> bool {
+    fn is_dx12_warp_adapter(instance: &Instance, adapter: &Adapter) -> bool {
         // goldy::WARP_ADAPTER_ID is u32::MAX; ekrano does not gate on goldy's `dx12` feature.
-        device.backend_type() == BackendType::Dx12 && device.adapter_id() == u32::MAX
+        instance.backend_type() == BackendType::Dx12 && adapter.id() == u32::MAX
     }
 
-    /// Process-lifetime shared GPU device for ordinary lib tests.
+    fn warp_lib_test_serial() -> &'static Mutex<()> {
+        WARP_LIB_TEST_SERIAL.get_or_init(|| Mutex::new(()))
+    }
+
+    /// Fresh GPU device for ordinary `--lib` tests, with WARP serialization when needed.
     ///
-    /// On DX12 WARP, holds a mutex for the guard's lifetime so parallel `cargo test --lib`
-    /// trials do not interleave WARP work. Hardware/Vulkan/Metal skip the lock.
-    ///
-    /// Device-lifetime / create-destroy tests must use [`exclusive_gpu_device`] instead —
-    /// they must not touch the shared [`OnceLock`].
-    pub(crate) struct SharedGpuTest {
-        device: &'static Device,
+    /// One device per test body via the public [`Instance`] / [`RequestAdapterOptions`] /
+    /// [`DeviceDescriptor`] APIs. On DX12 WARP, holds a process-wide lock for the guard's
+    /// lifetime so parallel `cargo test --lib` trials do not interleave WARP work.
+    pub(crate) struct GpuTestDevice {
+        device: Device,
         _warp_guard: Option<MutexGuard<'static, ()>>,
     }
 
-    impl Deref for SharedGpuTest {
+    impl Deref for GpuTestDevice {
         type Target = Device;
 
         fn deref(&self) -> &Device {
-            self.device
+            &self.device
         }
     }
 
-    /// Borrow the process-shared device; serialize only on DX12 WARP.
-    pub(crate) fn shared_gpu_test() -> Option<SharedGpuTest> {
-        let init = SHARED_DEVICE.get_or_init(|| match try_create_device() {
-            Some(device) => SharedDeviceInit::Ready(device),
-            None => SharedDeviceInit::Unavailable,
-        });
-        let SharedDeviceInit::Ready(device) = init else {
-            return None;
-        };
-        let _warp_guard = if is_dx12_warp(device) {
-            Some(
-                WARP_LIB_TEST_SERIAL
-                    .get_or_init(|| Mutex::new(()))
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner()),
-            )
+    fn try_create_gpu_test_device() -> Option<GpuTestDevice> {
+        let instance = Instance::new().ok()?;
+        let adapter = instance.request_adapter(&RequestAdapterOptions::default()).ok()?;
+
+        // Lock before `request_device` when the selected adapter is WARP — adapter
+        // selection is cheap/non-racy; device open is what must be serialized.
+        let _warp_guard = if is_dx12_warp_adapter(&instance, &adapter) {
+            Some(warp_lib_test_serial().lock().unwrap_or_else(|e| e.into_inner()))
         } else {
             None
         };
-        Some(SharedGpuTest { device, _warp_guard })
+
+        let device = adapter.request_device(&DeviceDescriptor::default()).ok()?;
+        drop(instance);
+
+        Some(GpuTestDevice { device, _warp_guard })
     }
 
-    /// Fresh device for tests that assert device create/destroy lifetime.
-    ///
-    /// Do not use for ordinary GPU lib tests — prefer [`shared_gpu_test`].
-    #[allow(dead_code, reason = "Escape hatch for future device-lifetime tests.")]
-    pub(crate) fn exclusive_gpu_device() -> Option<Device> {
-        try_create_device()
-    }
-
-    /// Shared test helper: process-shared GPU device plus a fresh [`PersistentState`].
+    /// Shared test helper: fresh GPU device plus a fresh [`PersistentState`].
     ///
     /// Returns `None` when no GPU adapter is available. Hold the returned
-    /// [`SharedGpuTest`] for the full test body so WARP serialization stays active.
-    pub(crate) fn make_device_and_persistent() -> Option<(SharedGpuTest, PersistentState)> {
-        let gpu = shared_gpu_test()?;
+    /// [`GpuTestDevice`] for the full test body so WARP serialization stays active.
+    pub(crate) fn make_device_and_persistent() -> Option<(GpuTestDevice, PersistentState)> {
+        let gpu = try_create_gpu_test_device()?;
         let mut persistent = PersistentState::new(&gpu);
         let pending = persistent.pending_owned_returns.clone();
         persistent.pool.set_pending_returns(pending);
