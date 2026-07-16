@@ -483,12 +483,14 @@ impl GraphRenderer {
         self.persistent.drain_pending_returns();
 
         let out_image_format = surface.map(|s| s.format()).unwrap_or(TextureFormat::Rgba8Unorm);
-        self.persistent.purge_render_target_cache_if_mismatch(
+        if self.persistent.purge_render_target_cache_if_mismatch(
             &self.context,
             params.width,
             params.height,
             out_image_format,
-        );
+        ) {
+            self.device.compact_overflow_heaps();
+        }
 
         let t_drain_start = Instant::now();
 
@@ -1069,8 +1071,8 @@ impl<'a> GraphRecorder<'a> {
     /// submits non-present partitions first and acquires the drawable inside
     /// [`goldy::Surface::submit_graph`] when the present partition is reached.
     pub(crate) fn finish(mut self) -> Result<FrameFinishOutcome> {
-        self.finished = true;
-
+        // Keep `finished` false until success so Drop aborts the orchestrator frame
+        // if end_frame / submit_frame fails.
         self.persistent.deferred_owned_cap_hint = self.deferred_owned_buffers.capacity();
         self.persistent.deferred_textures_cap_hint = self.deferred_textures.capacity();
 
@@ -1091,6 +1093,7 @@ impl<'a> GraphRecorder<'a> {
                     .map_err(|e| Error::Shader(e.to_string()))?
             };
             let submit_tv = frame.submit_frame().map_err(|e| Error::Shader(e.to_string()))?;
+            self.finished = true;
             Ok(FrameFinishOutcome {
                 timeline: submit_tv,
                 surface_frame: Some(frame),
@@ -1106,6 +1109,7 @@ impl<'a> GraphRecorder<'a> {
                 .frame_pipeline
                 .end_frame_standalone(frame_handle, self.graph, fallback, ())
                 .map_err(|e| Error::Shader(e.to_string()))?;
+            self.finished = true;
             Ok(FrameFinishOutcome {
                 timeline: tv,
                 surface_frame: None,

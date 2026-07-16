@@ -718,23 +718,18 @@ impl PersistentState {
         None
     }
 
-    /// Release scheme render targets to the texture pool, deferring until `tv` retires.
+    /// Retire scheme render targets that no longer match the requested size.
+    ///
+    /// Waits for `tv` if still in flight, then **drops** the textures. Returning them
+    /// to [`Self::tex_pool`] would keep mismatched-size heap allocations alive across
+    /// resize churn and exhaust Metal's overflow texture heaps.
     fn reclaim_scheme_render_targets(&mut self, ctx: &Context, out: Texture, layers: [Texture; 4], tv: TimelineValue) {
         if tv != 0 && ctx.gpu_progress() < tv {
-            let mut textures = Vec::with_capacity(5);
-            textures.push(out);
-            textures.extend(layers);
-            let mut payload = goldy::DeferredPayload::new();
-            payload.push(DeferredTextureToken {
-                pending: Arc::clone(&self.pending_texture_returns),
-                textures,
-            });
-            ctx.defer_release(tv, payload);
-            return;
+            let _ = ctx.wait_until(tv);
         }
-        self.tex_pool.release(out);
+        drop(out);
         for l in layers {
-            self.tex_pool.release(l);
+            drop(l);
         }
     }
 
@@ -756,6 +751,10 @@ impl PersistentState {
     /// Drop all cached render targets when any occupied slot no longer matches the
     /// requested dimensions. Waits for the oldest slot timeline so heap-backed textures
     /// are retired before new allocations during resize.
+    ///
+    /// Also clears [`Self::cached_scheme_rt`], drains pending texture returns by
+    /// dropping them, and empties [`Self::tex_pool`] so obsolete sizes cannot pin
+    /// Metal overflow heaps across continuous resize.
     pub(crate) fn purge_render_target_cache_if_mismatch(
         &mut self,
         ctx: &Context,
@@ -763,11 +762,14 @@ impl PersistentState {
         height: u32,
         out_format: TextureFormat,
     ) -> bool {
-        let mismatch = self.cached_render_targets.iter().any(|slot| {
+        let classic_mismatch = self.cached_render_targets.iter().any(|slot| {
             slot.as_ref()
                 .is_some_and(|(out, _)| out.width() != width || out.height() != height || out.format() != out_format)
         });
-        if !mismatch {
+        let scheme_mismatch = self.cached_scheme_rt.as_ref().is_some_and(|(out, _, _)| {
+            out.width() != width || out.height() != height || out.format() != out_format
+        });
+        if !classic_mismatch && !scheme_mismatch {
             return false;
         }
 
@@ -775,10 +777,13 @@ impl PersistentState {
         if ctx.peek_oldest_in_flight().is_none() {
             // GPU idle — skip the timeline scan entirely.
         } else {
-            let oldest = (0..RESOURCE_CACHE_SLOTS)
+            let mut oldest = (0..RESOURCE_CACHE_SLOTS)
                 .filter(|&i| self.cached_render_targets[i].is_some())
                 .map(|i| self.cached_rt_timelines[i])
                 .min();
+            if let Some((_, _, tv)) = &self.cached_scheme_rt {
+                oldest = Some(oldest.map_or(*tv, |o| o.min(*tv)));
+            }
             if let Some(oldest) = oldest
                 && progress < oldest
             {
@@ -799,6 +804,21 @@ impl PersistentState {
                 self.cached_rt_timelines[i] = 0;
             }
         }
+        if let Some((out, layers, _)) = self.cached_scheme_rt.take() {
+            drop(out);
+            for l in layers {
+                drop(l);
+            }
+        }
+
+        // Pending returns and the texture pool may still hold obsolete sizes from
+        // earlier frames / deferred atlas reclaim. Drop them so heap slots free now.
+        if let Ok(mut pending) = self.pending_texture_returns.lock() {
+            pending.clear();
+        }
+        self.tex_pool.clear();
+        ctx.flush_deferred_deletions();
+
         true
     }
 
@@ -827,9 +847,10 @@ impl PersistentState {
                 width,
                 height,
             );
-            self.tex_pool.release(out);
+            // Drop mismatched sizes — do not pool (same reason as purge above).
+            drop(out);
             for l in layers {
-                self.tex_pool.release(l);
+                drop(l);
             }
         }
         None

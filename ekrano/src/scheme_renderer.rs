@@ -575,12 +575,14 @@ impl SchemeRenderer {
         self.persistent.drain_pending_returns();
 
         let out_image_format = pool.map(|p| p.format()).unwrap_or(TextureFormat::Rgba8Unorm);
-        self.persistent.purge_render_target_cache_if_mismatch(
+        if self.persistent.purge_render_target_cache_if_mismatch(
             &self.context,
             params.width,
             params.height,
             out_image_format,
-        );
+        ) {
+            self.device.compact_overflow_heaps();
+        }
 
         let t_drain_start = Instant::now();
 
@@ -1366,8 +1368,8 @@ impl<'a> SchemeRecorder<'a> {
     where
         F: FnOnce() -> Result<()>,
     {
-        self.finished = true;
-
+        // Keep `finished` false until success so Drop aborts the orchestrator frame
+        // if upload/submit/end_frame fails (otherwise begin_frame stays stuck open).
         self.persistent.deferred_owned_cap_hint = self.deferred_owned_buffers.capacity();
         self.persistent.deferred_textures_cap_hint = self.deferred_textures.capacity();
 
@@ -1420,6 +1422,7 @@ impl<'a> SchemeRecorder<'a> {
                     .map_err(|e| Error::Shader(e.to_string()))?
             }
         };
+        self.finished = true;
         Ok(FrameFinishOutcome {
             timeline: tv,
             surface_frame: None,
