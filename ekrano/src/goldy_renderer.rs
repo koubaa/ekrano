@@ -569,6 +569,8 @@ pub(crate) struct PersistentState {
     /// Stable mask atlas (width, height, texture).
     pub(crate) cached_mask_atlas: Option<(u32, u32, Texture)>,
     /// Present grant recorded once on the worker when swapchain presentation is enabled.
+    /// Consume resolves the present easement at the copy/present-partition timeline
+    /// (when `out_image` finishes being read), not the later display-present timeline.
     pub(crate) cached_present_grant: Option<goldy::PresentGrant>,
     /// `out_image` handle the worker was recorded against (RT cache rotation invalidates retention).
     pub(crate) cached_worker_out_image: Option<goldy::types::ResourceHandle>,
