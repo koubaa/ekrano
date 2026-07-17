@@ -44,4 +44,5 @@ include_slang!(COARSE, "coarse.slang");
 include_slang!(PATH_TILING, "path_tiling.slang");
 include_slang!(FLATTEN, "flatten.slang");
 include_slang!(FINE, "fine.slang");
+include_slang!(FINE_SETUP_SCHEME, "fine_setup_scheme.slang");
 include_slang!(FILTER_PASS, "filter_pass.slang");

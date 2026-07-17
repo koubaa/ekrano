@@ -602,7 +602,8 @@ float hypot_fine(float a, float b) {
 [numthreads(4, 16, 1)]
 void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
              BufRO<uint> ptcl, BufRO<uint> info,
-             Scattered<uint> blend_spill, DirectSpatial<float4> output,
+             Scattered<uint> blend_spill, BufRO<uint> active_tile_ids,
+             DirectSpatial<float4> output,
              Interpolated<float4> gradients, Interpolated<float4> image_atlas,
              Interpolated<float4> mask_atlas,
              // Slots 9-12 / 9-13: filter layer snapshots (or mask_lut + layers for MSAA)
@@ -619,9 +620,11 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
              ThreadId global_id, GroupThreadId local_id, GroupId wg_id) {
     Config config = config_buf[0];
 
-    uint actual_y = wg_id.y + config.tile_y_offset;
-    uint tile_ix = actual_y * config.width_in_tiles + wg_id.x;
-    float2 xy = float2(float(global_id.x * PIXELS_PER_THREAD), float(local_id.y + actual_y * TILE_HEIGHT));
+    uint tile_ix = active_tile_ids[wg_id.x];
+    uint tile_x = tile_ix % config.width_in_tiles;
+    uint tile_y = tile_ix / config.width_in_tiles;
+    float2 xy = float2(float(tile_x * TILE_WIDTH + local_id.x * PIXELS_PER_THREAD),
+                       float(tile_y * TILE_HEIGHT + local_id.y));
     float2 local_xy = float2(float(local_id.x * PIXELS_PER_THREAD), float(local_id.y));
 
     // Fetch atlas dimensions once per thread for hardware-sampled UV normalisation.

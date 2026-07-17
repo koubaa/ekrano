@@ -94,6 +94,7 @@ pub(crate) fn sanitize_bump(bump: &BumpAllocators) -> BumpAllocators {
         segments: clamp(bump.segments),
         blend: clamp(bump.blend),
         lines: clamp(bump.lines),
+        active_tiles: bump.active_tiles,
     }
 }
 

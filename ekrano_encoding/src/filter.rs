@@ -249,6 +249,22 @@ impl FilterUniform {
         }
     }
 
+    /// Clear RGBA texture to a solid premultiplied color using the same straight-alpha
+    /// encoding as the fine pass output store (`pass_kind` 15).
+    pub fn clear_base_color(width: u32, height: u32, premul_color: u32) -> Self {
+        Self {
+            width,
+            height,
+            edge_mode: 0,
+            pass_kind: 15,
+            std_dev: 0.0,
+            dx: 0.0,
+            dy: 0.0,
+            color: premul_color,
+            _pad: 0,
+        }
+    }
+
     /// 2× downsample: read `src_sampled` (2× larger) via hardware bilinear, write to dst at
     /// (width, height) (`pass_kind` 9).
     pub fn downsample(width: u32, height: u32) -> Self {

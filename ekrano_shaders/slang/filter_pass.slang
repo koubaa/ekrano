@@ -259,5 +259,12 @@ void cs_main(BufRO<FilterUniform> uniforms_buf,
         return;
     }
 
+    if (u.pass_kind == 15u) {
+        float4 fg = unpackUnorm4x8ToFloat(u.color);
+        float a_inv = 1.0 / max(fg.a, 1e-6);
+        dst[gxy] = float4(fg.rgb * a_inv, fg.a);
+        return;
+    }
+
     dst[gxy] = src[uint2(p)];
 }

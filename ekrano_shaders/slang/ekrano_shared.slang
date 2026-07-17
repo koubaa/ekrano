@@ -423,6 +423,8 @@ public struct BumpAllocators {
 
     public uint lines;
 
+    public uint active_tiles;
+
 };
 
 // Must match Rust IndirectCount (count_x, count_y, count_z, pad0) = 16 bytes stride

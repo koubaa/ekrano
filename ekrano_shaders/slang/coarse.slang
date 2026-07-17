@@ -134,7 +134,7 @@ void write_set_blend_mode(uint blend_packed, inout uint cmd_offset, inout uint c
     cmd_offset += 2;
 }
 
-// Slots: 0=config, 1=scene, 2=draw_monoids, 3=bin_headers, 4=info_bin_data, 5=paths, 6=tiles, 7=bump, 8=ptcl
+// Slots: 0=config, 1=scene, 2=draw_monoids, 3=bin_headers, 4=info_bin_data, 5=paths, 6=tiles, 7=bump, 8=ptcl, 9=active_tile_ids
 
 [goldy_compute]
 [numthreads(256, 1, 1)]
@@ -142,6 +142,7 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
              BufRO<DrawMonoid> draw_monoids, BufRO<BinHeader> bin_headers,
              BufRO<uint> info_bin_data, BufRO<Path> paths,
              Scattered<Tile> tiles, Scattered<BumpAllocators> bump, Scattered<uint> ptcl,
+             Scattered<uint> active_tile_ids,
              GroupThreadId local_id, GroupId wg_id) {
     Config config = config_buf[0];
 
@@ -424,6 +425,11 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
     }
 
     if (bin_tile_x + tile_x < config.width_in_tiles && bin_tile_y + tile_y < config.height_in_tiles) {
+        if (cmd_offset > blend_offset + 1) {
+            uint slot;
+            InterlockedAdd(bump[0].active_tiles, 1, slot);
+            active_tile_ids[slot] = this_tile_ix;
+        }
         ptcl[cmd_offset] = CMD_END;
         uint blend_ix = 0;
         if (max_blend_depth > BLEND_STACK_SPLIT) {

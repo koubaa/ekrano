@@ -212,6 +212,7 @@ impl SchemeRenderer {
             segments: 0,
             blend: 0,
             lines: 0,
+            active_tiles: 0,
         });
         p.binning = p.binning.max(bump.binning);
         p.ptcl = p.ptcl.max(bump.ptcl);
@@ -1304,6 +1305,32 @@ impl<'a> SchemeRecorder<'a> {
     /// Use this (with split field borrows from the recorder) when `bindings` may
     /// reference resources in `recorder.persistent`, which cannot coexist with
     /// `recorder.dispatch()`'s whole-recorder mutable borrow.
+    pub(crate) fn record_dispatch_shape(
+        scheme: &mut Scheme,
+        shaders: &[GoldyShader],
+        shader_id: ShaderId,
+        shape: &goldy::Parcel,
+        bindings: &[GpuBinding<'_>],
+    ) {
+        let bind_types = &shaders[shader_id.0].bindings;
+        let mut node = scheme.node("dispatch_shape", &shaders[shader_id.0].pipeline);
+        for (i, binding) in bindings.iter().enumerate() {
+            let access = bind_types
+                .get(i)
+                .copied()
+                .map(bind_type_to_node_access)
+                .unwrap_or(NodeAccess::ReadWrite);
+            node = match binding {
+                GpuBinding::Buf(b) => node.with_parcel(*b, access),
+                GpuBinding::Parcel(p) => node.with_parcel(*p, access),
+                GpuBinding::Tex(t) => node.with_parcel(*t, access),
+                GpuBinding::Sampler(s) => node.with_parcel(*s, access),
+                GpuBinding::PersistentBuf(b) => node.with_parcel(*b, access),
+            };
+        }
+        node.dispatch_shape(shape).expect("dispatch_shape failed");
+    }
+
     pub(crate) fn record_dispatch(
         scheme: &mut Scheme,
         shaders: &[GoldyShader],

@@ -10,8 +10,7 @@ use crate::shaders::FullShaders;
 use crate::{AaConfig, RenderParams};
 
 use ekrano_encoding::{
-    FilterPrimitive, FilterUniform, LayerFilterEffect, WorkgroupCountsGpu, WorkgroupSize, make_mask_lut,
-    make_mask_lut_16,
+    FilterPrimitive, FilterUniform, LayerFilterEffect, WorkgroupCountsGpu, make_mask_lut, make_mask_lut_16,
 };
 use goldy::types::{TextureFlags, TextureKind};
 use goldy::{Buffer, Texture};
@@ -19,13 +18,12 @@ use peniko::color::{PremulColor, Srgb};
 
 use ekrano_encoding::{
     STAGE_BACKDROP, STAGE_BBOX_CLEAR, STAGE_BINNING, STAGE_CLIP_LEAF, STAGE_CLIP_REDUCE, STAGE_COARSE, STAGE_DRAW_LEAF,
-    STAGE_DRAW_REDUCE, STAGE_FLATTEN, STAGE_PATH_COUNT, STAGE_PATH_TILING, STAGE_PATHTAG_REDUCE, STAGE_PATHTAG_REDUCE2,
-    STAGE_PATHTAG_SCAN, STAGE_PATHTAG_SCAN_LARGE, STAGE_PATHTAG_SCAN1, STAGE_TILE_ALLOC,
+    STAGE_DRAW_REDUCE, STAGE_FINE, STAGE_FLATTEN, STAGE_PATH_COUNT, STAGE_PATH_TILING, STAGE_PATHTAG_REDUCE,
+    STAGE_PATHTAG_REDUCE2, STAGE_PATHTAG_SCAN, STAGE_PATHTAG_SCAN_LARGE, STAGE_PATHTAG_SCAN1, STAGE_TILE_ALLOC,
 };
 
 /// State for a render in progress.
 pub struct Render {
-    fine_wg_count: Option<WorkgroupSize>,
     aa_config: AaConfig,
 
     #[cfg(feature = "debug_layers")]
@@ -73,7 +71,6 @@ impl Default for Render {
 impl Render {
     pub fn new() -> Self {
         Self {
-            fine_wg_count: None,
             aa_config: AaConfig::Area,
             #[cfg(feature = "debug_layers")]
             captured_buffers: None,
@@ -350,6 +347,18 @@ impl Render {
                 pipeline.stable.tile.as_binding(),
                 pipeline.bump.as_binding(),
                 pipeline.stable.ptcl.as_binding(),
+                pipeline.stable.active_tile_ids.as_binding(),
+            ],
+        );
+
+        // fine_setup_scheme writes the active-tile count for fine into the per-stage
+        // DispatchShape buffer.
+        recorder.dispatch(
+            shaders.fine_setup,
+            (1, 1, 1),
+            &[
+                pipeline.bump.as_binding(),
+                GpuBinding::Parcel(indirect_buf.unit(STAGE_FINE as usize)),
             ],
         );
 
@@ -379,7 +388,6 @@ impl Render {
             ],
         );
 
-        self.fine_wg_count = Some(wg_counts.fine);
         self.aa_config = params.antialiasing_method;
 
         #[cfg(feature = "debug_layers")]
@@ -401,10 +409,6 @@ impl Render {
         output_texture: Option<&Texture>,
         recorder: &mut SchemeRecorder<'_>,
     ) {
-        let fine_wg_count = self.fine_wg_count.take().expect("fine_wg_count");
-        let width_in_tiles = fine_wg_count.0;
-        let height_in_tiles = fine_wg_count.1;
-
         let out_tex = output_texture.unwrap_or(&pipeline.out_image);
 
         let shader = match self.aa_config {
@@ -457,6 +461,18 @@ impl Render {
 
         let width_px = out_tex.width();
         let height_px = out_tex.height();
+
+        if width_px > 0 && height_px > 0 {
+            if let Some(fs) = shaders.filter_pass {
+                let wg = (width_px.div_ceil(16), height_px.div_ceil(16), 1);
+                let u_clear =
+                    FilterUniform::clear_base_color(width_px, height_px, pipeline.config_uniform_value.base_color);
+                filter_dispatch(recorder, fs, &u_clear, wg, out_tex, out_tex);
+            } else {
+                log::warn!("filter_pass shader unavailable; cannot clear output to base_color before fine");
+            }
+        }
+
         if !layer_filter_effects.is_empty() && width_px > 0 && height_px > 0 {
             if let Some(fs) = shaders.filter_pass {
                 let wg = (width_px.div_ceil(16), height_px.div_ceil(16), 1);
@@ -469,6 +485,16 @@ impl Render {
             }
         }
 
+        let mask_lut = if uses_mask_lut {
+            match self.aa_config {
+                AaConfig::Msaa16 => recorder.persistent.stable_mask_lut_msaa16.as_ref(),
+                AaConfig::Msaa8 => recorder.persistent.stable_mask_lut_msaa8.as_ref(),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
         let persistent = &*recorder.persistent;
         let mut fine_resources: Vec<GpuBinding<'_>> = vec![
             pipeline.config.as_binding(),
@@ -476,20 +502,14 @@ impl Render {
             pipeline.stable.ptcl.as_binding(),
             pipeline.stable.info_bin_data.as_binding(),
             pipeline.stable.blend_spill.as_binding(),
+            pipeline.stable.active_tile_ids.as_binding(),
             GpuBinding::Tex(out_tex),
             GpuBinding::Tex(&pipeline.gradient),
             GpuBinding::Tex(&pipeline.image_atlas),
             GpuBinding::Tex(&pipeline.mask_atlas),
         ];
-        if uses_mask_lut {
-            let lut = match self.aa_config {
-                AaConfig::Msaa16 => persistent.stable_mask_lut_msaa16.as_ref(),
-                AaConfig::Msaa8 => persistent.stable_mask_lut_msaa8.as_ref(),
-                _ => None,
-            };
-            if let Some(lut) = lut {
-                fine_resources.push(GpuBinding::PersistentBuf(lut));
-            }
+        if let Some(lut) = mask_lut {
+            fine_resources.push(GpuBinding::PersistentBuf(lut));
         }
         for fl in &pipeline.filter_layers {
             fine_resources.push(GpuBinding::Tex(fl));
@@ -508,13 +528,17 @@ impl Render {
                 .expect("nearest_clamp_sampler must be initialised before fine pass"),
         ));
 
-        SchemeRecorder::record_dispatch(
+        let (_, indirect_buf) = pipeline
+            .indirect
+            .as_ref()
+            .expect("indirect buffer must be allocated during coarse phase");
+
+        SchemeRecorder::record_dispatch_shape(
             recorder.scheme,
             recorder.shaders,
             shader,
-            (width_in_tiles, height_in_tiles, 1),
+            &indirect_buf.unit(STAGE_FINE as usize),
             &fine_resources,
-            &[],
         );
     }
 

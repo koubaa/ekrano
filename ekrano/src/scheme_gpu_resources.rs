@@ -13,8 +13,8 @@ use crate::scheme_renderer::SchemeRecorder;
 use crate::worker_retention::scene_size_bucket;
 use crate::{Error, RenderParams, Result};
 use ekrano_encoding::{
-    BumpAllocators, CoverageMask, Images, N_INDIRECT_STAGES, Ramps, RenderConfig, STAGE_PATH_COUNT, STAGE_PATH_TILING,
-    WorkgroupCountsGpu,
+    BumpAllocators, CoverageMask, Images, N_INDIRECT_STAGES, Ramps, RenderConfig, STAGE_FINE, STAGE_PATH_COUNT,
+    STAGE_PATH_TILING, WorkgroupCountsGpu,
 };
 
 /// Record GPU-orderable reuse epochs on `scheme` for a buffer that will be overwritten.
@@ -181,7 +181,7 @@ pub(crate) fn alloc_pipeline_buffer(
 ///
 /// One [`goldy::RetainedPool::acquire_record`] buffer holds `N_INDIRECT_STAGES` ordinal
 /// [`goldy::DispatchShape`] parcels. CPU-known stages are initialised at allocation via
-/// [`Init::data`]; GPU-written stages ([`STAGE_PATH_COUNT`], [`STAGE_PATH_TILING`])
+/// [`Init::data`]; GPU-written stages ([`STAGE_PATH_COUNT`], [`STAGE_PATH_TILING`], [`STAGE_FINE`])
 /// use [`Init::reserve`] and are written each frame by setup shaders.
 ///
 /// Indexed via [`Buffer::unit`]: `buf.unit(STAGE_FOO as usize)`.
@@ -199,7 +199,10 @@ pub(crate) fn alloc_or_reuse_scheme_indirect(
     }
     let fields: Vec<_> = (0..N_INDIRECT_STAGES as usize)
         .map(|i| {
-            if i != STAGE_PATH_COUNT as usize && i != STAGE_PATH_TILING as usize {
+            if i != STAGE_PATH_COUNT as usize
+                && i != STAGE_PATH_TILING as usize
+                && i != STAGE_FINE as usize
+            {
                 let e = wg_counts_gpu.entries[i];
                 ordinal(Init::data(&[DispatchShape {
                     x: e[0],
@@ -687,6 +690,8 @@ pub(crate) struct StablePipelineBuffers {
     pub tile: Buffer,
     pub segments: Buffer,
     pub ptcl: Buffer,
+    /// Compacted active tile indices written by coarse, read by fine.
+    pub active_tile_ids: Buffer,
     /// Used only by fine, but allocated in the shared pre-flush phase to avoid
     /// splitting `prepare` into two phases.
     pub blend_spill: Buffer,
@@ -700,23 +705,30 @@ impl StablePipelineBuffers {
         cached: Option<Self>,
         bs: &ekrano_encoding::BufferSizes,
     ) -> Result<Self, Error> {
-        let (c_ibd, c_tile, c_seg, c_ptcl, c_bs, c_lines, c_sc) = match cached {
+        let (c_ibd, c_tile, c_seg, c_ptcl, c_ati, c_bs, c_lines, c_sc) = match cached {
             Some(c) => (
                 Some(c.info_bin_data),
                 Some(c.tile),
                 Some(c.segments),
                 Some(c.ptcl),
+                Some(c.active_tile_ids),
                 Some(c.blend_spill),
                 Some(c.lines),
                 Some(c.seg_counts),
             ),
-            None => (None, None, None, None, None, None, None),
+            None => (None, None, None, None, None, None, None, None),
         };
         Ok(Self {
             info_bin_data: alloc_stable_buffer(recorder, c_ibd, bs.bin_data.size_in_bytes() as u64, 4)?,
             tile: alloc_stable_buffer(recorder, c_tile, bs.tiles.size_in_bytes().into(), 8)?,
             segments: alloc_stable_buffer(recorder, c_seg, bs.segments.size_in_bytes().into(), 24)?,
             ptcl: alloc_stable_buffer(recorder, c_ptcl, bs.ptcl.size_in_bytes().into(), 4)?,
+            active_tile_ids: alloc_stable_buffer(
+                recorder,
+                c_ati,
+                bs.active_tile_ids.size_in_bytes().into(),
+                4,
+            )?,
             blend_spill: alloc_stable_buffer(
                 recorder,
                 c_bs,
@@ -1150,6 +1162,7 @@ impl PipelineResources {
                         c.stable.tile,
                         c.stable.segments,
                         c.stable.ptcl,
+                        c.stable.active_tile_ids,
                         c.stable.blend_spill,
                         c.stable.lines,
                         c.stable.seg_counts,

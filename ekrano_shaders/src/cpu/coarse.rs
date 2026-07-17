@@ -179,6 +179,7 @@ fn coarse_main(
     tiles: &mut [Tile],
     bump: &mut BumpAllocators,
     ptcl: &mut [u32],
+    mut active_tile_ids: Option<&mut [u32]>,
 ) {
     let width_in_tiles = config.width_in_tiles;
     let height_in_tiles = config.height_in_tiles;
@@ -354,6 +355,13 @@ fn coarse_main(
             }
 
             if bin_tile_x + tile_x < width_in_tiles && bin_tile_y + tile_y < height_in_tiles {
+                if tile_state.cmd_offset > blend_offset + 1 {
+                    let slot = bump.active_tiles;
+                    bump.active_tiles += 1;
+                    if let Some(ref mut ids) = active_tile_ids {
+                        ids[slot as usize] = this_tile_ix;
+                    }
+                }
                 ptcl[tile_state.cmd_offset as usize] = CMD_END;
                 let scratch_size = (max_blend_depth.saturating_sub(BLEND_STACK_SPLIT)) * TILE_WIDTH * TILE_HEIGHT;
                 ptcl[blend_offset as usize] = bump.blend;
@@ -373,6 +381,7 @@ pub fn coarse(_n_wg: u32, resources: &[CpuBinding<'_>]) {
     let mut tiles = resources[6].as_slice_mut();
     let mut bump = resources[7].as_typed_mut();
     let mut ptcl = resources[8].as_slice_mut();
+    let mut active_tile_ids_buf = resources.get(9).map(|b| b.as_slice_mut());
     coarse_main(
         &config,
         &scene,
@@ -383,5 +392,6 @@ pub fn coarse(_n_wg: u32, resources: &[CpuBinding<'_>]) {
         &mut tiles,
         &mut bump,
         &mut ptcl,
+        active_tile_ids_buf.as_deref_mut(),
     );
 }

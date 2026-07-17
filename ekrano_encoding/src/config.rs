@@ -35,6 +35,8 @@ pub struct BumpAllocators {
     pub segments: u32,
     pub blend: u32,
     pub lines: u32,
+    /// Count of tiles with non-empty PTCL (written by coarse, read by fine_setup).
+    pub active_tiles: u32,
 }
 
 #[derive(Default)]
@@ -462,6 +464,8 @@ pub struct BufferSizes {
     pub segments: BufferSize<PathSegment>,
     pub blend_spill: BufferSize<u32>,
     pub ptcl: BufferSize<u32>,
+    /// Compacted list of active tile indices (capacity = width_in_tiles * height_in_tiles).
+    pub active_tile_ids: BufferSize<u32>,
 }
 
 impl BufferSizes {
@@ -507,6 +511,7 @@ impl BufferSizes {
         // 16 * 16 (1 << 8) is one blend spill, so this allows for 4096 spills.
         let blend_spill = BufferSize::new(1 << 20);
         let ptcl = BufferSize::new(1 << 23);
+        let active_tile_ids = BufferSize::new(workgroups.fine.0 * workgroups.fine.1);
         Self {
             path_reduced,
             path_reduced2,
@@ -532,6 +537,7 @@ impl BufferSizes {
             segments,
             blend_spill,
             ptcl,
+            active_tile_ids,
         }
     }
 }
@@ -563,6 +569,7 @@ impl BufferSizes {
             (self.lines.len() as usize, size_of::<LineSoup>()),
             (self.seg_counts.len() as usize, size_of::<SegmentCount>()),
             (self.blend_spill.len() as usize, size_of::<u32>()),
+            (self.active_tile_ids.len() as usize, size_of::<u32>()),
         ]
     }
 
