@@ -562,7 +562,9 @@ impl SchemeRenderer {
         let frame_start = Instant::now();
 
         let packed = prepared.packed;
-        let packed_for_reprepare = packed.clone();
+        // Clone only for Metal fused re-prepare (worker_stale path below). DX12/Vulkan and
+        // non-fused Metal never consume a second copy; cloning every frame was pure overhead.
+        let packed_for_reprepare = self.metal_fused_upload.then(|| packed.clone());
         let layout = prepared.layout;
         let ramps_data = prepared.ramps_data;
         let ramps_width = prepared.ramps_width;
@@ -801,6 +803,8 @@ impl SchemeRenderer {
                 height: images_height,
                 images: &image_entries,
             };
+            let packed_for_reprepare = packed_for_reprepare
+                .expect("metal_fused_upload retains a packed clone for worker re-prepare");
             pipeline = recorder.prepare_pipeline_resources(
                 coverage_mask.as_ref(),
                 packed_for_reprepare,
