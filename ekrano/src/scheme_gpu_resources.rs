@@ -1296,10 +1296,10 @@ impl PipelineResources {
     }
 }
 
-pub(crate) fn bind_type_to_node_access(bt: BindType) -> goldy::task_graph::NodeAccess {
+pub(crate) fn bind_type_to_node_access(bt: BindType) -> goldy::NodeAccess {
     match bt {
-        BindType::Buffer | BindType::Image(_) => goldy::task_graph::NodeAccess::ReadWrite,
-        BindType::BufReadOnly | BindType::Uniform | BindType::ImageRead(_) => goldy::task_graph::NodeAccess::Read,
-        BindType::Sampler => goldy::task_graph::NodeAccess::Read,
+        BindType::Buffer | BindType::Image(_) => goldy::NodeAccess::ReadWrite,
+        BindType::BufReadOnly | BindType::Uniform | BindType::ImageRead(_) => goldy::NodeAccess::Read,
+        BindType::Sampler => goldy::NodeAccess::Read,
     }
 }

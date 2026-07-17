@@ -26,11 +26,10 @@ use std::mem;
 use std::mem::size_of;
 use std::sync::Arc;
 
-use goldy::task_graph::NodeAccess;
 use goldy::types::{BackendType, ResourceAccess, TextureFlags, TextureFormat, TextureKind};
 use goldy::{
-    BudgetPolicy, Buffer, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator, Scheme, ShaderModule,
-    Signal, TaskGraph, Texture,
+    BudgetPolicy, Buffer, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator, NodeAccess, Scheme,
+    ShaderModule, Signal, Texture,
 };
 
 #[cfg(debug_assertions)]
@@ -1220,9 +1219,9 @@ impl<'a> SchemeRecorder<'a> {
     }
 
     // NOTE: There is no explicit mid-frame flush. The backend is free to split
-    // a single TaskGraph into multiple command buffers as an implementation
-    // detail (e.g. coarse vs fine partitions). Callers should not assume or
-    // rely on intra-frame submission boundaries.
+    // a single Scheme submission into multiple command buffers as an
+    // implementation detail (e.g. coarse vs fine partitions). Callers should
+    // not assume or rely on intra-frame submission boundaries.
 
     pub(crate) fn defer_texture(&mut self, tex: Texture) {
         self.deferred_textures.push(tex);
@@ -1453,7 +1452,6 @@ impl<'a> SchemeRecorder<'a> {
             }
         };
         let scheme_tv = submission.timeline_value();
-        let mut empty_graph = TaskGraph::new();
         let tv = {
             let _tz = goldy::tracy_zone!("ekrano.finish.orchestrator");
             if self.nonblocking_reuse {
@@ -1468,7 +1466,7 @@ impl<'a> SchemeRecorder<'a> {
                     .map_err(|e| Error::Shader(e.to_string()))?
             } else {
                 self.frame_pipeline
-                    .end_frame_standalone(frame_handle, &mut empty_graph, Some(scheme_tv), ())
+                    .end_frame_standalone(frame_handle, scheme_tv, ())
                     .map_err(|e| Error::Shader(e.to_string()))?
             }
         };

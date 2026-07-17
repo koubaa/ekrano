@@ -27,8 +27,8 @@ use scenes::ImageCache;
 ///
 /// # Test status:
 /// Previously flaky on DX12 (intermittent 16,384-pixel / 64-tile deficit).
-/// Fixed by the `TaskGraph` refactor — see below. The Vulkan backend was
-/// already stable after fixes 1–3 below.
+/// Fixed when pool clears became first-class graph nodes (see below). The
+/// Vulkan backend was already stable after fixes 1–3 below.
 ///
 /// ## Root cause (fixed)
 ///
@@ -41,19 +41,18 @@ use scenes::ImageCache;
 /// for correctness purposes).
 ///
 /// On DX12 there is no per-dispatch barrier — the backend relies on
-/// `ResourceBarrier` commands emitted by the graph scheduler at wave
-/// boundaries. Previously, `ClearBuffer` lived in `ComputeGraph::prelude`,
-/// which bypassed dependency analysis. Wave 0 had no barrier before it, so
+/// `ResourceBarrier` commands emitted by the scheduler at wave boundaries.
+/// Previously, `ClearBuffer` lived in a `ComputeGraph::prelude` escape hatch
+/// that bypassed dependency analysis. Wave 0 had no barrier before it, so
 /// the GPU could start executing wave-0 shaders before
 /// `ClearUnorderedAccessViewUint` finished zeroing the pool buffer.
 ///
-/// ## Fix (`TaskGraph` refactor)
+/// ## Fix
 ///
-/// `ComputeGraph` has been renamed to `TaskGraph` and the `pub prelude`
-/// escape hatch removed. Pool clears and buffer writes are now first-class
-/// graph nodes with `NodeAccess::Write`. The dependency analyzer sees them
-/// and inserts the required `ResourceBarrier` before any downstream reader,
-/// including the DX12 `ClearUnorderedAccessViewUint → compute` boundary.
+/// Pool clears and buffer writes are first-class nodes with
+/// `NodeAccess::Write`. The dependency analyzer inserts the required
+/// `ResourceBarrier` before any downstream reader, including the DX12
+/// `ClearUnorderedAccessViewUint → compute` boundary.
 ///
 /// # Test design:
 /// Draws a large red rectangle across a 4352x4352 viewport (17x17 bins, 272x272 tiles).
