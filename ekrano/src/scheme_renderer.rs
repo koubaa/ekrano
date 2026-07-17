@@ -729,6 +729,11 @@ impl SchemeRenderer {
             self.persistent.cached_upload_key = Some(upload_key);
         }
 
+        // On Metal, upload declarations/copies live on the worker scheme. An upload-key
+        // change without a worker-topology change would otherwise append new copy nodes
+        // onto the retained worker while orphaning the old UploadBuffer ids — submit then
+        // fails every frame with "UploadBuffer was not staged". Force a full worker
+        // replacement whenever upload topology must be re-recorded.
         let worker_stale = {
             let _tz = goldy::tracy_zone!("ekrano.worker_stale_check");
             worker_stale_reasons(
@@ -738,16 +743,7 @@ impl SchemeRenderer {
                 out_image_handle,
                 output_texture.map(|t| t.gpu_handle()),
             )
-        };
-
-        #[cfg(test)]
-        if self.metal_fused_upload {
-            if worker_stale {
-                // Upload topology is re-recorded on the replacement worker below.
-            } else if upload_needs_record {
-                self.upload_record_epochs += 1;
-            }
-        }
+        } || (self.metal_fused_upload && upload_needs_record);
 
         #[cfg(debug_assertions)]
         if !worker_stale && let Some(recorded) = self.persistent.cached_worker_resources.as_ref() {
@@ -1936,6 +1932,106 @@ mod tests {
             renderer.worker_record_epochs(),
             worker_epochs_after_area + 1,
             "worker scheme must re-record on AA mode change"
+        );
+    }
+
+    /// Image atlas region layout can change while atlas dimensions and image count stay
+    /// fixed (default atlas is 1024²). That dirties `UploadKey.image_regions` without
+    /// dirtying `WorkerTopology`.
+    ///
+    /// On the Metal fused path, upload copy nodes live on the worker scheme — without
+    /// forcing a worker replacement, new region uploads would be appended while old
+    /// `UploadBuffer` ids remain referenced but unstaged, poisoning submit permanently.
+    #[test]
+    fn fused_worker_rerecords_on_image_region_layout_change() {
+        let _cb = goldy::test_support::CbReuseOverride::force_enabled();
+        let Some((gpu, _)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
+            return;
+        };
+
+        let mut renderer = SchemeRenderer::new(&gpu).expect("SchemeRenderer::new");
+
+        fn solid_image(width: u32, height: u32, rgba: [u8; 4]) -> peniko::ImageBrush {
+            let data = rgba.repeat((width * height) as usize);
+            peniko::ImageBrush {
+                image: peniko::ImageData {
+                    data: data.into(),
+                    format: peniko::ImageFormat::Rgba8,
+                    width,
+                    height,
+                    alpha_type: peniko::ImageAlphaType::Alpha,
+                },
+                sampler: peniko::ImageSampler {
+                    quality: peniko::ImageQuality::Low,
+                    ..Default::default()
+                },
+            }
+        }
+
+        let mut scene_a = Scene::new();
+        scene_a.draw_image(&solid_image(8, 8, [200, 100, 50, 255]), peniko::kurbo::Affine::IDENTITY);
+
+        let mut scene_b = Scene::new();
+        // Same atlas size (1024²) and image_count (1); different region (8×8 → 16×16).
+        scene_b.draw_image(&solid_image(16, 16, [50, 100, 200, 255]), peniko::kurbo::Affine::IDENTITY);
+
+        let params = RenderParams {
+            base_color: peniko::color::palette::css::BLACK,
+            width: 64,
+            height: 64,
+            antialiasing_method: crate::AaConfig::Area,
+            robust: false,
+        };
+
+        for _ in 0..2 {
+            renderer
+                .render_to_buffer(&scene_a, &params)
+                .expect("render_to_buffer scene_a");
+        }
+        let worker_epochs = renderer.worker_record_epochs();
+        let upload_epochs = renderer.upload_record_epochs();
+        assert_eq!(worker_epochs, 1);
+        assert_eq!(upload_epochs, 1);
+
+        // Must succeed (not poison the retained worker) and re-record upload topology.
+        renderer
+            .render_to_buffer(&scene_b, &params)
+            .expect("render_to_buffer after image region layout change");
+
+        assert!(
+            renderer.upload_record_epochs() > upload_epochs,
+            "upload topology must re-record when image region layout changes at fixed atlas dims"
+        );
+        if renderer.metal_fused_upload() {
+            assert!(
+                renderer.worker_record_epochs() > worker_epochs,
+                "fused Metal path: worker must be replaced when upload topology changes"
+            );
+        } else {
+            assert_eq!(
+                renderer.worker_record_epochs(),
+                worker_epochs,
+                "non-fused path: image region layout is upload-only; worker topology stays fresh"
+            );
+        }
+
+        // Stabilise: further frames with scene_b must not keep failing or re-recording.
+        let worker_stable = renderer.worker_record_epochs();
+        let upload_stable = renderer.upload_record_epochs();
+        for _ in 0..2 {
+            renderer
+                .render_to_buffer(&scene_b, &params)
+                .expect("render_to_buffer scene_b stable");
+        }
+        assert_eq!(
+            renderer.upload_record_epochs(),
+            upload_stable,
+            "upload must not re-record on repeated frames with stable region layout"
+        );
+        assert_eq!(
+            renderer.worker_record_epochs(),
+            worker_stable,
+            "worker must not re-record on repeated frames with stable region layout"
         );
     }
 }
