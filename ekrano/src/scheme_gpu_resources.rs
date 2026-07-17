@@ -57,8 +57,12 @@ fn release_or_defer_pooled_texture(recorder: &mut SchemeRecorder<'_>, tex: Textu
         return;
     }
     let mut payload = goldy::DeferredPayload::new();
+    let generation = std::sync::Arc::clone(&recorder.persistent.texture_return_generation);
+    let created_generation = generation.load(std::sync::atomic::Ordering::Relaxed);
     payload.push(DeferredPoolTextureReturn {
         pending: std::sync::Arc::clone(&recorder.persistent.pending_texture_returns),
+        generation,
+        created_generation,
         tex: Some(tex),
     });
     recorder.context().defer_release(epoch, payload);
@@ -66,11 +70,17 @@ fn release_or_defer_pooled_texture(recorder: &mut SchemeRecorder<'_>, tex: Textu
 
 struct DeferredPoolTextureReturn {
     pending: std::sync::Arc<std::sync::Mutex<Vec<Texture>>>,
+    generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    created_generation: u64,
     tex: Option<Texture>,
 }
 
 impl Drop for DeferredPoolTextureReturn {
     fn drop(&mut self) {
+        if self.generation.load(std::sync::atomic::Ordering::Relaxed) != self.created_generation {
+            // Metal resize purge invalidated this generation — drop without re-pooling.
+            return;
+        }
         if let Some(tex) = self.tex.take()
             && let Ok(mut pending) = self.pending.lock()
         {

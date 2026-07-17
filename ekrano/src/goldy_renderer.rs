@@ -13,12 +13,13 @@
 pub const MAX_BINDLESS_SLOTS: usize = 16;
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use goldy::types::{BufferFlags, TextureFormat};
 use goldy::{
-    Buffer, BufferKind, ComputePipeline, Context, Device, Grant, RetainedPool, Texture, TexturePool, TimelineValue,
+    BackendType, Buffer, BufferKind, ComputePipeline, Context, Device, Grant, RetainedPool, Texture, TexturePool,
+    TimelineValue,
 };
 
 /// Ekrano uses a single-frame fire-and-forget model.
@@ -193,14 +194,24 @@ impl Drop for DeferredOwnedBuffersToken {
 /// it enqueues the textures into `pending_texture_returns`. The next
 /// `run_frame` call drains that queue and returns them to `TexturePool`.
 ///
+/// If [`PersistentState::texture_return_generation`] advanced since creation (Metal
+/// resize purge), textures are dropped instead of re-pooled so obsolete sizes cannot
+/// pin overflow heaps.
+///
 /// [`DeferredPayload`]: goldy::DeferredPayload
 struct DeferredTextureToken {
     pending: Arc<Mutex<Vec<Texture>>>,
+    generation: Arc<AtomicU64>,
+    created_generation: u64,
     textures: Vec<Texture>,
 }
 
 impl Drop for DeferredTextureToken {
     fn drop(&mut self) {
+        if self.generation.load(Ordering::Relaxed) != self.created_generation {
+            // Resize purge invalidated this generation — drop without re-pooling.
+            return;
+        }
         if let Ok(mut pending) = self.pending.lock() {
             pending.append(&mut self.textures);
         }
@@ -305,6 +316,8 @@ pub(crate) fn defer_frame_gpu_resources(
     if !textures.is_empty() {
         payload.push(DeferredTextureToken {
             pending: Arc::clone(&persistent.pending_texture_returns),
+            generation: Arc::clone(&persistent.texture_return_generation),
+            created_generation: persistent.texture_return_generation.load(Ordering::Relaxed),
             textures,
         });
     }
@@ -596,11 +609,17 @@ pub(crate) struct PersistentState {
     /// Textures waiting to be returned to [`Self::tex_pool`] after GPU retirement.
     /// Populated by [`DeferredTextureToken`] drops from [`Context::defer_release`].
     pub(crate) pending_texture_returns: Arc<Mutex<Vec<Texture>>>,
+    /// Generation for [`Self::pending_texture_returns`]. Bumped on Metal resize purge so
+    /// in-flight [`DeferredTextureToken`]s drop obsolete sizes instead of re-pooling.
+    pub(crate) texture_return_generation: Arc<AtomicU64>,
     /// Owned buffers waiting to be returned to [`Self::pool`] after GPU retirement.
     /// Populated by [`DeferredOwnedBuffersToken`] drops from [`Context::defer_release`].
     pub(crate) pending_owned_returns: Arc<Mutex<Vec<(Buffer, &'static str)>>>,
     /// Persistent host buffer parcel for [`crate::scheme_renderer::SchemeRenderer::render_to_buffer`].
     pub(crate) readback_host_buf: Option<(Buffer, u64)>,
+    /// Metal overflow texture heaps stay pinned if mismatched-size RTs are pooled across
+    /// resize. When set, reclaim/purge drop and clear aggressively instead of deferred pooling.
+    metal_heap_sensitive: bool,
 }
 
 impl PersistentState {
@@ -647,8 +666,10 @@ impl PersistentState {
             cached_mask_upload: None,
             cached_image_region_uploads: Vec::new(),
             pending_texture_returns: Arc::new(Mutex::new(Vec::new())),
+            texture_return_generation: Arc::new(AtomicU64::new(0)),
             pending_owned_returns: Arc::new(Mutex::new(Vec::new())),
             readback_host_buf: None,
+            metal_heap_sensitive: device.backend_type() == BackendType::Metal,
         }
     }
 
@@ -722,16 +743,42 @@ impl PersistentState {
 
     /// Retire scheme render targets that no longer match the requested size.
     ///
-    /// Waits for `tv` if still in flight, then **drops** the textures. Returning them
-    /// to [`Self::tex_pool`] would keep mismatched-size heap allocations alive across
-    /// resize churn and exhaust Metal's overflow texture heaps.
+    /// On Metal, waits for `tv` if still in flight, then **drops** the textures —
+    /// returning them to [`Self::tex_pool`] would keep mismatched-size heap allocations
+    /// alive across resize churn and exhaust overflow texture heaps.
+    ///
+    /// On DX12/Vulkan, defers return to the texture pool until `tv` retires (nonblocking).
     fn reclaim_scheme_render_targets(&mut self, ctx: &Context, out: Texture, layers: [Texture; 4], tv: TimelineValue) {
-        if tv != 0 && ctx.gpu_progress() < tv {
-            let _ = ctx.wait_until(tv);
+        if self.metal_heap_sensitive {
+            if tv != 0 && ctx.gpu_progress() < tv {
+                if let Err(e) = ctx.wait_until(tv) {
+                    log::warn!("[RT-CACHE] wait_until({tv}) failed before Metal scheme RT drop: {e}");
+                }
+            }
+            drop(out);
+            for l in layers {
+                drop(l);
+            }
+            return;
         }
-        drop(out);
+
+        if tv != 0 && ctx.gpu_progress() < tv {
+            let mut textures = Vec::with_capacity(5);
+            textures.push(out);
+            textures.extend(layers);
+            let mut payload = goldy::DeferredPayload::new();
+            payload.push(DeferredTextureToken {
+                pending: Arc::clone(&self.pending_texture_returns),
+                generation: Arc::clone(&self.texture_return_generation),
+                created_generation: self.texture_return_generation.load(Ordering::Relaxed),
+                textures,
+            });
+            ctx.defer_release(tv, payload);
+            return;
+        }
+        self.tex_pool.release(out);
         for l in layers {
-            drop(l);
+            self.tex_pool.release(l);
         }
     }
 
@@ -754,9 +801,9 @@ impl PersistentState {
     /// requested dimensions. Waits for the oldest slot timeline so heap-backed textures
     /// are retired before new allocations during resize.
     ///
-    /// Also clears [`Self::cached_scheme_rt`], drains pending texture returns by
+    /// On Metal, also clears [`Self::cached_scheme_rt`], drains pending texture returns by
     /// dropping them, and empties [`Self::tex_pool`] so obsolete sizes cannot pin
-    /// Metal overflow heaps across continuous resize.
+    /// overflow heaps across continuous resize. DX12/Vulkan keep deferred pool reclamation.
     pub(crate) fn purge_render_target_cache_if_mismatch(
         &mut self,
         ctx: &Context,
@@ -784,13 +831,19 @@ impl PersistentState {
                 .filter(|&i| self.cached_render_targets[i].is_some())
                 .map(|i| self.cached_rt_timelines[i])
                 .min();
-            if let Some((_, _, tv)) = &self.cached_scheme_rt {
-                oldest = Some(oldest.map_or(*tv, |o| o.min(*tv)));
+            // Metal must wait on scheme RTs too before dropping them for heap free.
+            // DX12/Vulkan defer scheme reclaim without a render-thread stall.
+            if self.metal_heap_sensitive {
+                if let Some((_, _, tv)) = &self.cached_scheme_rt {
+                    oldest = Some(oldest.map_or(*tv, |o| o.min(*tv)));
+                }
             }
             if let Some(oldest) = oldest
                 && progress < oldest
             {
-                let _ = ctx.wait_until(oldest);
+                if let Err(e) = ctx.wait_until(oldest) {
+                    log::warn!("[RT-CACHE] wait_until({oldest}) failed during resize purge: {e}");
+                }
             }
         }
 
@@ -800,6 +853,8 @@ impl PersistentState {
                 // allocation is reclaimed immediately. tex_pool.release would keep
                 // the mismatched-size texture in the pool, keeping the heap full and
                 // causing subsequent allocations at the new dimensions to fail.
+                // Classic path has always dropped on purge; pooling mismatched classic
+                // RTs is not restored on DX12/Vulkan either.
                 drop(out);
                 for l in layers {
                     drop(l);
@@ -807,20 +862,31 @@ impl PersistentState {
                 self.cached_rt_timelines[i] = 0;
             }
         }
-        if let Some((out, layers, _)) = self.cached_scheme_rt.take() {
-            drop(out);
-            for l in layers {
-                drop(l);
+        if let Some((out, layers, tv)) = self.cached_scheme_rt.take() {
+            if self.metal_heap_sensitive {
+                drop(out);
+                for l in layers {
+                    drop(l);
+                }
+            } else {
+                self.reclaim_scheme_render_targets(ctx, out, layers, tv);
             }
         }
 
-        // Pending returns and the texture pool may still hold obsolete sizes from
-        // earlier frames / deferred atlas reclaim. Drop them so heap slots free now.
-        if let Ok(mut pending) = self.pending_texture_returns.lock() {
-            pending.clear();
+        if self.metal_heap_sensitive {
+            // Invalidate in-flight deferred returns before flushing so ready tokens
+            // (and later-retiring ones) drop obsolete sizes instead of re-pooling.
+            self.texture_return_generation.fetch_add(1, Ordering::Relaxed);
+            if let Ok(mut pending) = self.pending_texture_returns.lock() {
+                pending.clear();
+            }
+            self.tex_pool.clear();
+            ctx.flush_deferred_deletions();
+            // Anything already sitting in pending before the generation bump.
+            if let Ok(mut pending) = self.pending_texture_returns.lock() {
+                pending.clear();
+            }
         }
-        self.tex_pool.clear();
-        ctx.flush_deferred_deletions();
 
         true
     }
@@ -850,10 +916,17 @@ impl PersistentState {
                 width,
                 height,
             );
-            // Drop mismatched sizes — do not pool (same reason as purge above).
-            drop(out);
-            for l in layers {
-                drop(l);
+            if self.metal_heap_sensitive {
+                // Drop mismatched sizes — do not pool (same reason as Metal purge above).
+                drop(out);
+                for l in layers {
+                    drop(l);
+                }
+            } else {
+                self.tex_pool.release(out);
+                for l in layers {
+                    self.tex_pool.release(l);
+                }
             }
         }
         None
