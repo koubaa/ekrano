@@ -58,7 +58,7 @@ use crate::{
     },
     scheme_render::Render,
     shaders::{self, FullShaders},
-    worker_retention::{upload_key, worker_stale_reasons, worker_topology},
+    worker_retention::{predict_worker_stale, upload_key, worker_stale_reasons, worker_topology},
 };
 use ekrano_encoding::{BumpAllocators, Images, Layout, Ramps, RenderConfig, Resolver};
 
@@ -562,9 +562,6 @@ impl SchemeRenderer {
         let frame_start = Instant::now();
 
         let packed = prepared.packed;
-        // Clone only for Metal fused re-prepare (worker_stale path below). DX12/Vulkan and
-        // non-fused Metal never consume a second copy; cloning every frame was pure overhead.
-        let packed_for_reprepare = self.metal_fused_upload.then(|| packed.clone());
         let layout = prepared.layout;
         let ramps_data = prepared.ramps_data;
         let ramps_width = prepared.ramps_width;
@@ -685,7 +682,83 @@ impl SchemeRenderer {
             }
         }
 
-        let (mut pipeline, mut out_image_handle) = {
+        let output_tex_handle = output_texture.map(|t| t.gpu_handle());
+        // Metal fused: upload + worker topology share one scheme. When a re-record is
+        // required, replace the worker *before* prepare and prepare once onto it —
+        // otherwise the first prepare consumes cached_pipeline / RTs and the re-prepare
+        // allocates a duplicate set while the first PipelineResources is still alive.
+        let metal_fused_rerecord = self.metal_fused_upload
+            && (upload_needs_record
+                || predict_worker_stale(
+                    &self.persistent,
+                    &topology,
+                    &layer_filter_effects,
+                    output_tex_handle,
+                    params.width,
+                    params.height,
+                    out_image_format,
+                ));
+
+        let (mut pipeline, out_image_handle, worker_stale) = if metal_fused_rerecord {
+            {
+                let _tz = goldy::tracy_zone!("ekrano.worker_record");
+                self.worker = Scheme::new(&self.context);
+                self.persistent.cached_bump_grant = None;
+                self.persistent.cached_present_grant = None;
+                // Upload topology lives on the worker scheme; drop cached declarations.
+                self.persistent.cached_scene_upload = None;
+                self.persistent.cached_config_upload = None;
+                self.persistent.cached_gradient_upload = None;
+                self.persistent.cached_mask_upload = None;
+                self.persistent.cached_image_region_uploads.clear();
+            }
+            #[cfg(test)]
+            {
+                self.upload_record_epochs += 1;
+            }
+            let mut recorder = SchemeRecorder::new(
+                &self.device,
+                &self.context,
+                &mut self.worker,
+                &mut self.upload,
+                true, // re-record fused upload topology on the new worker
+                self.metal_fused_upload,
+                self.nonblocking_reuse,
+                &mut self.frame_pipeline,
+                frame_handle,
+                &mut self.persistent,
+                &self.engine_shaders,
+            );
+            let pipeline = {
+                let _tz = goldy::tracy_zone!("ekrano.prepare");
+                let pipeline_result = recorder.prepare_pipeline_resources(
+                    coverage_mask.as_ref(),
+                    packed,
+                    ramps,
+                    images,
+                    &params,
+                    &config,
+                    out_image_format,
+                );
+                self.resolver = resolver;
+                match pipeline_result {
+                    Ok(p) => p,
+                    Err(e) => {
+                        recorder.dismiss();
+                        return Err(e);
+                    }
+                }
+            };
+            let out_image_handle = pipeline
+                .out_image
+                .handle(ResourceAccess::Write)
+                .expect("out_image must be writable");
+            recorder.dismiss();
+            if upload_needs_record {
+                self.persistent.cached_upload_key = Some(upload_key);
+            }
+            (pipeline, out_image_handle, true)
+        } else {
             let mut recorder = SchemeRecorder::new(
                 &self.device,
                 &self.context,
@@ -724,28 +797,26 @@ impl SchemeRenderer {
                 .handle(ResourceAccess::Write)
                 .expect("out_image must be writable");
             recorder.dismiss();
-            (pipeline, out_image_handle)
+            if upload_needs_record {
+                self.persistent.cached_upload_key = Some(upload_key);
+            }
+
+            let worker_stale = {
+                let _tz = goldy::tracy_zone!("ekrano.worker_stale_check");
+                worker_stale_reasons(
+                    &self.persistent,
+                    &topology,
+                    &layer_filter_effects,
+                    out_image_handle,
+                    output_tex_handle,
+                )
+            };
+            debug_assert!(
+                !(self.metal_fused_upload && worker_stale),
+                "Metal fused worker re-record should have been predicted before prepare"
+            );
+            (pipeline, out_image_handle, worker_stale)
         };
-
-        if upload_needs_record {
-            self.persistent.cached_upload_key = Some(upload_key);
-        }
-
-        // On Metal, upload declarations/copies live on the worker scheme. An upload-key
-        // change without a worker-topology change would otherwise append new copy nodes
-        // onto the retained worker while orphaning the old UploadBuffer ids — submit then
-        // fails every frame with "UploadBuffer was not staged". Force a full worker
-        // replacement whenever upload topology must be re-recorded.
-        let worker_stale = {
-            let _tz = goldy::tracy_zone!("ekrano.worker_stale_check");
-            worker_stale_reasons(
-                &self.persistent,
-                &topology,
-                &layer_filter_effects,
-                out_image_handle,
-                output_texture.map(|t| t.gpu_handle()),
-            )
-        } || (self.metal_fused_upload && upload_needs_record);
 
         #[cfg(debug_assertions)]
         if !worker_stale && let Some(recorded) = self.persistent.cached_worker_resources.as_ref() {
@@ -763,19 +834,11 @@ impl SchemeRenderer {
         #[cfg(debug_assertions)]
         let mut debug_recorded_resources = None;
 
-        if worker_stale {
+        if worker_stale && !metal_fused_rerecord {
             let _tz = goldy::tracy_zone!("ekrano.worker_record");
             self.worker = Scheme::new(&self.context);
             self.persistent.cached_bump_grant = None;
             self.persistent.cached_present_grant = None;
-            if self.metal_fused_upload {
-                // Upload topology lives on the worker scheme; drop cached declarations.
-                self.persistent.cached_scene_upload = None;
-                self.persistent.cached_config_upload = None;
-                self.persistent.cached_gradient_upload = None;
-                self.persistent.cached_mask_upload = None;
-                self.persistent.cached_image_region_uploads.clear();
-            }
         }
 
         let mut recorder = SchemeRecorder::new(
@@ -783,7 +846,7 @@ impl SchemeRenderer {
             &self.context,
             &mut self.worker,
             &mut self.upload,
-            upload_needs_record,
+            upload_needs_record || metal_fused_rerecord,
             self.metal_fused_upload,
             self.nonblocking_reuse,
             &mut self.frame_pipeline,
@@ -791,34 +854,6 @@ impl SchemeRenderer {
             &mut self.persistent,
             &self.engine_shaders,
         );
-
-        if worker_stale && self.metal_fused_upload {
-            recorder.upload_needs_record = true;
-            #[cfg(test)]
-            {
-                self.upload_record_epochs += 1;
-            }
-            let images_for_reprepare = Images {
-                width: images_width,
-                height: images_height,
-                images: &image_entries,
-            };
-            let packed_for_reprepare = packed_for_reprepare
-                .expect("metal_fused_upload retains a packed clone for worker re-prepare");
-            pipeline = recorder.prepare_pipeline_resources(
-                coverage_mask.as_ref(),
-                packed_for_reprepare,
-                ramps,
-                images_for_reprepare,
-                &params,
-                &config,
-                out_image_format,
-            )?;
-            out_image_handle = pipeline
-                .out_image
-                .handle(ResourceAccess::Write)
-                .expect("out_image must be writable");
-        }
 
         let mut render = Render::new();
         let mut worker_cache = None;
