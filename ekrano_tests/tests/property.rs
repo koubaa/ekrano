@@ -16,9 +16,9 @@ use ekrano::kurbo::{Affine, Rect};
 use ekrano::peniko::color::palette::css::TRANSPARENT;
 use ekrano::peniko::{Brush, Color, ImageFormat, color::palette};
 use ekrano::peniko::{ImageAlphaType, ImageData, ImageSampler};
-use ekrano_tests::{TestBackend, TestParams, shared_test_device};
+use ekrano_tests::{TestParams, shared_test_device};
 
-fn simple_square_test_body(backend: TestBackend) {
+fn simple_square_test() {
     let mut scene = Scene::new();
     scene.fill(
         ekrano::peniko::Fill::NonZero,
@@ -27,7 +27,7 @@ fn simple_square_test_body(backend: TestBackend) {
         None,
         &Rect::from_center_size((100., 100.), (50., 50.)),
     );
-    let params = TestParams::new("simple_square", 150, 150).with_backend(backend);
+    let params = TestParams::new("simple_square", 150, 150);
     let image = ekrano_tests::render_then_debug_sync(&scene, &params).unwrap();
     assert_eq!(image.format, ImageFormat::Rgba8);
     let mut red_count = 0;
@@ -49,22 +49,15 @@ fn simple_square_test_body(backend: TestBackend) {
     assert_eq!(red_count, 50 * 50);
     assert_eq!(black_count, 150 * 150 - 50 * 50);
 }
-fn simple_square_test() {
-    simple_square_test_body(TestBackend::Classic);
-}
 
-fn scheme_simple_square_test() {
-    simple_square_test_body(TestBackend::Scheme);
-}
-
-fn empty_scene_test_body(backend: TestBackend) {
+fn empty_scene_test() {
     let scene = Scene::new();
 
     // Adding an alpha factor here changes the resulting color *slightly*,
     // presumably due to pre-multiplied alpha.
     // We just assume that alpha scenarios work fine
     let color = palette::css::PLUM;
-    let mut params = TestParams::new("simple_square", 150, 150).with_backend(backend);
+    let mut params = TestParams::new("simple_square", 150, 150);
     params.base_color = Some(color);
     let image = ekrano_tests::render_then_debug_sync(&scene, &params).unwrap();
     assert_eq!(image.format, ImageFormat::Rgba8);
@@ -76,15 +69,8 @@ fn empty_scene_test_body(backend: TestBackend) {
         }
     }
 }
-fn empty_scene_test() {
-    empty_scene_test_body(TestBackend::Classic);
-}
 
-fn scheme_empty_scene_test() {
-    empty_scene_test_body(TestBackend::Scheme);
-}
-
-fn tiny_red_2x2_test_body(backend: TestBackend) {
+fn tiny_red_2x2_test() {
     let mut scene = Scene::new();
     scene.fill(
         ekrano::peniko::Fill::NonZero,
@@ -93,7 +79,7 @@ fn tiny_red_2x2_test_body(backend: TestBackend) {
         None,
         &Rect::from_origin_size((0., 0.), (2., 2.)),
     );
-    let params = TestParams::new("tiny_red_2x2", 2, 2).with_backend(backend);
+    let params = TestParams::new("tiny_red_2x2", 2, 2);
     let image = ekrano_tests::render_then_debug_sync(&scene, &params).unwrap();
     assert_eq!(image.format, ImageFormat::Rgba8);
     let mut red_count = 0;
@@ -107,15 +93,8 @@ fn tiny_red_2x2_test_body(backend: TestBackend) {
     }
     assert_eq!(red_count, 4, "expected 4 red pixels in 2x2, got {red_count}");
 }
-fn tiny_red_2x2_test() {
-    tiny_red_2x2_test_body(TestBackend::Classic);
-}
 
-fn scheme_tiny_red_2x2_test() {
-    tiny_red_2x2_test_body(TestBackend::Scheme);
-}
-
-fn bgra_image_body(backend: TestBackend) {
+fn bgra_image() {
     let mut scene = Scene::new();
     let colors = [
         palette::css::RED,
@@ -144,7 +123,7 @@ fn bgra_image_body(backend: TestBackend) {
         },
     };
     scene.draw_image(&image, Affine::IDENTITY);
-    let params = TestParams::new("bgra", 2, 2).with_backend(backend);
+    let params = TestParams::new("bgra", 2, 2);
     let scene_image = ekrano_tests::render_then_debug_sync(&scene, &params).unwrap();
     assert_eq!(scene_image.format, ImageFormat::Rgba8);
     for (i, pixel) in scene_image.data.data().chunks_exact(4).enumerate() {
@@ -156,15 +135,8 @@ fn bgra_image_body(backend: TestBackend) {
         }
     }
 }
-fn bgra_image() {
-    bgra_image_body(TestBackend::Classic);
-}
 
-fn scheme_bgra_image() {
-    bgra_image_body(TestBackend::Scheme);
-}
-
-fn premultiplied_image_body(backend: TestBackend) {
+fn premultiplied_image() {
     let mut scene = Scene::new();
     let colors = [
         palette::css::RED.with_alpha(0.5).premultiply(),
@@ -187,7 +159,7 @@ fn premultiplied_image_body(backend: TestBackend) {
         },
     };
     scene.draw_image(&image, Affine::IDENTITY);
-    let mut params = TestParams::new("bgra", 2, 2).with_backend(backend);
+    let mut params = TestParams::new("bgra", 2, 2);
     params.base_color = Some(TRANSPARENT);
     let scene_image = ekrano_tests::render_then_debug_sync(&scene, &params).unwrap();
     assert_eq!(scene_image.format, ImageFormat::Rgba8);
@@ -200,19 +172,12 @@ fn premultiplied_image_body(backend: TestBackend) {
         }
     }
 }
-fn premultiplied_image() {
-    premultiplied_image_body(TestBackend::Classic);
-}
-
-fn scheme_premultiplied_image() {
-    premultiplied_image_body(TestBackend::Scheme);
-}
 
 /// Confirms that [`ImageAlphaType::Alpha`] (straight-alpha) and
 /// [`ImageAlphaType::AlphaPremultiplied`] produce pixel-equivalent output when the
 /// source data describes the same visual colours.  Since we now premultiply straight-alpha
 /// images on CPU before uploading to the atlas, the GPU path treats both identically.
-fn straight_alpha_equals_premultiplied_body(backend: TestBackend) {
+fn straight_alpha_equals_premultiplied() {
     use ekrano::peniko::{ImageBrush, ImageQuality, ImageSampler};
 
     let opaque_colors: [Color; 4] = [
@@ -259,7 +224,7 @@ fn straight_alpha_equals_premultiplied_body(backend: TestBackend) {
     let render = |brush: ImageBrush| {
         let mut scene = Scene::new();
         scene.draw_image(&brush, Affine::IDENTITY);
-        let mut params = TestParams::new("premul_equiv", 2, 2).with_backend(backend);
+        let mut params = TestParams::new("premul_equiv", 2, 2);
         params.base_color = Some(TRANSPARENT);
         ekrano_tests::render_then_debug_sync(&scene, &params).unwrap()
     };
@@ -274,17 +239,10 @@ fn straight_alpha_equals_premultiplied_body(backend: TestBackend) {
          after atlas premultiplication"
     );
 }
-fn straight_alpha_equals_premultiplied() {
-    straight_alpha_equals_premultiplied_body(TestBackend::Classic);
-}
-
-fn scheme_straight_alpha_equals_premultiplied() {
-    straight_alpha_equals_premultiplied_body(TestBackend::Scheme);
-}
 
 /// Confirms that fully-opaque straight-alpha images are rendered correctly after
 /// the CPU premultiplication pass (premul is a no-op when a=255).
-fn fully_opaque_straight_alpha_unchanged_body(backend: TestBackend) {
+fn fully_opaque_straight_alpha_unchanged() {
     let colors = [
         palette::css::RED,
         palette::css::BLUE,
@@ -307,7 +265,7 @@ fn fully_opaque_straight_alpha_unchanged_body(backend: TestBackend) {
     };
     let mut scene = Scene::new();
     scene.draw_image(&image, Affine::IDENTITY);
-    let params = TestParams::new("fully_opaque_straight", 2, 2).with_backend(backend);
+    let params = TestParams::new("fully_opaque_straight", 2, 2);
     let result = ekrano_tests::render_then_debug_sync(&scene, &params).unwrap();
     assert_eq!(result.format, ImageFormat::Rgba8);
     for (i, pixel) in result.data.data().chunks_exact(4).enumerate() {
@@ -320,26 +278,12 @@ fn fully_opaque_straight_alpha_unchanged_body(backend: TestBackend) {
         );
     }
 }
-fn fully_opaque_straight_alpha_unchanged() {
-    fully_opaque_straight_alpha_unchanged_body(TestBackend::Classic);
-}
-
-fn scheme_fully_opaque_straight_alpha_unchanged() {
-    fully_opaque_straight_alpha_unchanged_body(TestBackend::Scheme);
-}
 
 fn main() {
     let mut trials = Vec::new();
     trials.push(
         libtest_mimic::Trial::test("simple_square_test", || {
             simple_square_test();
-            Ok(())
-        })
-        .with_ignored_flag(false),
-    );
-    trials.push(
-        libtest_mimic::Trial::test("scheme_simple_square_test", || {
-            scheme_simple_square_test();
             Ok(())
         })
         .with_ignored_flag(false),
@@ -352,22 +296,8 @@ fn main() {
         .with_ignored_flag(false),
     );
     trials.push(
-        libtest_mimic::Trial::test("scheme_empty_scene_test", || {
-            scheme_empty_scene_test();
-            Ok(())
-        })
-        .with_ignored_flag(false),
-    );
-    trials.push(
         libtest_mimic::Trial::test("tiny_red_2x2_test", || {
             tiny_red_2x2_test();
-            Ok(())
-        })
-        .with_ignored_flag(false),
-    );
-    trials.push(
-        libtest_mimic::Trial::test("scheme_tiny_red_2x2_test", || {
-            scheme_tiny_red_2x2_test();
             Ok(())
         })
         .with_ignored_flag(false),
@@ -380,22 +310,8 @@ fn main() {
         .with_ignored_flag(false),
     );
     trials.push(
-        libtest_mimic::Trial::test("scheme_bgra_image", || {
-            scheme_bgra_image();
-            Ok(())
-        })
-        .with_ignored_flag(false),
-    );
-    trials.push(
         libtest_mimic::Trial::test("premultiplied_image", || {
             premultiplied_image();
-            Ok(())
-        })
-        .with_ignored_flag(false),
-    );
-    trials.push(
-        libtest_mimic::Trial::test("scheme_premultiplied_image", || {
-            scheme_premultiplied_image();
             Ok(())
         })
         .with_ignored_flag(false),
@@ -408,22 +324,8 @@ fn main() {
         .with_ignored_flag(false),
     );
     trials.push(
-        libtest_mimic::Trial::test("scheme_straight_alpha_equals_premultiplied", || {
-            scheme_straight_alpha_equals_premultiplied();
-            Ok(())
-        })
-        .with_ignored_flag(false),
-    );
-    trials.push(
         libtest_mimic::Trial::test("fully_opaque_straight_alpha_unchanged", || {
             fully_opaque_straight_alpha_unchanged();
-            Ok(())
-        })
-        .with_ignored_flag(false),
-    );
-    trials.push(
-        libtest_mimic::Trial::test("scheme_fully_opaque_straight_alpha_unchanged", || {
-            scheme_fully_opaque_straight_alpha_unchanged();
             Ok(())
         })
         .with_ignored_flag(false),

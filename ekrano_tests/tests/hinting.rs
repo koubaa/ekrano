@@ -16,7 +16,7 @@ use ekrano::{
     kurbo::Affine,
     peniko::{Brush, Fill, color::palette},
 };
-use ekrano_tests::{TestBackend, TestParams, shared_test_device, snapshot_test_sync};
+use ekrano_tests::{TestParams, shared_test_device, snapshot_test_sync};
 use scenes::SimpleText;
 
 fn encode_hinted_text(text: &str, font_size: f32) -> Scene {
@@ -40,40 +40,24 @@ fn encode_hinted_text(text: &str, font_size: f32) -> Scene {
     scene
 }
 
-fn simple_hinted_body(backend: TestBackend) {
+fn simple_hinted() {
     let font_size = 12.;
     let scene = encode_hinted_text("The quick brown fox", font_size);
-    let params =
-        TestParams::new("simple_hinted", (font_size * 10.) as _, (font_size * 1.1).ceil() as _).with_backend(backend);
+    let params = TestParams::new("simple_hinted", (font_size * 10.) as _, (font_size * 1.1).ceil() as _);
     snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.02);
 }
-fn simple_hinted() {
-    simple_hinted_body(TestBackend::Classic);
-}
 
-fn scheme_simple_hinted() {
-    simple_hinted_body(TestBackend::Scheme);
-}
-
-fn scaled_hinted_body(backend: TestBackend) {
+fn scaled_hinted() {
     let font_size = 12.;
     let text_scene = encode_hinted_text("The quick brown fox", font_size);
     let mut scene = Scene::new();
     scene.append(&text_scene, Some(Affine::scale(1.5)));
 
-    let params =
-        TestParams::new("scaled_hinted", (font_size * 15.) as _, (font_size * 1.65).ceil() as _).with_backend(backend);
+    let params = TestParams::new("scaled_hinted", (font_size * 15.) as _, (font_size * 1.65).ceil() as _);
     snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.02);
 }
-fn scaled_hinted() {
-    scaled_hinted_body(TestBackend::Classic);
-}
 
-fn scheme_scaled_hinted() {
-    scaled_hinted_body(TestBackend::Scheme);
-}
-
-fn integer_translation_body(backend: TestBackend) {
+fn integer_translation() {
     let font_size = 12.;
     let text_scene = encode_hinted_text("The quick brown fox", font_size);
     let mut scene = Scene::new();
@@ -83,19 +67,11 @@ fn integer_translation_body(backend: TestBackend) {
         "integer_translation",
         (font_size * 10.) as _,
         (font_size * 1.1 + 10.).ceil() as _,
-    )
-    .with_backend(backend);
+    );
     snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.02);
 }
-fn integer_translation() {
-    integer_translation_body(TestBackend::Classic);
-}
 
-fn scheme_integer_translation() {
-    integer_translation_body(TestBackend::Scheme);
-}
-
-fn non_integer_translation_body(backend: TestBackend) {
+fn non_integer_translation() {
     let font_size = 12.;
     let text_scene = encode_hinted_text("The quick brown fox", font_size);
     let mut scene = Scene::new();
@@ -105,16 +81,8 @@ fn non_integer_translation_body(backend: TestBackend) {
         "non_integer_translation",
         (font_size * 10.) as _,
         (font_size * 1.1 + 10.).ceil() as _,
-    )
-    .with_backend(backend);
+    );
     snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.02);
-}
-fn non_integer_translation() {
-    non_integer_translation_body(TestBackend::Classic);
-}
-
-fn scheme_non_integer_translation() {
-    non_integer_translation_body(TestBackend::Scheme);
 }
 
 fn main() {
@@ -129,22 +97,8 @@ fn main() {
         .with_ignored_flag(false),
     );
     trials.push(
-        libtest_mimic::Trial::test("scheme_simple_hinted", || {
-            scheme_simple_hinted();
-            Ok(())
-        })
-        .with_ignored_flag(false),
-    );
-    trials.push(
         libtest_mimic::Trial::test("scaled_hinted", || {
             scaled_hinted();
-            Ok(())
-        })
-        .with_ignored_flag(false),
-    );
-    trials.push(
-        libtest_mimic::Trial::test("scheme_scaled_hinted", || {
-            scheme_scaled_hinted();
             Ok(())
         })
         .with_ignored_flag(false),
@@ -157,22 +111,8 @@ fn main() {
         .with_ignored_flag(ignore_slow),
     );
     trials.push(
-        libtest_mimic::Trial::test("scheme_integer_translation", || {
-            scheme_integer_translation();
-            Ok(())
-        })
-        .with_ignored_flag(ignore_slow),
-    );
-    trials.push(
         libtest_mimic::Trial::test("non_integer_translation", || {
             non_integer_translation();
-            Ok(())
-        })
-        .with_ignored_flag(ignore_slow),
-    );
-    trials.push(
-        libtest_mimic::Trial::test("scheme_non_integer_translation", || {
-            scheme_non_integer_translation();
             Ok(())
         })
         .with_ignored_flag(ignore_slow),

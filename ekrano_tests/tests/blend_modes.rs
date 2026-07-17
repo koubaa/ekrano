@@ -29,7 +29,7 @@ use ekrano::{
     kurbo::{Affine, Rect},
     peniko::{BlendMode, Color, Compose, Fill, Mix, color::palette::css::*},
 };
-use ekrano_tests::{TestBackend, TestParams, shared_test_device, snapshot_test_sync};
+use ekrano_tests::{TestParams, shared_test_device, snapshot_test_sync};
 
 /// Helper: full-viewport rect for use as a layer clip.
 fn viewport(width: f64, height: f64) -> Rect {
@@ -70,51 +70,30 @@ fn non_isolated_blend(mix: Mix) -> Scene {
 }
 
 /// Non-isolated `Difference` blend: lime overlaps blue with difference compositing.
-fn mix_non_isolated_difference_body(backend: TestBackend) {
-    let mut params = TestParams::new("mix_non_isolated_difference", 100, 100).with_backend(backend);
+fn mix_non_isolated_difference() {
+    let mut params = TestParams::new("mix_non_isolated_difference", 100, 100);
     params.base_color = Some(WHITE);
     snapshot_test_sync(non_isolated_blend(Mix::Difference), &params)
         .unwrap()
         .assert_mean_less_than(0.0095);
 }
-fn mix_non_isolated_difference() {
-    mix_non_isolated_difference_body(TestBackend::Classic);
-}
-
-fn scheme_mix_non_isolated_difference() {
-    mix_non_isolated_difference_body(TestBackend::Scheme);
-}
 
 /// Non-isolated `SoftLight` blend.
-fn mix_non_isolated_soft_light_body(backend: TestBackend) {
-    let mut params = TestParams::new("mix_non_isolated_soft_light", 100, 100).with_backend(backend);
+fn mix_non_isolated_soft_light() {
+    let mut params = TestParams::new("mix_non_isolated_soft_light", 100, 100);
     params.base_color = Some(WHITE);
     snapshot_test_sync(non_isolated_blend(Mix::SoftLight), &params)
         .unwrap()
         .assert_mean_less_than(0.0095);
 }
-fn mix_non_isolated_soft_light() {
-    mix_non_isolated_soft_light_body(TestBackend::Classic);
-}
-
-fn scheme_mix_non_isolated_soft_light() {
-    mix_non_isolated_soft_light_body(TestBackend::Scheme);
-}
 
 /// Non-isolated `ColorDodge` blend.
-fn mix_non_isolated_color_dodge_body(backend: TestBackend) {
-    let mut params = TestParams::new("mix_non_isolated_color_dodge", 100, 100).with_backend(backend);
+fn mix_non_isolated_color_dodge() {
+    let mut params = TestParams::new("mix_non_isolated_color_dodge", 100, 100);
     params.base_color = Some(WHITE);
     snapshot_test_sync(non_isolated_blend(Mix::ColorDodge), &params)
         .unwrap()
         .assert_mean_less_than(0.0095);
-}
-fn mix_non_isolated_color_dodge() {
-    mix_non_isolated_color_dodge_body(TestBackend::Classic);
-}
-
-fn scheme_mix_non_isolated_color_dodge() {
-    mix_non_isolated_color_dodge_body(TestBackend::Scheme);
 }
 
 // ─── Layer blend mode matrix ─────────────────────────────────────────────────
@@ -129,7 +108,7 @@ fn scheme_mix_non_isolated_color_dodge() {
 // (ekrano ignores bare `scene.fill()` calls that are outside any layer).
 
 /// 16 × 8 grid exercising all standard `Mix` blend modes against 8 base colors.
-fn mix_modes_non_gradient_test_matrix_body(backend: TestBackend) {
+fn mix_modes_non_gradient_test_matrix() {
     let mut scene = Scene::new();
     let vp = viewport(80.0, 160.0);
 
@@ -224,17 +203,10 @@ fn mix_modes_non_gradient_test_matrix_body(backend: TestBackend) {
         }
     }
 
-    let params = TestParams::new("mix_modes_non_gradient_test_matrix", 80, 160).with_backend(backend);
+    let params = TestParams::new("mix_modes_non_gradient_test_matrix", 80, 160);
     snapshot_test_sync(scene, &params)
         .unwrap()
         .assert_mean_less_than(0.0095);
-}
-fn mix_modes_non_gradient_test_matrix() {
-    mix_modes_non_gradient_test_matrix_body(TestBackend::Classic);
-}
-
-fn scheme_mix_modes_non_gradient_test_matrix() {
-    mix_modes_non_gradient_test_matrix_body(TestBackend::Scheme);
 }
 
 fn main() {
@@ -247,22 +219,8 @@ fn main() {
         .with_ignored_flag(false),
     );
     trials.push(
-        libtest_mimic::Trial::test("scheme_mix_non_isolated_difference", || {
-            scheme_mix_non_isolated_difference();
-            Ok(())
-        })
-        .with_ignored_flag(false),
-    );
-    trials.push(
         libtest_mimic::Trial::test("mix_non_isolated_soft_light", || {
             mix_non_isolated_soft_light();
-            Ok(())
-        })
-        .with_ignored_flag(false),
-    );
-    trials.push(
-        libtest_mimic::Trial::test("scheme_mix_non_isolated_soft_light", || {
-            scheme_mix_non_isolated_soft_light();
             Ok(())
         })
         .with_ignored_flag(false),
@@ -275,22 +233,8 @@ fn main() {
         .with_ignored_flag(false),
     );
     trials.push(
-        libtest_mimic::Trial::test("scheme_mix_non_isolated_color_dodge", || {
-            scheme_mix_non_isolated_color_dodge();
-            Ok(())
-        })
-        .with_ignored_flag(false),
-    );
-    trials.push(
         libtest_mimic::Trial::test("mix_modes_non_gradient_test_matrix", || {
             mix_modes_non_gradient_test_matrix();
-            Ok(())
-        })
-        .with_ignored_flag(false),
-    );
-    trials.push(
-        libtest_mimic::Trial::test("scheme_mix_modes_non_gradient_test_matrix", || {
-            scheme_mix_modes_non_gradient_test_matrix();
             Ok(())
         })
         .with_ignored_flag(false),

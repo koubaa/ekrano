@@ -1,36 +1,26 @@
 // Copyright 2026 the Ekrano Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Retained-`Scheme`-based renderer — the Scheme backend.
+//! Retained-`Scheme`-based renderer.
 //!
-//! This file is intentionally self-contained: it contains only `Scheme` code.
-//! The companion [`crate::graph_renderer`] module contains the `TaskGraph`-based
-//! renderer; the two share infrastructure types from [`crate::goldy_renderer`]
-//! but have no rendering logic in common.
+//! Shares infrastructure types from [`crate::goldy_renderer`] (`PersistentState`,
+//! `PreparedFrame`, pools, etc.).
 //!
 //! # Surface rendering
 //!
-//! Unlike the Classic backend which uses [`goldy::Surface`] + `TaskGraph::copy_texture_to_swapchain`,
 //! `SchemeRenderer` uses the scheme-native present mechanism:
 //!
 //! 1. [`goldy::SwapchainPool`] is passed by the caller each frame.
 //! 2. A [`goldy::PresentLease`] is acquired from the pool.
 //! 3. After all compute nodes, [`goldy::Scheme::copy_texture_to_present`] records a copy
 //!    from `out_image` to the present lease.
-//! 4. [`goldy::Scheme::grant_present`] records the present easement (once per frame in
-//!    Phase 2; retained in Phase 3).
+//! 4. [`goldy::Scheme::grant_present`] records the present easement.
 //! 5. [`goldy::Scheme::submit`] submits non-present partitions first, then acquires the
 //!    drawable when the present partition is about to run (deferred acquire); fall back
 //!    to headless [`goldy::Scheme::submit`] only when no swapchain pool is bound.
 //! 6. [`PresentToken::present`] performs scanout — synchronously in
 //!    [`SchemeRenderer::render_to_swapchain`], or async on `TID_PRESENT` via
 //!    [`SchemeRenderer::submit_to_swapchain`] + velato's `Presenter`.
-//!
-//! # Phase 2 notes
-//!
-//! In this naive Phase 2 port the scheme is rebuilt from scratch every frame (same
-//! node topology as the `TaskGraph` path). Phase 3 will retain the topology across
-//! frames and only re-record when dirty.
 
 use std::mem;
 use std::mem::size_of;
@@ -70,11 +60,7 @@ use ekrano_encoding::{BumpAllocators, Images, Layout, Ramps, RenderConfig, Resol
 ///
 /// All rendering is done via Goldy's [`Scheme`] command recording.
 /// Surface presentation uses [`goldy::SwapchainPool`] + [`goldy::PresentGrant`]
-/// (scheme-native present mechanism). For the `TaskGraph` path see
-/// [`crate::graph_renderer::GraphRenderer`].
-///
-/// This struct is intentionally isolated: it contains no `TaskGraph` references and
-/// no graph-path branches.
+/// (scheme-native present mechanism).
 pub struct SchemeRenderer {
     device: Device,
     context: Context,
@@ -263,9 +249,7 @@ impl SchemeRenderer {
                     self.context.flush_deferred_deletions();
                     self.persistent.drain_pending_returns();
                 }
-                Signal::SwapchainReturned { image_index } => {
-                    self.persistent.mark_rt_slot_returned(&self.context, image_index);
-                }
+                Signal::SwapchainReturned { .. } => {}
                 Signal::SwapchainAcquired { .. } => {}
             }
         }
@@ -521,7 +505,7 @@ impl SchemeRenderer {
     }
 
     fn drain_ready_bump_readbacks(&mut self) -> Result<()> {
-        self.persistent.drain_ready_bump_readbacks(&self.device, &self.context)
+        self.persistent.drain_ready_bump_readbacks(&self.context)
     }
 
     // =======================================================================
@@ -949,8 +933,6 @@ impl SchemeRenderer {
         let cache_outcome = recorder.schedule_pipeline_cleanup(pipeline);
         let FrameFinishOutcome {
             timeline: frame_tv,
-            surface_frame: _,
-            bump_readback: _,
             deferred_textures,
             recyclable_owned,
             scheme_submission,
@@ -1003,13 +985,6 @@ impl SchemeRenderer {
             log::debug!("[RT-CACHE] stamp scheme out_image timeline={frame_tv}");
             entry.2 = frame_tv;
         }
-        if let Some(i) = cache_outcome.cached_render_targets_slot {
-            log::debug!(
-                "[RT-CACHE] stamp slot={i} timeline={frame_tv} (prev={})",
-                self.persistent.cached_rt_timelines[i],
-            );
-            self.persistent.cached_rt_timelines[i] = frame_tv;
-        }
         defer_frame_gpu_resources(
             &self.context,
             &self.persistent,
@@ -1028,12 +1003,7 @@ impl SchemeRenderer {
 
             let ring_depth = self.frame_pipeline.pending_frames();
             let (transient_views, transient_textures) = self.context.transient_cache_counts();
-            let rt_slots = self
-                .persistent
-                .cached_render_targets
-                .iter()
-                .filter(|s| s.is_some())
-                .count();
+            let rt_slots = self.persistent.cached_scheme_rt.is_some() as usize;
             let pipe_slots = self.persistent.cached_pipeline.is_some() as usize;
 
             log::debug!(
@@ -1052,7 +1022,7 @@ impl SchemeRenderer {
             );
         }
 
-        crate::goldy_renderer::maybe_log_gpu_memory(&self.device, "scheme");
+        crate::goldy_renderer::maybe_log_gpu_memory(&self.device);
 
         Ok((stats, present_token))
     }
@@ -1286,32 +1256,9 @@ impl<'a> SchemeRecorder<'a> {
             self.persistent.cached_scheme_indirect = Some((wg_counts_gpu, indirect_buf));
         }
         self.persistent.cached_bump = Some((bump.byte_size(), bump));
-        let pipeline_cache = crate::graph_gpu_resources::CachedPipeline {
-            stable: crate::graph_gpu_resources::StablePipelineBuffers {
-                info_bin_data: stable.info_bin_data,
-                tile: stable.tile,
-                segments: stable.segments,
-                ptcl: stable.ptcl,
-                blend_spill: stable.blend_spill,
-                lines: stable.lines,
-                seg_counts: stable.seg_counts,
-            },
-            scratch: crate::graph_gpu_resources::ScratchPipelineBuffers {
-                reduced: scratch.reduced,
-                reduced2: scratch.reduced2,
-                reduced_scan: scratch.reduced_scan,
-                tagmonoid: scratch.tagmonoid,
-                path_bbox: scratch.path_bbox,
-                draw_reduced: scratch.draw_reduced,
-                draw_monoid: scratch.draw_monoid,
-                clip_inp: scratch.clip_inp,
-                clip_el: scratch.clip_el,
-                clip_bic: scratch.clip_bic,
-                clip_bbox: scratch.clip_bbox,
-                draw_bbox: scratch.draw_bbox,
-                bin_header: scratch.bin_header,
-                path: scratch.path,
-            },
+        let pipeline_cache = crate::scheme_gpu_resources::CachedPipeline {
+            stable,
+            scratch,
             buffer_sizes,
         };
         assert!(
@@ -1528,8 +1475,6 @@ impl<'a> SchemeRecorder<'a> {
         self.finished = true;
         Ok(FrameFinishOutcome {
             timeline: tv,
-            surface_frame: None,
-            bump_readback: None,
             deferred_textures,
             recyclable_owned,
             scheme_submission: Some(submission),
@@ -1553,13 +1498,10 @@ mod tests {
     use ekrano_encoding::{RenderConfig, Resolver};
     use goldy::{FrameOrchestrator, Scheme};
 
-    /// Scheme-backend counterpart of the Classic `prepare_out_image_format_matches_requested`
-    /// test in [`crate::goldy_renderer::tests`].
-    ///
-    /// Verifies that `scheme_gpu_resources::PipelineResources::prepare` honours the
-    /// `out_image_format` argument and does not hard-code `Rgba8Unorm`.  The same
-    /// channel-swap regression (velato tiger turning blue) can occur on the Scheme
-    /// path if `copy_texture_to_present` copies an RGBA `out_image` into a BGRA
+    /// Regression: `PipelineResources::prepare` must honour the requested
+    /// `out_image_format` and must not hard-code `Rgba8Unorm`.  The same
+    /// channel-swap regression (velato tiger turning blue) can occur if
+    /// `copy_texture_to_present` copies an RGBA `out_image` into a BGRA
     /// present lease.
     #[test]
     fn prepare_out_image_format_matches_requested() {

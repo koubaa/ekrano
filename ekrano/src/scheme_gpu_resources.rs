@@ -895,6 +895,13 @@ impl ScratchPipelineBuffers {
     }
 }
 
+/// Cached stable + scratch pipeline buffers from the previous frame.
+pub(crate) struct CachedPipeline {
+    pub stable: StablePipelineBuffers,
+    pub scratch: ScratchPipelineBuffers,
+    pub buffer_sizes: ekrano_encoding::BufferSizes,
+}
+
 pub(crate) struct PipelineResources {
     pub gradient: Texture,
     pub image_atlas: Texture,
@@ -1130,34 +1137,7 @@ impl PipelineResources {
         let (cached_stable, cached_scratch) = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.pipeline_cache");
             match recorder.persistent.take_cached_pipeline() {
-                Some(c) if c.buffer_sizes == buffer_sizes => {
-                    let stable = StablePipelineBuffers {
-                        info_bin_data: c.stable.info_bin_data,
-                        tile: c.stable.tile,
-                        segments: c.stable.segments,
-                        ptcl: c.stable.ptcl,
-                        blend_spill: c.stable.blend_spill,
-                        lines: c.stable.lines,
-                        seg_counts: c.stable.seg_counts,
-                    };
-                    let scratch = ScratchPipelineBuffers {
-                        reduced: c.scratch.reduced,
-                        reduced2: c.scratch.reduced2,
-                        reduced_scan: c.scratch.reduced_scan,
-                        tagmonoid: c.scratch.tagmonoid,
-                        path_bbox: c.scratch.path_bbox,
-                        draw_reduced: c.scratch.draw_reduced,
-                        draw_monoid: c.scratch.draw_monoid,
-                        clip_inp: c.scratch.clip_inp,
-                        clip_el: c.scratch.clip_el,
-                        clip_bic: c.scratch.clip_bic,
-                        clip_bbox: c.scratch.clip_bbox,
-                        draw_bbox: c.scratch.draw_bbox,
-                        bin_header: c.scratch.bin_header,
-                        path: c.scratch.path,
-                    };
-                    (Some(stable), Some(scratch))
-                }
+                Some(c) if c.buffer_sizes == buffer_sizes => (Some(c.stable), Some(c.scratch)),
                 Some(c) => {
                     if std::env::var_os("EKRANO_LOG_PIPELINE_RESIZE").is_some() {
                         log::info!("[PIPE-RESIZE] buffer_sizes mismatch — releasing stable parcels");

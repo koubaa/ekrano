@@ -68,9 +68,6 @@ mod scene;
 mod shaders;
 
 mod goldy_renderer;
-mod graph_gpu_resources;
-mod graph_render;
-mod graph_renderer;
 mod scheme_gpu_resources;
 mod scheme_render;
 mod scheme_renderer;
@@ -82,8 +79,8 @@ pub mod low_level {
     //! These APIs have not been carefully designed, and might not be powerful enough for this use case.
 
     pub use crate::debug::DebugLayers;
-    pub use crate::graph_render::Render;
     pub use crate::resource_proxy::{BindType, ImageFormat, ShaderId};
+    pub use crate::scheme_render::Render;
     pub use crate::shaders::FullShaders;
     /// Temporary export, used in `with_winit` for stats
     pub use ekrano_encoding::BumpAllocators;
@@ -93,13 +90,12 @@ pub use peniko;
 /// 2D geometry, with a focus on curves.
 pub use peniko::kurbo;
 
+pub use goldy::TimelineValue;
 pub use goldy::placement_heap::PlacementHeapStats;
-pub use goldy::{Frame, TimelineValue};
-pub use goldy_renderer::{
-    AllocatorStats, FrameStats, GoldyBackend, GoldyRenderer, PreparedFrame, PresentToken, ResourcePoolStats,
-};
-pub use graph_renderer::GraphRenderer;
+pub use goldy_renderer::{AllocatorStats, FrameStats, PreparedFrame, PresentToken, ResourcePoolStats};
 pub use scheme_renderer::SchemeRenderer;
+/// Goldy-based 2D renderer (retained-`Scheme` frame loop).
+pub type GoldyRenderer = SchemeRenderer;
 
 pub use ekrano_encoding::{Glyph, NormalizedCoord};
 pub use scene::{DrawGlyphs, Scene};
