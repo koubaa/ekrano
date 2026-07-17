@@ -35,7 +35,7 @@ use ekrano::{
     peniko::{Color, Fill, color::palette::css::*},
 };
 use ekrano_encoding::{Filter, FilterEdgeMode, FilterPrimitive};
-use ekrano_tests::{TestBackend, TestParams, shared_test_device, snapshot_test_sync};
+use ekrano_tests::{TestParams, shared_test_device, snapshot_test_sync};
 
 /// Build a star polygon centered at `center` with `n` points, alternating
 /// between `inner` and `outer` radii.
@@ -60,7 +60,7 @@ fn vp(w: f64, h: f64) -> Rect {
 // ─── Gaussian blur ──────────────────────────────────────────────────────────
 
 /// Gaussian blur with small radius (`std_dev` = 2.0, no decimation).
-fn filter_gaussian_blur_no_decimation_body(backend: TestBackend) {
+fn filter_gaussian_blur_no_decimation() {
     let mut scene = Scene::new();
     let filter = Filter(FilterPrimitive::GaussianBlur {
         std_dev: 2.0,
@@ -75,7 +75,7 @@ fn filter_gaussian_blur_no_decimation_body(backend: TestBackend) {
         &Rect::new(20.0, 20.0, 80.0, 80.0),
     );
     scene.pop_layer();
-    let mut params = TestParams::new("filter_gaussian_blur_no_decimation", 100, 100).with_backend(backend);
+    let mut params = TestParams::new("filter_gaussian_blur_no_decimation", 100, 100);
     params.base_color = Some(WHITE);
     snapshot_test_sync(scene, &params)
         .unwrap()
@@ -83,7 +83,7 @@ fn filter_gaussian_blur_no_decimation_body(backend: TestBackend) {
 }
 
 /// Gaussian blur with larger radius (`std_dev` = 4.0, uses decimation).
-fn filter_gaussian_blur_with_decimation_body(backend: TestBackend) {
+fn filter_gaussian_blur_with_decimation() {
     let mut scene = Scene::new();
     let filter = Filter(FilterPrimitive::GaussianBlur {
         std_dev: 4.0,
@@ -98,7 +98,7 @@ fn filter_gaussian_blur_with_decimation_body(backend: TestBackend) {
         &Rect::new(20.0, 20.0, 80.0, 80.0),
     );
     scene.pop_layer();
-    let mut params = TestParams::new("filter_gaussian_blur_with_decimation", 100, 100).with_backend(backend);
+    let mut params = TestParams::new("filter_gaussian_blur_with_decimation", 100, 100);
     params.base_color = Some(WHITE);
     snapshot_test_sync(scene, &params)
         .unwrap()
@@ -106,7 +106,7 @@ fn filter_gaussian_blur_with_decimation_body(backend: TestBackend) {
 }
 
 /// Zero blur acts as identity (no-op).
-fn filter_gaussian_blur_zero_body(backend: TestBackend) {
+fn filter_gaussian_blur_zero() {
     let mut scene = Scene::new();
     let filter = Filter(FilterPrimitive::GaussianBlur {
         std_dev: 0.0,
@@ -121,7 +121,7 @@ fn filter_gaussian_blur_zero_body(backend: TestBackend) {
         &Rect::new(25.0, 25.0, 75.0, 75.0),
     );
     scene.pop_layer();
-    let mut params = TestParams::new("filter_gaussian_blur_zero", 100, 100).with_backend(backend);
+    let mut params = TestParams::new("filter_gaussian_blur_zero", 100, 100);
     params.base_color = Some(WHITE);
     snapshot_test_sync(scene, &params)
         .unwrap()
@@ -160,7 +160,7 @@ fn filter_gaussian_blur_zero_body(backend: TestBackend) {
 /// mipmap-style temporary textures); until that happens the ekrano baseline
 /// tracks the direct-convolution output.  The mismatch grows with σ and is
 /// negligible below ~σ = 3 where decimation doesn't kick in.
-fn filter_extreme_blur_body(backend: TestBackend) {
+fn filter_extreme_blur() {
     let mut scene = Scene::new();
     let filter = Filter(FilterPrimitive::GaussianBlur {
         std_dev: 20.0,
@@ -175,7 +175,7 @@ fn filter_extreme_blur_body(backend: TestBackend) {
         &Rect::new(25.0, 25.0, 75.0, 75.0),
     );
     scene.pop_layer();
-    let mut params = TestParams::new("filter_extreme_blur", 100, 100).with_backend(backend);
+    let mut params = TestParams::new("filter_extreme_blur", 100, 100);
     params.base_color = Some(WHITE);
     snapshot_test_sync(scene, &params)
         .unwrap()
@@ -183,7 +183,7 @@ fn filter_extreme_blur_body(backend: TestBackend) {
 }
 
 /// Blur on semi-transparent shapes — fully-opaque (left) and 50%-transparent (right).
-fn filter_transparent_shapes_body(backend: TestBackend) {
+fn filter_transparent_shapes() {
     let mut scene = Scene::new();
     let filter = Filter(FilterPrimitive::GaussianBlur {
         std_dev: 3.0,
@@ -210,7 +210,7 @@ fn filter_transparent_shapes_body(backend: TestBackend) {
     );
     scene.pop_layer();
 
-    let mut params = TestParams::new("filter_transparent_shapes", 100, 100).with_backend(backend);
+    let mut params = TestParams::new("filter_transparent_shapes", 100, 100);
     params.base_color = Some(WHITE);
     snapshot_test_sync(scene, &params)
         .unwrap()
@@ -258,24 +258,24 @@ fn blur_with_edge_mode(edge_mode: FilterEdgeMode) -> Scene {
     scene
 }
 
-fn filter_gaussian_blur_edge_mode_duplicate_body(backend: TestBackend) {
-    let mut params = TestParams::new("filter_gaussian_blur_edge_mode_duplicate", 256, 100).with_backend(backend);
+fn filter_gaussian_blur_edge_mode_duplicate() {
+    let mut params = TestParams::new("filter_gaussian_blur_edge_mode_duplicate", 256, 100);
     params.base_color = Some(WHITE);
     snapshot_test_sync(blur_with_edge_mode(FilterEdgeMode::Duplicate), &params)
         .unwrap()
         .assert_mean_less_than(0.04);
 }
 
-fn filter_gaussian_blur_edge_mode_wrap_body(backend: TestBackend) {
-    let mut params = TestParams::new("filter_gaussian_blur_edge_mode_wrap", 256, 100).with_backend(backend);
+fn filter_gaussian_blur_edge_mode_wrap() {
+    let mut params = TestParams::new("filter_gaussian_blur_edge_mode_wrap", 256, 100);
     params.base_color = Some(WHITE);
     snapshot_test_sync(blur_with_edge_mode(FilterEdgeMode::Wrap), &params)
         .unwrap()
         .assert_mean_less_than(0.06);
 }
 
-fn filter_gaussian_blur_edge_mode_mirror_body(backend: TestBackend) {
-    let mut params = TestParams::new("filter_gaussian_blur_edge_mode_mirror", 256, 100).with_backend(backend);
+fn filter_gaussian_blur_edge_mode_mirror() {
+    let mut params = TestParams::new("filter_gaussian_blur_edge_mode_mirror", 256, 100);
     params.base_color = Some(WHITE);
     snapshot_test_sync(blur_with_edge_mode(FilterEdgeMode::Mirror), &params)
         .unwrap()
@@ -290,7 +290,7 @@ fn filter_gaussian_blur_edge_mode_mirror_body(backend: TestBackend) {
 /// record those bounds in `FilterPrimitive::Flood::clip_rect`.  The shader then
 /// restricts the flood to that rect, matching `vello_sparse`'s auto-bounded
 /// per-layer-pixmap semantics.
-fn filter_flood_body(backend: TestBackend) {
+fn filter_flood() {
     let mut scene = Scene::new();
     let filter = Filter(FilterPrimitive::Flood {
         color: TOMATO.premultiply(),
@@ -302,7 +302,7 @@ fn filter_flood_body(backend: TestBackend) {
     scene.push_filter_layer(filter, Fill::NonZero, Affine::IDENTITY, &drawn_rect);
     scene.fill(Fill::NonZero, Affine::IDENTITY, REBECCA_PURPLE, None, &drawn_rect);
     scene.pop_layer();
-    let mut params = TestParams::new("filter_flood", 256, 40).with_backend(backend);
+    let mut params = TestParams::new("filter_flood", 256, 40);
     params.base_color = Some(WHITE);
     // Render with transparent clear so the flood shader can detect drawn pixels via src.a.
     params.render_clear_color = Some(Color::TRANSPARENT);
@@ -312,7 +312,7 @@ fn filter_flood_body(backend: TestBackend) {
 }
 
 /// Flood filter on a star-shaped fill (no extra clip wrapper).
-fn filter_flood_star_body(backend: TestBackend) {
+fn filter_flood_star() {
     let mut scene = Scene::new();
     let filter = Filter(FilterPrimitive::Flood {
         color: TOMATO.premultiply(),
@@ -324,7 +324,7 @@ fn filter_flood_star_body(backend: TestBackend) {
     scene.fill(Fill::NonZero, Affine::IDENTITY, REBECCA_PURPLE, None, &star_path);
     scene.pop_layer();
 
-    let mut params = TestParams::new("filter_flood_star", 100, 100).with_backend(backend);
+    let mut params = TestParams::new("filter_flood_star", 100, 100);
     params.base_color = Some(WHITE);
     // Render with transparent clear so s.a carries the star's AA coverage, which the
     // flood shader then copies into the output alpha — matching vello_sparse edge behaviour.
@@ -337,7 +337,7 @@ fn filter_flood_star_body(backend: TestBackend) {
 // ─── Drop shadow ─────────────────────────────────────────────────────────────
 
 /// Drop shadow with sub-pixel offsets.
-fn filter_drop_shadow_fractional_offset_body(backend: TestBackend) {
+fn filter_drop_shadow_fractional_offset() {
     let mut scene = Scene::new();
     let filter = Filter(FilterPrimitive::DropShadow {
         dx: 2.5,
@@ -355,7 +355,7 @@ fn filter_drop_shadow_fractional_offset_body(backend: TestBackend) {
         &Rect::new(30.0, 30.0, 70.0, 70.0),
     );
     scene.pop_layer();
-    let mut params = TestParams::new("filter_drop_shadow_fractional_offset", 100, 100).with_backend(backend);
+    let mut params = TestParams::new("filter_drop_shadow_fractional_offset", 100, 100);
     params.base_color = Some(WHITE);
     snapshot_test_sync(scene, &params)
         .unwrap()
@@ -363,7 +363,7 @@ fn filter_drop_shadow_fractional_offset_body(backend: TestBackend) {
 }
 
 /// Drop shadow with zero offset (shadow directly behind).
-fn filter_drop_shadow_zero_offset_body(backend: TestBackend) {
+fn filter_drop_shadow_zero_offset() {
     let mut scene = Scene::new();
     let filter = Filter(FilterPrimitive::DropShadow {
         dx: 0.0,
@@ -381,7 +381,7 @@ fn filter_drop_shadow_zero_offset_body(backend: TestBackend) {
         &Rect::new(30.0, 30.0, 70.0, 70.0),
     );
     scene.pop_layer();
-    let mut params = TestParams::new("filter_drop_shadow_zero_offset", 100, 100).with_backend(backend);
+    let mut params = TestParams::new("filter_drop_shadow_zero_offset", 100, 100);
     params.base_color = Some(WHITE);
     snapshot_test_sync(scene, &params)
         .unwrap()
@@ -394,7 +394,7 @@ fn filter_drop_shadow_zero_offset_body(backend: TestBackend) {
 ///
 /// Reference stroke + marker use a zero-blur filter layer as an identity pass-through
 /// (ekrano does not render top-level draws outside a layer).
-fn filter_offset_body(backend: TestBackend) {
+fn filter_offset() {
     let mut scene = Scene::new();
     let filter = Filter(FilterPrimitive::Offset { dx: 18.0, dy: -12.0 });
     let star_path = circular_star(Point::new(50.0, 50.0), 7, 10.0, 22.0);
@@ -417,7 +417,7 @@ fn filter_offset_body(backend: TestBackend) {
     scene.fill(Fill::NonZero, Affine::IDENTITY, VIOLET, None, &marker);
     scene.pop_layer();
 
-    let mut params = TestParams::new("filter_offset", 100, 100).with_backend(backend);
+    let mut params = TestParams::new("filter_offset", 100, 100);
     params.base_color = Some(WHITE);
     snapshot_test_sync(scene, &params)
         .unwrap()
@@ -454,7 +454,7 @@ fn filter_offset_body(backend: TestBackend) {
 /// `0.0095` mean-FLIP threshold is tight enough to catch that drift, even
 /// though the images are visually indistinguishable.  Accepting the fresh
 /// baseline is cheaper — and more honest — than loosening the threshold.
-fn filter_nested_layers_body(backend: TestBackend) {
+fn filter_nested_layers() {
     let mut scene = Scene::new();
     let blur = Filter(FilterPrimitive::GaussianBlur {
         std_dev: 2.0,
@@ -480,7 +480,7 @@ fn filter_nested_layers_body(backend: TestBackend) {
     scene.pop_layer();
     scene.pop_layer();
 
-    let mut params = TestParams::new("filter_nested_layers", 100, 100).with_backend(backend);
+    let mut params = TestParams::new("filter_nested_layers", 100, 100);
     params.base_color = Some(WHITE);
     snapshot_test_sync(scene, &params)
         .unwrap()
@@ -490,7 +490,7 @@ fn filter_nested_layers_body(backend: TestBackend) {
 /// Three nested filter layers with no content drawn — white background is all that shows.
 ///
 /// TODO: nested filter layers require multi-pass fine, not yet implemented.
-fn filter_empty_layers_body(backend: TestBackend) {
+fn filter_empty_layers() {
     let mut scene = Scene::new();
     let filter = Filter(FilterPrimitive::GaussianBlur {
         std_dev: 4.0,
@@ -505,7 +505,7 @@ fn filter_empty_layers_body(backend: TestBackend) {
     scene.pop_layer();
     scene.pop_layer();
 
-    let mut params = TestParams::new("filter_empty_layers", 100, 100).with_backend(backend);
+    let mut params = TestParams::new("filter_empty_layers", 100, 100);
     params.base_color = Some(WHITE);
     snapshot_test_sync(scene, &params)
         .unwrap()
@@ -526,97 +526,37 @@ fn main() {
 
     case!(
         "filter_gaussian_blur_no_decimation",
-        filter_gaussian_blur_no_decimation_body(TestBackend::Classic)
-    );
-    case!(
-        "scheme_filter_gaussian_blur_no_decimation",
-        filter_gaussian_blur_no_decimation_body(TestBackend::Scheme)
+        filter_gaussian_blur_no_decimation()
     );
     case!(
         "filter_gaussian_blur_with_decimation",
-        filter_gaussian_blur_with_decimation_body(TestBackend::Classic)
+        filter_gaussian_blur_with_decimation()
     );
-    case!(
-        "scheme_filter_gaussian_blur_with_decimation",
-        filter_gaussian_blur_with_decimation_body(TestBackend::Scheme)
-    );
-    case!(
-        "filter_gaussian_blur_zero",
-        filter_gaussian_blur_zero_body(TestBackend::Classic)
-    );
-    case!(
-        "scheme_filter_gaussian_blur_zero",
-        filter_gaussian_blur_zero_body(TestBackend::Scheme)
-    );
-    case!("filter_extreme_blur", filter_extreme_blur_body(TestBackend::Classic));
-    case!(
-        "scheme_filter_extreme_blur",
-        filter_extreme_blur_body(TestBackend::Scheme)
-    );
-    case!(
-        "filter_transparent_shapes",
-        filter_transparent_shapes_body(TestBackend::Classic)
-    );
-    case!(
-        "scheme_filter_transparent_shapes",
-        filter_transparent_shapes_body(TestBackend::Scheme)
-    );
+    case!("filter_gaussian_blur_zero", filter_gaussian_blur_zero());
+    case!("filter_extreme_blur", filter_extreme_blur());
+    case!("filter_transparent_shapes", filter_transparent_shapes());
     case!(
         "filter_gaussian_blur_edge_mode_duplicate",
-        filter_gaussian_blur_edge_mode_duplicate_body(TestBackend::Classic)
-    );
-    case!(
-        "scheme_filter_gaussian_blur_edge_mode_duplicate",
-        filter_gaussian_blur_edge_mode_duplicate_body(TestBackend::Scheme)
+        filter_gaussian_blur_edge_mode_duplicate()
     );
     case!(
         "filter_gaussian_blur_edge_mode_wrap",
-        filter_gaussian_blur_edge_mode_wrap_body(TestBackend::Classic)
-    );
-    case!(
-        "scheme_filter_gaussian_blur_edge_mode_wrap",
-        filter_gaussian_blur_edge_mode_wrap_body(TestBackend::Scheme)
+        filter_gaussian_blur_edge_mode_wrap()
     );
     case!(
         "filter_gaussian_blur_edge_mode_mirror",
-        filter_gaussian_blur_edge_mode_mirror_body(TestBackend::Classic)
+        filter_gaussian_blur_edge_mode_mirror()
     );
-    case!(
-        "scheme_filter_gaussian_blur_edge_mode_mirror",
-        filter_gaussian_blur_edge_mode_mirror_body(TestBackend::Scheme)
-    );
-    case!("filter_flood", filter_flood_body(TestBackend::Classic));
-    case!("scheme_filter_flood", filter_flood_body(TestBackend::Scheme));
-    case!("filter_flood_star", filter_flood_star_body(TestBackend::Classic));
-    case!("scheme_filter_flood_star", filter_flood_star_body(TestBackend::Scheme));
+    case!("filter_flood", filter_flood());
+    case!("filter_flood_star", filter_flood_star());
     case!(
         "filter_drop_shadow_fractional_offset",
-        filter_drop_shadow_fractional_offset_body(TestBackend::Classic)
+        filter_drop_shadow_fractional_offset()
     );
-    case!(
-        "scheme_filter_drop_shadow_fractional_offset",
-        filter_drop_shadow_fractional_offset_body(TestBackend::Scheme)
-    );
-    case!(
-        "filter_drop_shadow_zero_offset",
-        filter_drop_shadow_zero_offset_body(TestBackend::Classic)
-    );
-    case!(
-        "scheme_filter_drop_shadow_zero_offset",
-        filter_drop_shadow_zero_offset_body(TestBackend::Scheme)
-    );
-    case!("filter_offset", filter_offset_body(TestBackend::Classic));
-    case!("scheme_filter_offset", filter_offset_body(TestBackend::Scheme));
-    case!("filter_nested_layers", filter_nested_layers_body(TestBackend::Classic));
-    case!(
-        "scheme_filter_nested_layers",
-        filter_nested_layers_body(TestBackend::Scheme)
-    );
-    case!("filter_empty_layers", filter_empty_layers_body(TestBackend::Classic));
-    case!(
-        "scheme_filter_empty_layers",
-        filter_empty_layers_body(TestBackend::Scheme)
-    );
+    case!("filter_drop_shadow_zero_offset", filter_drop_shadow_zero_offset());
+    case!("filter_offset", filter_offset());
+    case!("filter_nested_layers", filter_nested_layers());
+    case!("filter_empty_layers", filter_empty_layers());
 
     let mut args = libtest_mimic::Arguments::from_args();
     if let Some(device) = shared_test_device() {

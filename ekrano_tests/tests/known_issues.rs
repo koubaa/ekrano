@@ -20,7 +20,7 @@ use ekrano::{
     kurbo::{Affine, Rect, Triangle},
     peniko::{Color, ColorStop, Extend, Gradient, ImageFormat, ImageQuality, Mix, color::palette},
 };
-use ekrano_tests::{TestBackend, TestParams, shared_test_device, smoke_snapshot_test_sync, snapshot_test_sync};
+use ekrano_tests::{TestParams, shared_test_device, smoke_snapshot_test_sync, snapshot_test_sync};
 use scenes::ImageCache;
 
 /// A reproduction of <https://github.com/linebender/vello/issues/680>
@@ -75,7 +75,7 @@ use scenes::ImageCache;
 /// 3. **goldy vulkan buffer.rs**: Added `TRANSFER_WRITE → COMPUTE_SHADER` memory
 ///    barriers after `cmd_fill_buffer` and `cmd_copy_buffer` in `Buffer::clear`.
 ///
-fn many_bins_body(backend: TestBackend) {
+fn many_bins_test() {
     let mut scene = Scene::new();
     scene.fill(
         ekrano::peniko::Fill::NonZero,
@@ -84,7 +84,7 @@ fn many_bins_body(backend: TestBackend) {
         None,
         &Rect::new(-5., -5., 256. * 20., 256. * 20.),
     );
-    let params = TestParams::new("many_bins", 256 * 17, 256 * 17).with_backend(backend);
+    let params = TestParams::new("many_bins", 256 * 17, 256 * 17);
     // To view, use EKRANO_DEBUG_TEST=many_bins
     let image = ekrano_tests::render_then_debug_sync(&scene, &params).unwrap();
     assert_eq!(image.format, ImageFormat::Rgba8);
@@ -140,21 +140,9 @@ fn many_bins_body(backend: TestBackend) {
     assert!(black_count > 0);
 }
 
-fn many_bins_test() {
-    many_bins_test_body(TestBackend::Classic);
-}
-
-fn scheme_many_bins_test() {
-    many_bins_test_body(TestBackend::Scheme);
-}
-
-fn many_bins_test_body(backend: TestBackend) {
-    many_bins_body(backend);
-}
-
 /// Regression test for <https://github.com/linebender/vello/issues/1061>
 /// (Fixed in ekrano by the `END_CLIP` draw-data encoding fix.)
-fn test_layer_size_body(backend: TestBackend) {
+fn test_layer_size() {
     let mut scene = Scene::new();
     scene.fill(
         ekrano::peniko::Fill::NonZero,
@@ -181,24 +169,17 @@ fn test_layer_size_body(backend: TestBackend) {
     // Compose::Clear makes the layer region transparent; compositing over white
     // makes the hole visible as white.  The reference was generated on a white-
     // surface renderer (vello-sparse), so we match that here.
-    let mut params = TestParams::new("layer_size", 60, 60).with_backend(backend);
+    let mut params = TestParams::new("layer_size", 60, 60);
     params.base_color = Some(palette::css::WHITE);
     smoke_snapshot_test_sync(scene, &params)
         .unwrap()
         .assert_mean_less_than(0.001);
 }
-fn test_layer_size() {
-    test_layer_size_body(TestBackend::Classic);
-}
-
-fn scheme_test_layer_size() {
-    test_layer_size_body(TestBackend::Scheme);
-}
 
 const DATA_IMAGE_PNG: &[u8] = include_bytes!("../snapshots/smoke/data_image_roundtrip.png");
 
 /// Test for <https://github.com/linebender/vello/issues/972>
-fn test_data_image_roundtrip_extend_reflect_body(backend: TestBackend) {
+fn test_data_image_roundtrip_extend_reflect() {
     let mut scene = Scene::new();
     let mut images = ImageCache::new();
     let image = images
@@ -207,23 +188,15 @@ fn test_data_image_roundtrip_extend_reflect_body(backend: TestBackend) {
         .with_quality(ImageQuality::Low)
         .with_extend(Extend::Reflect);
     scene.draw_image(&image, Affine::IDENTITY);
-    let mut params =
-        TestParams::new("data_image_roundtrip", image.image.width, image.image.height).with_backend(backend);
+    let mut params = TestParams::new("data_image_roundtrip", image.image.width, image.image.height);
     params.anti_aliasing = AaConfig::Area;
     smoke_snapshot_test_sync(scene, &params)
         .unwrap()
         .assert_mean_less_than(0.001);
 }
-fn test_data_image_roundtrip_extend_reflect() {
-    test_data_image_roundtrip_extend_reflect_body(TestBackend::Classic);
-}
-
-fn scheme_test_data_image_roundtrip_extend_reflect() {
-    test_data_image_roundtrip_extend_reflect_body(TestBackend::Scheme);
-}
 
 /// Test for <https://github.com/linebender/vello/issues/972>
-fn test_data_image_roundtrip_extend_repeat_body(backend: TestBackend) {
+fn test_data_image_roundtrip_extend_repeat() {
     let mut scene = Scene::new();
     let mut images = ImageCache::new();
     let image = images
@@ -232,24 +205,16 @@ fn test_data_image_roundtrip_extend_repeat_body(backend: TestBackend) {
         .with_quality(ImageQuality::Low)
         .with_extend(Extend::Repeat);
     scene.draw_image(&image, Affine::IDENTITY);
-    let mut params =
-        TestParams::new("data_image_roundtrip", image.image.width, image.image.height).with_backend(backend);
+    let mut params = TestParams::new("data_image_roundtrip", image.image.width, image.image.height);
     params.anti_aliasing = AaConfig::Area;
     smoke_snapshot_test_sync(scene, &params)
         .unwrap()
         .assert_mean_less_than(0.001);
 }
-fn test_data_image_roundtrip_extend_repeat() {
-    test_data_image_roundtrip_extend_repeat_body(TestBackend::Classic);
-}
-
-fn scheme_test_data_image_roundtrip_extend_repeat() {
-    test_data_image_roundtrip_extend_repeat_body(TestBackend::Scheme);
-}
 
 /// <https://github.com/web-platform-tests/wpt/blob/18c64a74b1/html/canvas/element/fill-and-stroke-styles/2d.gradient.interpolate.coloralpha.html>
 /// See <https://github.com/linebender/vello/issues/1056>.
-fn test_gradient_color_alpha_body(backend: TestBackend) {
+fn test_gradient_color_alpha() {
     let mut scene = Scene::new();
     let viewport = Rect::new(0., 0., 100., 50.);
     scene.fill(
@@ -268,22 +233,15 @@ fn test_gradient_color_alpha_body(backend: TestBackend) {
         None,
         &viewport,
     );
-    let mut params = TestParams::new("gradient_color_alpha", 100, 50).with_backend(backend);
+    let mut params = TestParams::new("gradient_color_alpha", 100, 50);
     params.base_color = Some(palette::css::WHITE);
     smoke_snapshot_test_sync(scene, &params)
         .unwrap()
         .assert_mean_less_than(0.001);
 }
-fn test_gradient_color_alpha() {
-    test_gradient_color_alpha_body(TestBackend::Classic);
-}
-
-fn scheme_test_gradient_color_alpha() {
-    test_gradient_color_alpha_body(TestBackend::Scheme);
-}
 
 /// See <https://github.com/linebender/vello/issues/1198>
-fn clip_blends_body(backend: TestBackend) {
+fn clip_blends() {
     let mut scene = Scene::new();
 
     scene.fill(
@@ -312,15 +270,8 @@ fn clip_blends_body(backend: TestBackend) {
     scene.pop_layer();
     scene.pop_layer();
 
-    let params = TestParams::new("clip_blends", 100, 100).with_backend(backend);
+    let params = TestParams::new("clip_blends", 100, 100);
     snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.001);
-}
-fn clip_blends() {
-    clip_blends_body(TestBackend::Classic);
-}
-
-fn scheme_clip_blends() {
-    clip_blends_body(TestBackend::Scheme);
 }
 
 // ---------------------------------------------------------------------------
@@ -338,7 +289,7 @@ fn scheme_clip_blends() {
 /// barrier chain has a hole, the output may contain stale pixels. Unlike
 /// `many_bins_test` which needs 17x17 bins to trigger the race, this test
 /// checks whether even the minimal one-bin path is solid.
-fn single_bin_red_fill_body(backend: TestBackend) {
+fn single_bin_red_fill() {
     let mut scene = Scene::new();
     scene.fill(
         ekrano::peniko::Fill::NonZero,
@@ -347,7 +298,7 @@ fn single_bin_red_fill_body(backend: TestBackend) {
         None,
         &Rect::new(0., 0., 256., 256.),
     );
-    let params = TestParams::new("single_bin_red_fill", 256, 256).with_backend(backend);
+    let params = TestParams::new("single_bin_red_fill", 256, 256);
     let image = ekrano_tests::render_then_debug_sync(&scene, &params).unwrap();
     assert_eq!(image.format, ImageFormat::Rgba8);
 
@@ -366,20 +317,13 @@ fn single_bin_red_fill_body(backend: TestBackend) {
         total - red_count
     );
 }
-fn single_bin_red_fill() {
-    single_bin_red_fill_body(TestBackend::Classic);
-}
-
-fn scheme_single_bin_red_fill() {
-    single_bin_red_fill_body(TestBackend::Scheme);
-}
 
 /// Four-bin grid: 2x2 bins with different colors per quadrant.
 ///
 /// Uses a 512x512 viewport (2x2 bins). Each quadrant is filled with a distinct
 /// color. Verifies that inter-bin boundaries don't lose pixels due to
 /// synchronization issues in the coarse rasterizer.
-fn four_bin_colored_quadrants_body(backend: TestBackend) {
+fn four_bin_colored_quadrants() {
     let mut scene = Scene::new();
     let colors = [
         palette::css::RED,
@@ -399,7 +343,7 @@ fn four_bin_colored_quadrants_body(backend: TestBackend) {
             &Rect::new(x, y, x + half, y + half),
         );
     }
-    let params = TestParams::new("four_bin_quadrants", 512, 512).with_backend(backend);
+    let params = TestParams::new("four_bin_quadrants", 512, 512);
     let image = ekrano_tests::render_then_debug_sync(&scene, &params).unwrap();
     assert_eq!(image.format, ImageFormat::Rgba8);
 
@@ -418,20 +362,13 @@ fn four_bin_colored_quadrants_body(backend: TestBackend) {
         total - non_black_count
     );
 }
-fn four_bin_colored_quadrants() {
-    four_bin_colored_quadrants_body(TestBackend::Classic);
-}
-
-fn scheme_four_bin_colored_quadrants() {
-    four_bin_colored_quadrants_body(TestBackend::Scheme);
-}
 
 /// Medium-scale fill across 4x4 bins (1024x1024).
 ///
 /// Larger than 4-bin but smaller than `many_bins_test`. Exercises more
 /// workgroups in the coarse shader. A synchronization bug that loses a
 /// fraction of bins should be visible here.
-fn medium_bins_red_fill_body(backend: TestBackend) {
+fn medium_bins_red_fill() {
     let mut scene = Scene::new();
     scene.fill(
         ekrano::peniko::Fill::NonZero,
@@ -440,7 +377,7 @@ fn medium_bins_red_fill_body(backend: TestBackend) {
         None,
         &Rect::new(-5., -5., 1030., 1030.),
     );
-    let params = TestParams::new("medium_bins_red_fill", 1024, 1024).with_backend(backend);
+    let params = TestParams::new("medium_bins_red_fill", 1024, 1024);
     let image = ekrano_tests::render_then_debug_sync(&scene, &params).unwrap();
     assert_eq!(image.format, ImageFormat::Rgba8);
 
@@ -459,20 +396,13 @@ fn medium_bins_red_fill_body(backend: TestBackend) {
         total - red_count
     );
 }
-fn medium_bins_red_fill() {
-    medium_bins_red_fill_body(TestBackend::Classic);
-}
-
-fn scheme_medium_bins_red_fill() {
-    medium_bins_red_fill_body(TestBackend::Scheme);
-}
 
 /// Repeated rendering: render the same scene N times and verify each time.
 ///
 /// Catches flakiness that only manifests occasionally due to GPU timing
 /// variations. Uses the same viewport size as `many_bins_test` but renders
 /// repeatedly to amplify the failure probability.
-fn repeated_many_bins_body(backend: TestBackend) {
+fn repeated_many_bins() {
     const ITERATIONS: u32 = 10;
     let mut failures = Vec::new();
 
@@ -485,7 +415,7 @@ fn repeated_many_bins_body(backend: TestBackend) {
             None,
             &Rect::new(-5., -5., 256. * 20., 256. * 20.),
         );
-        let params = TestParams::new("repeated_many_bins", 256 * 17, 256 * 17).with_backend(backend);
+        let params = TestParams::new("repeated_many_bins", 256 * 17, 256 * 17);
         let image = ekrano_tests::render_then_debug_sync(&scene, &params).unwrap();
 
         let mut red_count = 0_u32;
@@ -509,26 +439,12 @@ fn repeated_many_bins_body(backend: TestBackend) {
         failures
     );
 }
-fn repeated_many_bins() {
-    repeated_many_bins_body(TestBackend::Classic);
-}
-
-fn scheme_repeated_many_bins() {
-    repeated_many_bins_body(TestBackend::Scheme);
-}
 
 fn main() {
     let mut trials = Vec::new();
     trials.push(
         libtest_mimic::Trial::test("many_bins_test", || {
             many_bins_test();
-            Ok(())
-        })
-        .with_ignored_flag(false),
-    );
-    trials.push(
-        libtest_mimic::Trial::test("scheme_many_bins_test", || {
-            scheme_many_bins_test();
             Ok(())
         })
         .with_ignored_flag(false),
@@ -541,22 +457,8 @@ fn main() {
         .with_ignored_flag(false),
     );
     trials.push(
-        libtest_mimic::Trial::test("scheme_test_layer_size", || {
-            scheme_test_layer_size();
-            Ok(())
-        })
-        .with_ignored_flag(false),
-    );
-    trials.push(
         libtest_mimic::Trial::test("test_data_image_roundtrip_extend_reflect", || {
             test_data_image_roundtrip_extend_reflect();
-            Ok(())
-        })
-        .with_ignored_flag(true),
-    );
-    trials.push(
-        libtest_mimic::Trial::test("scheme_test_data_image_roundtrip_extend_reflect", || {
-            scheme_test_data_image_roundtrip_extend_reflect();
             Ok(())
         })
         .with_ignored_flag(true),
@@ -569,22 +471,8 @@ fn main() {
         .with_ignored_flag(true),
     );
     trials.push(
-        libtest_mimic::Trial::test("scheme_test_data_image_roundtrip_extend_repeat", || {
-            scheme_test_data_image_roundtrip_extend_repeat();
-            Ok(())
-        })
-        .with_ignored_flag(true),
-    );
-    trials.push(
         libtest_mimic::Trial::test("test_gradient_color_alpha", || {
             test_gradient_color_alpha();
-            Ok(())
-        })
-        .with_ignored_flag(false),
-    );
-    trials.push(
-        libtest_mimic::Trial::test("scheme_test_gradient_color_alpha", || {
-            scheme_test_gradient_color_alpha();
             Ok(())
         })
         .with_ignored_flag(false),
@@ -597,22 +485,8 @@ fn main() {
         .with_ignored_flag(false),
     );
     trials.push(
-        libtest_mimic::Trial::test("scheme_clip_blends", || {
-            scheme_clip_blends();
-            Ok(())
-        })
-        .with_ignored_flag(false),
-    );
-    trials.push(
         libtest_mimic::Trial::test("single_bin_red_fill", || {
             single_bin_red_fill();
-            Ok(())
-        })
-        .with_ignored_flag(false),
-    );
-    trials.push(
-        libtest_mimic::Trial::test("scheme_single_bin_red_fill", || {
-            scheme_single_bin_red_fill();
             Ok(())
         })
         .with_ignored_flag(false),
@@ -625,13 +499,6 @@ fn main() {
         .with_ignored_flag(false),
     );
     trials.push(
-        libtest_mimic::Trial::test("scheme_four_bin_colored_quadrants", || {
-            scheme_four_bin_colored_quadrants();
-            Ok(())
-        })
-        .with_ignored_flag(false),
-    );
-    trials.push(
         libtest_mimic::Trial::test("medium_bins_red_fill", || {
             medium_bins_red_fill();
             Ok(())
@@ -639,22 +506,8 @@ fn main() {
         .with_ignored_flag(false),
     );
     trials.push(
-        libtest_mimic::Trial::test("scheme_medium_bins_red_fill", || {
-            scheme_medium_bins_red_fill();
-            Ok(())
-        })
-        .with_ignored_flag(false),
-    );
-    trials.push(
         libtest_mimic::Trial::test("repeated_many_bins", || {
             repeated_many_bins();
-            Ok(())
-        })
-        .with_ignored_flag(false),
-    );
-    trials.push(
-        libtest_mimic::Trial::test("scheme_repeated_many_bins", || {
-            scheme_repeated_many_bins();
             Ok(())
         })
         .with_ignored_flag(false),

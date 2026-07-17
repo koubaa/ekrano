@@ -11,10 +11,10 @@ use ekrano::{
     kurbo::{Affine, Circle, Rect},
     peniko::{Brush, Fill, color::palette},
 };
-use ekrano_tests::{TestBackend, TestParams, shared_test_device, smoke_snapshot_test_sync};
+use ekrano_tests::{TestParams, shared_test_device, smoke_snapshot_test_sync};
 use scenes::SimpleText;
 
-fn filled_square_body(backend: TestBackend) {
+fn filled_square() {
     let mut scene = Scene::new();
     scene.fill(
         Fill::NonZero,
@@ -23,20 +23,13 @@ fn filled_square_body(backend: TestBackend) {
         None,
         &Rect::from_center_size((10., 10.), (6., 6.)),
     );
-    let params = TestParams::new("filled_square", 20, 20).with_backend(backend);
+    let params = TestParams::new("filled_square", 20, 20);
     smoke_snapshot_test_sync(scene, &params)
         .unwrap()
         .assert_mean_less_than(0.01);
 }
-fn filled_square() {
-    filled_square_body(TestBackend::Classic);
-}
 
-fn scheme_filled_square() {
-    filled_square_body(TestBackend::Scheme);
-}
-
-fn filled_circle_body(backend: TestBackend) {
+fn filled_circle() {
     let mut scene = Scene::new();
     scene.fill(
         Fill::NonZero,
@@ -45,20 +38,13 @@ fn filled_circle_body(backend: TestBackend) {
         None,
         &Circle::new((10., 10.), 7.),
     );
-    let params = TestParams::new("filled_circle", 20, 20).with_backend(backend);
+    let params = TestParams::new("filled_circle", 20, 20);
     smoke_snapshot_test_sync(scene, &params)
         .unwrap()
         .assert_mean_less_than(0.01);
 }
-fn filled_circle() {
-    filled_circle_body(TestBackend::Classic);
-}
 
-fn scheme_filled_circle() {
-    filled_circle_body(TestBackend::Scheme);
-}
-
-fn two_emoji_body(backend: TestBackend) {
+fn two_emoji() {
     let mut scene = Scene::new();
     let mut text = SimpleText::new();
     text.add_colr_emoji_run(&mut scene, 24., Affine::translate((0., 24.)), None, Fill::NonZero, "🤠");
@@ -70,17 +56,10 @@ fn two_emoji_body(backend: TestBackend) {
         Fill::NonZero,
         "🤠",
     );
-    let params = TestParams::new("two_emoji", 60, 30).with_backend(backend);
+    let params = TestParams::new("two_emoji", 60, 30);
     smoke_snapshot_test_sync(scene, &params)
         .unwrap()
         .assert_mean_less_than(0.01);
-}
-fn two_emoji() {
-    two_emoji_body(TestBackend::Classic);
-}
-
-fn scheme_two_emoji() {
-    two_emoji_body(TestBackend::Scheme);
 }
 
 fn main() {
@@ -93,13 +72,6 @@ fn main() {
         .with_ignored_flag(false),
     );
     trials.push(
-        libtest_mimic::Trial::test("scheme_filled_square", || {
-            scheme_filled_square();
-            Ok(())
-        })
-        .with_ignored_flag(false),
-    );
-    trials.push(
         libtest_mimic::Trial::test("filled_circle", || {
             filled_circle();
             Ok(())
@@ -107,22 +79,8 @@ fn main() {
         .with_ignored_flag(false),
     );
     trials.push(
-        libtest_mimic::Trial::test("scheme_filled_circle", || {
-            scheme_filled_circle();
-            Ok(())
-        })
-        .with_ignored_flag(false),
-    );
-    trials.push(
         libtest_mimic::Trial::test("two_emoji", || {
             two_emoji();
-            Ok(())
-        })
-        .with_ignored_flag(false),
-    );
-    trials.push(
-        libtest_mimic::Trial::test("scheme_two_emoji", || {
-            scheme_two_emoji();
             Ok(())
         })
         .with_ignored_flag(false),

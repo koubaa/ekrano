@@ -19,7 +19,7 @@ use ekrano::peniko::color::palette;
 #[cfg(target_os = "macos")]
 use ekrano::peniko::{Blob, Brush, FontData};
 use ekrano::{Scene, kurbo::Affine, peniko::Fill};
-use ekrano_tests::{TestBackend, TestParams, shared_test_device, snapshot_test_sync};
+use ekrano_tests::{TestParams, shared_test_device, snapshot_test_sync};
 use scenes::SimpleText;
 #[cfg(target_os = "macos")]
 use std::sync::Arc;
@@ -81,7 +81,7 @@ fn encode_apple_bitmap(text: &str, font_size: f32) -> Scene {
 /// The Emoji supported by our font subset.
 const TEXT: &str = "✅👀🎉🤠";
 
-fn big_colr(backend: TestBackend) {
+fn big_colr() {
     let font_size = 48.;
     let scene = encode_noto_colr(TEXT, font_size);
     let params = TestParams::new(
@@ -89,25 +89,22 @@ fn big_colr(backend: TestBackend) {
         (font_size * 10.) as _,
         // Noto Emoji seem to be about 25% bigger than the actual font_size suggests
         (font_size * 1.25).ceil() as _,
-    )
-    .with_backend(backend);
+    );
     snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.002);
 }
 
-fn little_colr(backend: TestBackend) {
+fn little_colr() {
     let font_size = 10.;
     let scene = encode_noto_colr(TEXT, font_size);
-    let params =
-        TestParams::new("little_colr", (font_size * 10.) as _, (font_size * 1.25).ceil() as _).with_backend(backend);
+    let params = TestParams::new("little_colr", (font_size * 10.) as _, (font_size * 1.25).ceil() as _);
     snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.005);
 }
 
-fn colr_undef(backend: TestBackend) {
+fn colr_undef() {
     let font_size = 10.;
     // This emoji isn't in the subset we have made
     let scene = encode_noto_colr("🤷", font_size);
-    let params =
-        TestParams::new("colr_undef", (font_size * 10.) as _, (font_size * 1.25).ceil() as _).with_backend(backend);
+    let params = TestParams::new("colr_undef", (font_size * 10.) as _, (font_size * 1.25).ceil() as _);
     // TODO: Work out why the undef glyph is nothing - is it an issue with our font subset or with our renderer?
     snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.001);
 }
@@ -115,41 +112,37 @@ fn colr_undef(backend: TestBackend) {
 // Bitmap emoji compositing can differ slightly between DX12 WARP and hardware GPUs
 // (±1–2 RGB on opaque glyph pixels; FLIP mean ~0.0011 on WARP vs ~0.0009 on hardware).
 // CI runs on WARP; regenerate the snapshot with `EKRANO_TEST_UPDATE=big_bitmap` on WARP if needed.
-fn big_bitmap(backend: TestBackend) {
+fn big_bitmap() {
     let font_size = 48.;
     let scene = encode_noto_bitmap(TEXT, font_size);
-    let params =
-        TestParams::new("big_bitmap", (font_size * 10.) as _, (font_size * 1.25).ceil() as _).with_backend(backend);
+    let params = TestParams::new("big_bitmap", (font_size * 10.) as _, (font_size * 1.25).ceil() as _);
     snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.001);
 }
 
 #[cfg(target_os = "macos")]
-fn big_bitmap_apple(backend: TestBackend) {
+fn big_bitmap_apple() {
     let font_size = 48.;
     let scene = encode_apple_bitmap(TEXT, font_size);
     let params = TestParams::new(
         "big_bitmap_apple",
         (font_size * 10.) as _,
         (font_size * 1.25).ceil() as _,
-    )
-    .with_backend(backend);
+    );
     snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.001);
 }
 
-fn little_bitmap(backend: TestBackend) {
+fn little_bitmap() {
     let font_size = 10.;
     let scene = encode_noto_bitmap(TEXT, font_size);
-    let params =
-        TestParams::new("little_bitmap", (font_size * 10.) as _, (font_size * 1.25).ceil() as _).with_backend(backend);
+    let params = TestParams::new("little_bitmap", (font_size * 10.) as _, (font_size * 1.25).ceil() as _);
     snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.001);
 }
 
-fn bitmap_undef(backend: TestBackend) {
+fn bitmap_undef() {
     let font_size = 10.;
     // This emoji isn't in the subset we have made
     let scene = encode_noto_bitmap("🤷", font_size);
-    let params =
-        TestParams::new("bitmap_undef", (font_size * 10.) as _, (font_size * 1.25).ceil() as _).with_backend(backend);
+    let params = TestParams::new("bitmap_undef", (font_size * 10.) as _, (font_size * 1.25).ceil() as _);
     // TODO: Work out why the undef glyph is nothing - is it an issue with our font subset or with our renderer?
     snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.001);
 }
@@ -170,23 +163,16 @@ fn main() {
         }};
     }
 
-    case!("big_colr", big_colr(TestBackend::Classic));
-    case!("scheme_big_colr", big_colr(TestBackend::Scheme));
-    case!("little_colr", little_colr(TestBackend::Classic));
-    case!("scheme_little_colr", little_colr(TestBackend::Scheme));
-    case!("colr_undef", colr_undef(TestBackend::Classic));
-    case!("scheme_colr_undef", colr_undef(TestBackend::Scheme));
-    case!("big_bitmap", big_bitmap(TestBackend::Classic));
-    case!("scheme_big_bitmap", big_bitmap(TestBackend::Scheme));
+    case!("big_colr", big_colr());
+    case!("little_colr", little_colr());
+    case!("colr_undef", colr_undef());
+    case!("big_bitmap", big_bitmap());
     #[cfg(target_os = "macos")]
     {
-        case!("big_bitmap_apple", big_bitmap_apple(TestBackend::Classic));
-        case!("scheme_big_bitmap_apple", big_bitmap_apple(TestBackend::Scheme));
+        case!("big_bitmap_apple", big_bitmap_apple());
     }
-    case!("little_bitmap", little_bitmap(TestBackend::Classic));
-    case!("scheme_little_bitmap", little_bitmap(TestBackend::Scheme));
-    case!("bitmap_undef", bitmap_undef(TestBackend::Classic));
-    case!("scheme_bitmap_undef", bitmap_undef(TestBackend::Scheme));
+    case!("little_bitmap", little_bitmap());
+    case!("bitmap_undef", bitmap_undef());
 
     let mut args = libtest_mimic::Arguments::from_args();
     if let Some(device) = shared_test_device() {

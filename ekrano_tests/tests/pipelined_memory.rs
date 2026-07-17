@@ -12,8 +12,8 @@ mod submission;
 
 use ekrano::kurbo::{Affine, Rect};
 use ekrano::peniko::{Fill, color::palette};
-use ekrano::{AaConfig, GoldyBackend, GoldyRenderer, RenderParams, Scene};
-use ekrano_tests::{SharedTestDevice, TestBackend, shared_test_device, test_alloc_texture, test_device};
+use ekrano::{AaConfig, GoldyRenderer, RenderParams, Scene};
+use ekrano_tests::{SharedTestDevice, shared_test_device, test_alloc_texture, test_device};
 use goldy::types::{TextureFlags, TextureFormat, TextureKind};
 
 /// Serialize GPU tests when the D3D12 debug layer is active.
@@ -45,9 +45,9 @@ fn make_device() -> SharedTestDevice {
     test_device()
 }
 
-fn make_renderer(backend: TestBackend) -> (SharedTestDevice, GoldyRenderer) {
+fn make_renderer() -> (SharedTestDevice, GoldyRenderer) {
     let device = make_device();
-    let renderer = GoldyRenderer::new_with_backend(&device, backend.goldy_backend()).expect("GoldyRenderer");
+    let renderer = GoldyRenderer::new(&device).expect("GoldyRenderer");
     (device, renderer)
 }
 
@@ -65,16 +65,16 @@ fn tiny_scene() -> Scene {
 
 /// Render many frames and verify the frame-orchestrator ring stays at depth=1.
 ///
-/// On scheme backends with nonblocking reuse (`host_sidecar_on_submit_worker`), frames
-/// close with `end_frame_externally_ordered` and leave **no** retirement-ring slot, so
+/// With nonblocking reuse (`host_sidecar_on_submit_worker`), frames close with
+/// `end_frame_externally_ordered` and leave **no** retirement-ring slot, so
 /// `cleanup_ring_depth` stays 0 after each frame.
-fn single_frame_ring_depth_bounded_body(backend: TestBackend) {
+fn single_frame_ring_depth_bounded() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
 
     let device = make_device();
-    let nonblocking = device.capabilities().host_sidecar_on_submit_worker && matches!(backend, TestBackend::Scheme);
-    let mut renderer = GoldyRenderer::new_with_backend(&device, backend.goldy_backend()).expect("GoldyRenderer");
+    let nonblocking = device.capabilities().host_sidecar_on_submit_worker;
+    let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer");
     let texture = test_alloc_texture(
         renderer.device(),
         WIDTH,
@@ -111,20 +111,13 @@ fn single_frame_ring_depth_bounded_body(backend: TestBackend) {
         }
     }
 }
-fn single_frame_ring_depth_bounded() {
-    single_frame_ring_depth_bounded_body(TestBackend::Classic);
-}
-
-fn scheme_single_frame_ring_depth_bounded() {
-    single_frame_ring_depth_bounded_body(TestBackend::Scheme);
-}
 
 /// Verify the resource pool stabilises after warmup under the single-frame model.
-fn resource_pool_stable_under_single_frame_body(backend: TestBackend) {
+fn resource_pool_stable_under_single_frame() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
 
-    let (_device, mut renderer) = make_renderer(backend);
+    let (_device, mut renderer) = make_renderer();
     let texture = test_alloc_texture(
         renderer.device(),
         WIDTH,
@@ -165,28 +158,19 @@ fn resource_pool_stable_under_single_frame_body(backend: TestBackend) {
         baseline.total_pooled_buffers,
     );
 }
-fn resource_pool_stable_under_single_frame() {
-    resource_pool_stable_under_single_frame_body(TestBackend::Classic);
-}
-
-fn scheme_resource_pool_stable_under_single_frame() {
-    resource_pool_stable_under_single_frame_body(TestBackend::Scheme);
-}
 
 /// Verify the composite indirect buffer is reused (not reallocated) across frames when the
 /// scene resolution is unchanged, and reallocated when the resolution changes.
 ///
-/// Scheme-backend only: Classic never populates `retained_pool_buffer_bytes` (returns 0).
-///
 /// Failure modes this catches:
 /// - `alloc_or_reuse_scheme_indirect` ignoring the cache and allocating every frame.
 /// - The cache key being stale so topology changes don't trigger a fresh allocation.
-fn scheme_indirect_buffer_reused_across_frames() {
+fn indirect_buffer_reused_across_frames() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
 
     let device = make_device();
-    let mut renderer = GoldyRenderer::new_with_backend(&device, GoldyBackend::Scheme).expect("GoldyRenderer");
+    let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer");
 
     let texture_a = test_alloc_texture(
         renderer.device(),
@@ -273,9 +257,9 @@ fn scheme_indirect_buffer_reused_across_frames() {
     }
 }
 
-/// Scheme head-chases-tail: resize churn must not force orchestrator retirement
+/// Head-chases-tail: resize churn must not force orchestrator retirement
 /// slots or unbounded retained-pool growth (DX12/Vulkan with host sidecar).
-fn scheme_resize_churn_keeps_ring_empty_and_pool_bounded() {
+fn resize_churn_keeps_ring_empty_and_pool_bounded() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
 
@@ -285,7 +269,7 @@ fn scheme_resize_churn_keeps_ring_empty_and_pool_bounded() {
         return;
     }
 
-    let mut renderer = GoldyRenderer::new_with_backend(&device, GoldyBackend::Scheme).expect("GoldyRenderer");
+    let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer");
     let scene = tiny_scene();
     let sizes = [
         (WIDTH, HEIGHT),
@@ -342,13 +326,6 @@ fn main() {
         .with_ignored_flag(false),
     );
     trials.push(
-        libtest_mimic::Trial::test("scheme_single_frame_ring_depth_bounded", || {
-            scheme_single_frame_ring_depth_bounded();
-            Ok(())
-        })
-        .with_ignored_flag(false),
-    );
-    trials.push(
         libtest_mimic::Trial::test("resource_pool_stable_under_single_frame", || {
             resource_pool_stable_under_single_frame();
             Ok(())
@@ -356,22 +333,15 @@ fn main() {
         .with_ignored_flag(false),
     );
     trials.push(
-        libtest_mimic::Trial::test("scheme_resource_pool_stable_under_single_frame", || {
-            scheme_resource_pool_stable_under_single_frame();
+        libtest_mimic::Trial::test("indirect_buffer_reused_across_frames", || {
+            indirect_buffer_reused_across_frames();
             Ok(())
         })
         .with_ignored_flag(false),
     );
     trials.push(
-        libtest_mimic::Trial::test("scheme_indirect_buffer_reused_across_frames", || {
-            scheme_indirect_buffer_reused_across_frames();
-            Ok(())
-        })
-        .with_ignored_flag(false),
-    );
-    trials.push(
-        libtest_mimic::Trial::test("scheme_resize_churn_keeps_ring_empty_and_pool_bounded", || {
-            scheme_resize_churn_keeps_ring_empty_and_pool_bounded();
+        libtest_mimic::Trial::test("resize_churn_keeps_ring_empty_and_pool_bounded", || {
+            resize_churn_keeps_ring_empty_and_pool_bounded();
             Ok(())
         })
         .with_ignored_flag(false),
