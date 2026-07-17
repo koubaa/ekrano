@@ -678,7 +678,7 @@ fn al_cached_opt(
 ///
 /// Cross-frame reuse is ordered by [`goldy::Scheme::record_reuse_epochs`] on the worker
 /// scheme (DX12/Vulkan/Metal) or by the frame-orchestrator `begin_frame` wait (backends
-/// without host_sidecar_on_submit_worker). If pipeline
+/// without `host_sidecar_on_submit_worker`). If pipeline
 /// depth is raised so the next frame may record while the prior frame's GPU work is still in
 /// flight without those gates, a single retained deed is not enough — use double-buffered
 /// parcels or a transient pool instead.

@@ -750,10 +750,11 @@ impl PersistentState {
     /// On DX12/Vulkan, defers return to the texture pool until `tv` retires (nonblocking).
     fn reclaim_scheme_render_targets(&mut self, ctx: &Context, out: Texture, layers: [Texture; 4], tv: TimelineValue) {
         if self.metal_heap_sensitive {
-            if tv != 0 && ctx.gpu_progress() < tv {
-                if let Err(e) = ctx.wait_until(tv) {
-                    log::warn!("[RT-CACHE] wait_until({tv}) failed before Metal scheme RT drop: {e}");
-                }
+            if tv != 0
+                && ctx.gpu_progress() < tv
+                && let Err(e) = ctx.wait_until(tv)
+            {
+                log::warn!("[RT-CACHE] wait_until({tv}) failed before Metal scheme RT drop: {e}");
             }
             drop(out);
             for l in layers {
@@ -833,17 +834,16 @@ impl PersistentState {
                 .min();
             // Metal must wait on scheme RTs too before dropping them for heap free.
             // DX12/Vulkan defer scheme reclaim without a render-thread stall.
-            if self.metal_heap_sensitive {
-                if let Some((_, _, tv)) = &self.cached_scheme_rt {
-                    oldest = Some(oldest.map_or(*tv, |o| o.min(*tv)));
-                }
+            if self.metal_heap_sensitive
+                && let Some((_, _, tv)) = &self.cached_scheme_rt
+            {
+                oldest = Some(oldest.map_or(*tv, |o| o.min(*tv)));
             }
             if let Some(oldest) = oldest
                 && progress < oldest
+                && let Err(e) = ctx.wait_until(oldest)
             {
-                if let Err(e) = ctx.wait_until(oldest) {
-                    log::warn!("[RT-CACHE] wait_until({oldest}) failed during resize purge: {e}");
-                }
+                log::warn!("[RT-CACHE] wait_until({oldest}) failed during resize purge: {e}");
             }
         }
 

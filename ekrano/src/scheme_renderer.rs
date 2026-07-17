@@ -2012,7 +2012,10 @@ mod tests {
 
         let mut scene_b = Scene::new();
         // Same atlas size (1024²) and image_count (1); different region (8×8 → 16×16).
-        scene_b.draw_image(&solid_image(16, 16, [50, 100, 200, 255]), peniko::kurbo::Affine::IDENTITY);
+        scene_b.draw_image(
+            &solid_image(16, 16, [50, 100, 200, 255]),
+            peniko::kurbo::Affine::IDENTITY,
+        );
 
         let params = RenderParams {
             base_color: peniko::color::palette::css::BLACK,
