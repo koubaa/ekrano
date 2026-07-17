@@ -19,9 +19,9 @@
 //!    from `out_image` to the present lease.
 //! 4. [`goldy::Scheme::grant_present`] records the present easement (once per frame in
 //!    Phase 2; retained in Phase 3).
-//! 5. [`goldy::Scheme::submit_with_acquired_presents`] submits all partitions using a
-//!    drawable acquired at frame start (classic-like timing); fall back to
-//!    [`goldy::Scheme::submit`] only when no swapchain pool is bound.
+//! 5. [`goldy::Scheme::submit`] submits non-present partitions first, then acquires the
+//!    drawable when the present partition is about to run (deferred acquire); fall back
+//!    to headless [`goldy::Scheme::submit`] only when no swapchain pool is bound.
 //! 6. [`PresentToken::present`] performs scanout — synchronously in
 //!    [`SchemeRenderer::render_to_swapchain`], or async on `TID_PRESENT` via
 //!    [`SchemeRenderer::submit_to_swapchain`] + velato's `Presenter`.
@@ -37,7 +37,7 @@ use std::mem::size_of;
 use std::sync::Arc;
 
 use goldy::task_graph::NodeAccess;
-use goldy::types::{ResourceAccess, TextureFlags, TextureFormat, TextureKind};
+use goldy::types::{BackendType, ResourceAccess, TextureFlags, TextureFormat, TextureKind};
 use goldy::{
     BudgetPolicy, Buffer, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator, Scheme, ShaderModule,
     Signal, TaskGraph, Texture,
@@ -58,7 +58,7 @@ use crate::{
     },
     scheme_render::Render,
     shaders::{self, FullShaders},
-    worker_retention::{upload_key, worker_stale_reasons, worker_topology},
+    worker_retention::{predict_worker_stale, upload_key, worker_stale_reasons, worker_topology},
 };
 use ekrano_encoding::{BumpAllocators, Images, Layout, Ramps, RenderConfig, Resolver};
 
@@ -85,14 +85,18 @@ pub struct SchemeRenderer {
     persistent: PersistentState,
     /// Pipelined frame scheduling: depth enforcement and timeline tracking.
     frame_pipeline: FrameOrchestrator<()>,
-    /// When true (DX12/Vulkan), reuse ordering is enforced via scheme submit sidecars and
+    /// When true (DX12/Vulkan/Metal), reuse ordering is enforced via scheme submit sidecars and
     /// frames close with [`FrameOrchestrator::end_frame_externally_ordered`] — no
-    /// coarse `begin_frame` GPU wait. Metal keeps the blocking ring path.
+    /// coarse `begin_frame` GPU wait. Backends without `host_sidecar_on_submit_worker`
+    /// keep the blocking ring path.
     nonblocking_reuse: bool,
     /// Persistent bump estimates: running max across frames.
     persistent_bump: Option<BumpAllocators>,
     /// Frame counter for rate-limiting housekeeping operations.
     cleanup_frame_counter: u64,
+    /// When true (Metal), upload declarations and copies are recorded on the worker
+    /// scheme so one submit emits a single upload+compute command buffer.
+    metal_fused_upload: bool,
     /// Retained worker scheme: compute topology recorded once per fingerprint.
     worker: Scheme,
     /// Persistent upload scheme: per-frame property writes without churning worker topology.
@@ -124,6 +128,7 @@ impl SchemeRenderer {
             FrameOrchestrator::new(&context, FRAME_PIPELINE_DEPTH)
         };
         let nonblocking_reuse = device.capabilities().host_sidecar_on_submit_worker;
+        let metal_fused_upload = device.backend_type() == BackendType::Metal;
         let worker = Scheme::new(&context);
         let upload = Scheme::new(&context);
         let readback = Scheme::new(&context);
@@ -136,6 +141,7 @@ impl SchemeRenderer {
             persistent: PersistentState::new(&device),
             frame_pipeline,
             nonblocking_reuse,
+            metal_fused_upload,
             persistent_bump: None,
             cleanup_frame_counter: 0,
             worker,
@@ -348,9 +354,10 @@ impl SchemeRenderer {
     }
 
     /// Like [`Self::submit_to_swapchain`], but runs `pre_acquire` after the upload
-    /// scheme is submitted and immediately before the worker acquires its swapchain
-    /// drawable. Callers use this to defer present-ack backpressure to the acquire
-    /// boundary so upload recording/submit overlaps the previous frame's present.
+    /// scheme is submitted and immediately before the worker scheme submits (including
+    /// deferred swapchain acquire at the present partition). Callers use this to defer
+    /// present-ack backpressure to that boundary so upload recording/submit overlaps the
+    /// previous frame's present.
     pub fn submit_to_swapchain_with<F>(
         &mut self,
         prepared: PreparedFrame,
@@ -384,7 +391,17 @@ impl SchemeRenderer {
     /// Upload scheme retention counters (tests / diagnostics).
     #[cfg(test)]
     pub(crate) fn upload_replay_stats(&self) -> goldy::ReplayStats {
-        self.upload.replay_stats()
+        if self.metal_fused_upload {
+            self.worker.replay_stats()
+        } else {
+            self.upload.replay_stats()
+        }
+    }
+
+    /// True when upload topology is recorded on the worker scheme (Metal fused path).
+    #[cfg(test)]
+    pub(crate) fn metal_fused_upload(&self) -> bool {
+        self.metal_fused_upload
     }
 
     /// Worker topology records across worker replacements (tests / diagnostics).
@@ -573,12 +590,14 @@ impl SchemeRenderer {
         self.persistent.drain_pending_returns();
 
         let out_image_format = pool.map(|p| p.format()).unwrap_or(TextureFormat::Rgba8Unorm);
-        self.persistent.purge_render_target_cache_if_mismatch(
+        if self.persistent.purge_render_target_cache_if_mismatch(
             &self.context,
             params.width,
             params.height,
             out_image_format,
-        );
+        ) {
+            self.device.compact_overflow_heaps();
+        }
 
         let t_drain_start = Instant::now();
 
@@ -597,16 +616,6 @@ impl SchemeRenderer {
 
         let prev_bump = self.persistent.take_last_drained_bump();
         self.apply_bump_feedback(prev_bump, &layout, &params, &mut config, &mut stats);
-
-        // Match classic task-graph timing: acquire the swapchain drawable immediately
-        // after begin_frame, before prepare/coarse/fine recording.
-        let mut early_present = if let Some(pool) = pool {
-            let _tz = goldy::tracy_zone!("ekrano.surface.acquire_early");
-            let lease = pool.lease();
-            Some(pool.acquire_present(&lease).map_err(|e| Error::Shader(e.to_string()))?)
-        } else {
-            None
-        };
 
         let t1 = Instant::now();
         if self.persistent.linear_clamp_sampler.is_none() {
@@ -659,7 +668,7 @@ impl SchemeRenderer {
             &image_regions,
         );
         let upload_needs_record = crate::worker_retention::upload_stale(&self.persistent, &upload_key);
-        if upload_needs_record {
+        if upload_needs_record && !self.metal_fused_upload {
             self.upload = Scheme::new(&self.context);
             // Logical upload declarations live on the scheme; drop cached handles.
             self.persistent.cached_scene_upload = None;
@@ -673,13 +682,47 @@ impl SchemeRenderer {
             }
         }
 
-        let (mut pipeline, out_image_handle) = {
+        let output_tex_handle = output_texture.map(|t| t.gpu_handle());
+        // Metal fused: upload + worker topology share one scheme. When a re-record is
+        // required, replace the worker *before* prepare and prepare once onto it —
+        // otherwise the first prepare consumes cached_pipeline / RTs and the re-prepare
+        // allocates a duplicate set while the first PipelineResources is still alive.
+        let metal_fused_rerecord = self.metal_fused_upload
+            && (upload_needs_record
+                || predict_worker_stale(
+                    &self.persistent,
+                    &topology,
+                    &layer_filter_effects,
+                    output_tex_handle,
+                    params.width,
+                    params.height,
+                    out_image_format,
+                ));
+
+        let (mut pipeline, out_image_handle, worker_stale) = if metal_fused_rerecord {
+            {
+                let _tz = goldy::tracy_zone!("ekrano.worker_record");
+                self.worker = Scheme::new(&self.context);
+                self.persistent.cached_bump_grant = None;
+                self.persistent.cached_present_grant = None;
+                // Upload topology lives on the worker scheme; drop cached declarations.
+                self.persistent.cached_scene_upload = None;
+                self.persistent.cached_config_upload = None;
+                self.persistent.cached_gradient_upload = None;
+                self.persistent.cached_mask_upload = None;
+                self.persistent.cached_image_region_uploads.clear();
+            }
+            #[cfg(test)]
+            {
+                self.upload_record_epochs += 1;
+            }
             let mut recorder = SchemeRecorder::new(
                 &self.device,
                 &self.context,
                 &mut self.worker,
                 &mut self.upload,
-                upload_needs_record,
+                true, // re-record fused upload topology on the new worker
+                self.metal_fused_upload,
                 self.nonblocking_reuse,
                 &mut self.frame_pipeline,
                 frame_handle,
@@ -711,22 +754,68 @@ impl SchemeRenderer {
                 .handle(ResourceAccess::Write)
                 .expect("out_image must be writable");
             recorder.dismiss();
-            (pipeline, out_image_handle)
-        };
+            if upload_needs_record {
+                self.persistent.cached_upload_key = Some(upload_key);
+            }
+            (pipeline, out_image_handle, true)
+        } else {
+            let mut recorder = SchemeRecorder::new(
+                &self.device,
+                &self.context,
+                &mut self.worker,
+                &mut self.upload,
+                upload_needs_record,
+                self.metal_fused_upload,
+                self.nonblocking_reuse,
+                &mut self.frame_pipeline,
+                frame_handle,
+                &mut self.persistent,
+                &self.engine_shaders,
+            );
+            let pipeline = {
+                let _tz = goldy::tracy_zone!("ekrano.prepare");
+                let pipeline_result = recorder.prepare_pipeline_resources(
+                    coverage_mask.as_ref(),
+                    packed,
+                    ramps,
+                    images,
+                    &params,
+                    &config,
+                    out_image_format,
+                );
+                self.resolver = resolver;
+                match pipeline_result {
+                    Ok(p) => p,
+                    Err(e) => {
+                        recorder.dismiss();
+                        return Err(e);
+                    }
+                }
+            };
+            let out_image_handle = pipeline
+                .out_image
+                .handle(ResourceAccess::Write)
+                .expect("out_image must be writable");
+            recorder.dismiss();
+            if upload_needs_record {
+                self.persistent.cached_upload_key = Some(upload_key);
+            }
 
-        if upload_needs_record {
-            self.persistent.cached_upload_key = Some(upload_key);
-        }
-
-        let worker_stale = {
-            let _tz = goldy::tracy_zone!("ekrano.worker_stale_check");
-            worker_stale_reasons(
-                &self.persistent,
-                &topology,
-                &layer_filter_effects,
-                out_image_handle,
-                output_texture.map(|t| t.gpu_handle()),
-            )
+            let worker_stale = {
+                let _tz = goldy::tracy_zone!("ekrano.worker_stale_check");
+                worker_stale_reasons(
+                    &self.persistent,
+                    &topology,
+                    &layer_filter_effects,
+                    out_image_handle,
+                    output_tex_handle,
+                )
+            };
+            debug_assert!(
+                !(self.metal_fused_upload && worker_stale),
+                "Metal fused worker re-record should have been predicted before prepare"
+            );
+            (pipeline, out_image_handle, worker_stale)
         };
 
         #[cfg(debug_assertions)]
@@ -745,7 +834,7 @@ impl SchemeRenderer {
         #[cfg(debug_assertions)]
         let mut debug_recorded_resources = None;
 
-        if worker_stale {
+        if worker_stale && !metal_fused_rerecord {
             let _tz = goldy::tracy_zone!("ekrano.worker_record");
             self.worker = Scheme::new(&self.context);
             self.persistent.cached_bump_grant = None;
@@ -757,7 +846,8 @@ impl SchemeRenderer {
             &self.context,
             &mut self.worker,
             &mut self.upload,
-            upload_needs_record,
+            upload_needs_record || metal_fused_rerecord,
+            self.metal_fused_upload,
             self.nonblocking_reuse,
             &mut self.frame_pipeline,
             frame_handle,
@@ -866,7 +956,7 @@ impl SchemeRenderer {
             scheme_submission,
         } = {
             let _tz = goldy::tracy_zone!("ekrano.finish");
-            recorder.finish(pool.is_some(), pre_acquire, early_present.take())?
+            recorder.finish(pool.is_some(), pre_acquire, None)?
         };
 
         if let Some((present, bump, topology, filter_effects, out_image)) = worker_cache {
@@ -899,8 +989,9 @@ impl SchemeRenderer {
             _ => None,
         };
 
-        // On Metal the ring stamps compute+copy completion so begin_frame waits.
-        // On DX12/Vulkan (nonblocking_reuse) ordering lives in submit sidecars + present easement;
+        // On backends without nonblocking_reuse the ring stamps compute+copy completion
+        // so begin_frame waits. On DX12/Vulkan/Metal (nonblocking_reuse) ordering lives in
+        // submit sidecars + present easement;
         // no retirement slot is created, so note_presented is a no-op / unused.
         if !self.nonblocking_reuse {
             self.frame_pipeline.note_presented(frame_tv);
@@ -1033,11 +1124,13 @@ pub(crate) struct SchemeRecorder<'a> {
     pub(crate) context: &'a Context,
     /// Retained worker scheme (compute + present topology).
     pub(crate) scheme: &'a mut Scheme,
-    /// Per-frame upload scheme (property writes only).
+    /// Per-frame upload scheme (property writes only); unused on Metal fused path.
     upload: &'a mut Scheme,
+    /// When true (Metal), upload nodes are recorded on the worker scheme.
+    metal_fused_upload: bool,
     /// When true, the upload scheme IR is empty and copy/upload nodes must be recorded this frame.
     pub(crate) upload_needs_record: bool,
-    /// DX12 head-chases-tail path: deferred host writes + reuse epochs; no ring wait.
+    /// Nonblocking head-chases-tail path: deferred host writes + reuse epochs; no ring wait.
     pub(crate) nonblocking_reuse: bool,
     frame_pipeline: &'a mut FrameOrchestrator<()>,
     frame_handle: FrameHandle,
@@ -1068,7 +1161,11 @@ impl<'a> SchemeRecorder<'a> {
     }
 
     pub(crate) fn upload_scheme(&mut self) -> &mut Scheme {
-        self.upload
+        if self.metal_fused_upload {
+            self.scheme
+        } else {
+            self.upload
+        }
     }
 
     pub(crate) fn copy_texture_to_present(&mut self, src: &Texture, dst: &goldy::PresentLease) {
@@ -1085,6 +1182,7 @@ impl<'a> SchemeRecorder<'a> {
         scheme: &'a mut Scheme,
         upload: &'a mut Scheme,
         upload_needs_record: bool,
+        metal_fused_upload: bool,
         nonblocking_reuse: bool,
         frame_pipeline: &'a mut FrameOrchestrator<()>,
         frame_handle: FrameHandle,
@@ -1101,6 +1199,7 @@ impl<'a> SchemeRecorder<'a> {
             scheme,
             upload,
             upload_needs_record,
+            metal_fused_upload,
             nonblocking_reuse,
             frame_pipeline,
             frame_handle,
@@ -1373,8 +1472,8 @@ impl<'a> SchemeRecorder<'a> {
     where
         F: FnOnce() -> Result<()>,
     {
-        self.finished = true;
-
+        // Keep `finished` false until success so Drop aborts the orchestrator frame
+        // if upload/submit/end_frame fails (otherwise begin_frame stays stuck open).
         self.persistent.deferred_owned_cap_hint = self.deferred_owned_buffers.capacity();
         self.persistent.deferred_textures_cap_hint = self.deferred_textures.capacity();
 
@@ -1383,15 +1482,14 @@ impl<'a> SchemeRecorder<'a> {
 
         let frame_handle = self.frame_handle;
 
-        {
+        if !self.metal_fused_upload {
             let _tz = goldy::tracy_zone!("ekrano.finish.upload_submit");
             self.upload.submit().map_err(|e| Error::Shader(e.to_string()))?;
         }
 
-        // The upload scheme has no dependency on the swapchain image. Run the caller's
-        // pre-acquire barrier (e.g. wait-for-present-ack) here after upload submit.
-        // Drawable acquire itself is done earlier (`ekrano.surface.acquire_early`) when
-        // an `AcquiredPresent` was supplied.
+        // On the fused Metal path the upload blits share the worker scheme's single
+        // command buffer. Run pre_acquire immediately before that submit so the
+        // upload is not committed ahead of the drawable/present barrier.
         {
             let _tz = goldy::tracy_zone!("ekrano.finish.pre_acquire");
             pre_acquire()?;
@@ -1427,6 +1525,7 @@ impl<'a> SchemeRecorder<'a> {
                     .map_err(|e| Error::Shader(e.to_string()))?
             }
         };
+        self.finished = true;
         Ok(FrameFinishOutcome {
             timeline: tv,
             surface_frame: None,
@@ -1499,6 +1598,7 @@ mod tests {
                     &mut worker,
                     &mut upload,
                     true,
+                    false,
                     false,
                     &mut frame_pipeline,
                     frame_handle,
@@ -1579,15 +1679,26 @@ mod tests {
             "foreign readback reader on out_image dirties worker topology once"
         );
         let upload_stats = renderer.upload_replay_stats();
-        assert_eq!(
-            upload_stats.records, 2,
-            "bootstrap record + one topology-induced invalidation when worker registers \
-             reader edges on shared parcels (optimization target: should plateau at 1)"
-        );
-        assert_eq!(
-            upload_stats.topology_records, 1,
-            "foreign worker reader on shared parcels dirties upload topology once"
-        );
+        if renderer.metal_fused_upload() {
+            assert_eq!(
+                upload_stats.records, stats.records,
+                "fused Metal path: upload and worker share one scheme"
+            );
+            assert_eq!(
+                upload_stats.topology_records, stats.topology_records,
+                "fused Metal path: upload and worker share one scheme"
+            );
+        } else {
+            assert_eq!(
+                upload_stats.records, 2,
+                "bootstrap record + one topology-induced invalidation when worker registers \
+                 reader edges on shared parcels (optimization target: should plateau at 1)"
+            );
+            assert_eq!(
+                upload_stats.topology_records, 1,
+                "foreign worker reader on shared parcels dirties upload topology once"
+            );
+        }
     }
 
     /// Resolution change invalidates worker retention and triggers exactly one re-record.
@@ -1692,10 +1803,19 @@ mod tests {
         }
 
         let stats = renderer.worker_replay_stats();
-        assert_eq!(
-            stats.records, 1,
-            "render_to_texture has no foreign readback scheme on out_image"
-        );
+        assert_eq!(renderer.worker_record_epochs(), 1);
+        if renderer.metal_fused_upload() {
+            assert!(
+                stats.records >= 1,
+                "fused Metal path: worker scheme records at least once; upload staging may \
+                 trigger an additional partition record without ekrano re-recording coarse/fine"
+            );
+        } else {
+            assert_eq!(
+                stats.records, 1,
+                "render_to_texture has no foreign readback scheme on out_image"
+            );
+        }
         assert_eq!(stats.topology_records, 0);
     }
 
@@ -1834,15 +1954,126 @@ mod tests {
             .render_to_buffer(&scene, &params)
             .expect("render_to_buffer with msaa16");
 
-        assert_eq!(
-            renderer.upload_record_epochs(),
-            upload_epochs_after_area,
-            "upload scheme must NOT re-record when only AA mode changes"
-        );
+        if renderer.metal_fused_upload() {
+            assert_eq!(
+                renderer.upload_record_epochs(),
+                upload_epochs_after_area + 1,
+                "fused Metal path: worker replacement re-attaches upload topology"
+            );
+        } else {
+            assert_eq!(
+                renderer.upload_record_epochs(),
+                upload_epochs_after_area,
+                "upload scheme must NOT re-record when only AA mode changes"
+            );
+        }
         assert_eq!(
             renderer.worker_record_epochs(),
             worker_epochs_after_area + 1,
             "worker scheme must re-record on AA mode change"
+        );
+    }
+
+    /// Image atlas region layout can change while atlas dimensions and image count stay
+    /// fixed (default atlas is 1024²). That dirties `UploadKey.image_regions` without
+    /// dirtying `WorkerTopology`.
+    ///
+    /// On the Metal fused path, upload copy nodes live on the worker scheme — without
+    /// forcing a worker replacement, new region uploads would be appended while old
+    /// `UploadBuffer` ids remain referenced but unstaged, poisoning submit permanently.
+    #[test]
+    fn fused_worker_rerecords_on_image_region_layout_change() {
+        let _cb = goldy::test_support::CbReuseOverride::force_enabled();
+        let Some((gpu, _)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
+            return;
+        };
+
+        let mut renderer = SchemeRenderer::new(&gpu).expect("SchemeRenderer::new");
+
+        fn solid_image(width: u32, height: u32, rgba: [u8; 4]) -> peniko::ImageBrush {
+            let data = rgba.repeat((width * height) as usize);
+            peniko::ImageBrush {
+                image: peniko::ImageData {
+                    data: data.into(),
+                    format: peniko::ImageFormat::Rgba8,
+                    width,
+                    height,
+                    alpha_type: peniko::ImageAlphaType::Alpha,
+                },
+                sampler: peniko::ImageSampler {
+                    quality: peniko::ImageQuality::Low,
+                    ..Default::default()
+                },
+            }
+        }
+
+        let mut scene_a = Scene::new();
+        scene_a.draw_image(&solid_image(8, 8, [200, 100, 50, 255]), peniko::kurbo::Affine::IDENTITY);
+
+        let mut scene_b = Scene::new();
+        // Same atlas size (1024²) and image_count (1); different region (8×8 → 16×16).
+        scene_b.draw_image(
+            &solid_image(16, 16, [50, 100, 200, 255]),
+            peniko::kurbo::Affine::IDENTITY,
+        );
+
+        let params = RenderParams {
+            base_color: peniko::color::palette::css::BLACK,
+            width: 64,
+            height: 64,
+            antialiasing_method: crate::AaConfig::Area,
+            robust: false,
+        };
+
+        for _ in 0..2 {
+            renderer
+                .render_to_buffer(&scene_a, &params)
+                .expect("render_to_buffer scene_a");
+        }
+        let worker_epochs = renderer.worker_record_epochs();
+        let upload_epochs = renderer.upload_record_epochs();
+        assert_eq!(worker_epochs, 1);
+        assert_eq!(upload_epochs, 1);
+
+        // Must succeed (not poison the retained worker) and re-record upload topology.
+        renderer
+            .render_to_buffer(&scene_b, &params)
+            .expect("render_to_buffer after image region layout change");
+
+        assert!(
+            renderer.upload_record_epochs() > upload_epochs,
+            "upload topology must re-record when image region layout changes at fixed atlas dims"
+        );
+        if renderer.metal_fused_upload() {
+            assert!(
+                renderer.worker_record_epochs() > worker_epochs,
+                "fused Metal path: worker must be replaced when upload topology changes"
+            );
+        } else {
+            assert_eq!(
+                renderer.worker_record_epochs(),
+                worker_epochs,
+                "non-fused path: image region layout is upload-only; worker topology stays fresh"
+            );
+        }
+
+        // Stabilise: further frames with scene_b must not keep failing or re-recording.
+        let worker_stable = renderer.worker_record_epochs();
+        let upload_stable = renderer.upload_record_epochs();
+        for _ in 0..2 {
+            renderer
+                .render_to_buffer(&scene_b, &params)
+                .expect("render_to_buffer scene_b stable");
+        }
+        assert_eq!(
+            renderer.upload_record_epochs(),
+            upload_stable,
+            "upload must not re-record on repeated frames with stable region layout"
+        );
+        assert_eq!(
+            renderer.worker_record_epochs(),
+            worker_stable,
+            "worker must not re-record on repeated frames with stable region layout"
         );
     }
 }

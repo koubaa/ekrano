@@ -483,12 +483,14 @@ impl GraphRenderer {
         self.persistent.drain_pending_returns();
 
         let out_image_format = surface.map(|s| s.format()).unwrap_or(TextureFormat::Rgba8Unorm);
-        self.persistent.purge_render_target_cache_if_mismatch(
+        if self.persistent.purge_render_target_cache_if_mismatch(
             &self.context,
             params.width,
             params.height,
             out_image_format,
-        );
+        ) {
+            self.device.compact_overflow_heaps();
+        }
 
         let t_drain_start = Instant::now();
 
@@ -508,6 +510,9 @@ impl GraphRenderer {
         let prev_bump = self.persistent.take_last_drained_bump();
         self.apply_bump_feedback(prev_bump, &layout, &params, &mut config, &mut stats);
 
+        // Classic path: acquire the drawable before prepare/record so acquire failure
+        // aborts cleanly (no throwaway GPU work) and pacing matches pre-Metal-opt behavior.
+        // Scheme deferred acquire (Unit 10) does not apply here.
         let preacquired_frame = if let Some(surface) = surface {
             let _tz = goldy::tracy_zone!("ekrano.surface.acquire_early");
             match surface.begin() {
@@ -1079,9 +1084,12 @@ impl<'a> GraphRecorder<'a> {
     ///
     /// Surface paths call [`goldy::Frame::submit_frame`] before returning so the
     /// timeline is valid for cache stamping before [`goldy::Frame::present`].
+    /// When a drawable was acquired at frame start, finishes via
+    /// [`FrameOrchestrator::end_frame_for_acquired_surface`]; otherwise
+    /// [`FrameOrchestrator::end_frame_for_surface`] acquires inside submit.
     pub(crate) fn finish(mut self) -> Result<FrameFinishOutcome> {
-        self.finished = true;
-
+        // Keep `finished` false until success so Drop aborts the orchestrator frame
+        // if end_frame / submit_frame fails.
         self.persistent.deferred_owned_cap_hint = self.deferred_owned_buffers.capacity();
         self.persistent.deferred_textures_cap_hint = self.deferred_textures.capacity();
 
@@ -1102,6 +1110,7 @@ impl<'a> GraphRecorder<'a> {
                     .map_err(|e| Error::Shader(e.to_string()))?
             };
             let submit_tv = frame.submit_frame().map_err(|e| Error::Shader(e.to_string()))?;
+            self.finished = true;
             Ok(FrameFinishOutcome {
                 timeline: submit_tv,
                 surface_frame: Some(frame),
@@ -1117,6 +1126,7 @@ impl<'a> GraphRecorder<'a> {
                 .frame_pipeline
                 .end_frame_standalone(frame_handle, self.graph, fallback, ())
                 .map_err(|e| Error::Shader(e.to_string()))?;
+            self.finished = true;
             Ok(FrameFinishOutcome {
                 timeline: tv,
                 surface_frame: None,

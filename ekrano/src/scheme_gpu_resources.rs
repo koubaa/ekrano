@@ -57,8 +57,12 @@ fn release_or_defer_pooled_texture(recorder: &mut SchemeRecorder<'_>, tex: Textu
         return;
     }
     let mut payload = goldy::DeferredPayload::new();
+    let generation = std::sync::Arc::clone(&recorder.persistent.texture_return_generation);
+    let created_generation = generation.load(std::sync::atomic::Ordering::Relaxed);
     payload.push(DeferredPoolTextureReturn {
         pending: std::sync::Arc::clone(&recorder.persistent.pending_texture_returns),
+        generation,
+        created_generation,
         tex: Some(tex),
     });
     recorder.context().defer_release(epoch, payload);
@@ -66,11 +70,17 @@ fn release_or_defer_pooled_texture(recorder: &mut SchemeRecorder<'_>, tex: Textu
 
 struct DeferredPoolTextureReturn {
     pending: std::sync::Arc<std::sync::Mutex<Vec<Texture>>>,
+    generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    created_generation: u64,
     tex: Option<Texture>,
 }
 
 impl Drop for DeferredPoolTextureReturn {
     fn drop(&mut self) {
+        if self.generation.load(std::sync::atomic::Ordering::Relaxed) != self.created_generation {
+            // Metal resize purge invalidated this generation — drop without re-pooling.
+            return;
+        }
         if let Some(tex) = self.tex.take()
             && let Ok(mut pending) = self.pending.lock()
         {
@@ -667,7 +677,8 @@ fn al_cached_opt(
 /// See `resource-pool.md §1` for the rationale behind this split from [`ScratchPipelineBuffers`].
 ///
 /// Cross-frame reuse is ordered by [`goldy::Scheme::record_reuse_epochs`] on the worker
-/// scheme (DX12/Vulkan) or by the frame-orchestrator `begin_frame` wait (Metal). If pipeline
+/// scheme (DX12/Vulkan/Metal) or by the frame-orchestrator `begin_frame` wait (backends
+/// without `host_sidecar_on_submit_worker`). If pipeline
 /// depth is raised so the next frame may record while the prior frame's GPU work is still in
 /// flight without those gates, a single retained deed is not enough — use double-buffered
 /// parcels or a transient pool instead.
@@ -1113,8 +1124,9 @@ impl PipelineResources {
         let buffer_sizes = cpu_config_owned.buffer_sizes;
 
         // Try to reuse cached pipeline buffers from the previous frame.
-        // On DX12/Vulkan, ordering is via submit-side reuse epochs / deferred host writes.
-        // On Metal, begin_frame still retires the prior frame before reuse.
+        // On DX12/Vulkan/Metal, ordering is via submit-side reuse epochs / deferred host writes.
+        // On backends without host_sidecar_on_submit_worker, begin_frame still retires
+        // the prior frame before reuse.
         let (cached_stable, cached_scratch) = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.pipeline_cache");
             match recorder.persistent.take_cached_pipeline() {
@@ -1252,16 +1264,36 @@ impl PipelineResources {
                         TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
                     )
                     .map_err(|e| Error::Shader(e.to_string()))?;
-                let layers = std::array::from_fn(|_| {
+                let layers = [
                     acquire_texture_rgba(
                         recorder,
                         params.width,
                         params.height,
                         TextureKind::DirectInterpolated,
                         TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
-                    )
-                    .expect("filter layer")
-                });
+                    )?,
+                    acquire_texture_rgba(
+                        recorder,
+                        params.width,
+                        params.height,
+                        TextureKind::DirectInterpolated,
+                        TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
+                    )?,
+                    acquire_texture_rgba(
+                        recorder,
+                        params.width,
+                        params.height,
+                        TextureKind::DirectInterpolated,
+                        TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
+                    )?,
+                    acquire_texture_rgba(
+                        recorder,
+                        params.width,
+                        params.height,
+                        TextureKind::DirectInterpolated,
+                        TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
+                    )?,
+                ];
                 (out, layers)
             }
         };

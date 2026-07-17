@@ -3,9 +3,7 @@
 
 //! Retained worker-scheme invalidation (no per-frame hashing).
 
-#[cfg(debug_assertions)]
-use goldy::types::ResourceAccess;
-use goldy::types::{ResourceHandle, TextureFormat};
+use goldy::types::{ResourceAccess, ResourceHandle, TextureFormat};
 #[cfg(debug_assertions)]
 use goldy::{Buffer, Texture};
 
@@ -205,6 +203,41 @@ pub(crate) fn worker_stale_reasons(
     let topology_mismatch = persistent.cached_worker_topology.as_ref() != Some(topology);
     let filter_effects_mismatch = !layer_filter_effects_eq(&persistent.cached_worker_filter_effects, filter_effects);
     out_image_mismatch || output_texture_mismatch || topology_mismatch || filter_effects_mismatch
+}
+
+/// Predict worker staleness *before* `prepare_pipeline_resources` acquires resources.
+///
+/// Peeks the cached scheme `out_image` handle when dimensions still match; a cache miss
+/// means prepare will allocate a new RT (new handle) and the worker is therefore stale.
+/// Used on the Metal fused path to skip a throwaway first prepare that would consume
+/// `cached_pipeline` / RTs and force a duplicate allocation spike on re-prepare.
+pub(crate) fn predict_worker_stale(
+    persistent: &PersistentState,
+    topology: &WorkerTopology,
+    filter_effects: &[LayerFilterEffect],
+    output_texture: Option<goldy::backend::TextureHandle>,
+    width: u32,
+    height: u32,
+    out_format: TextureFormat,
+) -> bool {
+    if persistent.cached_worker_topology.as_ref() != Some(topology) {
+        return true;
+    }
+    if !layer_filter_effects_eq(&persistent.cached_worker_filter_effects, filter_effects) {
+        return true;
+    }
+    if persistent.cached_worker_output_texture != output_texture {
+        return true;
+    }
+    match &persistent.cached_scheme_rt {
+        Some((out, _, _)) if out.width() == width && out.height() == height && out.format() == out_format => {
+            let handle = out
+                .handle(ResourceAccess::Write)
+                .expect("cached scheme out_image must be writable");
+            persistent.cached_worker_out_image != Some(handle)
+        }
+        _ => true,
+    }
 }
 
 /// Retained resubmit assumes worker-bound resources keep the same GPU handles.

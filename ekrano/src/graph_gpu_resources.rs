@@ -762,16 +762,36 @@ impl PipelineResources {
                         TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
                     )
                     .map_err(|e| Error::Shader(e.to_string()))?;
-                let layers = std::array::from_fn(|_| {
+                let layers = [
                     acquire_texture_rgba(
                         recorder,
                         params.width,
                         params.height,
                         TextureKind::DirectInterpolated,
                         TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
-                    )
-                    .expect("filter layer")
-                });
+                    )?,
+                    acquire_texture_rgba(
+                        recorder,
+                        params.width,
+                        params.height,
+                        TextureKind::DirectInterpolated,
+                        TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
+                    )?,
+                    acquire_texture_rgba(
+                        recorder,
+                        params.width,
+                        params.height,
+                        TextureKind::DirectInterpolated,
+                        TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
+                    )?,
+                    acquire_texture_rgba(
+                        recorder,
+                        params.width,
+                        params.height,
+                        TextureKind::DirectInterpolated,
+                        TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
+                    )?,
+                ];
                 (out, layers)
             }
         };
