@@ -627,10 +627,18 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
              Filter linear_clamp, Filter nearest_clamp,
 #endif
              ThreadId global_id, GroupThreadId local_id, GroupId wg_id) {
-    Config config = config_buf[0];
+    // Scalar field loads — avoid `Config config = config_buf[0]`, which Slang
+    // lowers to a 100-byte private aggregate copy even though fine only reads
+    // six fields. See issue #56 register-pressure notes.
+    uint width_in_tiles = config_buf[0].width_in_tiles;
+    uint tile_y_offset = config_buf[0].tile_y_offset;
+    uint base_color_u = config_buf[0].base_color;
+    uint mask_active = config_buf[0].mask_active;
+    uint target_width = config_buf[0].target_width;
+    uint target_height = config_buf[0].target_height;
 
-    uint actual_y = wg_id.y + config.tile_y_offset;
-    uint tile_ix = actual_y * config.width_in_tiles + wg_id.x;
+    uint actual_y = wg_id.y + tile_y_offset;
+    uint tile_ix = actual_y * width_in_tiles + wg_id.x;
     float2 xy = float2(float(global_id.x * PIXELS_PER_THREAD), float(local_id.y + actual_y * TILE_HEIGHT));
     float2 local_xy = float2(float(local_id.x * PIXELS_PER_THREAD), float(local_id.y));
 #ifndef msaa
@@ -646,13 +654,13 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
     image_atlas.GetDimensions(atlas_w, atlas_h);
     float2 inv_atlas = float2(1.0 / float(atlas_w), 1.0 / float(atlas_h));
 
-    float4 base_color = unpackUnorm4x8ToFloat(config.base_color);
+    float4 base_color = unpackUnorm4x8ToFloat(base_color_u);
     float4 rgba[4];
     for (uint i = 0; i < 4; i++) rgba[i] = base_color;
 
     float mask_w[4];
     for (uint mi = 0; mi < 4; mi++) {
-        if (config.mask_active != 0u) {
+        if (mask_active != 0u) {
             uint2 mc = uint2(uint(xy.x) + mi, uint(xy.y));
             mask_w[mi] = mask_atlas.Load(int3(int2(mc), 0)).r;
         } else {
@@ -776,7 +784,7 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
                 if (area[i] < (1.0 / 510.0)) { rgba[i] = bg; continue; }
                 float4 fg = rgba[i] * area[i] * mask_w[i] * end_clip.alpha;
                 uint2 coords = uint2(uint(xy.x) + i, uint(xy.y));
-                if (coords.x < config.target_width && coords.y < config.target_height) {
+                if (coords.x < target_width && coords.y < target_height) {
                     if (layer_idx == 0u)
                         filter_tex0[coords] = fg;
                     else if (layer_idx == 1u)
@@ -977,7 +985,7 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
 
     for (uint i = 0; i < 4; i++) {
         uint2 coords = uint2(uint(xy.x) + i, uint(xy.y));
-        if (coords.x < config.target_width && coords.y < config.target_height) {
+        if (coords.x < target_width && coords.y < target_height) {
             float4 fg = rgba[i];
             float a_inv = 1.0 / max(fg.a, 1e-6);
             float4 rgba_sep = float4(fg.rgb * a_inv, fg.a);
