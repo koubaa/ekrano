@@ -958,15 +958,23 @@ impl SchemeRenderer {
             .then(|| self.persistent.cached_present_grant.clone())
             .flatten();
 
-        if params.robust
-            && self.persistent.cached_bump_grant.is_some()
-            && let Some(ref submission) = scheme_submission
-        {
-            self.persistent.queue_bump_submission(submission.clone());
-        }
-
         let present_token = match (present_grant, scheme_submission) {
-            (Some(grant), Some(submission)) => Some(PresentToken { grant, submission }),
+            (Some(grant), Some(mut submission)) => {
+                let claim = grant
+                    .transaction()
+                    .claim(&mut submission)
+                    .map_err(|e| Error::Shader(e.to_string()))?;
+                if params.robust && self.persistent.cached_bump_grant.is_some() {
+                    self.persistent.queue_bump_submission(submission);
+                }
+                Some(PresentToken { claim })
+            }
+            (None, Some(submission)) => {
+                if params.robust && self.persistent.cached_bump_grant.is_some() {
+                    self.persistent.queue_bump_submission(submission);
+                }
+                None
+            }
             _ => None,
         };
 

@@ -229,16 +229,13 @@ pub(crate) struct FrameFinishOutcome {
 /// Produced by [`crate::GoldyRenderer::submit_to_swapchain`]. Hand to `TID_PRESENT` for async
 /// scanout, or call [`Self::present`] synchronously (e.g. [`crate::scheme_renderer::SchemeRenderer::render_to_swapchain`]).
 pub struct PresentToken {
-    pub(crate) grant: goldy::PresentGrant,
-    pub(crate) submission: goldy::Submission,
+    pub(crate) claim: goldy::Claim,
 }
 
 impl PresentToken {
-    /// Perform scanout via [`goldy::PresentGrant::consume`].
+    /// Perform scanout via [`goldy::Claim::consume`].
     pub fn present(self) -> Result<()> {
-        self.grant
-            .consume(&self.submission)
-            .map_err(|e| Error::Shader(e.to_string()))
+        self.claim.consume().map_err(|e| Error::Shader(e.to_string()))
     }
 }
 
