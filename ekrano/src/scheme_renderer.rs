@@ -8,17 +8,16 @@
 //!
 //! # Surface rendering
 //!
-//! `SchemeRenderer` uses the scheme-native present mechanism:
+//! `SchemeRenderer` uses the scheme-native present mechanism via [`goldy::SurfaceExchange`]:
 //!
-//! 1. [`goldy::SwapchainPool`] is passed by the caller each frame.
-//! 2. A [`goldy::PresentLease`] is acquired from the pool.
-//! 3. After all compute nodes, [`goldy::Scheme::copy_texture_to_present`] records a copy
-//!    from `out_image` to the present lease.
-//! 4. [`goldy::Scheme::grant_present`] records the present easement.
-//! 5. [`goldy::Scheme::submit`] submits non-present partitions first, then acquires the
+//! 1. [`goldy::SurfaceExchange`] is passed by the caller each frame.
+//! 2. After all compute nodes, [`goldy::SurfaceExchange::bind`] records a copy
+//!    from `out_image` to the surface destination and returns a [`goldy::Transaction`].
+//! 3. [`goldy::Scheme::submit`] submits non-present partitions first, then acquires the
 //!    drawable when the present partition is about to run (deferred acquire); fall back
-//!    to headless [`goldy::Scheme::submit`] only when no swapchain pool is bound.
-//! 6. [`PresentToken::present`] performs scanout — synchronously in
+//!    to headless [`goldy::Scheme::submit`] only when no surface exchange is bound.
+//! 4. [`goldy::Transaction::claim`] extracts a [`goldy::Claim`] from the submission.
+//! 5. [`PresentToken::present`] performs scanout — synchronously in
 //!    [`SchemeRenderer::render_to_swapchain`], or async on `TID_PRESENT` via
 //!    [`SchemeRenderer::submit_to_swapchain`] + velato's `Presenter`.
 
@@ -58,8 +57,8 @@ use ekrano_encoding::{BumpAllocators, Images, Layout, Ramps, RenderConfig, Resol
 /// Goldy-based 2D renderer using the retained-[`Scheme`] backend.
 ///
 /// All rendering is done via Goldy's [`Scheme`] command recording.
-/// Surface presentation uses [`goldy::SwapchainPool`] + [`goldy::PresentGrant`]
-/// (scheme-native present mechanism).
+/// Surface presentation uses [`goldy::SurfaceExchange`] + [`goldy::Transaction`] /
+/// [`goldy::Claim`] (scheme-native present mechanism).
 pub struct SchemeRenderer {
     device: Device,
     context: Context,
@@ -262,18 +261,18 @@ impl SchemeRenderer {
 
     /// Render a scene to a swapchain using the scheme-native present mechanism.
     ///
-    /// `pool` must have been created with the same [`Context`] as this renderer.
-    /// Each call acquires a drawable from the pool, submits the scheme, and returns
+    /// `surface` must have been created with the same [`Context`] as this renderer.
+    /// Each call binds the rendered output to the surface, submits the scheme, and returns
     /// a [`PresentToken`] for scanout via [`PresentToken::present`].
     pub fn render_to_swapchain(
         &mut self,
         scene: &Scene,
-        pool: &goldy::SwapchainPool,
+        surface: &goldy::SurfaceExchange,
         params: &RenderParams,
     ) -> Result<FrameStats> {
         let _tz = goldy::tracy_zone!("ekrano.render_to_swapchain");
         let prepared = self.prepare(scene, params)?;
-        let (stats, token) = self.submit_to_swapchain(prepared, pool)?;
+        let (stats, token) = self.submit_to_swapchain(prepared, surface)?;
         token.present()?;
         Ok(stats)
     }
@@ -325,15 +324,15 @@ impl SchemeRenderer {
 
     /// Phase 2: record GPU work and return frame stats plus a present token.
     ///
-    /// Uses the scheme-native present mechanism: records a `copy_texture_to_present`
-    /// node followed by `grant_present`, submits the scheme, and returns a
+    /// Uses the scheme-native present mechanism: records a surface bind via
+    /// [`goldy::SurfaceExchange::bind`], submits the scheme, and returns a
     /// [`PresentToken`] for scanout (does not call [`PresentToken::present`]).
     pub fn submit_to_swapchain(
         &mut self,
         prepared: PreparedFrame,
-        pool: &goldy::SwapchainPool,
+        surface: &goldy::SurfaceExchange,
     ) -> Result<(FrameStats, PresentToken)> {
-        self.submit_to_swapchain_with(prepared, pool, || Ok(()))
+        self.submit_to_swapchain_with(prepared, surface, || Ok(()))
     }
 
     /// Like [`Self::submit_to_swapchain`], but runs `pre_acquire` after the upload
@@ -344,7 +343,7 @@ impl SchemeRenderer {
     pub fn submit_to_swapchain_with<F>(
         &mut self,
         prepared: PreparedFrame,
-        pool: &goldy::SwapchainPool,
+        surface: &goldy::SurfaceExchange,
         pre_acquire: F,
     ) -> Result<(FrameStats, PresentToken)>
     where
@@ -352,9 +351,9 @@ impl SchemeRenderer {
     {
         let _tz = goldy::tracy_zone!("ekrano.submit_to_swapchain");
         self.poll_and_reclaim();
-        let (stats, token) = self.run_frame_from_prepared(prepared, None, Some(pool), pre_acquire)?;
+        let (stats, token) = self.run_frame_from_prepared(prepared, None, Some(surface), pre_acquire)?;
         token
-            .ok_or_else(|| Error::Shader("missing present grant for swapchain submit".into()))
+            .ok_or_else(|| Error::Shader("missing present transaction for swapchain submit".into()))
             .map(|token| (stats, token))
     }
 
@@ -516,10 +515,10 @@ impl SchemeRenderer {
         scene: &Scene,
         params: &RenderParams,
         output_texture: Option<&Texture>,
-        pool: Option<&goldy::SwapchainPool>,
+        surface: Option<&goldy::SurfaceExchange>,
     ) -> Result<FrameStats> {
         let prepared = self.prepare(scene, params)?;
-        let (stats, token) = self.run_frame_from_prepared(prepared, output_texture, pool, || Ok(()))?;
+        let (stats, token) = self.run_frame_from_prepared(prepared, output_texture, surface, || Ok(()))?;
         if let Some(token) = token {
             token.present()?;
         }
@@ -528,13 +527,13 @@ impl SchemeRenderer {
 
     /// GPU submission path for both texture and swapchain rendering.
     ///
-    /// When `pool` is `Some`, records `copy_texture_to_present` + `grant_present`
-    /// into the scheme, submits, and returns a [`PresentToken`] (does not present).
+    /// When `surface` is `Some`, records a surface bind via [`goldy::SurfaceExchange::bind`],
+    /// submits, and returns a [`PresentToken`] (does not present).
     fn run_frame_from_prepared<F>(
         &mut self,
         prepared: PreparedFrame,
         output_texture: Option<&Texture>,
-        pool: Option<&goldy::SwapchainPool>,
+        surface: Option<&goldy::SurfaceExchange>,
         pre_acquire: F,
     ) -> Result<(FrameStats, Option<PresentToken>)>
     where
@@ -572,7 +571,7 @@ impl SchemeRenderer {
 
         self.persistent.drain_pending_returns();
 
-        let out_image_format = pool.map(|p| p.format()).unwrap_or(TextureFormat::Rgba8Unorm);
+        let out_image_format = surface.map(|s| s.format()).unwrap_or(TextureFormat::Rgba8Unorm);
         if self.persistent.purge_render_target_cache_if_mismatch(
             &self.context,
             params.width,
@@ -629,7 +628,7 @@ impl SchemeRenderer {
             images_width,
             images_height,
             image_entries.len(),
-            pool.is_some(),
+            surface.is_some(),
             scene_bucket,
             coverage_mask_dims,
         );
@@ -687,7 +686,7 @@ impl SchemeRenderer {
                 let _tz = goldy::tracy_zone!("ekrano.worker_record");
                 self.worker = Scheme::new(&self.context);
                 self.persistent.cached_bump_grant = None;
-                self.persistent.cached_present_grant = None;
+                self.persistent.cached_present_tx = None;
                 // Upload topology lives on the worker scheme; drop cached declarations.
                 self.persistent.cached_scene_upload = None;
                 self.persistent.cached_config_upload = None;
@@ -821,7 +820,7 @@ impl SchemeRenderer {
             let _tz = goldy::tracy_zone!("ekrano.worker_record");
             self.worker = Scheme::new(&self.context);
             self.persistent.cached_bump_grant = None;
-            self.persistent.cached_present_grant = None;
+            self.persistent.cached_present_tx = None;
         }
 
         let mut recorder = SchemeRecorder::new(
@@ -877,10 +876,8 @@ impl SchemeRenderer {
             }
             let t_fine_record = t3.elapsed();
 
-            let present_grant = if let Some(pool) = pool {
-                let screen = pool.lease();
-                recorder.copy_texture_to_present(&pipeline.out_image, &screen);
-                Some(recorder.grant_present(&screen))
+            let present_tx = if let Some(surface) = surface {
+                Some(recorder.bind_surface(surface, &pipeline.out_image)?)
             } else {
                 None
             };
@@ -897,7 +894,7 @@ impl SchemeRenderer {
             };
 
             worker_cache = Some((
-                present_grant,
+                present_tx,
                 bump_grant,
                 topology,
                 layer_filter_effects.clone(),
@@ -937,11 +934,11 @@ impl SchemeRenderer {
             scheme_submission,
         } = {
             let _tz = goldy::tracy_zone!("ekrano.finish");
-            recorder.finish(pool.is_some(), pre_acquire, None)?
+            recorder.finish(surface.is_some(), pre_acquire, None)?
         };
 
         if let Some((present, bump, topology, filter_effects, out_image)) = worker_cache {
-            self.persistent.cached_present_grant = present;
+            self.persistent.cached_present_tx = present;
             self.persistent.cached_bump_grant = bump;
             self.persistent.cached_worker_topology = Some(topology);
             self.persistent.cached_worker_filter_effects = filter_effects;
@@ -953,15 +950,14 @@ impl SchemeRenderer {
             }
         }
 
-        let present_grant = pool
+        let present_tx = surface
             .is_some()
-            .then(|| self.persistent.cached_present_grant.clone())
+            .then(|| self.persistent.cached_present_tx.clone())
             .flatten();
 
-        let present_token = match (present_grant, scheme_submission) {
-            (Some(grant), Some(mut submission)) => {
-                let claim = grant
-                    .transaction()
+        let present_token = match (present_tx, scheme_submission) {
+            (Some(tx), Some(mut submission)) => {
+                let claim = tx
                     .claim(&mut submission)
                     .map_err(|e| Error::Shader(e.to_string()))?;
                 if params.robust && self.persistent.cached_bump_grant.is_some() {
@@ -1006,7 +1002,7 @@ impl SchemeRenderer {
             let t_submit = t4.elapsed();
 
             let frame_num = FRAME_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let label = if pool.is_some() { "swapchain" } else { "" };
+            let label = if surface.is_some() { "swapchain" } else { "" };
 
             let ring_depth = self.frame_pipeline.pending_frames();
             let (transient_views, transient_textures) = self.context.transient_cache_counts();
@@ -1145,12 +1141,14 @@ impl<'a> SchemeRecorder<'a> {
         }
     }
 
-    pub(crate) fn copy_texture_to_present(&mut self, src: &Texture, dst: &goldy::PresentLease) {
-        self.scheme.copy_texture_to_present(src, dst);
-    }
-
-    pub(crate) fn grant_present(&mut self, dst: &goldy::PresentLease) -> goldy::PresentGrant {
-        self.scheme.grant_present(dst)
+    pub(crate) fn bind_surface(
+        &mut self,
+        surface: &goldy::SurfaceExchange,
+        source: &Texture,
+    ) -> Result<goldy::Transaction> {
+        surface
+            .bind(self.scheme, source)
+            .map_err(|e| Error::Shader(e.to_string()))
     }
 
     pub(crate) fn new(

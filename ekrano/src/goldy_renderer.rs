@@ -538,10 +538,10 @@ pub(crate) struct PersistentState {
     pub(crate) cached_image_atlas: Option<(u32, u32, Texture)>,
     /// Stable mask atlas (width, height, texture).
     pub(crate) cached_mask_atlas: Option<(u32, u32, Texture)>,
-    /// Present grant recorded once on the worker when swapchain presentation is enabled.
-    /// Consume resolves the present easement at the copy/present-partition timeline
+    /// Present transaction recorded once on the worker when surface presentation is enabled.
+    /// Claim resolves the present easement at the copy/present-partition timeline
     /// (when `out_image` finishes being read), not the later display-present timeline.
-    pub(crate) cached_present_grant: Option<goldy::PresentGrant>,
+    pub(crate) cached_present_tx: Option<goldy::Transaction>,
     /// `out_image` handle the worker was recorded against (RT cache rotation invalidates retention).
     pub(crate) cached_worker_out_image: Option<goldy::types::ResourceHandle>,
     /// Output texture handle the worker fine pass was recorded against.
@@ -605,7 +605,7 @@ impl PersistentState {
             cached_gradient: None,
             cached_image_atlas: None,
             cached_mask_atlas: None,
-            cached_present_grant: None,
+            cached_present_tx: None,
             cached_worker_out_image: None,
             cached_worker_output_texture: None,
             #[cfg(debug_assertions)]
