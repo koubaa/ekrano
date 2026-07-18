@@ -311,6 +311,8 @@ pub(crate) fn defer_frame_gpu_resources(
 pub(crate) struct GoldyShader {
     pub(crate) pipeline: ComputePipeline,
     pub(crate) bindings: Vec<BindType>,
+    /// Registration name (e.g. `"fine_area"`) used for scheme node labels and Metal PSO labels.
+    pub(crate) label: &'static str,
 }
 
 #[derive(Hash, PartialEq, Eq, Clone)]
