@@ -35,6 +35,8 @@ pub(crate) struct WorkerTopology {
     pub images_height: u32,
     pub image_count: usize,
     pub swapchain_present: bool,
+    /// When true, fine/filter composites write directly to the present lease (no `out_image`).
+    pub direct_present: bool,
     /// Scene byte bucket the worker was recorded against; change = new scene buffer handle.
     pub scene_bucket: u64,
     /// Normalized mask atlas dims (1×1 when no coverage mask).
@@ -53,6 +55,7 @@ pub(crate) fn worker_topology(
     images_height: u32,
     image_count: usize,
     swapchain_present: bool,
+    direct_present: bool,
     scene_bucket: u64,
     coverage_mask_dims: Option<(u32, u32)>,
 ) -> WorkerTopology {
@@ -71,6 +74,7 @@ pub(crate) fn worker_topology(
         images_height,
         image_count,
         swapchain_present,
+        direct_present,
         scene_bucket,
         mask_atlas_width,
         mask_atlas_height,
@@ -150,7 +154,7 @@ pub(crate) struct WorkerResourceHandles {
     pub gradient: ResourceHandle,
     pub image_atlas: ResourceHandle,
     pub mask_atlas: ResourceHandle,
-    pub out_image: ResourceHandle,
+    pub out_image: Option<ResourceHandle>,
 }
 
 #[cfg(debug_assertions)]
@@ -160,7 +164,7 @@ pub(crate) fn worker_resource_handles(
     gradient: &Texture,
     image_atlas: &Texture,
     mask_atlas: &Texture,
-    out_image: &Texture,
+    out_image: Option<&Texture>,
 ) -> WorkerResourceHandles {
     WorkerResourceHandles {
         scene: scattered_buffer_handle(scene),
@@ -168,9 +172,7 @@ pub(crate) fn worker_resource_handles(
         gradient: sampled_texture_handle(gradient),
         image_atlas: sampled_texture_handle(image_atlas),
         mask_atlas: sampled_texture_handle(mask_atlas),
-        out_image: out_image
-            .handle(ResourceAccess::Write)
-            .expect("out_image must be writable"),
+        out_image: out_image.and_then(|tex| tex.handle(ResourceAccess::Write)),
     }
 }
 
@@ -195,10 +197,14 @@ pub(crate) fn worker_stale_reasons(
     persistent: &PersistentState,
     topology: &WorkerTopology,
     filter_effects: &[LayerFilterEffect],
-    out_image: ResourceHandle,
+    out_image: Option<ResourceHandle>,
     output_texture: Option<goldy::backend::TextureHandle>,
 ) -> bool {
-    let out_image_mismatch = persistent.cached_worker_out_image != Some(out_image);
+    let out_image_mismatch = if topology.direct_present {
+        false
+    } else {
+        persistent.cached_worker_out_image != out_image
+    };
     let output_texture_mismatch = persistent.cached_worker_output_texture != output_texture;
     let topology_mismatch = persistent.cached_worker_topology.as_ref() != Some(topology);
     let filter_effects_mismatch = !layer_filter_effects_eq(&persistent.cached_worker_filter_effects, filter_effects);
@@ -229,13 +235,17 @@ pub(crate) fn predict_worker_stale(
     if persistent.cached_worker_output_texture != output_texture {
         return true;
     }
+    if topology.direct_present {
+        return false;
+    }
     match &persistent.cached_scheme_rt {
-        Some((out, _, _)) if out.width() == width && out.height() == height && out.format() == out_format => {
+        Some((Some(out), _, _)) if out.width() == width && out.height() == height && out.format() == out_format => {
             let handle = out
                 .handle(ResourceAccess::Write)
                 .expect("cached scheme out_image must be writable");
             persistent.cached_worker_out_image != Some(handle)
         }
+        Some((None, _, _)) => false,
         _ => true,
     }
 }
@@ -370,6 +380,7 @@ mod tests {
     use peniko::color::palette::css;
 
     use ekrano_encoding::FilterEdgeMode;
+    use ekrano_encoding::BufferSizes;
     use peniko::color::{AlphaColor, Srgb};
 
     fn premul_srgb(color: AlphaColor<Srgb>) -> peniko::color::PremulColor<Srgb> {
@@ -548,5 +559,66 @@ mod tests {
             *color = premul_srgb(css::BLUE);
         }
         assert!(!layer_filter_effects_eq(&[a], &[b]));
+    }
+
+    fn sample_topology(direct_present: bool) -> WorkerTopology {
+        WorkerTopology {
+            aa: AaConfig::Area,
+            robust: false,
+            out_format: TextureFormat::Rgba8Unorm,
+            width: 64,
+            height: 64,
+            buffer_sizes: BufferSizes::default(),
+            has_coverage_mask: false,
+            ramps_width: 1,
+            ramps_height: 1,
+            images_width: 1,
+            images_height: 1,
+            image_count: 0,
+            swapchain_present: true,
+            direct_present,
+            scene_bucket: 256,
+            mask_atlas_width: 1,
+            mask_atlas_height: 1,
+        }
+    }
+
+    #[test]
+    fn worker_stale_when_direct_present_mode_changes() {
+        let mut p = PersistentState::new_test_only();
+        let copy_topo = sample_topology(false);
+        let direct_topo = sample_topology(true);
+        p.cached_worker_topology = Some(copy_topo.clone());
+        assert!(worker_stale_reasons(
+            &p,
+            &direct_topo,
+            &[],
+            None,
+            None,
+        ));
+        p.cached_worker_topology = Some(direct_topo.clone());
+        assert!(!worker_stale_reasons(
+            &p,
+            &direct_topo,
+            &[],
+            None,
+            None,
+        ));
+    }
+
+    #[test]
+    fn predict_worker_stale_false_in_direct_present_without_out_image() {
+        let mut p = PersistentState::new_test_only();
+        let topo = sample_topology(true);
+        p.cached_worker_topology = Some(topo.clone());
+        assert!(!predict_worker_stale(
+            &p,
+            &topo,
+            &[],
+            None,
+            64,
+            64,
+            TextureFormat::Rgba8Unorm,
+        ));
     }
 }

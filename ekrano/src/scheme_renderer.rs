@@ -11,8 +11,13 @@
 //! `SchemeRenderer` uses the scheme-native present mechanism via [`goldy::SurfaceExchange`]:
 //!
 //! 1. [`goldy::SurfaceExchange`] is passed by the caller each frame.
-//! 2. After all compute nodes, [`goldy::SurfaceExchange::bind`] records a copy
-//!    from `out_image` to the surface destination and returns a [`goldy::Transaction`].
+//! 2. After all compute nodes, either:
+//!    - **Copy path (default):** [`goldy::SurfaceExchange::bind`] records a copy
+//!      from `out_image` to the surface destination, or
+//!    - **Direct-present path (`EKRANO_DIRECT_PRESENT=1`):** fine and the final filter
+//!      composites bind [`goldy::SurfaceExchange::bind_destination`]'s lease directly
+//!      (no full-size `out_image` or copy blit).
+//!    Either way this returns a [`goldy::Transaction`].
 //! 3. [`goldy::Scheme::submit`] submits non-present partitions first, then acquires the
 //!    drawable when the present partition is about to run (deferred acquire); fall back
 //!    to headless [`goldy::Scheme::submit`] only when no surface exchange is bound.
@@ -38,7 +43,7 @@ use crate::{
     goldy_renderer::{
         AllocatorStats, CacheScheduleOutcome, FRAME_COUNTER, FRAME_PIPELINE_DEPTH, FrameFinishOutcome, FrameStats,
         GoldyShader, MAX_BUMP_RETRIES, PersistentState, PreparedFrame, PresentToken, ResourcePoolStats,
-        defer_frame_gpu_resources, env_robust_override, sanitize_bump,
+        defer_frame_gpu_resources, env_direct_present, env_robust_override, sanitize_bump,
     },
     resource_proxy::{BindType, ShaderId},
     scheme_gpu_resources::{
@@ -398,6 +403,24 @@ impl SchemeRenderer {
         self.upload_record_epochs
     }
 
+    #[cfg(test)]
+    fn worker_ir_has_copy_to_present(&self) -> bool {
+        self.worker.test_has_copy_render_target_to_present()
+    }
+
+    #[cfg(test)]
+    fn worker_ir_has_present_lease_dispatch_binding(&self) -> bool {
+        self.worker.test_has_present_lease_dispatch_binding()
+    }
+
+    #[cfg(test)]
+    fn cached_scheme_has_out_image(&self) -> bool {
+        self.persistent
+            .cached_scheme_rt
+            .as_ref()
+            .is_some_and(|(out, _, _)| out.is_some())
+    }
+
     /// GPU device handle shared by this renderer.
     pub fn device(&self) -> &Device {
         &self.device
@@ -463,7 +486,7 @@ impl SchemeRenderer {
                 .persistent
                 .cached_scheme_rt
                 .as_ref()
-                .map(|(t, _, _)| t)
+                .and_then(|(t, _, _)| t.as_ref())
                 .ok_or_else(|| Error::Shader("render_to_buffer: missing scheme out_image".into()))?;
             out_image.copy_layout()
         };
@@ -476,7 +499,7 @@ impl SchemeRenderer {
                 .persistent
                 .cached_scheme_rt
                 .as_ref()
-                .map(|(t, _, _)| t)
+                .and_then(|(t, _, _)| t.as_ref())
                 .expect("render_to_buffer: missing scheme out_image");
             self.readback
                 .copy_texture(out_image, &host_buf)
@@ -572,6 +595,7 @@ impl SchemeRenderer {
         self.persistent.drain_pending_returns();
 
         let out_image_format = surface.map(|s| s.format()).unwrap_or(TextureFormat::Rgba8Unorm);
+        let direct_present = surface.is_some() && output_texture.is_none() && env_direct_present();
         if self.persistent.purge_render_target_cache_if_mismatch(
             &self.context,
             params.width,
@@ -629,6 +653,7 @@ impl SchemeRenderer {
             images_height,
             image_entries.len(),
             surface.is_some(),
+            direct_present,
             scene_bucket,
             coverage_mask_dims,
         );
@@ -721,6 +746,7 @@ impl SchemeRenderer {
                     &params,
                     &config,
                     out_image_format,
+                    direct_present,
                 );
                 self.resolver = resolver;
                 match pipeline_result {
@@ -731,10 +757,7 @@ impl SchemeRenderer {
                     }
                 }
             };
-            let out_image_handle = pipeline
-                .out_image
-                .handle(ResourceAccess::Write)
-                .expect("out_image must be writable");
+            let out_image_handle = pipeline.out_image.as_ref().and_then(|t| t.handle(ResourceAccess::Write));
             recorder.dismiss();
             if upload_needs_record {
                 self.persistent.cached_upload_key = Some(upload_key);
@@ -764,6 +787,7 @@ impl SchemeRenderer {
                     &params,
                     &config,
                     out_image_format,
+                    direct_present,
                 );
                 self.resolver = resolver;
                 match pipeline_result {
@@ -774,10 +798,7 @@ impl SchemeRenderer {
                     }
                 }
             };
-            let out_image_handle = pipeline
-                .out_image
-                .handle(ResourceAccess::Write)
-                .expect("out_image must be writable");
+            let out_image_handle = pipeline.out_image.as_ref().and_then(|t| t.handle(ResourceAccess::Write));
             recorder.dismiss();
             if upload_needs_record {
                 self.persistent.cached_upload_key = Some(upload_key);
@@ -808,7 +829,7 @@ impl SchemeRenderer {
                 &pipeline.gradient,
                 &pipeline.image_atlas,
                 &pipeline.mask_atlas,
-                &pipeline.out_image,
+                pipeline.out_image.as_ref(),
             );
             debug_assert_retained_worker_resources(recorded, &current);
         }
@@ -839,6 +860,8 @@ impl SchemeRenderer {
 
         let mut render = Render::new();
         let mut worker_cache = None;
+        let present_lease = surface.filter(|_| direct_present).map(|s| s.lease());
+
         let (t_coarse, t_fine_record) = if worker_stale {
             {
                 let _tz = goldy::tracy_zone!("ekrano.coarse");
@@ -853,6 +876,12 @@ impl SchemeRenderer {
             }
             let t_coarse = t2.elapsed();
 
+            let render_output = crate::scheme_render::resolve_render_output(
+                &pipeline,
+                output_texture,
+                present_lease.as_ref(),
+            );
+
             let t3 = Instant::now();
             {
                 let _tz = goldy::tracy_zone!("ekrano.fine");
@@ -861,7 +890,7 @@ impl SchemeRenderer {
                     &layer_filter_effects,
                     &self.shaders,
                     &pipeline,
-                    output_texture,
+                    render_output,
                     &mut recorder,
                 );
                 #[cfg(feature = "debug_layers")]
@@ -871,13 +900,27 @@ impl SchemeRenderer {
                     &self.shaders,
                     &mut recorder,
                     &pipeline,
-                    output_texture,
+                    render_output,
                 );
             }
             let t_fine_record = t3.elapsed();
 
             let present_tx = if let Some(surface) = surface {
-                Some(recorder.bind_surface(surface, &pipeline.out_image)?)
+                if direct_present {
+                    debug_assert!(
+                        present_lease.is_some(),
+                        "direct present requires stable lease"
+                    );
+                    Some(recorder.bind_surface_destination(surface)?)
+                } else {
+                    Some(recorder.bind_surface(
+                        surface,
+                        pipeline
+                            .out_image
+                            .as_ref()
+                            .expect("copy path requires out_image"),
+                    )?)
+                }
             } else {
                 None
             };
@@ -908,7 +951,7 @@ impl SchemeRenderer {
                     &pipeline.gradient,
                     &pipeline.image_atlas,
                     &pipeline.mask_atlas,
-                    &pipeline.out_image,
+                    pipeline.out_image.as_ref(),
                 ));
             }
             #[cfg(test)]
@@ -942,7 +985,7 @@ impl SchemeRenderer {
             self.persistent.cached_bump_grant = bump;
             self.persistent.cached_worker_topology = Some(topology);
             self.persistent.cached_worker_filter_effects = filter_effects;
-            self.persistent.cached_worker_out_image = Some(out_image);
+            self.persistent.cached_worker_out_image = out_image;
             self.persistent.cached_worker_output_texture = output_texture.map(|t| t.gpu_handle());
             #[cfg(debug_assertions)]
             if let Some(resources) = debug_recorded_resources {
@@ -983,7 +1026,7 @@ impl SchemeRenderer {
         if cache_outcome.scheme_rt_stored
             && let Some(entry) = self.persistent.cached_scheme_rt.as_mut()
         {
-            log::debug!("[RT-CACHE] stamp scheme out_image timeline={frame_tv}");
+            log::debug!("[RT-CACHE] stamp scheme render targets timeline={frame_tv}");
             entry.2 = frame_tv;
         }
         defer_frame_gpu_resources(
@@ -1151,6 +1194,16 @@ impl<'a> SchemeRecorder<'a> {
             .map_err(|e| Error::Shader(e.to_string()))
     }
 
+    /// Bind the surface's destination lease directly (no copy). The lease used to build
+    /// [`crate::scheme_render::RenderOutput::Present`] earlier in this frame's fine/filter
+    /// recording must be the same exchange's lease, obtained via [`goldy::SurfaceExchange::lease`].
+    pub(crate) fn bind_surface_destination(&mut self, surface: &goldy::SurfaceExchange) -> Result<goldy::Transaction> {
+        let (_lease, transaction) = surface
+            .bind_destination(self.scheme)
+            .map_err(|e| Error::Shader(e.to_string()))?;
+        Ok(transaction)
+    }
+
     pub(crate) fn new(
         device: &'a Device,
         context: &'a Context,
@@ -1211,6 +1264,7 @@ impl<'a> SchemeRecorder<'a> {
         params: &RenderParams,
         config: &RenderConfig,
         out_image_format: TextureFormat,
+        direct_present: bool,
     ) -> Result<crate::scheme_gpu_resources::PipelineResources, Error> {
         crate::scheme_gpu_resources::PipelineResources::prepare(
             self,
@@ -1221,6 +1275,7 @@ impl<'a> SchemeRecorder<'a> {
             params,
             config,
             out_image_format,
+            direct_present,
         )
     }
 
@@ -1252,6 +1307,8 @@ impl<'a> SchemeRecorder<'a> {
             filter_layers,
             buffer_sizes,
             config_uniform_value,
+            frame_width: _,
+            frame_height: _,
         } = pipeline;
 
         let _ = (gradient, image_atlas, mask_atlas);
@@ -1274,7 +1331,7 @@ impl<'a> SchemeRecorder<'a> {
         log::debug!("[PIPE-CACHE] schedule: cached");
         self.persistent.store_scheme_render_targets(out_image, filter_layers, 0);
         outcome.scheme_rt_stored = true;
-        log::debug!("[RT-CACHE] schedule: scheme out_image stored (single slot)");
+        log::debug!("[RT-CACHE] schedule: scheme render targets stored");
         outcome
     }
 
@@ -1342,17 +1399,22 @@ impl<'a> SchemeRecorder<'a> {
 
         let mut node = scheme.node(label, &shaders[shader_id.0].pipeline);
         for (i, binding) in bindings.iter().enumerate() {
-            let access = bind_types
-                .get(i)
-                .copied()
-                .map(bind_type_to_node_access)
-                .unwrap_or(NodeAccess::ReadWrite);
-            node = match binding {
-                GpuBinding::Buf(b) => node.with_parcel(*b, access),
-                GpuBinding::Parcel(p) => node.with_parcel(*p, access),
-                GpuBinding::Tex(t) => node.with_parcel(*t, access),
-                GpuBinding::Sampler(s) => node.with_parcel(*s, access),
-                GpuBinding::PersistentBuf(b) => node.with_parcel(*b, access),
+            node = if let GpuBinding::Present(lease, present_access) = binding {
+                node.with_present_access(lease, *present_access)
+            } else {
+                let access = bind_types
+                    .get(i)
+                    .copied()
+                    .map(bind_type_to_node_access)
+                    .unwrap_or(NodeAccess::ReadWrite);
+                match binding {
+                    GpuBinding::Buf(b) => node.with_parcel(*b, access),
+                    GpuBinding::Parcel(p) => node.with_parcel(*p, access),
+                    GpuBinding::Tex(t) => node.with_parcel(*t, access),
+                    GpuBinding::Sampler(s) => node.with_parcel(*s, access),
+                    GpuBinding::PersistentBuf(b) => node.with_parcel(*b, access),
+                    GpuBinding::Present(..) => unreachable!(),
+                }
             };
         }
         for &val in push_tail {
@@ -1371,17 +1433,22 @@ impl<'a> SchemeRecorder<'a> {
         let label = self.shaders[shader.0].label;
         let mut node = self.scheme.node(label, &self.shaders[shader.0].pipeline);
         for (i, binding) in bindings.iter().enumerate() {
-            let access = bind_types
-                .get(i)
-                .copied()
-                .map(bind_type_to_node_access)
-                .unwrap_or(NodeAccess::ReadWrite);
-            node = match binding {
-                GpuBinding::Buf(b) => node.with_parcel(*b, access),
-                GpuBinding::Parcel(p) => node.with_parcel(*p, access),
-                GpuBinding::Tex(t) => node.with_parcel(*t, access),
-                GpuBinding::Sampler(s) => node.with_parcel(*s, access),
-                GpuBinding::PersistentBuf(b) => node.with_parcel(*b, access),
+            node = if let GpuBinding::Present(lease, present_access) = binding {
+                node.with_present_access(lease, *present_access)
+            } else {
+                let access = bind_types
+                    .get(i)
+                    .copied()
+                    .map(bind_type_to_node_access)
+                    .unwrap_or(NodeAccess::ReadWrite);
+                match binding {
+                    GpuBinding::Buf(b) => node.with_parcel(*b, access),
+                    GpuBinding::Parcel(p) => node.with_parcel(*p, access),
+                    GpuBinding::Tex(t) => node.with_parcel(*t, access),
+                    GpuBinding::Sampler(s) => node.with_parcel(*s, access),
+                    GpuBinding::PersistentBuf(b) => node.with_parcel(*b, access),
+                    GpuBinding::Present(..) => unreachable!(),
+                }
             };
         }
         node.dispatch_shape(shape).expect("dispatch_shape failed");
@@ -1562,12 +1629,17 @@ mod tests {
                     &params,
                     &config,
                     expected_format,
+                    false,
                 )
                 .unwrap_or_else(|e| panic!("PipelineResources::prepare({expected_format:?}) failed: {e}"))
             };
 
             assert_eq!(
-                pipeline.out_image.format(),
+                pipeline
+                    .out_image
+                    .as_ref()
+                    .expect("headless prepare allocates out_image")
+                    .format(),
                 expected_format,
                 "out_image must use the requested format {expected_format:?}; \
                  using Rgba8Unorm unconditionally would cause copy_texture_to_present \
@@ -2023,5 +2095,92 @@ mod tests {
             worker_stable,
             "worker must not re-record on repeated frames with stable region layout"
         );
+    }
+
+    #[test]
+    fn prepare_direct_present_omits_out_image() {
+        let device = goldy::test_support::mock_device();
+        let (_ctx, surface) = goldy::test_support::mock_surface_exchange(&device);
+        let mut renderer = SchemeRenderer::new(&device).expect("SchemeRenderer::new");
+        let _guard = EnvGuard::set("EKRANO_DIRECT_PRESENT", "1");
+        let mut scene = Scene::new();
+        scene.fill(
+            peniko::Fill::NonZero,
+            peniko::kurbo::Affine::IDENTITY,
+            peniko::Color::from_rgb8(40, 80, 120),
+            None,
+            &peniko::kurbo::Rect::new(0.0, 0.0, 64.0, 64.0),
+        );
+        let params = RenderParams {
+            base_color: peniko::color::palette::css::BLACK,
+            width: 64,
+            height: 64,
+            antialiasing_method: crate::AaConfig::Area,
+            robust: false,
+        };
+        let prepared = renderer.prepare(&scene, &params).expect("prepare");
+        let (_stats, _token) = renderer
+            .submit_to_swapchain(prepared, &surface)
+            .expect("submit_to_swapchain");
+        assert!(
+            !renderer.worker_ir_has_copy_to_present(),
+            "direct present must not record copy_texture_to_present"
+        );
+        assert!(
+            renderer.worker_ir_has_present_lease_dispatch_binding(),
+            "direct present must bind PresentLease in a dispatch node"
+        );
+    }
+
+    #[test]
+    fn render_to_buffer_still_allocates_out_image_when_direct_present_env_set() {
+        let Some((gpu, _)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
+            return;
+        };
+        let _guard = EnvGuard::set("EKRANO_DIRECT_PRESENT", "1");
+
+        let mut renderer = SchemeRenderer::new(&gpu).expect("SchemeRenderer::new");
+        let mut scene = Scene::new();
+        scene.fill(
+            peniko::Fill::NonZero,
+            peniko::kurbo::Affine::IDENTITY,
+            peniko::Color::from_rgb8(200, 100, 50),
+            None,
+            &peniko::kurbo::Circle::new((32.0, 32.0), 24.0),
+        );
+        let params = RenderParams {
+            base_color: peniko::color::palette::css::BLACK,
+            width: 64,
+            height: 64,
+            antialiasing_method: crate::AaConfig::Area,
+            robust: false,
+        };
+        renderer.render_to_buffer(&scene, &params).expect("render_to_buffer");
+        assert!(
+            renderer.cached_scheme_has_out_image(),
+            "headless readback path must retain out_image even when env is set"
+        );
+    }
+
+    struct EnvGuard {
+        key: &'static str,
+        prior: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prior = std::env::var(key).ok();
+            unsafe { std::env::set_var(key, value) };
+            Self { key, prior }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prior {
+                Some(v) => unsafe { std::env::set_var(self.key, v) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
     }
 }

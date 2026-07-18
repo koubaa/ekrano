@@ -14,7 +14,7 @@ use ekrano_encoding::{
     make_mask_lut_16,
 };
 use goldy::types::{TextureFlags, TextureKind};
-use goldy::{Buffer, Texture};
+use goldy::{Buffer, NodeAccess, PresentLease, Texture};
 use peniko::color::{PremulColor, Srgb};
 
 use ekrano_encoding::{
@@ -22,6 +22,63 @@ use ekrano_encoding::{
     STAGE_DRAW_REDUCE, STAGE_FLATTEN, STAGE_PATH_COUNT, STAGE_PATH_TILING, STAGE_PATHTAG_REDUCE, STAGE_PATHTAG_REDUCE2,
     STAGE_PATHTAG_SCAN, STAGE_PATHTAG_SCAN_LARGE, STAGE_PATHTAG_SCAN1, STAGE_TILE_ALLOC,
 };
+
+/// Fine/filter final destination: offscreen texture or swapchain present lease.
+#[derive(Clone, Copy)]
+pub(crate) enum RenderOutput<'a> {
+    Texture(&'a Texture),
+    Present(&'a PresentLease),
+}
+
+impl<'a> RenderOutput<'a> {
+    fn width(&self, pipeline: &PipelineResources) -> u32 {
+        match self {
+            Self::Texture(tex) => tex.width(),
+            Self::Present(_) => pipeline.frame_width,
+        }
+    }
+
+    fn height(&self, pipeline: &PipelineResources) -> u32 {
+        match self {
+            Self::Texture(tex) => tex.height(),
+            Self::Present(_) => pipeline.frame_height,
+        }
+    }
+
+    fn fine_binding(self) -> GpuBinding<'a> {
+        match self {
+            Self::Texture(tex) => GpuBinding::Tex(tex),
+            Self::Present(lease) => GpuBinding::Present(lease, NodeAccess::Write),
+        }
+    }
+
+    fn filter_dst_binding(self) -> GpuBinding<'a> {
+        match self {
+            Self::Texture(tex) => GpuBinding::Tex(tex),
+            Self::Present(lease) => GpuBinding::Present(lease, NodeAccess::ReadWrite),
+        }
+    }
+}
+
+/// Resolve the render output target for fine/filter compositing.
+pub(crate) fn resolve_render_output<'a>(
+    pipeline: &'a PipelineResources,
+    output_texture: Option<&'a Texture>,
+    present_lease: Option<&'a PresentLease>,
+) -> RenderOutput<'a> {
+    if let Some(tex) = output_texture {
+        RenderOutput::Texture(tex)
+    } else if let Some(lease) = present_lease {
+        RenderOutput::Present(lease)
+    } else {
+        RenderOutput::Texture(
+            pipeline
+                .out_image
+                .as_ref()
+                .expect("render output requires out_image or present lease"),
+        )
+    }
+}
 
 /// State for a render in progress.
 pub struct Render {
@@ -398,14 +455,12 @@ impl Render {
         layer_filter_effects: &[LayerFilterEffect],
         shaders: &FullShaders,
         pipeline: &PipelineResources,
-        output_texture: Option<&Texture>,
+        render_output: RenderOutput<'_>,
         recorder: &mut SchemeRecorder<'_>,
     ) {
         let fine_wg_count = self.fine_wg_count.take().expect("fine_wg_count");
         let width_in_tiles = fine_wg_count.0;
         let height_in_tiles = fine_wg_count.1;
-
-        let out_tex = output_texture.unwrap_or(&pipeline.out_image);
 
         let shader = match self.aa_config {
             AaConfig::Area => shaders
@@ -455,14 +510,18 @@ impl Render {
             }
         }
 
-        let width_px = out_tex.width();
-        let height_px = out_tex.height();
+        let width_px = render_output.width(pipeline);
+        let height_px = render_output.height(pipeline);
         if !layer_filter_effects.is_empty() && width_px > 0 && height_px > 0 {
             if let Some(fs) = shaders.filter_pass {
                 let wg = (width_px.div_ceil(16), height_px.div_ceil(16), 1);
                 let u_clear = FilterUniform::clear_transparent(width_px, height_px);
+                let clear_src = pipeline
+                    .out_image
+                    .as_ref()
+                    .unwrap_or(&pipeline.filter_layers[0]);
                 for fl in &pipeline.filter_layers {
-                    filter_dispatch(recorder, fs, &u_clear, wg, out_tex, fl);
+                    filter_dispatch(recorder, fs, &u_clear, wg, clear_src, fl);
                 }
             } else {
                 log::warn!("filter_pass shader unavailable; cannot clear filter layer textures");
@@ -476,7 +535,7 @@ impl Render {
             pipeline.stable.ptcl.as_binding(),
             pipeline.stable.info_bin_data.as_binding(),
             pipeline.stable.blend_spill.as_binding(),
-            GpuBinding::Tex(out_tex),
+            render_output.fine_binding(),
             GpuBinding::Tex(&pipeline.gradient),
             GpuBinding::Tex(&pipeline.image_atlas),
             GpuBinding::Tex(&pipeline.mask_atlas),
@@ -526,6 +585,58 @@ impl Render {
 
 fn premul_srgb_u32(c: PremulColor<Srgb>) -> u32 {
     c.to_rgba8().to_u32()
+}
+
+fn filter_dispatch_to_output(
+    recorder: &mut SchemeRecorder<'_>,
+    shader: crate::ShaderId,
+    uniform: &FilterUniform,
+    wg: (u32, u32, u32),
+    src: &Texture,
+    dst: RenderOutput<'_>,
+) {
+    let slot = recorder.filter_dispatch_slot;
+    recorder.filter_dispatch_slot += 1;
+
+    let cached = recorder
+        .persistent
+        .cached_filter_uniforms
+        .get_mut(slot)
+        .and_then(|e| e.take());
+
+    let buf = match cached {
+        Some((ref val, buf)) if val == uniform => buf,
+        Some((_, old_buf)) => {
+            recorder.persistent.pool.return_buf(old_buf, "ekrano.filter_uniform");
+            recorder.upload_typed("ekrano.filter_uniform", uniform)
+        }
+        None => recorder.upload_typed("ekrano.filter_uniform", uniform),
+    };
+
+    let persistent = &*recorder.persistent;
+    let bindings = [
+        GpuBinding::Buf(&buf),
+        GpuBinding::Tex(src),
+        GpuBinding::Tex(src),
+        dst.filter_dst_binding(),
+        GpuBinding::Sampler(
+            persistent
+                .linear_clamp_sampler
+                .as_ref()
+                .expect("linear_clamp_sampler must be initialised before filter pass"),
+        ),
+    ];
+    SchemeRecorder::record_dispatch(recorder.scheme, recorder.shaders, shader, wg, &bindings, &[]);
+
+    let cache = &mut recorder.persistent.cached_filter_uniforms;
+    if slot < cache.len() {
+        cache[slot] = Some((*uniform, buf));
+    } else {
+        while cache.len() < slot {
+            cache.push(None);
+        }
+        cache.push(Some((*uniform, buf)));
+    }
 }
 
 fn filter_dispatch(
@@ -725,11 +836,10 @@ pub(crate) fn record_filter_effects(
     shaders: &FullShaders,
     recorder: &mut SchemeRecorder<'_>,
     pipeline: &PipelineResources,
-    output_override: Option<&Texture>,
+    render_output: RenderOutput<'_>,
 ) {
-    let width = pipeline.out_image.width();
-    let height = pipeline.out_image.height();
-    let dest = output_override.unwrap_or(&pipeline.out_image);
+    let width = pipeline.frame_width;
+    let height = pipeline.frame_height;
 
     if width == 0 || height == 0 {
         return;
@@ -858,13 +968,13 @@ pub(crate) fn record_filter_effects(
         let idx = (effect.layer_index as usize).min(3);
         let ft = &filter_layers[idx];
         let u_comp = FilterUniform::composite_filtered_layer(width, height, effect.layer_blend);
-        filter_dispatch(recorder, shader, &u_comp, wg, ft, dest);
+        filter_dispatch_to_output(recorder, shader, &u_comp, wg, ft, render_output);
     }
     for effect in layer_filter_effects.iter().filter(|e| !e.is_nested) {
         let idx = (effect.layer_index as usize).min(3);
         let ft = &filter_layers[idx];
         let u_comp = FilterUniform::composite_filtered_layer(width, height, effect.layer_blend);
-        filter_dispatch(recorder, shader, &u_comp, wg, ft, dest);
+        filter_dispatch_to_output(recorder, shader, &u_comp, wg, ft, render_output);
     }
 
     recorder.defer_texture(scratch);

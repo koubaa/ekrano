@@ -474,6 +474,14 @@ pub(crate) fn env_robust_override() -> Option<bool> {
         .map(|v| !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"))
 }
 
+/// When set, swapchain rendering binds fine and final filter composites directly to the
+/// present lease instead of an intermediate `out_image` + copy blit.
+pub(crate) fn env_direct_present() -> bool {
+    std::env::var("EKRANO_DIRECT_PRESENT")
+        .ok()
+        .is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+}
+
 // -----------------------------------------------------------------------
 // PersistentState — GPU resources that survive across frames
 // -----------------------------------------------------------------------
@@ -496,8 +504,8 @@ pub(crate) struct PersistentState {
     pub(crate) linear_clamp_sampler: Option<goldy::Sampler>,
     /// Persistent nearest-filter + clamp-to-edge sampler for `IMAGE_QUALITY_LOW` reads.
     pub(crate) nearest_clamp_sampler: Option<goldy::Sampler>,
-    /// Scheme-path render-target reuse: a single persistent `out_image` + filter layers.
-    pub(crate) cached_scheme_rt: Option<(Texture, [Texture; 4], TimelineValue)>,
+    /// Scheme-path render-target reuse: optional persistent `out_image` + filter layers.
+    pub(crate) cached_scheme_rt: Option<(Option<Texture>, [Texture; 4], TimelineValue)>,
     /// Cached pipeline buffers from the previous frame. At depth=1 only one
     /// entry exists at a time: take-then-install within a single `run_frame`.
     pub(crate) cached_pipeline: Option<crate::scheme_gpu_resources::CachedPipeline>,
@@ -677,21 +685,30 @@ impl PersistentState {
         width: u32,
         height: u32,
         out_format: TextureFormat,
-    ) -> Option<(Texture, [Texture; 4])> {
+        direct_present: bool,
+    ) -> Option<(Option<Texture>, [Texture; 4])> {
         let (out, layers, tv) = self.cached_scheme_rt.take()?;
-        if out.width() == width && out.height() == height && out.format() == out_format {
-            // `tv` is only a cache/reclamation stamp. Ordering for reuse is either
-            // submit-side (DX12/Vulkan/Metal nonblocking) or the orchestrator ring
-            // (backends without host_sidecar_on_submit_worker).
+        let out_matches = match (&out, direct_present) {
+            (None, true) => true,
+            (Some(tex), false) => tex.width() == width && tex.height() == height && tex.format() == out_format,
+            _ => false,
+        };
+        if out_matches {
             let _ = tv;
             return Some((out, layers));
         }
         log::warn!(
-            "[RT-CACHE] scheme MISS (resize) timeline={tv} {}x{} vs {width}x{height} fmt={out_format:?}",
-            out.width(),
-            out.height(),
+            "[RT-CACHE] scheme MISS (resize/mode) timeline={tv} direct_present={direct_present} \
+             cached_out={} vs {width}x{height} fmt={out_format:?}",
+            out.as_ref()
+                .map(|t| format!("{}x{}", t.width(), t.height()))
+                .unwrap_or_else(|| "none".into()),
         );
-        self.reclaim_scheme_render_targets(ctx, out, layers, tv);
+        if let Some(out_tex) = out {
+            self.reclaim_scheme_render_targets(ctx, Some(out_tex), layers, tv);
+        } else {
+            self.reclaim_scheme_render_targets(ctx, None, layers, tv);
+        }
         None
     }
 
@@ -702,7 +719,13 @@ impl PersistentState {
     /// alive across resize churn and exhaust overflow texture heaps.
     ///
     /// On DX12/Vulkan, defers return to the texture pool until `tv` retires (nonblocking).
-    fn reclaim_scheme_render_targets(&mut self, ctx: &Context, out: Texture, layers: [Texture; 4], tv: TimelineValue) {
+    fn reclaim_scheme_render_targets(
+        &mut self,
+        ctx: &Context,
+        out: Option<Texture>,
+        layers: [Texture; 4],
+        tv: TimelineValue,
+    ) {
         if self.metal_heap_sensitive {
             if tv != 0
                 && ctx.gpu_progress() < tv
@@ -710,7 +733,9 @@ impl PersistentState {
             {
                 log::warn!("[RT-CACHE] wait_until({tv}) failed before Metal scheme RT drop: {e}");
             }
-            drop(out);
+            if let Some(out) = out {
+                drop(out);
+            }
             for l in layers {
                 drop(l);
             }
@@ -719,7 +744,9 @@ impl PersistentState {
 
         if tv != 0 && ctx.gpu_progress() < tv {
             let mut textures = Vec::with_capacity(5);
-            textures.push(out);
+            if let Some(out) = out {
+                textures.push(out);
+            }
             textures.extend(layers);
             let mut payload = goldy::DeferredPayload::new();
             payload.push(DeferredTextureToken {
@@ -731,13 +758,20 @@ impl PersistentState {
             ctx.defer_release(tv, payload);
             return;
         }
-        self.tex_pool.release(out);
+        if let Some(out) = out {
+            self.tex_pool.release(out);
+        }
         for l in layers {
             self.tex_pool.release(l);
         }
     }
 
-    pub(crate) fn store_scheme_render_targets(&mut self, out: Texture, layers: [Texture; 4], timeline: TimelineValue) {
+    pub(crate) fn store_scheme_render_targets(
+        &mut self,
+        out: Option<Texture>,
+        layers: [Texture; 4],
+        timeline: TimelineValue,
+    ) {
         self.cached_scheme_rt = Some((out, layers, timeline));
     }
 }
@@ -766,10 +800,13 @@ impl PersistentState {
         height: u32,
         out_format: TextureFormat,
     ) -> bool {
-        let scheme_mismatch = self
-            .cached_scheme_rt
-            .as_ref()
-            .is_some_and(|(out, _, _)| out.width() != width || out.height() != height || out.format() != out_format);
+        let scheme_mismatch = self.cached_scheme_rt.as_ref().is_some_and(|(out, layers, _)| {
+            layers[0].width() != width
+                || layers[0].height() != height
+                || out
+                    .as_ref()
+                    .is_some_and(|tex| tex.format() != out_format || tex.width() != width || tex.height() != height)
+        });
         if !scheme_mismatch {
             return false;
         }
@@ -942,5 +979,90 @@ pub(crate) mod tests {
         let pending = persistent.pending_owned_returns.clone();
         persistent.pool.set_pending_returns(pending);
         Some((gpu, persistent))
+    }
+
+    #[test]
+    fn env_direct_present_parses_truthy_and_falsy() {
+        let cases = [
+            ("1", true),
+            ("true", true),
+            ("YES", true),
+            ("on", true),
+            ("0", false),
+            ("false", false),
+            ("", false),
+        ];
+        for (value, expected) in cases {
+            let key = "EKRANO_DIRECT_PRESENT";
+            let prior = std::env::var(key).ok();
+            if value.is_empty() {
+                unsafe { std::env::remove_var(key) };
+            } else {
+                unsafe { std::env::set_var(key, value) };
+            }
+            assert_eq!(
+                env_direct_present(),
+                expected,
+                "EKRANO_DIRECT_PRESENT={value:?}"
+            );
+            match prior {
+                Some(v) => unsafe { std::env::set_var(key, v) },
+                None => unsafe { std::env::remove_var(key) },
+            }
+        }
+    }
+
+    #[test]
+    fn scheme_rt_cache_reuses_none_out_image_in_direct_present_mode() {
+        let device = goldy::test_support::mock_device();
+        let mut p = PersistentState::new(&device);
+        let layers = [
+            p.tex_pool
+                .acquire(
+                    &device,
+                    8,
+                    8,
+                    TextureFormat::Rgba8Unorm,
+                    goldy::types::TextureKind::DirectInterpolated,
+                    goldy::types::TextureFlags::empty(),
+                )
+                .expect("layer0"),
+            p.tex_pool
+                .acquire(
+                    &device,
+                    8,
+                    8,
+                    TextureFormat::Rgba8Unorm,
+                    goldy::types::TextureKind::DirectInterpolated,
+                    goldy::types::TextureFlags::empty(),
+                )
+                .expect("layer1"),
+            p.tex_pool
+                .acquire(
+                    &device,
+                    8,
+                    8,
+                    TextureFormat::Rgba8Unorm,
+                    goldy::types::TextureKind::DirectInterpolated,
+                    goldy::types::TextureFlags::empty(),
+                )
+                .expect("layer2"),
+            p.tex_pool
+                .acquire(
+                    &device,
+                    8,
+                    8,
+                    TextureFormat::Rgba8Unorm,
+                    goldy::types::TextureKind::DirectInterpolated,
+                    goldy::types::TextureFlags::empty(),
+                )
+                .expect("layer3"),
+        ];
+        p.store_scheme_render_targets(None, layers, 1);
+        let ctx = device.create_context().expect("ctx");
+        let hit = p.take_scheme_render_targets(&ctx, 8, 8, TextureFormat::Rgba8Unorm, true);
+        assert!(hit.is_some());
+        let (out, _) = hit.unwrap();
+        assert!(out.is_none(), "direct-present cache must not retain out_image");
     }
 }

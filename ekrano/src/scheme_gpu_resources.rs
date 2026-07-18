@@ -6,7 +6,7 @@
 use std::mem::size_of;
 
 use goldy::types::{BufferFlags, TextureFlags, TextureKind};
-use goldy::{Buffer, BufferKind, DispatchShape, Init, Parcel, Sampler, Texture, TextureFormat, ordinal};
+use goldy::{Buffer, BufferKind, DispatchShape, Init, NodeAccess, Parcel, PresentLease, Sampler, Texture, TextureFormat, ordinal};
 
 use crate::resource_proxy::BindType;
 use crate::scheme_renderer::SchemeRecorder;
@@ -152,6 +152,8 @@ pub(crate) enum GpuBinding<'a> {
     /// Use for buffers uploaded exactly once (e.g. static LUTs) that are GPU-readable on
     /// every frame after their first upload, without additional write nodes.
     PersistentBuf(&'a Buffer),
+    /// Swapchain drawable bound at submit time via a present-lease placeholder slot.
+    Present(&'a PresentLease, NodeAccess),
 }
 
 pub(crate) fn alloc_pipeline_buffer(
@@ -914,8 +916,11 @@ pub(crate) struct PipelineResources {
     pub stable: StablePipelineBuffers,
     pub scratch: ScratchPipelineBuffers,
     pub bump: Buffer,
-    pub out_image: Texture,
+    /// Full-frame output texture. `None` when swapchain direct-present writes to the lease.
+    pub out_image: Option<Texture>,
     pub filter_layers: [Texture; 4],
+    pub frame_width: u32,
+    pub frame_height: u32,
     /// Buffer sizes used this frame, stored for cache-key comparison next frame.
     pub buffer_sizes: ekrano_encoding::BufferSizes,
     /// The `ConfigUniform` value uploaded to `config`, stored so that
@@ -934,6 +939,7 @@ impl PipelineResources {
         params: &RenderParams,
         config: &RenderConfig,
         out_image_format: TextureFormat,
+        direct_present: bool,
     ) -> Result<Self, Error> {
         if packed.is_empty() {
             packed.resize(size_of::<u32>(), u8::MAX);
@@ -1224,26 +1230,35 @@ impl PipelineResources {
                 params.width,
                 params.height,
                 out_image_format,
+                direct_present,
             ) {
-                record_texture_reuse(recorder.scheme(), &cached_out);
+                if let Some(ref out) = cached_out {
+                    record_texture_reuse(recorder.scheme(), out);
+                }
                 for layer in &cached_layers {
                     record_texture_reuse(recorder.scheme(), layer);
                 }
                 (cached_out, cached_layers)
             } else {
                 let _tz2 = goldy::tracy_zone!("ekrano.prepare.render_targets.ALLOC");
-                let out = recorder
-                    .persistent
-                    .tex_pool
-                    .acquire(
-                        recorder.device(),
-                        params.width,
-                        params.height,
-                        out_image_format,
-                        TextureKind::Direct,
-                        TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
+                let out = if direct_present {
+                    None
+                } else {
+                    Some(
+                        recorder
+                            .persistent
+                            .tex_pool
+                            .acquire(
+                                recorder.device(),
+                                params.width,
+                                params.height,
+                                out_image_format,
+                                TextureKind::Direct,
+                                TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
+                            )
+                            .map_err(|e| Error::Shader(e.to_string()))?,
                     )
-                    .map_err(|e| Error::Shader(e.to_string()))?;
+                };
                 let layers = [
                     acquire_texture_rgba(
                         recorder,
@@ -1290,16 +1305,18 @@ impl PipelineResources {
             bump,
             out_image,
             filter_layers,
+            frame_width: params.width,
+            frame_height: params.height,
             buffer_sizes,
             config_uniform_value,
         })
     }
 }
 
-pub(crate) fn bind_type_to_node_access(bt: BindType) -> goldy::NodeAccess {
+pub(crate) fn bind_type_to_node_access(bt: BindType) -> NodeAccess {
     match bt {
-        BindType::Buffer | BindType::Image(_) => goldy::NodeAccess::ReadWrite,
-        BindType::BufReadOnly | BindType::Uniform | BindType::ImageRead(_) => goldy::NodeAccess::Read,
-        BindType::Sampler => goldy::NodeAccess::Read,
+        BindType::Buffer | BindType::Image(_) => NodeAccess::ReadWrite,
+        BindType::BufReadOnly | BindType::Uniform | BindType::ImageRead(_) => NodeAccess::Read,
+        BindType::Sampler => NodeAccess::Read,
     }
 }
