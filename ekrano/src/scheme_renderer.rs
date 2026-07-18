@@ -957,9 +957,7 @@ impl SchemeRenderer {
 
         let present_token = match (present_tx, scheme_submission) {
             (Some(tx), Some(mut submission)) => {
-                let claim = tx
-                    .claim(&mut submission)
-                    .map_err(|e| Error::Shader(e.to_string()))?;
+                let claim = tx.claim(&mut submission).map_err(|e| Error::Shader(e.to_string()))?;
                 if params.robust && self.persistent.cached_bump_grant.is_some() {
                     self.persistent.queue_bump_submission(submission);
                 }
