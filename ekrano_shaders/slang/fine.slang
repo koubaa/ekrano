@@ -476,7 +476,6 @@ void fill_path(CmdFill fill, float2 xy, ReadOnlyBuffer<Segment> segments, out fl
             float x1 = startx + t1 * delta.x;
             float xmin0 = min(x0, x1);
             float xmax0 = max(x0, x1);
-            [ForceUnroll]
             for (uint j = 0; j < 4; j++) {
                 float j_f = float(j);
                 float xmin = min(xmin0 - j_f, 1.0) - 1.0e-6;
@@ -489,16 +488,13 @@ void fill_path(CmdFill fill, float2 xy, ReadOnlyBuffer<Segment> segments, out fl
             }
         }
         float y_edge = sign(delta.x) * clamp(xy.y - segment.y_edge + 1.0, 0.0, 1.0);
-        [ForceUnroll]
         for (uint j = 0; j < 4; j++)
             area[j] += y_edge;
     }
     if (even_odd) {
-        [ForceUnroll]
         for (uint j = 0; j < 4; j++)
             area[j] = abs(area[j] - 2.0 * round(0.5 * area[j]));
     } else {
-        [ForceUnroll]
         for (uint j = 0; j < 4; j++)
             area[j] = min(abs(area[j]), 1.0);
     }
