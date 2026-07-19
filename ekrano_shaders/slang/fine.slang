@@ -598,6 +598,16 @@ float hypot_fine(float a, float b) {
     return sqrt(a * a + b * b);
 }
 
+#ifndef msaa
+// Issue #56 P2: keep the first BLEND_STACK_SPLIT clip levels in threadgroup memory
+// instead of private registers. Area AA otherwise uses almost no LDS; this frees
+// ~16 live u32s/thread. Layout is [depth][pixel_in_strip][thread] so that when
+// every lane stores/loads the same depth+pixel index, adjacent threads hit
+// adjacent banks. No barrier is required — each thread only touches its own slot.
+static const uint FINE_WG_SIZE = 64;
+groupshared uint sh_blend_stack[BLEND_STACK_SPLIT][PIXELS_PER_THREAD][FINE_WG_SIZE];
+#endif
+
 [goldy_compute]
 [numthreads(4, 16, 1)]
 void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
@@ -623,6 +633,9 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
     uint tile_ix = actual_y * config.width_in_tiles + wg_id.x;
     float2 xy = float2(float(global_id.x * PIXELS_PER_THREAD), float(local_id.y + actual_y * TILE_HEIGHT));
     float2 local_xy = float2(float(local_id.x * PIXELS_PER_THREAD), float(local_id.y));
+#ifndef msaa
+    uint th_ix = local_id.y * (TILE_WIDTH / PIXELS_PER_THREAD) + local_id.x;
+#endif
 
     // Fetch atlas dimensions once per thread for hardware-sampled UV normalisation.
     uint grad_w, grad_h;
@@ -647,7 +660,11 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
         }
     }
 
-    uint blend_stack[4][4];
+#ifdef msaa
+    // MSAA already spends several KiB of LDS on sample/winding scratch; keep the
+    // shallow blend stack private so we do not raise occupancy pressure there.
+    uint blend_stack[BLEND_STACK_SPLIT][PIXELS_PER_THREAD];
+#endif
     uint clip_depth = 0;
     float area[4];
     uint draw_blend = (MIX_NORMAL << 8) | COMPOSE_SRC_OVER;
@@ -681,7 +698,11 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
         } else if (tag == CMD_BEGIN_CLIP) {
             if (clip_depth < BLEND_STACK_SPLIT) {
                 for (uint i = 0; i < 4; i++) {
+#ifdef msaa
                     blend_stack[clip_depth][i] = packUnorm4x8(rgba[i]);
+#else
+                    sh_blend_stack[clip_depth][i][th_ix] = packUnorm4x8(rgba[i]);
+#endif
                     rgba[i] = float4(0, 0, 0, 0);
                 }
             } else {
@@ -700,9 +721,13 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
             clip_depth -= 1;
             for (uint i = 0; i < 4; i++) {
                 uint bg_rgba;
-                if (clip_depth < BLEND_STACK_SPLIT)
+                if (clip_depth < BLEND_STACK_SPLIT) {
+#ifdef msaa
                     bg_rgba = blend_stack[clip_depth][i];
-                else {
+#else
+                    bg_rgba = sh_blend_stack[clip_depth][i][th_ix];
+#endif
+                } else {
                     uint blend_in_scratch = clip_depth - BLEND_STACK_SPLIT;
                     uint local_tile_ix = local_id.x * PIXELS_PER_THREAD + local_id.y * TILE_WIDTH;
                     bg_rgba = blend_spill[blend_offset + blend_in_scratch * TILE_WIDTH * TILE_HEIGHT + local_tile_ix + i];
@@ -736,9 +761,13 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
             clip_depth -= 1;
             for (uint i = 0; i < 4; i++) {
                 uint bg_rgba;
-                if (clip_depth < BLEND_STACK_SPLIT)
+                if (clip_depth < BLEND_STACK_SPLIT) {
+#ifdef msaa
                     bg_rgba = blend_stack[clip_depth][i];
-                else {
+#else
+                    bg_rgba = sh_blend_stack[clip_depth][i][th_ix];
+#endif
+                } else {
                     uint blend_in_scratch = clip_depth - BLEND_STACK_SPLIT;
                     uint local_tile_ix = local_id.x * PIXELS_PER_THREAD + local_id.y * TILE_WIDTH;
                     bg_rgba = blend_spill[blend_offset + blend_in_scratch * TILE_WIDTH * TILE_HEIGHT + local_tile_ix + i];

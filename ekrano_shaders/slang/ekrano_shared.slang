@@ -968,7 +968,15 @@ public float4 premul_over(float4 bg, float4 fg) {
     return bg * (1.0 - fg.a) + fg;
 }
 
-public void composite_strip(inout float4 rgba[PIXELS_PER_THREAD], float4 fg, float area[PIXELS_PER_THREAD]) {
+/// Force-inline + `__constref` so Slang does not snapshot the area array (value type)
+/// into a private thread copy before the call (issue #56 register pressure).
+[ForceInline]
+public void composite_strip(
+    inout float4 rgba[PIXELS_PER_THREAD],
+    float4 fg,
+    __constref float area[PIXELS_PER_THREAD]
+) {
+    [ForceUnroll]
     for (uint i = 0; i < PIXELS_PER_THREAD; i++) {
         float4 fg_i = fg * area[i];
         rgba[i] = premul_over(rgba[i], fg_i);
@@ -976,14 +984,16 @@ public void composite_strip(inout float4 rgba[PIXELS_PER_THREAD], float4 fg, flo
 }
 
 /// Per-draw compositing with optional non-isolated blend mode (`CMD_SET_BLEND_MODE` state).
+[ForceInline]
 public void composite_draw(
     inout float4 rgba[PIXELS_PER_THREAD],
     float4 fg,
-    float area[PIXELS_PER_THREAD],
+    __constref float area[PIXELS_PER_THREAD],
     uint blend_mode,
-    float mask_w[PIXELS_PER_THREAD]
+    __constref float mask_w[PIXELS_PER_THREAD]
 ) {
     uint BLEND_DEFAULT = (MIX_NORMAL << 8) | COMPOSE_SRC_OVER;
+    [ForceUnroll]
     for (uint i = 0; i < PIXELS_PER_THREAD; i++) {
         float4 fg_i = fg * area[i] * mask_w[i];
         if ((blend_mode & 0x7FFFu) == BLEND_DEFAULT) {

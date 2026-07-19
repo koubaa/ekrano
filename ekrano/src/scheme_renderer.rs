@@ -1054,7 +1054,7 @@ impl SchemeRenderer {
     /// Add a compute shader with explicit optimization level.
     pub(crate) fn add_compute_shader_with_options(
         &mut self,
-        _label: &'static str,
+        label: &'static str,
         slang_source: &str,
         bindings: &[BindType],
         search_paths: &[&str],
@@ -1062,7 +1062,7 @@ impl SchemeRenderer {
         optimization_level: goldy::OptimizationLevel,
     ) -> Result<ShaderId> {
         let shader_module = {
-            let _tz = goldy::tracy_zone!("ekrano.add_shader.slang", _label);
+            let _tz = goldy::tracy_zone!("ekrano.add_shader.slang", label);
             ShaderModule::from_slang_with_options(
                 &self.device,
                 slang_source,
@@ -1074,14 +1074,16 @@ impl SchemeRenderer {
             .map_err(|e| Error::Shader(format!("{:#}", e)))?
         };
         let pipeline = {
-            let _tz = goldy::tracy_zone!("ekrano.add_shader.pipeline", _label);
-            ComputePipeline::new(&self.device, &shader_module).map_err(|e| Error::Shader(format!("{:#}", e)))?
+            let _tz = goldy::tracy_zone!("ekrano.add_shader.pipeline", label);
+            ComputePipeline::new_with_label(&self.device, &shader_module, Some(label))
+                .map_err(|e| Error::Shader(format!("{:#}", e)))?
         };
 
         let id = ShaderId(self.engine_shaders.len());
         self.engine_shaders.push(GoldyShader {
             pipeline,
             bindings: bindings.to_vec(),
+            label,
         });
         Ok(id)
     }
@@ -1336,8 +1338,9 @@ impl<'a> SchemeRecorder<'a> {
             return;
         }
         let bind_types = &shaders[shader_id.0].bindings;
+        let label = shaders[shader_id.0].label;
 
-        let mut node = scheme.node("dispatch", &shaders[shader_id.0].pipeline);
+        let mut node = scheme.node(label, &shaders[shader_id.0].pipeline);
         for (i, binding) in bindings.iter().enumerate() {
             let access = bind_types
                 .get(i)
@@ -1365,7 +1368,8 @@ impl<'a> SchemeRecorder<'a> {
     /// (e.g. from `path_count_setup_scheme`) is correctly ordered before this node.
     pub fn dispatch_shape(&mut self, shader: ShaderId, shape: &goldy::Parcel, bindings: &[GpuBinding<'_>]) {
         let bind_types = &self.shaders[shader.0].bindings;
-        let mut node = self.scheme.node("dispatch_shape", &self.shaders[shader.0].pipeline);
+        let label = self.shaders[shader.0].label;
+        let mut node = self.scheme.node(label, &self.shaders[shader.0].pipeline);
         for (i, binding) in bindings.iter().enumerate() {
             let access = bind_types
                 .get(i)
