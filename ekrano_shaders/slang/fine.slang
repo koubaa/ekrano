@@ -11,10 +11,11 @@
 import goldy_exp;
 import ekrano_shared;
 
-// [ForceUnroll] on the fixed 4-pixel strip loops is a Metal occupancy win, but Slang's
-// SPIR-V backend miscompiles several of these unrolls (Vulkan CI: solid fills land at
-// ~240/255 coverage instead of 1.0; Metal remains correct). Gate to __METAL__ until the
-// Slang SPIR-V unroll bug is fixed. Goldy defines __METAL__ / __SPIRV__ per target.
+// [ForceUnroll] on the fixed 4-pixel strip loops is a Metal occupancy win, but Slang
+// 2026.13's SPIR-V backend miscompiles several of these unrolls (Vulkan CI: solid fills
+// land at ~240/255 coverage instead of 1.0; Metal remains correct). spirv-val still passes;
+// bytecode balloons ~200KiB → ~550KiB. Related: slang#9456 (ForceUnroll + array + early
+// exit). Gate to __METAL__ until fixed. Goldy defines __METAL__ / __SPIRV__ per target.
 
 // Slots: 0=config, 1=segments, 2=ptcl, 3=info, 4=blend_spill, 5=output, 6=gradients, 7=image_atlas, 8=mask_atlas
 // Non-MSAA: filter layer snapshots at 9–12. MSAA: mask_lut at 9, filter snapshots at 10–13.
