@@ -585,9 +585,8 @@ impl SchemeRenderer {
         let out_image_format = surface.map(|s| s.format()).unwrap_or(TextureFormat::Rgba8Unorm);
         // Metal: write fine/filter output straight into the drawable. Other backends keep
         // the intermediate `out_image` + copy blit (DX12 flip-model cannot UAV the backbuffer).
-        let direct_present = surface.is_some()
-            && output_texture.is_none()
-            && self.device.backend_type() == BackendType::Metal;
+        let direct_present =
+            surface.is_some() && output_texture.is_none() && self.device.backend_type() == BackendType::Metal;
         if self.persistent.purge_render_target_cache_if_mismatch(
             &self.context,
             params.width,
@@ -749,7 +748,10 @@ impl SchemeRenderer {
                     }
                 }
             };
-            let out_image_handle = pipeline.out_image.as_ref().and_then(|t| t.handle(ResourceAccess::Write));
+            let out_image_handle = pipeline
+                .out_image
+                .as_ref()
+                .and_then(|t| t.handle(ResourceAccess::Write));
             recorder.dismiss();
             if upload_needs_record {
                 self.persistent.cached_upload_key = Some(upload_key);
@@ -790,7 +792,10 @@ impl SchemeRenderer {
                     }
                 }
             };
-            let out_image_handle = pipeline.out_image.as_ref().and_then(|t| t.handle(ResourceAccess::Write));
+            let out_image_handle = pipeline
+                .out_image
+                .as_ref()
+                .and_then(|t| t.handle(ResourceAccess::Write));
             recorder.dismiss();
             if upload_needs_record {
                 self.persistent.cached_upload_key = Some(upload_key);
@@ -879,11 +884,7 @@ impl SchemeRenderer {
             }
             let t_coarse = t2.elapsed();
 
-            let render_output = crate::scheme_render::resolve_render_output(
-                &pipeline,
-                output_texture,
-                present_lease,
-            );
+            let render_output = crate::scheme_render::resolve_render_output(&pipeline, output_texture, present_lease);
 
             let t3 = Instant::now();
             {
@@ -913,10 +914,7 @@ impl SchemeRenderer {
             } else if let Some(surface) = surface {
                 Some(recorder.bind_surface(
                     surface,
-                    pipeline
-                        .out_image
-                        .as_ref()
-                        .expect("copy path requires out_image"),
+                    pipeline.out_image.as_ref().expect("copy path requires out_image"),
                 )?)
             } else {
                 None

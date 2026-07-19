@@ -6,7 +6,9 @@
 use std::mem::size_of;
 
 use goldy::types::{BufferFlags, TextureFlags, TextureKind};
-use goldy::{Buffer, BufferKind, DispatchShape, Init, NodeAccess, Parcel, PresentLease, Sampler, Texture, TextureFormat, ordinal};
+use goldy::{
+    Buffer, BufferKind, DispatchShape, Init, NodeAccess, Parcel, PresentLease, Sampler, Texture, TextureFormat, ordinal,
+};
 
 use crate::resource_proxy::BindType;
 use crate::scheme_renderer::SchemeRecorder;

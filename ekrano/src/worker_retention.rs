@@ -379,8 +379,8 @@ mod tests {
     use super::*;
     use peniko::color::palette::css;
 
-    use ekrano_encoding::FilterEdgeMode;
     use ekrano_encoding::BufferSizes;
+    use ekrano_encoding::FilterEdgeMode;
     use peniko::color::{AlphaColor, Srgb};
 
     fn premul_srgb(color: AlphaColor<Srgb>) -> peniko::color::PremulColor<Srgb> {
@@ -589,21 +589,9 @@ mod tests {
         let copy_topo = sample_topology(false);
         let direct_topo = sample_topology(true);
         p.cached_worker_topology = Some(copy_topo.clone());
-        assert!(worker_stale_reasons(
-            &p,
-            &direct_topo,
-            &[],
-            None,
-            None,
-        ));
+        assert!(worker_stale_reasons(&p, &direct_topo, &[], None, None,));
         p.cached_worker_topology = Some(direct_topo.clone());
-        assert!(!worker_stale_reasons(
-            &p,
-            &direct_topo,
-            &[],
-            None,
-            None,
-        ));
+        assert!(!worker_stale_reasons(&p, &direct_topo, &[], None, None,));
     }
 
     #[test]

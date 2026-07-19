@@ -31,14 +31,14 @@ pub(crate) enum RenderOutput<'a> {
 }
 
 impl<'a> RenderOutput<'a> {
-    fn width(&self, pipeline: &PipelineResources) -> u32 {
+    fn width(self, pipeline: &PipelineResources) -> u32 {
         match self {
             Self::Texture(tex) => tex.width(),
             Self::Present(_) => pipeline.frame_width,
         }
     }
 
-    fn height(&self, pipeline: &PipelineResources) -> u32 {
+    fn height(self, pipeline: &PipelineResources) -> u32 {
         match self {
             Self::Texture(tex) => tex.height(),
             Self::Present(_) => pipeline.frame_height,
@@ -516,10 +516,7 @@ impl Render {
             if let Some(fs) = shaders.filter_pass {
                 let wg = (width_px.div_ceil(16), height_px.div_ceil(16), 1);
                 let u_clear = FilterUniform::clear_transparent(width_px, height_px);
-                let clear_src = pipeline
-                    .out_image
-                    .as_ref()
-                    .unwrap_or(&pipeline.filter_layers[0]);
+                let clear_src = pipeline.out_image.as_ref().unwrap_or(&pipeline.filter_layers[0]);
                 for fl in &pipeline.filter_layers {
                     filter_dispatch(recorder, fs, &u_clear, wg, clear_src, fl);
                 }
