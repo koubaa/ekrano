@@ -70,6 +70,10 @@ name = "property"
 harness = false
 
 [[test]]
+name = "forceunroll_spirv_repro"
+harness = false
+
+[[test]]
 name = "regression"
 harness = false
 
