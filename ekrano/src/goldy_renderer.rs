@@ -474,14 +474,6 @@ pub(crate) fn env_robust_override() -> Option<bool> {
         .map(|v| !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"))
 }
 
-/// When set, swapchain rendering binds fine and final filter composites directly to the
-/// present lease instead of an intermediate `out_image` + copy blit.
-pub(crate) fn env_direct_present() -> bool {
-    std::env::var("EKRANO_DIRECT_PRESENT")
-        .ok()
-        .is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-}
-
 // -----------------------------------------------------------------------
 // PersistentState — GPU resources that survive across frames
 // -----------------------------------------------------------------------
@@ -979,37 +971,6 @@ pub(crate) mod tests {
         let pending = persistent.pending_owned_returns.clone();
         persistent.pool.set_pending_returns(pending);
         Some((gpu, persistent))
-    }
-
-    #[test]
-    fn env_direct_present_parses_truthy_and_falsy() {
-        let cases = [
-            ("1", true),
-            ("true", true),
-            ("YES", true),
-            ("on", true),
-            ("0", false),
-            ("false", false),
-            ("", false),
-        ];
-        for (value, expected) in cases {
-            let key = "EKRANO_DIRECT_PRESENT";
-            let prior = std::env::var(key).ok();
-            if value.is_empty() {
-                unsafe { std::env::remove_var(key) };
-            } else {
-                unsafe { std::env::set_var(key, value) };
-            }
-            assert_eq!(
-                env_direct_present(),
-                expected,
-                "EKRANO_DIRECT_PRESENT={value:?}"
-            );
-            match prior {
-                Some(v) => unsafe { std::env::set_var(key, v) },
-                None => unsafe { std::env::remove_var(key) },
-            }
-        }
     }
 
     #[test]

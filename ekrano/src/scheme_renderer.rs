@@ -12,11 +12,11 @@
 //!
 //! 1. [`goldy::SurfaceExchange`] is passed by the caller each frame.
 //! 2. After all compute nodes, either:
-//!    - **Copy path (default):** [`goldy::SurfaceExchange::bind`] records a copy
-//!      from `out_image` to the surface destination, or
-//!    - **Direct-present path (`EKRANO_DIRECT_PRESENT=1`):** fine and the final filter
-//!      composites bind [`goldy::SurfaceExchange::bind_destination`]'s lease directly
-//!      (no full-size `out_image` or copy blit).
+//!    - **Metal (direct present):** fine and the final filter composites bind
+//!      [`goldy::SurfaceExchange::bind_destination`]'s lease directly (no full-size
+//!      `out_image` or copy blit), or
+//!    - **Other backends (copy path):** [`goldy::SurfaceExchange::bind`] records a copy
+//!      from `out_image` to the surface destination.
 //!    Either way this returns a [`goldy::Transaction`].
 //! 3. [`goldy::Scheme::submit`] submits non-present partitions first, then acquires the
 //!    drawable when the present partition is about to run (deferred acquire); fall back
@@ -43,7 +43,7 @@ use crate::{
     goldy_renderer::{
         AllocatorStats, CacheScheduleOutcome, FRAME_COUNTER, FRAME_PIPELINE_DEPTH, FrameFinishOutcome, FrameStats,
         GoldyShader, MAX_BUMP_RETRIES, PersistentState, PreparedFrame, PresentToken, ResourcePoolStats,
-        defer_frame_gpu_resources, env_direct_present, env_robust_override, sanitize_bump,
+        defer_frame_gpu_resources, env_robust_override, sanitize_bump,
     },
     resource_proxy::{BindType, ShaderId},
     scheme_gpu_resources::{
@@ -404,16 +404,6 @@ impl SchemeRenderer {
     }
 
     #[cfg(test)]
-    fn worker_ir_has_copy_to_present(&self) -> bool {
-        self.worker.test_has_copy_render_target_to_present()
-    }
-
-    #[cfg(test)]
-    fn worker_ir_has_present_lease_dispatch_binding(&self) -> bool {
-        self.worker.test_has_present_lease_dispatch_binding()
-    }
-
-    #[cfg(test)]
     fn cached_scheme_has_out_image(&self) -> bool {
         self.persistent
             .cached_scheme_rt
@@ -595,7 +585,11 @@ impl SchemeRenderer {
         self.persistent.drain_pending_returns();
 
         let out_image_format = surface.map(|s| s.format()).unwrap_or(TextureFormat::Rgba8Unorm);
-        let direct_present = surface.is_some() && output_texture.is_none() && env_direct_present();
+        // Metal: write fine/filter output straight into the drawable. Other backends keep
+        // the intermediate `out_image` + copy blit (DX12 flip-model cannot UAV the backbuffer).
+        let direct_present = surface.is_some()
+            && output_texture.is_none()
+            && self.device.backend_type() == BackendType::Metal;
         if self.persistent.purge_render_target_cache_if_mismatch(
             &self.context,
             params.width,
@@ -2098,11 +2092,16 @@ mod tests {
     }
 
     #[test]
-    fn prepare_direct_present_omits_out_image() {
+    fn non_metal_swapchain_uses_out_image_copy_path() {
+        // MockBackend reports Vulkan; direct present is Metal-only.
         let device = goldy::test_support::mock_device();
+        assert_ne!(
+            device.backend_type(),
+            BackendType::Metal,
+            "mock backend must not report Metal"
+        );
         let (_ctx, surface) = goldy::test_support::mock_surface_exchange(&device);
         let mut renderer = SchemeRenderer::new(&device).expect("SchemeRenderer::new");
-        let _guard = EnvGuard::set("EKRANO_DIRECT_PRESENT", "1");
         let mut scene = Scene::new();
         scene.fill(
             peniko::Fill::NonZero,
@@ -2123,21 +2122,20 @@ mod tests {
             .submit_to_swapchain(prepared, &surface)
             .expect("submit_to_swapchain");
         assert!(
-            !renderer.worker_ir_has_copy_to_present(),
-            "direct present must not record copy_texture_to_present"
+            renderer.cached_scheme_has_out_image(),
+            "non-Metal swapchain path must keep intermediate out_image"
         );
         assert!(
-            renderer.worker_ir_has_present_lease_dispatch_binding(),
-            "direct present must bind PresentLease in a dispatch node"
+            !renderer.metal_fused_upload(),
+            "mock device must not enable Metal fused upload"
         );
     }
 
     #[test]
-    fn render_to_buffer_still_allocates_out_image_when_direct_present_env_set() {
+    fn render_to_buffer_allocates_out_image() {
         let Some((gpu, _)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
             return;
         };
-        let _guard = EnvGuard::set("EKRANO_DIRECT_PRESENT", "1");
 
         let mut renderer = SchemeRenderer::new(&gpu).expect("SchemeRenderer::new");
         let mut scene = Scene::new();
@@ -2158,29 +2156,7 @@ mod tests {
         renderer.render_to_buffer(&scene, &params).expect("render_to_buffer");
         assert!(
             renderer.cached_scheme_has_out_image(),
-            "headless readback path must retain out_image even when env is set"
+            "headless readback path must retain out_image"
         );
-    }
-
-    struct EnvGuard {
-        key: &'static str,
-        prior: Option<String>,
-    }
-
-    impl EnvGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let prior = std::env::var(key).ok();
-            unsafe { std::env::set_var(key, value) };
-            Self { key, prior }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match &self.prior {
-                Some(v) => unsafe { std::env::set_var(self.key, v) },
-                None => unsafe { std::env::remove_var(self.key) },
-            }
-        }
     }
 }
