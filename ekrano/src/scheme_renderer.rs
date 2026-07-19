@@ -11,13 +11,11 @@
 //! `SchemeRenderer` uses the scheme-native present mechanism via [`goldy::SurfaceExchange`]:
 //!
 //! 1. [`goldy::SurfaceExchange`] is passed by the caller each frame.
-//! 2. After all compute nodes, either:
-//!    - **Metal (direct present):** fine and the final filter composites bind
-//!      [`goldy::SurfaceExchange::bind_destination`]'s lease directly (no full-size
-//!      `out_image` or copy blit), or
-//!    - **Other backends (copy path):** [`goldy::SurfaceExchange::bind`] records a copy
-//!      from `out_image` to the surface destination.
-//!    Either way this returns a [`goldy::Transaction`].
+//! 2. **Direct present (Metal):** [`goldy::SurfaceExchange::bind_destination`] runs
+//!    before coarse/fine recording; fine and filter composites use the returned lease.
+//!    **Copy path (other backends):** after recording, [`goldy::SurfaceExchange::bind`]
+//!    records a copy from `out_image` to the surface destination.
+//!    Either path returns a [`goldy::Transaction`].
 //! 3. [`goldy::Scheme::submit`] submits non-present partitions first, then acquires the
 //!    drawable when the present partition is about to run (deferred acquire); fall back
 //!    to headless [`goldy::Scheme::submit`] only when no surface exchange is bound.
@@ -854,9 +852,20 @@ impl SchemeRenderer {
 
         let mut render = Render::new();
         let mut worker_cache = None;
-        let present_lease = surface.filter(|_| direct_present).map(|s| s.lease());
 
         let (t_coarse, t_fine_record) = if worker_stale {
+            let mut present_bound_lease = None;
+            let mut early_present_tx = None;
+            if direct_present {
+                let surface = surface.expect("direct present requires surface");
+                let (lease, tx) = surface
+                    .bind_destination(recorder.scheme())
+                    .map_err(|e| Error::Shader(e.to_string()))?;
+                present_bound_lease = Some(lease);
+                early_present_tx = Some(tx);
+            }
+            let present_lease = present_bound_lease.as_ref();
+
             {
                 let _tz = goldy::tracy_zone!("ekrano.coarse");
                 render.run_coarse(
@@ -873,7 +882,7 @@ impl SchemeRenderer {
             let render_output = crate::scheme_render::resolve_render_output(
                 &pipeline,
                 output_texture,
-                present_lease.as_ref(),
+                present_lease,
             );
 
             let t3 = Instant::now();
@@ -899,22 +908,16 @@ impl SchemeRenderer {
             }
             let t_fine_record = t3.elapsed();
 
-            let present_tx = if let Some(surface) = surface {
-                if direct_present {
-                    debug_assert!(
-                        present_lease.is_some(),
-                        "direct present requires stable lease"
-                    );
-                    Some(recorder.bind_surface_destination(surface)?)
-                } else {
-                    Some(recorder.bind_surface(
-                        surface,
-                        pipeline
-                            .out_image
-                            .as_ref()
-                            .expect("copy path requires out_image"),
-                    )?)
-                }
+            let present_tx = if direct_present {
+                early_present_tx
+            } else if let Some(surface) = surface {
+                Some(recorder.bind_surface(
+                    surface,
+                    pipeline
+                        .out_image
+                        .as_ref()
+                        .expect("copy path requires out_image"),
+                )?)
             } else {
                 None
             };
@@ -1186,16 +1189,6 @@ impl<'a> SchemeRecorder<'a> {
         surface
             .bind(self.scheme, source)
             .map_err(|e| Error::Shader(e.to_string()))
-    }
-
-    /// Bind the surface's destination lease directly (no copy). The lease used to build
-    /// [`crate::scheme_render::RenderOutput::Present`] earlier in this frame's fine/filter
-    /// recording must be the same exchange's lease, obtained via [`goldy::SurfaceExchange::lease`].
-    pub(crate) fn bind_surface_destination(&mut self, surface: &goldy::SurfaceExchange) -> Result<goldy::Transaction> {
-        let (_lease, transaction) = surface
-            .bind_destination(self.scheme)
-            .map_err(|e| Error::Shader(e.to_string()))?;
-        Ok(transaction)
     }
 
     pub(crate) fn new(
@@ -2128,6 +2121,40 @@ mod tests {
         assert!(
             !renderer.metal_fused_upload(),
             "mock device must not enable Metal fused upload"
+        );
+    }
+
+    #[test]
+    fn swapchain_retains_worker_and_present_transaction() {
+        let _cb = goldy::test_support::CbReuseOverride::force_enabled();
+        let device = goldy::test_support::mock_device();
+        let (_ctx, surface) = goldy::test_support::mock_surface_exchange(&device);
+        let mut renderer = SchemeRenderer::new(&device).expect("SchemeRenderer::new");
+        let mut scene = Scene::new();
+        scene.fill(
+            peniko::Fill::NonZero,
+            peniko::kurbo::Affine::IDENTITY,
+            peniko::Color::from_rgb8(40, 80, 120),
+            None,
+            &peniko::kurbo::Rect::new(0.0, 0.0, 64.0, 64.0),
+        );
+        let params = RenderParams {
+            base_color: peniko::color::palette::css::BLACK,
+            width: 64,
+            height: 64,
+            antialiasing_method: crate::AaConfig::Area,
+            robust: false,
+        };
+        for _ in 0..2 {
+            let prepared = renderer.prepare(&scene, &params).expect("prepare");
+            renderer
+                .submit_to_swapchain(prepared, &surface)
+                .expect("submit_to_swapchain");
+        }
+        assert_eq!(
+            renderer.worker_record_epochs(),
+            1,
+            "swapchain path must retain worker topology across frames"
         );
     }
 
