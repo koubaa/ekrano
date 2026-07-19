@@ -230,7 +230,6 @@ void fill_path_ms_impl(
     for (uint i = 0; i < (local_id.y >> 2); i++)
         wind_y += sh_winding_y_prefix[i];
 
-    [ForceUnroll]
     for (uint i = 0; i < PIXELS_PER_THREAD; i++) {
         uint pix_ix = th_ix * PIXELS_PER_THREAD + i;
         uint minor = i;
@@ -425,7 +424,6 @@ void fill_path_ms_evenodd_impl(
     scan_y ^= scan_y << 8;
     uint row_parity = (scan_y >> local_id.y) ^ uint(fill.backdrop);
 
-    [ForceUnroll]
     for (uint i = 0; i < PIXELS_PER_THREAD; i++) {
         uint pix_ix = th_ix * PIXELS_PER_THREAD + i;
         uint samples = sh_samples[pix_ix];
@@ -662,11 +660,9 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
 
     float4 base_color = unpackUnorm4x8ToFloat(base_color_u);
     float4 rgba[4];
-    [ForceUnroll]
     for (uint i = 0; i < 4; i++) rgba[i] = base_color;
 
     float mask_w[4];
-    [ForceUnroll]
     for (uint mi = 0; mi < 4; mi++) {
         if (mask_active != 0u) {
             uint2 mc = uint2(uint(xy.x) + mi, uint(xy.y));
@@ -701,7 +697,6 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
 #endif
             cmd_ix += 4;
         } else if (tag == CMD_SOLID) {
-            [ForceUnroll]
             for (uint i = 0; i < 4; i++) area[i] = 1.0;
             cmd_ix += 1;
         } else if (tag == CMD_SET_BLEND_MODE) {
@@ -714,7 +709,6 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
             cmd_ix += 2;
         } else if (tag == CMD_BEGIN_CLIP) {
             if (clip_depth < BLEND_STACK_SPLIT) {
-                [ForceUnroll]
                 for (uint i = 0; i < 4; i++) {
 #ifdef msaa
                     blend_stack[clip_depth][i] = packUnorm4x8(rgba[i]);
@@ -727,7 +721,6 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
                 uint blend_in_scratch = clip_depth - BLEND_STACK_SPLIT;
                 uint local_tile_ix = local_id.x * PIXELS_PER_THREAD + local_id.y * TILE_WIDTH;
                 uint local_blend_start = blend_offset + blend_in_scratch * TILE_WIDTH * TILE_HEIGHT + local_tile_ix;
-                [ForceUnroll]
                 for (uint i = 0; i < 4; i++) {
                     blend_spill[local_blend_start + i] = packUnorm4x8(rgba[i]);
                     rgba[i] = float4(0, 0, 0, 0);
@@ -738,7 +731,6 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
         } else if (tag == CMD_END_CLIP) {
             CmdEndClip end_clip = read_end_clip(ptcl, cmd_ix);
             clip_depth -= 1;
-            [ForceUnroll]
             for (uint i = 0; i < 4; i++) {
                 uint bg_rgba;
                 if (clip_depth < BLEND_STACK_SPLIT) {
@@ -779,7 +771,6 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
             bool is_nested = (layer_idx_raw & 0x80000000u) != 0u;
             uint layer_idx = layer_idx_raw & 0x7FFFFFFFu;
             clip_depth -= 1;
-            [ForceUnroll]
             for (uint i = 0; i < 4; i++) {
                 uint bg_rgba;
                 if (clip_depth < BLEND_STACK_SPLIT) {
@@ -834,7 +825,6 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
             float scale = 0.5 * erf7(inv_std_dev * 0.5 * (max(width, height) - 0.5 * blur.radius));
             float4 blur_rgba = unpackUnorm4x8ToFloat(blur.rgba_color);
 
-            [ForceUnroll]
             for (uint i = 0; i < 4; i++) {
                 float2 my_xy = float2(xy.x + float(i), xy.y);
                 float2 local_xy_blur = blur.xform * my_xy;
@@ -859,7 +849,6 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
         } else if (tag == CMD_LIN_GRAD) {
             CmdLinGrad lin = read_lin_grad(ptcl, info, cmd_ix);
             float d = lin.line_x * xy.x + lin.line_y * xy.y + lin.line_c;
-            [ForceUnroll]
             for (uint i = 0; i < 4; i++) {
                 float my_d = d + lin.line_x * float(i);
                 float t = extend_mode_normalized(my_d, lin.extend_mode);
@@ -882,7 +871,6 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
             float r1_recip = is_circular ? 0.0 : (1.0 / rad.radius);
             float less_scale = (is_swapped || (1.0 - rad.focal_x) < 0.0) ? -1.0 : 1.0;
             float t_sign = sign(1.0 - rad.focal_x);
-            [ForceUnroll]
             for (uint i = 0; i < 4; i++) {
                 float2 my_xy = float2(xy.x + float(i), xy.y);
                 float2 local_xy_rad = rad.xform * my_xy;
@@ -921,7 +909,6 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
         } else if (tag == CMD_SWEEP_GRAD) {
             CmdSweepGrad sweep = read_sweep_grad(ptcl, info, cmd_ix);
             float scale = 1.0 / (sweep.t1 - sweep.t0);
-            [ForceUnroll]
             for (uint i = 0; i < 4; i++) {
                 float2 my_xy = float2(xy.x + float(i), xy.y);
                 float2 local_xy_sw = sweep.xform * my_xy;
@@ -955,7 +942,6 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
             float2 norm_max = (image.atlas_offset + image.extents - 0.5) * inv_atlas;
             if (image.quality == IMAGE_QUALITY_LOW) {
                 // Nearest-neighbor via hardware sampler (atlas stores premultiplied RGBA).
-                [ForceUnroll]
                 for (uint i = 0; i < 4; i++) {
                     if (area[i] != 0.0) {
                         float2 my_xy = float2(xy.x + float(i), xy.y);
@@ -975,7 +961,6 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
             } else {
                 // Bilinear via hardware sampler (atlas stores premultiplied RGBA; 4× fewer
                 // texture ops vs the manual 4-tap path this replaced).
-                [ForceUnroll]
                 for (uint i = 0; i < 4; i++) {
                     if (area[i] != 0.0) {
                         float2 my_xy = float2(xy.x + float(i), xy.y);
@@ -1002,7 +987,6 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
         }
     }
 
-    [ForceUnroll]
     for (uint i = 0; i < 4; i++) {
         uint2 coords = uint2(uint(xy.x) + i, uint(xy.y));
         if (coords.x < target_width && coords.y < target_height) {
