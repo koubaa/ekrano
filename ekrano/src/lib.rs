@@ -91,7 +91,6 @@ pub use peniko;
 pub use peniko::kurbo;
 
 pub use goldy::TimelineValue;
-pub use goldy::placement_heap::PlacementHeapStats;
 pub use goldy_renderer::{AllocatorStats, FrameStats, PreparedFrame, PresentToken, ResourcePoolStats};
 pub use scheme_renderer::SchemeRenderer;
 /// Goldy-based 2D renderer (retained-`Scheme` frame loop).

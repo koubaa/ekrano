@@ -433,11 +433,6 @@ impl SchemeRenderer {
         self.context.flush_deferred_deletions();
     }
 
-    /// Query the render context's placement heap state for diagnostics / tests.
-    pub fn placement_heap_stats(&self) -> Option<goldy::placement_heap::PlacementHeapStats> {
-        self.context.placement_heap_stats()
-    }
-
     /// Render a scene and return the pixel data as RGBA bytes (synchronous).
     pub fn render_to_buffer(&mut self, scene: &Scene, params: &RenderParams) -> Result<Vec<u8>> {
         for _attempt in 0..=MAX_BUMP_RETRIES {
@@ -1041,12 +1036,11 @@ impl SchemeRenderer {
             let label = if surface.is_some() { "swapchain" } else { "" };
 
             let ring_depth = self.frame_pipeline.pending_frames();
-            let (transient_views, transient_textures) = self.context.transient_cache_counts();
             let rt_slots = self.persistent.cached_scheme_rt.is_some() as usize;
             let pipe_slots = self.persistent.cached_pipeline.is_some() as usize;
 
             log::debug!(
-                "[PERF] frame={} drain={:.2}ms resolve={:.2}ms pool={:.2}ms coarse_record={:.2}ms fine_record={:.2}ms submit={:.2}ms total={:.2}ms ring={} rt_slots={rt_slots} pipe_slots={pipe_slots} tv={} tt={} {label}",
+                "[PERF] frame={} drain={:.2}ms resolve={:.2}ms pool={:.2}ms coarse_record={:.2}ms fine_record={:.2}ms submit={:.2}ms total={:.2}ms ring={} rt_slots={rt_slots} pipe_slots={pipe_slots} {label}",
                 frame_num,
                 t_drain.as_secs_f64() * 1000.0,
                 t_resolve.as_secs_f64() * 1000.0,
@@ -1056,8 +1050,6 @@ impl SchemeRenderer {
                 t_submit.as_secs_f64() * 1000.0,
                 frame_start.elapsed().as_secs_f64() * 1000.0,
                 ring_depth,
-                transient_views,
-                transient_textures,
             );
         }
 
