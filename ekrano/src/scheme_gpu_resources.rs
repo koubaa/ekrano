@@ -47,48 +47,38 @@ fn defer_buffer_until_retired(ctx: &goldy::Context, buf: Buffer) {
     ctx.defer_release(epoch, payload);
 }
 
-/// Return a texture to the texture pool immediately, or after its GPU references retire.
-fn release_or_defer_pooled_texture(recorder: &mut SchemeRecorder<'_>, tex: Texture) {
-    if !recorder.nonblocking_reuse {
-        recorder.persistent.tex_pool.release(tex);
-        return;
-    }
-    let epoch = tex.last_referenced().iter().map(|(_, tv)| tv).max().unwrap_or(0);
-    if epoch == 0 {
-        recorder.persistent.tex_pool.release(tex);
-        return;
-    }
-    let mut payload = goldy::DeferredPayload::new();
-    let generation = std::sync::Arc::clone(&recorder.persistent.texture_return_generation);
-    let created_generation = generation.load(std::sync::atomic::Ordering::Relaxed);
-    payload.push(DeferredPoolTextureReturn {
-        pending: std::sync::Arc::clone(&recorder.persistent.pending_texture_returns),
-        generation,
-        created_generation,
-        tex: Some(tex),
-    });
-    recorder.context().defer_release(epoch, payload);
+/// Acquire a sticky (cross-frame) RGBA texture deed from the retained pool.
+fn acquire_retained_texture(
+    recorder: &mut SchemeRecorder<'_>,
+    width: u32,
+    height: u32,
+    format: TextureFormat,
+    access: TextureKind,
+    flags: TextureFlags,
+) -> Result<Texture, Error> {
+    recorder
+        .persistent
+        .retained_pool
+        .acquire_texture(width, height, format, access, flags, None)
+        .map_err(|e| Error::Shader(e.to_string()))
 }
 
-struct DeferredPoolTextureReturn {
-    pending: std::sync::Arc<std::sync::Mutex<Vec<Texture>>>,
-    generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    created_generation: u64,
-    tex: Option<Texture>,
+fn acquire_retained_texture_rgba(
+    recorder: &mut SchemeRecorder<'_>,
+    width: u32,
+    height: u32,
+    access: TextureKind,
+    flags: TextureFlags,
+) -> Result<Texture, Error> {
+    acquire_retained_texture(recorder, width, height, TextureFormat::Rgba8Unorm, access, flags)
 }
 
-impl Drop for DeferredPoolTextureReturn {
-    fn drop(&mut self) {
-        if self.generation.load(std::sync::atomic::Ordering::Relaxed) != self.created_generation {
-            // Metal resize purge invalidated this generation — drop without re-pooling.
-            return;
-        }
-        if let Some(tex) = self.tex.take()
-            && let Ok(mut pending) = self.pending.lock()
-        {
-            pending.push(tex);
-        }
-    }
+/// Relinquish a sticky texture deed into the context transient pool (epoch-gated).
+fn release_retained_texture(recorder: &mut SchemeRecorder<'_>, tex: Texture) {
+    recorder
+        .persistent
+        .retained_pool
+        .release_texture(recorder.context(), tex);
 }
 
 /// Host-visible staging write into a scheme [`goldy::UploadBuffer`] (never waits).
@@ -966,10 +956,15 @@ impl PipelineResources {
                     Ok(tex) => tex,
                     Err(stale) => {
                         if let Some(tex) = *stale {
-                            release_or_defer_pooled_texture(recorder, tex);
+                            release_retained_texture(recorder, tex);
                         }
-                        let tex =
-                            acquire_texture_rgba(recorder, 1, 1, TextureKind::Interpolated, TextureFlags::COPY_DST)?;
+                        let tex = acquire_retained_texture_rgba(
+                            recorder,
+                            1,
+                            1,
+                            TextureKind::Interpolated,
+                            TextureFlags::COPY_DST,
+                        )?;
                         install_cached_texture(&mut recorder.persistent.cached_gradient, 1, 1, tex)
                     }
                 }
@@ -979,9 +974,9 @@ impl PipelineResources {
                     Ok(tex) => tex,
                     Err(stale) => {
                         if let Some(tex) = *stale {
-                            release_or_defer_pooled_texture(recorder, tex);
+                            release_retained_texture(recorder, tex);
                         }
-                        let tex = acquire_texture_rgba(
+                        let tex = acquire_retained_texture_rgba(
                             recorder,
                             ramps.width,
                             ramps.height,
@@ -1011,9 +1006,9 @@ impl PipelineResources {
                     Ok(tex) => tex,
                     Err(stale) => {
                         if let Some(tex) = *stale {
-                            release_or_defer_pooled_texture(recorder, tex);
+                            release_retained_texture(recorder, tex);
                         }
-                        let tex = acquire_texture_rgba(
+                        let tex = acquire_retained_texture_rgba(
                             recorder,
                             1,
                             1,
@@ -1031,9 +1026,9 @@ impl PipelineResources {
                         Ok(tex) => tex,
                         Err(stale) => {
                             if let Some(tex) = *stale {
-                                release_or_defer_pooled_texture(recorder, tex);
+                                release_retained_texture(recorder, tex);
                             }
-                            let tex = acquire_texture_rgba(
+                            let tex = acquire_retained_texture_rgba(
                                 recorder,
                                 images.width,
                                 images.height,
@@ -1063,9 +1058,9 @@ impl PipelineResources {
                         Ok(tex) => tex,
                         Err(stale) => {
                             if let Some(tex) = *stale {
-                                release_or_defer_pooled_texture(recorder, tex);
+                                release_retained_texture(recorder, tex);
                             }
-                            let tex = acquire_texture_rgba(
+                            let tex = acquire_retained_texture_rgba(
                                 recorder,
                                 m.width,
                                 m.height,
@@ -1087,9 +1082,9 @@ impl PipelineResources {
                         Ok(tex) => tex,
                         Err(stale) => {
                             if let Some(tex) = *stale {
-                                release_or_defer_pooled_texture(recorder, tex);
+                                release_retained_texture(recorder, tex);
                             }
-                            let tex = acquire_texture_rgba(
+                            let tex = acquire_retained_texture_rgba(
                                 recorder,
                                 1,
                                 1,
@@ -1223,8 +1218,8 @@ impl PipelineResources {
         let bump = alloc_or_reuse_bump(recorder, bump_size)?;
         clear_gpu_buf(recorder, &bump, 0, None)?;
 
-        // Try to reuse cached render targets from the previous frame (avoids TexturePool
-        // round-trips when render dimensions are stable across frames).
+        // Try to reuse cached render targets from the previous frame (avoids retained-pool
+        // reallocation when render dimensions are stable across frames).
         let (out_image, filter_layers) = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.render_targets");
             if let Some((cached_out, cached_layers)) = recorder.persistent.take_scheme_render_targets(
@@ -1246,44 +1241,38 @@ impl PipelineResources {
                 let out = if direct_present {
                     None
                 } else {
-                    Some(
-                        recorder
-                            .persistent
-                            .tex_pool
-                            .acquire(
-                                recorder.device(),
-                                params.width,
-                                params.height,
-                                out_image_format,
-                                TextureKind::Direct,
-                                TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
-                            )
-                            .map_err(|e| Error::Shader(e.to_string()))?,
-                    )
+                    Some(acquire_retained_texture(
+                        recorder,
+                        params.width,
+                        params.height,
+                        out_image_format,
+                        TextureKind::Direct,
+                        TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
+                    )?)
                 };
                 let layers = [
-                    acquire_texture_rgba(
+                    acquire_retained_texture_rgba(
                         recorder,
                         params.width,
                         params.height,
                         TextureKind::DirectInterpolated,
                         TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
                     )?,
-                    acquire_texture_rgba(
+                    acquire_retained_texture_rgba(
                         recorder,
                         params.width,
                         params.height,
                         TextureKind::DirectInterpolated,
                         TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
                     )?,
-                    acquire_texture_rgba(
+                    acquire_retained_texture_rgba(
                         recorder,
                         params.width,
                         params.height,
                         TextureKind::DirectInterpolated,
                         TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
                     )?,
-                    acquire_texture_rgba(
+                    acquire_retained_texture_rgba(
                         recorder,
                         params.width,
                         params.height,

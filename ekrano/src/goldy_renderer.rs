@@ -486,7 +486,8 @@ pub(crate) struct PersistentState {
     /// Retained pool for the seven stable pipeline buffers (`resource-pool.md` §4).
     /// Valid only at [`FRAME_PIPELINE_DEPTH`] = 1; see [`StablePipelineBuffers`](crate::scheme_gpu_resources::StablePipelineBuffers).
     pub(crate) retained_pool: RetainedPool,
-    /// Texture pool for intermediate render targets (gradient, filter layers, etc.)
+    /// Texture pool for per-use transient scratches (filter/pyramid temps).
+    /// Sticky atlases and scheme RTs use [`Self::retained_pool`] instead.
     pub(crate) tex_pool: TexturePool,
     /// Bump allocator counters from the most recently drained frame.
     /// `None` until the first GPU readback completes.
@@ -496,7 +497,8 @@ pub(crate) struct PersistentState {
     pub(crate) linear_clamp_sampler: Option<goldy::Sampler>,
     /// Persistent nearest-filter + clamp-to-edge sampler for `IMAGE_QUALITY_LOW` reads.
     pub(crate) nearest_clamp_sampler: Option<goldy::Sampler>,
-    /// Scheme-path render-target reuse: optional persistent `out_image` + filter layers.
+    /// Scheme-path render-target reuse: optional persistent `out_image` + filter layers
+    /// (retained deeds; take/store across frames).
     pub(crate) cached_scheme_rt: Option<(Option<Texture>, [Texture; 4], TimelineValue)>,
     /// Cached pipeline buffers from the previous frame. At depth=1 only one
     /// entry exists at a time: take-then-install within a single `run_frame`.
@@ -707,10 +709,10 @@ impl PersistentState {
     /// Retire scheme render targets that no longer match the requested size.
     ///
     /// On Metal, waits for `tv` if still in flight, then **drops** the textures —
-    /// returning them to [`Self::tex_pool`] would keep mismatched-size heap allocations
-    /// alive across resize churn and exhaust overflow texture heaps.
+    /// releasing them into the transient pool would keep mismatched-size heap
+    /// allocations alive across resize churn and exhaust overflow texture heaps.
     ///
-    /// On DX12/Vulkan, defers return to the texture pool until `tv` retires (nonblocking).
+    /// On DX12/Vulkan, releases deeds into the retained → transient path (epoch-gated).
     fn reclaim_scheme_render_targets(
         &mut self,
         ctx: &Context,
@@ -734,27 +736,11 @@ impl PersistentState {
             return;
         }
 
-        if tv != 0 && ctx.gpu_progress() < tv {
-            let mut textures = Vec::with_capacity(5);
-            if let Some(out) = out {
-                textures.push(out);
-            }
-            textures.extend(layers);
-            let mut payload = goldy::DeferredPayload::new();
-            payload.push(DeferredTextureToken {
-                pending: Arc::clone(&self.pending_texture_returns),
-                generation: Arc::clone(&self.texture_return_generation),
-                created_generation: self.texture_return_generation.load(Ordering::Relaxed),
-                textures,
-            });
-            ctx.defer_release(tv, payload);
-            return;
-        }
         if let Some(out) = out {
-            self.tex_pool.release(out);
+            self.retained_pool.release_texture(ctx, out);
         }
         for l in layers {
-            self.tex_pool.release(l);
+            self.retained_pool.release_texture(ctx, l);
         }
     }
 
@@ -978,44 +964,44 @@ pub(crate) mod tests {
         let device = goldy::test_support::mock_device();
         let mut p = PersistentState::new(&device);
         let layers = [
-            p.tex_pool
-                .acquire(
-                    &device,
+            p.retained_pool
+                .acquire_texture(
                     8,
                     8,
                     TextureFormat::Rgba8Unorm,
                     goldy::types::TextureKind::DirectInterpolated,
                     goldy::types::TextureFlags::empty(),
+                    None,
                 )
                 .expect("layer0"),
-            p.tex_pool
-                .acquire(
-                    &device,
+            p.retained_pool
+                .acquire_texture(
                     8,
                     8,
                     TextureFormat::Rgba8Unorm,
                     goldy::types::TextureKind::DirectInterpolated,
                     goldy::types::TextureFlags::empty(),
+                    None,
                 )
                 .expect("layer1"),
-            p.tex_pool
-                .acquire(
-                    &device,
+            p.retained_pool
+                .acquire_texture(
                     8,
                     8,
                     TextureFormat::Rgba8Unorm,
                     goldy::types::TextureKind::DirectInterpolated,
                     goldy::types::TextureFlags::empty(),
+                    None,
                 )
                 .expect("layer2"),
-            p.tex_pool
-                .acquire(
-                    &device,
+            p.retained_pool
+                .acquire_texture(
                     8,
                     8,
                     TextureFormat::Rgba8Unorm,
                     goldy::types::TextureKind::DirectInterpolated,
                     goldy::types::TextureFlags::empty(),
+                    None,
                 )
                 .expect("layer3"),
         ];
