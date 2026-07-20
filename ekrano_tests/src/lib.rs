@@ -48,7 +48,6 @@ use goldy::types::{TextureFlags, TextureFormat, TextureKind};
 use goldy::{
     BackendType, Device, DeviceDescriptor, Instance, RequestAdapterOptions, RetainedPool, Texture,
 };
-use std::sync::Arc;
 use image::RgbImage;
 use scenes::{ExampleScene, ImageCache, SceneParams, SimpleText};
 

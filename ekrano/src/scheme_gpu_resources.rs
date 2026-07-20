@@ -152,23 +152,13 @@ pub(crate) fn alloc_pipeline_buffer(
     recorder: &mut SchemeRecorder<'_>,
     size: u64,
     stride: u32,
-    name: &'static str,
+    _name: &'static str,
     flags: BufferFlags,
 ) -> Result<Buffer, Error> {
-    let ctx = recorder.context;
-    let persistent = &mut recorder.persistent;
-    let buf = persistent.pool.get_buf_with_stride(
-        &mut persistent.retained_pool,
-        ctx,
-        size,
-        name,
-        BufferKind::Scattered,
-        Some(stride),
-        flags,
-    )?;
-    // Pipeline buffers are always overwritten by GPU dispatches before first read.
-    // Per-frame clears (e.g. bump) go through `clear_gpu_buf` on the upload scheme.
-    Ok(buf)
+    recorder
+        .context
+        .acquire_transient_buffer(size, BufferKind::Scattered, flags, Some(stride))
+        .map_err(|e| Error::Gpu(e.to_string()))
 }
 
 /// Allocate or reuse a composite indirect buffer for the scheme path.
@@ -215,21 +205,19 @@ pub(crate) fn alloc_or_reuse_scheme_indirect(
 #[cfg(feature = "debug_layers")]
 pub(crate) fn record_upload_bytes_owned(
     recorder: &mut SchemeRecorder<'_>,
-    name: &'static str,
+    _name: &'static str,
     element_stride: u32,
     bytes: Vec<u8>,
 ) -> Result<Buffer, Error> {
-    let ctx = recorder.context;
-    let persistent = &mut recorder.persistent;
-    let buf = persistent.pool.get_buf_with_stride(
-        &mut persistent.retained_pool,
-        ctx,
-        bytes.len() as u64,
-        name,
-        BufferKind::Scattered,
-        Some(element_stride),
-        BufferFlags::empty(),
-    )?;
+    let buf = recorder
+        .context
+        .acquire_transient_buffer(
+            bytes.len() as u64,
+            BufferKind::Scattered,
+            BufferFlags::empty(),
+            Some(element_stride),
+        )
+        .map_err(|e| Error::Gpu(e.to_string()))?;
     recorder
         .upload_scheme()
         .commit_write_parcel(&buf, 0, bytes)
@@ -711,8 +699,8 @@ fn alloc_stable_buffer(
 }
 
 /// The fourteen count-derived scratch buffers whose sizes track scene complexity.
-/// These stay in [`crate::goldy_renderer::ResourcePool`], recycled by
-/// `{size, access, name, flags}`.
+/// Acquired via [`goldy::Context::acquire_transient_buffer`]; sticky across frames in
+/// [`crate::goldy_renderer::PersistentState::cached_pipeline`] when sizes match.
 /// See `resource-pool.md §1` for the rationale behind this split from [`StablePipelineBuffers`].
 pub(crate) struct ScratchPipelineBuffers {
     pub reduced: Buffer,
@@ -1127,48 +1115,24 @@ impl PipelineResources {
                         // RetainedPool adopts with ready_after = last_referenced.
                         pool.release_buffer(ctx, buffer);
                     }
-                    let scratch_returns = vec![
-                        (c.scratch.reduced, "ekrano.reduced_buf"),
-                        (c.scratch.reduced2, "ekrano.reduced2_buf"),
-                        (c.scratch.reduced_scan, "ekrano.reduced_scan_buf"),
-                        (c.scratch.tagmonoid, "ekrano.tagmonoid_buf"),
-                        (c.scratch.path_bbox, "ekrano.path_bbox_buf"),
-                        (c.scratch.draw_reduced, "ekrano.draw_reduced_buf"),
-                        (c.scratch.draw_monoid, "ekrano.draw_monoid_buf"),
-                        (c.scratch.clip_inp, "ekrano.clip_inp_buf"),
-                        (c.scratch.clip_el, "ekrano.clip_el_buf"),
-                        (c.scratch.clip_bic, "ekrano.clip_bic_buf"),
-                        (c.scratch.clip_bbox, "ekrano.clip_bbox_buf"),
-                        (c.scratch.draw_bbox, "ekrano.draw_bbox_buf"),
-                        (c.scratch.bin_header, "ekrano.bin_header_buf"),
-                        (c.scratch.path, "ekrano.path_buf"),
+                    let scratch_returns = [
+                        c.scratch.reduced,
+                        c.scratch.reduced2,
+                        c.scratch.reduced_scan,
+                        c.scratch.tagmonoid,
+                        c.scratch.path_bbox,
+                        c.scratch.draw_reduced,
+                        c.scratch.draw_monoid,
+                        c.scratch.clip_inp,
+                        c.scratch.clip_el,
+                        c.scratch.clip_bic,
+                        c.scratch.clip_bbox,
+                        c.scratch.draw_bbox,
+                        c.scratch.bin_header,
+                        c.scratch.path,
                     ];
-                    if recorder.nonblocking_reuse {
-                        let mut epoch = 0_u64;
-                        for (buf, _) in &scratch_returns {
-                            for (_, tv) in buf.last_referenced().iter() {
-                                epoch = epoch.max(tv);
-                            }
-                        }
-                        if epoch > 0 {
-                            crate::goldy_renderer::defer_frame_gpu_resources(
-                                ctx,
-                                recorder.persistent,
-                                epoch,
-                                Vec::new(),
-                                scratch_returns,
-                            );
-                        } else {
-                            let ppool = &mut recorder.persistent.pool;
-                            for (buf, name) in scratch_returns {
-                                ppool.return_buf(buf, name);
-                            }
-                        }
-                    } else {
-                        let ppool = &mut recorder.persistent.pool;
-                        for (buf, name) in scratch_returns {
-                            ppool.return_buf(buf, name);
-                        }
+                    for buf in scratch_returns {
+                        ctx.return_transient_buffer(buf);
                     }
                     (None, None)
                 }
@@ -1177,7 +1141,7 @@ impl PipelineResources {
         }; // end ekrano.prepare.pipeline_cache zone
 
         let _tz_alloc = goldy::tracy_zone!("ekrano.prepare.alloc_buffers");
-        // Reuse from cache when sizes match (no ResourcePool round-trip). These buffers
+        // Reuse from cache when sizes match (no transient-pool round-trip). These buffers
         // are fully GPU-overwritten before first read.
         let stable = StablePipelineBuffers::alloc(recorder, cached_stable, &buffer_sizes)?;
         let scratch = ScratchPipelineBuffers::alloc(recorder, cached_scratch, &buffer_sizes)?;
