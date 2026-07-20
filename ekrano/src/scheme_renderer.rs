@@ -25,7 +25,6 @@
 //!    [`SchemeRenderer::submit_to_swapchain`] + velato's `Presenter`.
 
 use std::mem;
-use std::mem::size_of;
 use std::sync::Arc;
 
 use goldy::types::{BackendType, ResourceAccess, TextureFlags, TextureFormat, TextureKind};
@@ -44,13 +43,13 @@ use crate::{
         defer_frame_gpu_resources, env_robust_override, sanitize_bump,
     },
     resource_proxy::{BindType, ShaderId},
-    scheme_gpu_resources::{
-        GpuBinding, acquire_texture_rgba, bind_type_to_node_access, record_upload_bytes, record_upload_bytes_owned,
-    },
+    scheme_gpu_resources::{GpuBinding, acquire_texture_rgba, bind_type_to_node_access},
     scheme_render::Render,
     shaders::{self, FullShaders},
     worker_retention::{predict_worker_stale, upload_key, worker_stale_reasons, worker_topology},
 };
+#[cfg(feature = "debug_layers")]
+use crate::scheme_gpu_resources::record_upload_bytes_owned;
 use ekrano_encoding::{BumpAllocators, Images, Layout, Ramps, RenderConfig, Resolver};
 
 // -----------------------------------------------------------------------
@@ -1312,17 +1311,14 @@ impl<'a> SchemeRecorder<'a> {
         outcome
     }
 
-    #[allow(dead_code, reason = "parity stub; scheme debug renderer not wired yet")]
+    #[cfg(feature = "debug_layers")]
     pub fn upload(&mut self, name: &'static str, data: impl Into<Vec<u8>>) -> Buffer {
         record_upload_bytes_owned(self, name, 1, data.into()).expect("upload failed")
     }
 
+    #[cfg(feature = "debug_layers")]
     pub fn upload_strided(&mut self, name: &'static str, element_stride: u32, data: impl Into<Vec<u8>>) -> Buffer {
         record_upload_bytes_owned(self, name, element_stride, data.into()).expect("upload_strided failed")
-    }
-
-    pub fn upload_typed<T: bytemuck::Pod>(&mut self, name: &'static str, data: &T) -> Buffer {
-        record_upload_bytes(self, name, size_of::<T>() as u32, bytemuck::bytes_of(data)).expect("upload_typed failed")
     }
 
     pub fn dispatch(&mut self, shader: ShaderId, wg_size: (u32, u32, u32), bindings: &[GpuBinding<'_>]) {

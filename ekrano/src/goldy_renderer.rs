@@ -450,7 +450,7 @@ pub(crate) fn env_robust_override() -> Option<bool> {
 /// GPU resources that live for the lifetime of the renderer and are reused
 /// across frames. Pool growth, texture reuse, and bump estimates all live here.
 pub(crate) struct PersistentState {
-    /// Owned buffer cache: recycles pool-exempt buffers (bump, indirect, etc.)
+    /// Owned buffer cache: recycles scratch + debug upload buffers.
     pub(crate) pool: ResourcePool,
     /// Retained pool for the seven stable pipeline buffers (`resource-pool.md` §4).
     /// Valid only at [`FRAME_PIPELINE_DEPTH`] = 1; see [`StablePipelineBuffers`](crate::scheme_gpu_resources::StablePipelineBuffers).
@@ -474,7 +474,7 @@ pub(crate) struct PersistentState {
     /// avoids re-allocations on the hot path.
     pub(crate) deferred_owned_cap_hint: usize,
     pub(crate) deferred_textures_cap_hint: usize,
-    /// Static MSAA8 mask LUT buffer (uploaded once, reused without re-upload).
+    /// Static MSAA8 mask LUT buffer (retained deed, init once).
     ///
     /// Keeping this persistent avoids a staging-belt `CopyBufferRegion` in the
     /// retained fine command list, which would reference a stale staging chunk on
@@ -486,7 +486,7 @@ pub(crate) struct PersistentState {
     /// converge; eliminates `WriteBuffer` from the dispatch graph at steady state.
     pub(crate) cached_config_uniform: Option<(ekrano_encoding::ConfigUniform, Buffer)>,
     /// Per-slot cached `FilterUniform` buffers, indexed by filter dispatch order.
-    /// Stable for scenes with fixed filter effects (e.g. a static drop shadow).
+    /// Retained deeds; stable for scenes with fixed filter effects (e.g. a static drop shadow).
     pub(crate) cached_filter_uniforms: Vec<Option<(ekrano_encoding::FilterUniform, Buffer)>>,
     /// Composite per-stage indirect `DispatchShape` buffer, retained across frames.
     /// Cache key is the `WorkgroupCountsGpu` that seeded the allocation.
@@ -594,33 +594,27 @@ impl PersistentState {
             .unwrap_or(true);
         if needs_new {
             if let Some((old, _)) = self.readback_host_buf.take() {
-                self.pool.return_buf(old, "ekrano.readback_host_buf");
+                self.retained_pool.release_buffer(ctx, old);
             }
-            let buf = self
-                .pool
-                .get_buf_with_stride(
-                    &mut self.retained_pool,
-                    ctx,
+            self.retained_pool
+                .acquire_buffer(
                     staging_bytes,
-                    "ekrano.readback_host_buf",
                     BufferKind::Scattered,
                     None,
                     BufferFlags::CPU_READABLE,
+                    None,
                 )
-                .map_err(|e| Error::Shader(e.to_string()))?;
-            Ok(buf)
+                .map_err(|e| Error::Shader(e.to_string()))
         } else if let Some((buf, _)) = self.readback_host_buf.take() {
             Ok(buf)
         } else {
-            self.pool
-                .get_buf_with_stride(
-                    &mut self.retained_pool,
-                    ctx,
+            self.retained_pool
+                .acquire_buffer(
                     staging_bytes,
-                    "ekrano.readback_host_buf",
                     BufferKind::Scattered,
                     None,
                     BufferFlags::CPU_READABLE,
+                    None,
                 )
                 .map_err(|e| Error::Shader(e.to_string()))
         }

@@ -212,32 +212,7 @@ pub(crate) fn alloc_or_reuse_scheme_indirect(
         .map_err(|e| Error::Gpu(e.to_string()))
 }
 
-pub(crate) fn record_upload_bytes(
-    recorder: &mut SchemeRecorder<'_>,
-    name: &'static str,
-    element_stride: u32,
-    bytes: &[u8],
-) -> Result<Buffer, Error> {
-    let ctx = recorder.context;
-    let persistent = &mut recorder.persistent;
-    let buf = persistent.pool.get_buf_with_stride(
-        &mut persistent.retained_pool,
-        ctx,
-        bytes.len() as u64,
-        name,
-        BufferKind::Scattered,
-        Some(element_stride),
-        BufferFlags::empty(),
-    )?;
-    recorder
-        .upload_scheme()
-        .commit_write_parcel(&buf, 0, bytes.to_vec())
-        .map_err(|e| Error::Shader(e.to_string()))?;
-    Ok(buf)
-}
-
-/// Like [`record_upload_bytes`] but takes ownership of the byte vector, avoiding
-/// the redundant `to_vec()` copy when the caller already holds an owned `Vec<u8>`.
+#[cfg(feature = "debug_layers")]
 pub(crate) fn record_upload_bytes_owned(
     recorder: &mut SchemeRecorder<'_>,
     name: &'static str,
