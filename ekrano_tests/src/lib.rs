@@ -45,11 +45,14 @@ use ekrano::peniko::{Blob, Color, ImageFormat, color::palette};
 use ekrano::peniko::{ImageAlphaType, ImageData};
 use ekrano::{AaConfig, GoldyRenderer, Scene};
 use goldy::types::{TextureFlags, TextureFormat, TextureKind};
-use goldy::{BackendType, Device, DeviceDescriptor, Instance, RequestAdapterOptions, Texture, TexturePool};
+use goldy::{
+    BackendType, Device, DeviceDescriptor, Instance, RequestAdapterOptions, RetainedPool, Texture,
+};
+use std::sync::Arc;
 use image::RgbImage;
 use scenes::{ExampleScene, ImageCache, SceneParams, SimpleText};
 
-/// Allocate a standalone texture for integration tests (via [`TexturePool`]).
+/// Allocate a standalone texture for integration tests.
 pub fn test_alloc_texture(
     device: &Device,
     width: u32,
@@ -58,8 +61,8 @@ pub fn test_alloc_texture(
     access: TextureKind,
     flags: TextureFlags,
 ) -> Texture {
-    TexturePool::default()
-        .acquire(device, width, height, format, access, flags)
+    RetainedPool::new(Arc::new(device.clone()))
+        .acquire_texture(width, height, format, access, flags, None)
         .expect("acquire texture")
 }
 

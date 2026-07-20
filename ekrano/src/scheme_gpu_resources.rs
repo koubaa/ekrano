@@ -316,16 +316,8 @@ pub(crate) fn acquire_texture_rgba(
     flags: TextureFlags,
 ) -> Result<Texture, Error> {
     recorder
-        .persistent
-        .tex_pool
-        .acquire(
-            recorder.device(),
-            width,
-            height,
-            TextureFormat::Rgba8Unorm,
-            access,
-            flags,
-        )
+        .context()
+        .acquire_transient_texture(width, height, TextureFormat::Rgba8Unorm, access, flags)
         .map_err(|e| Error::Shader(e.to_string()))
 }
 
