@@ -16,7 +16,7 @@
 //! These tests assert heap/pool/deferred-ring survival, not byte-level VRAM accounting.
 //! Budget and tracking policies are tested in goldy (`allocation_policy`, `vram_allocator`);
 //! ekrano production paths run with [`NoPolicy`](goldy::NoPolicy) unless the caller installs
-//! one via [`Device::set_allocation_policy`](goldy::Device::set_allocation_policy).
+//! one via [`Device::ensure_allocation_policy`](goldy::Device::ensure_allocation_policy).
 
 #[path = "common/submission.rs"]
 mod submission;
