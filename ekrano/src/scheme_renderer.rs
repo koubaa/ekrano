@@ -27,14 +27,16 @@
 use std::mem;
 use std::sync::Arc;
 
+#[cfg(feature = "debug_layers")]
+use goldy::Buffer;
 use goldy::types::{BackendType, ResourceAccess, TextureFlags, TextureFormat, TextureKind};
 use goldy::{
     BudgetPolicy, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator, NodeAccess, Scheme, ShaderModule,
     Signal, Texture,
 };
-#[cfg(feature = "debug_layers")]
-use goldy::Buffer;
 
+#[cfg(feature = "debug_layers")]
+use crate::scheme_gpu_resources::record_upload_bytes_owned;
 #[cfg(debug_assertions)]
 use crate::worker_retention::{debug_assert_retained_worker_resources, worker_resource_handles};
 use crate::{
@@ -50,8 +52,6 @@ use crate::{
     shaders::{self, FullShaders},
     worker_retention::{predict_worker_stale, upload_key, worker_stale_reasons, worker_topology},
 };
-#[cfg(feature = "debug_layers")]
-use crate::scheme_gpu_resources::record_upload_bytes_owned;
 use ekrano_encoding::{BumpAllocators, Images, Layout, Ramps, RenderConfig, Resolver};
 
 // -----------------------------------------------------------------------
@@ -1561,9 +1561,7 @@ mod tests {
             let mut worker = Scheme::new(&ctx);
             let mut upload = Scheme::new(&ctx);
             let mut frame_pipeline = FrameOrchestrator::new(&ctx, FRAME_PIPELINE_DEPTH);
-            let frame_handle = frame_pipeline
-                .begin_frame()
-                .expect("begin_frame");
+            let frame_handle = frame_pipeline.begin_frame().expect("begin_frame");
             let pipeline = {
                 let mut recorder = SchemeRecorder::new(
                     &gpu,

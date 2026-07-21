@@ -15,8 +15,8 @@ use ekrano_encoding::{
 };
 use goldy::types::{BufferFlags, BufferKind, TextureFlags, TextureKind};
 use goldy::{Buffer, NodeAccess, PresentLease, Texture};
-use std::mem::size_of;
 use peniko::color::{PremulColor, Srgb};
+use std::mem::size_of;
 
 use ekrano_encoding::{
     STAGE_BACKDROP, STAGE_BBOX_CLEAR, STAGE_BINNING, STAGE_CLIP_LEAF, STAGE_CLIP_REDUCE, STAGE_COARSE, STAGE_DRAW_LEAF,

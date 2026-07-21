@@ -45,9 +45,7 @@ use ekrano::peniko::{Blob, Color, ImageFormat, color::palette};
 use ekrano::peniko::{ImageAlphaType, ImageData};
 use ekrano::{AaConfig, GoldyRenderer, Scene};
 use goldy::types::{TextureFlags, TextureFormat, TextureKind};
-use goldy::{
-    BackendType, Device, DeviceDescriptor, Instance, RequestAdapterOptions, RetainedPool, Texture,
-};
+use goldy::{BackendType, Device, DeviceDescriptor, Instance, RequestAdapterOptions, RetainedPool, Texture};
 use image::RgbImage;
 use scenes::{ExampleScene, ImageCache, SceneParams, SimpleText};
 

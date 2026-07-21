@@ -10,13 +10,12 @@
 //! Push constants carry bindless indices per dispatch via Slang `uniform`
 //! entry-point parameters.
 
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use goldy::types::{BufferFlags, TextureFormat};
 use goldy::{
-    BackendType, Buffer, BufferKind, ComputePipeline, Context, Device, Grant, RetainedPool, Texture,
-    TimelineValue,
+    BackendType, Buffer, BufferKind, ComputePipeline, Context, Device, Grant, RetainedPool, Texture, TimelineValue,
 };
 
 /// Ekrano uses a single-frame fire-and-forget model.
