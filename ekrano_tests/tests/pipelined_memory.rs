@@ -20,7 +20,7 @@ use goldy::types::{TextureFlags, TextureFormat, TextureKind};
 #[cfg(target_os = "windows")]
 fn gpu_test_lock() -> Option<std::sync::MutexGuard<'static, ()>> {
     use std::sync::{Mutex, OnceLock};
-    if goldy::backend::dx12::is_debug_mode() {
+    if goldy::dx12_debug_mode() {
         static GPU_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         return Some(
             GPU_LOCK

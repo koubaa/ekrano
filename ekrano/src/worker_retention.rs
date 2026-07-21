@@ -198,7 +198,7 @@ pub(crate) fn worker_stale_reasons(
     topology: &WorkerTopology,
     filter_effects: &[LayerFilterEffect],
     out_image: Option<ResourceHandle>,
-    output_texture: Option<goldy::backend::TextureHandle>,
+    output_texture: Option<goldy::TextureHandle>,
 ) -> bool {
     let out_image_mismatch = if topology.direct_present {
         false
@@ -221,7 +221,7 @@ pub(crate) fn predict_worker_stale(
     persistent: &PersistentState,
     topology: &WorkerTopology,
     filter_effects: &[LayerFilterEffect],
-    output_texture: Option<goldy::backend::TextureHandle>,
+    output_texture: Option<goldy::TextureHandle>,
     width: u32,
     height: u32,
     out_format: TextureFormat,

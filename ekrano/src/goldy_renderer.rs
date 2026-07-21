@@ -318,7 +318,7 @@ pub(crate) struct PersistentState {
     /// `out_image` handle the worker was recorded against (RT cache rotation invalidates retention).
     pub(crate) cached_worker_out_image: Option<goldy::types::ResourceHandle>,
     /// Output texture handle the worker fine pass was recorded against.
-    pub(crate) cached_worker_output_texture: Option<goldy::backend::TextureHandle>,
+    pub(crate) cached_worker_output_texture: Option<goldy::TextureHandle>,
     /// Full worker-bound handles from the last record (debug invariant checks only).
     #[cfg(debug_assertions)]
     pub(crate) cached_worker_resources: Option<crate::worker_retention::WorkerResourceHandles>,
