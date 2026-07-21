@@ -10,14 +10,12 @@
 //! Push constants carry bindless indices per dispatch via Slang `uniform`
 //! entry-point parameters.
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use goldy::types::{BufferFlags, TextureFormat};
 use goldy::{
-    BackendType, Buffer, BufferKind, ComputePipeline, Context, Device, Grant, RetainedPool, Texture, TexturePool,
-    TimelineValue,
+    BackendType, Buffer, BufferKind, ComputePipeline, Context, Device, Grant, RetainedPool, Texture, TimelineValue,
 };
 
 /// Ekrano uses a single-frame fire-and-forget model.
@@ -51,13 +49,9 @@ pub struct AllocatorStats {
     pub cleanup_ring_depth: usize,
 }
 
-/// Snapshot of the resource pool's state, useful for tests and diagnostics.
+/// Snapshot of retained-pool buffer accounting, useful for tests and diagnostics.
 #[derive(Debug, Clone, Copy)]
 pub struct ResourcePoolStats {
-    /// Total number of pooled buffers across all keys.
-    pub total_pooled_buffers: usize,
-    /// Number of distinct `(size, access, name, flags)` keys in the pool.
-    pub distinct_keys: usize,
     /// Committed bytes held in the retained pool.
     ///
     /// Increases when `retain_pool.acquire_*` adds a new buffer, stays flat when
@@ -150,57 +144,7 @@ pub(crate) fn maybe_log_gpu_memory(device: &Device) {
 // Deferred per-frame work
 // -----------------------------------------------------------------------
 //
-// The `FrameOrchestrator` ring now carries `()` — all resource retirement
-// (render targets, pipeline buffers, owned buffers, bump readback) bypasses
-// the ring via timeline-guarded cache slots + `Device::defer_release`
-// + bump `ReadGrant` drain.  The ring is a pure scheduling primitive:
-// depth enforcement + timeline tracking only.
-
-/// Token pushed into a [`DeferredPayload`] when owned pipeline buffers are retired.
-///
-/// [`DeferredPayload`]: goldy::DeferredPayload
-struct DeferredOwnedBuffersToken {
-    pending: Arc<Mutex<Vec<(Buffer, &'static str)>>>,
-    buffers: Vec<(Buffer, &'static str)>,
-}
-
-impl Drop for DeferredOwnedBuffersToken {
-    fn drop(&mut self) {
-        if let Ok(mut pending) = self.pending.lock() {
-            pending.append(&mut self.buffers);
-        }
-    }
-}
-
-/// Token pushed into a [`DeferredPayload`] when intermediate textures are retired.
-///
-/// When the `VramAllocator` ring drops this token (after `gpu_progress >= epoch`),
-/// it enqueues the textures into `pending_texture_returns`. The next
-/// `run_frame` call drains that queue and returns them to `TexturePool`.
-///
-/// If [`PersistentState::texture_return_generation`] advanced since creation (Metal
-/// resize purge), textures are dropped instead of re-pooled so obsolete sizes cannot
-/// pin overflow heaps.
-///
-/// [`DeferredPayload`]: goldy::DeferredPayload
-struct DeferredTextureToken {
-    pending: Arc<Mutex<Vec<Texture>>>,
-    generation: Arc<AtomicU64>,
-    created_generation: u64,
-    textures: Vec<Texture>,
-}
-
-impl Drop for DeferredTextureToken {
-    fn drop(&mut self) {
-        if self.generation.load(Ordering::Relaxed) != self.created_generation {
-            // Resize purge invalidated this generation — drop without re-pooling.
-            return;
-        }
-        if let Ok(mut pending) = self.pending.lock() {
-            pending.append(&mut self.textures);
-        }
-    }
-}
+// `FrameOrchestrator` is scheduling-only (depth + timeline ring).
 
 /// Which caches received new entries during pipeline cleanup.
 #[derive(Debug, Default)]
@@ -212,11 +156,10 @@ pub(crate) struct CacheScheduleOutcome {
 }
 
 /// Outcome of [`crate::scheme_renderer::SchemeRecorder::finish`]: orchestrator submit
-/// result plus resources that bypass the ring and are deferred via [`Device::defer_release`].
+/// result plus filter-scratch textures returned to the transient pool after submit.
 pub(crate) struct FrameFinishOutcome {
     pub(crate) timeline: TimelineValue,
     pub(crate) deferred_textures: Vec<Texture>,
-    pub(crate) recyclable_owned: Vec<(Buffer, &'static str)>,
     /// Submission returned by [`goldy::Scheme::submit`].
     ///
     /// Held here so that `SchemeRenderer::run_frame_from_prepared` can build a
@@ -277,34 +220,17 @@ impl PreparedFrame {
     }
 }
 
-/// Defer textures and recyclable owned buffers until `tv` retires on the GPU.
+/// Return filter-scratch textures to the context transient pool (epoch-gated).
 ///
-/// Uses a single [`Context::defer_release`] per frame (one mutex push) instead of
-/// multiple deferred cleanup calls.
-pub(crate) fn defer_frame_gpu_resources(
-    ctx: &Context,
-    persistent: &PersistentState,
-    tv: TimelineValue,
-    textures: Vec<Texture>,
-    recyclable_owned: Vec<(Buffer, &'static str)>,
-) {
-    let mut payload = goldy::DeferredPayload::new();
-    if !textures.is_empty() {
-        payload.push(DeferredTextureToken {
-            pending: Arc::clone(&persistent.pending_texture_returns),
-            generation: Arc::clone(&persistent.texture_return_generation),
-            created_generation: persistent.texture_return_generation.load(Ordering::Relaxed),
-            textures,
-        });
-    }
-    if !recyclable_owned.is_empty() {
-        payload.push(DeferredOwnedBuffersToken {
-            pending: Arc::clone(&persistent.pending_owned_returns),
-            buffers: recyclable_owned,
-        });
-    }
-    if !payload.is_empty() {
-        ctx.defer_release(tv, payload);
+/// On Metal, mismatched/resize-prone scratches are dropped instead of parked
+/// (overflow-heap pin avoidance).
+pub(crate) fn defer_frame_gpu_resources(ctx: &Context, persistent: &PersistentState, textures: Vec<Texture>) {
+    if persistent.metal_heap_sensitive {
+        drop(textures);
+    } else {
+        for tex in textures {
+            ctx.return_transient_texture(tex);
+        }
     }
 }
 
@@ -313,155 +239,6 @@ pub(crate) struct GoldyShader {
     pub(crate) bindings: Vec<BindType>,
     /// Registration name (e.g. `"fine_area"`) used for scheme node labels and Metal PSO labels.
     pub(crate) label: &'static str,
-}
-
-#[derive(Hash, PartialEq, Eq, Clone)]
-struct BufferKey {
-    size: u64,
-    access: BufferKind,
-    name: &'static str,
-    buffer_flags: BufferFlags,
-}
-
-fn pool_key_for_return(buf: &Buffer, name: &'static str) -> BufferKey {
-    BufferKey {
-        size: buf.byte_size(),
-        access: BufferKind::Scattered,
-        name,
-        buffer_flags: buf.flags(),
-    }
-}
-
-type PendingOwnedReturns = Arc<Mutex<Vec<(Buffer, &'static str)>>>;
-
-#[derive(Default)]
-pub(crate) struct ResourcePool {
-    bufs: HashMap<BufferKey, Vec<Buffer>>,
-    /// Reference to the pending returns queue. When a buffer allocation fails
-    /// (heap exhausted), the pool flushes deferred deletions, drains this queue
-    /// back into itself, and retries before blocking for GPU progress.
-    pending_owned_returns: Option<PendingOwnedReturns>,
-}
-
-impl ResourcePool {
-    /// Wire the pool to the renderer's `pending_owned_returns` queue so that
-    /// pool-misses can self-replenish before triggering a GPU wait.
-    pub(crate) fn set_pending_returns(&mut self, pending: PendingOwnedReturns) {
-        self.pending_owned_returns = Some(pending);
-    }
-
-    /// Drain `pending_owned_returns` into this pool.
-    fn drain_pending(&mut self) {
-        let Some(ref pending) = self.pending_owned_returns else {
-            return;
-        };
-        let Ok(mut guard) = pending.try_lock() else {
-            return;
-        };
-        let drained: Vec<_> = guard.drain(..).collect();
-        drop(guard);
-        for (buf, name) in drained {
-            self.return_buf(buf, name);
-        }
-    }
-
-    pub(crate) fn get_buf_with_stride(
-        &mut self,
-        retained_pool: &mut RetainedPool,
-        ctx: &Context,
-        size: u64,
-        name: &'static str,
-        access: BufferKind,
-        stride: Option<u32>,
-        buffer_flags: BufferFlags,
-    ) -> Result<Buffer> {
-        let key = BufferKey {
-            size,
-            access,
-            name,
-            buffer_flags,
-        };
-        // Fast path: pool hit.
-        if let Some(buf) = self.bufs.entry(key.clone()).or_default().pop() {
-            return Ok(buf);
-        }
-
-        // Pool miss: try a fresh allocation via the retained pool door.
-        match retained_pool.acquire_buffer(size, access, stride, buffer_flags, None) {
-            Ok(buf) => Ok(buf),
-            Err(_) => {
-                // Attempt 2 (non-blocking): flush deferred deletions so that any GPU
-                // work that completed since the last flush moves buffers from the vram
-                // allocator ring into pending_owned_returns, then drain pending back into
-                // this pool and retry. This handles the common case where one or more
-                // frames finished between the last run_frame flush and this alloc.
-                ctx.flush_deferred_deletions();
-                self.drain_pending();
-                if let Some(buf) = self.bufs.entry(key.clone()).or_default().pop() {
-                    return Ok(buf);
-                }
-
-                // Attempt 3 (blocking): the `Oversubscribed` signal was queued by the
-                // allocation failure above; wait for the oldest outstanding GPU work to
-                // retire, which frees one frame's worth of heap. A single wait suffices —
-                // the previous loop logic iterated through deferred epochs one-by-one, but
-                // peek_oldest_in_flight() gives us the exact fence value we need to unblock.
-                {
-                    let _tz = goldy::tracy_zone!("ekrano.resource_pool.wait_reclaim");
-                    if let Some(oldest_in_flight) = ctx.peek_oldest_in_flight() {
-                        log::debug!(
-                            "ResourcePool heap pressure for {name} — waiting for GPU epoch \
-                             {oldest_in_flight} to reclaim archive",
-                        );
-                        let _ = ctx.wait_until_timeout(oldest_in_flight, 2000);
-                        ctx.flush_deferred_deletions();
-                        self.drain_pending();
-                        if let Some(buf) = self.bufs.entry(key.clone()).or_default().pop() {
-                            return Ok(buf);
-                        }
-                    }
-                }
-
-                // Final attempt: one more fresh allocation (heap may have space now that
-                // the DeletionQueue was processed inside flush_deferred_deletions).
-                retained_pool
-                    .acquire_buffer(size, access, stride, buffer_flags, None)
-                    .map_err(|e| Error::Shader(e.to_string()))
-            }
-        }
-    }
-
-    /// Return a buffer to the pool for reuse by a future frame.
-    pub(crate) fn return_buf(&mut self, buf: Buffer, name: &'static str) {
-        let key = pool_key_for_return(&buf, name);
-        self.bufs.entry(key).or_default().push(buf);
-    }
-
-    /// Drop excess pooled [`Buffer`]s per `(size, access, name)` key to bound memory.
-    pub(crate) fn cap_pool_depth(&mut self, max_per_key: usize) {
-        let mut empties = Vec::<BufferKey>::new();
-        for (key, stack) in self.bufs.iter_mut() {
-            while stack.len() > max_per_key {
-                drop(stack.pop());
-            }
-            if stack.is_empty() {
-                empties.push(key.clone());
-            }
-        }
-        for k in empties {
-            self.bufs.remove(&k);
-        }
-    }
-
-    /// Total number of pooled buffers across all keys.
-    pub(crate) fn total_pooled_buffers(&self) -> usize {
-        self.bufs.values().map(|v| v.len()).sum()
-    }
-
-    /// Number of distinct buffer keys in the pool.
-    pub(crate) fn distinct_keys(&self) -> usize {
-        self.bufs.len()
-    }
 }
 
 /// Override [`RenderParams::robust`] from the environment for benchmarking.
@@ -481,13 +258,9 @@ pub(crate) fn env_robust_override() -> Option<bool> {
 /// GPU resources that live for the lifetime of the renderer and are reused
 /// across frames. Pool growth, texture reuse, and bump estimates all live here.
 pub(crate) struct PersistentState {
-    /// Owned buffer cache: recycles pool-exempt buffers (bump, indirect, etc.)
-    pub(crate) pool: ResourcePool,
     /// Retained pool for the seven stable pipeline buffers (`resource-pool.md` §4).
     /// Valid only at [`FRAME_PIPELINE_DEPTH`] = 1; see [`StablePipelineBuffers`](crate::scheme_gpu_resources::StablePipelineBuffers).
     pub(crate) retained_pool: RetainedPool,
-    /// Texture pool for intermediate render targets (gradient, filter layers, etc.)
-    pub(crate) tex_pool: TexturePool,
     /// Bump allocator counters from the most recently drained frame.
     /// `None` until the first GPU readback completes.
     last_drained_bump: Option<BumpAllocators>,
@@ -496,17 +269,16 @@ pub(crate) struct PersistentState {
     pub(crate) linear_clamp_sampler: Option<goldy::Sampler>,
     /// Persistent nearest-filter + clamp-to-edge sampler for `IMAGE_QUALITY_LOW` reads.
     pub(crate) nearest_clamp_sampler: Option<goldy::Sampler>,
-    /// Scheme-path render-target reuse: optional persistent `out_image` + filter layers.
+    /// Scheme-path render-target reuse: optional persistent `out_image` + filter layers
+    /// (retained deeds; take/store across frames).
     pub(crate) cached_scheme_rt: Option<(Option<Texture>, [Texture; 4], TimelineValue)>,
     /// Cached pipeline buffers from the previous frame. At depth=1 only one
     /// entry exists at a time: take-then-install within a single `run_frame`.
     pub(crate) cached_pipeline: Option<crate::scheme_gpu_resources::CachedPipeline>,
-    /// Capacity hints for recorder scratch allocations. Updated after each
-    /// `finish()` call so that the next frame pre-allocates the right amount and
-    /// avoids re-allocations on the hot path.
-    pub(crate) deferred_owned_cap_hint: usize,
+    /// Capacity hint for recorder deferred-texture scratch. Updated after each
+    /// `finish()` call so that the next frame pre-allocates the right amount.
     pub(crate) deferred_textures_cap_hint: usize,
-    /// Static MSAA8 mask LUT buffer (uploaded once, reused without re-upload).
+    /// Static MSAA8 mask LUT buffer (retained deed, init once).
     ///
     /// Keeping this persistent avoids a staging-belt `CopyBufferRegion` in the
     /// retained fine command list, which would reference a stale staging chunk on
@@ -518,11 +290,10 @@ pub(crate) struct PersistentState {
     /// converge; eliminates `WriteBuffer` from the dispatch graph at steady state.
     pub(crate) cached_config_uniform: Option<(ekrano_encoding::ConfigUniform, Buffer)>,
     /// Per-slot cached `FilterUniform` buffers, indexed by filter dispatch order.
-    /// Stable for scenes with fixed filter effects (e.g. a static drop shadow).
+    /// Retained deeds; stable for scenes with fixed filter effects (e.g. a static drop shadow).
     pub(crate) cached_filter_uniforms: Vec<Option<(ekrano_encoding::FilterUniform, Buffer)>>,
     /// Composite per-stage indirect `DispatchShape` buffer, retained across frames.
     /// Cache key is the `WorkgroupCountsGpu` that seeded the allocation.
-    /// Scheme-path only; never touches `ResourcePool`.
     pub(crate) cached_scheme_indirect: Option<(ekrano_encoding::WorkgroupCountsGpu, Buffer)>,
     /// Stable scene buffer for the retained worker scheme (bucket capacity, buffer).
     pub(crate) cached_scene: Option<(u64, Buffer)>,
@@ -547,7 +318,7 @@ pub(crate) struct PersistentState {
     /// `out_image` handle the worker was recorded against (RT cache rotation invalidates retention).
     pub(crate) cached_worker_out_image: Option<goldy::types::ResourceHandle>,
     /// Output texture handle the worker fine pass was recorded against.
-    pub(crate) cached_worker_output_texture: Option<goldy::backend::TextureHandle>,
+    pub(crate) cached_worker_output_texture: Option<goldy::TextureHandle>,
     /// Full worker-bound handles from the last record (debug invariant checks only).
     #[cfg(debug_assertions)]
     pub(crate) cached_worker_resources: Option<crate::worker_retention::WorkerResourceHandles>,
@@ -565,34 +336,22 @@ pub(crate) struct PersistentState {
     pub(crate) cached_mask_upload: Option<(u32, u32, u64, goldy::UploadBuffer)>,
     /// Logical upload buffers for image atlas region uploads.
     pub(crate) cached_image_region_uploads: Vec<((u32, u32, u32, u32), goldy::UploadBuffer)>,
-    /// Textures waiting to be returned to [`Self::tex_pool`] after GPU retirement.
-    /// Populated by [`DeferredTextureToken`] drops from [`Context::defer_release`].
-    pub(crate) pending_texture_returns: Arc<Mutex<Vec<Texture>>>,
-    /// Generation for [`Self::pending_texture_returns`]. Bumped on Metal resize purge so
-    /// in-flight [`DeferredTextureToken`]s drop obsolete sizes instead of re-pooling.
-    pub(crate) texture_return_generation: Arc<AtomicU64>,
-    /// Owned buffers waiting to be returned to [`Self::pool`] after GPU retirement.
-    /// Populated by [`DeferredOwnedBuffersToken`] drops from [`Context::defer_release`].
-    pub(crate) pending_owned_returns: Arc<Mutex<Vec<(Buffer, &'static str)>>>,
     /// Persistent host buffer parcel for [`crate::scheme_renderer::SchemeRenderer::render_to_buffer`].
     pub(crate) readback_host_buf: Option<(Buffer, u64)>,
     /// Metal overflow texture heaps stay pinned if mismatched-size RTs are pooled across
     /// resize. When set, reclaim/purge drop and clear aggressively instead of deferred pooling.
-    metal_heap_sensitive: bool,
+    pub(crate) metal_heap_sensitive: bool,
 }
 
 impl PersistentState {
     pub(crate) fn new(device: &Device) -> Self {
         Self {
-            pool: ResourcePool::default(),
             retained_pool: RetainedPool::new(Arc::new(device.clone())),
-            tex_pool: TexturePool::default(),
             last_drained_bump: None,
             linear_clamp_sampler: None,
             nearest_clamp_sampler: None,
             cached_scheme_rt: None,
             cached_pipeline: None,
-            deferred_owned_cap_hint: 0,
             deferred_textures_cap_hint: 0,
             stable_mask_lut_msaa8: None,
             stable_mask_lut_msaa16: None,
@@ -619,9 +378,6 @@ impl PersistentState {
             cached_gradient_upload: None,
             cached_mask_upload: None,
             cached_image_region_uploads: Vec::new(),
-            pending_texture_returns: Arc::new(Mutex::new(Vec::new())),
-            texture_return_generation: Arc::new(AtomicU64::new(0)),
-            pending_owned_returns: Arc::new(Mutex::new(Vec::new())),
             readback_host_buf: None,
             metal_heap_sensitive: device.backend_type() == BackendType::Metal,
         }
@@ -635,33 +391,27 @@ impl PersistentState {
             .unwrap_or(true);
         if needs_new {
             if let Some((old, _)) = self.readback_host_buf.take() {
-                self.pool.return_buf(old, "ekrano.readback_host_buf");
+                self.retained_pool.release_buffer(ctx, old);
             }
-            let buf = self
-                .pool
-                .get_buf_with_stride(
-                    &mut self.retained_pool,
-                    ctx,
+            self.retained_pool
+                .acquire_buffer(
                     staging_bytes,
-                    "ekrano.readback_host_buf",
                     BufferKind::Scattered,
                     None,
                     BufferFlags::CPU_READABLE,
+                    None,
                 )
-                .map_err(|e| Error::Shader(e.to_string()))?;
-            Ok(buf)
+                .map_err(|e| Error::Shader(e.to_string()))
         } else if let Some((buf, _)) = self.readback_host_buf.take() {
             Ok(buf)
         } else {
-            self.pool
-                .get_buf_with_stride(
-                    &mut self.retained_pool,
-                    ctx,
+            self.retained_pool
+                .acquire_buffer(
                     staging_bytes,
-                    "ekrano.readback_host_buf",
                     BufferKind::Scattered,
                     None,
                     BufferFlags::CPU_READABLE,
+                    None,
                 )
                 .map_err(|e| Error::Shader(e.to_string()))
         }
@@ -707,10 +457,10 @@ impl PersistentState {
     /// Retire scheme render targets that no longer match the requested size.
     ///
     /// On Metal, waits for `tv` if still in flight, then **drops** the textures —
-    /// returning them to [`Self::tex_pool`] would keep mismatched-size heap allocations
-    /// alive across resize churn and exhaust overflow texture heaps.
+    /// releasing them into the transient pool would keep mismatched-size heap
+    /// allocations alive across resize churn and exhaust overflow texture heaps.
     ///
-    /// On DX12/Vulkan, defers return to the texture pool until `tv` retires (nonblocking).
+    /// On DX12/Vulkan, releases deeds into the retained → transient path (epoch-gated).
     fn reclaim_scheme_render_targets(
         &mut self,
         ctx: &Context,
@@ -734,27 +484,11 @@ impl PersistentState {
             return;
         }
 
-        if tv != 0 && ctx.gpu_progress() < tv {
-            let mut textures = Vec::with_capacity(5);
-            if let Some(out) = out {
-                textures.push(out);
-            }
-            textures.extend(layers);
-            let mut payload = goldy::DeferredPayload::new();
-            payload.push(DeferredTextureToken {
-                pending: Arc::clone(&self.pending_texture_returns),
-                generation: Arc::clone(&self.texture_return_generation),
-                created_generation: self.texture_return_generation.load(Ordering::Relaxed),
-                textures,
-            });
-            ctx.defer_release(tv, payload);
-            return;
-        }
         if let Some(out) = out {
-            self.tex_pool.release(out);
+            self.retained_pool.release_texture(ctx, out);
         }
         for l in layers {
-            self.tex_pool.release(l);
+            self.retained_pool.release_texture(ctx, l);
         }
     }
 
@@ -782,9 +516,9 @@ impl PersistentState {
     /// requested dimensions. Waits for the oldest slot timeline so heap-backed textures
     /// are retired before new allocations during resize.
     ///
-    /// On Metal, also clears [`Self::cached_scheme_rt`], drains pending texture returns by
-    /// dropping them, and empties [`Self::tex_pool`] so obsolete sizes cannot pin
-    /// overflow heaps across continuous resize. DX12/Vulkan keep deferred pool reclamation.
+    /// On Metal, also clears [`Self::cached_scheme_rt`] and the context transient
+    /// texture bins so obsolete sizes cannot pin overflow heaps across continuous
+    /// resize. DX12/Vulkan keep deferred pool reclamation.
     pub(crate) fn purge_render_target_cache_if_mismatch(
         &mut self,
         ctx: &Context,
@@ -825,18 +559,8 @@ impl PersistentState {
         }
 
         if self.metal_heap_sensitive {
-            // Invalidate in-flight deferred returns before flushing so ready tokens
-            // (and later-retiring ones) drop obsolete sizes instead of re-pooling.
-            self.texture_return_generation.fetch_add(1, Ordering::Relaxed);
-            if let Ok(mut pending) = self.pending_texture_returns.lock() {
-                pending.clear();
-            }
-            self.tex_pool.clear();
+            ctx.clear_transient_textures();
             ctx.flush_deferred_deletions();
-            // Anything already sitting in pending before the generation bump.
-            if let Ok(mut pending) = self.pending_texture_returns.lock() {
-                pending.clear();
-            }
         }
 
         true
@@ -885,20 +609,6 @@ impl PersistentState {
             return Some(c);
         }
         None
-    }
-
-    /// Return textures and owned buffers whose GPU retirement completed since the last frame.
-    pub(crate) fn drain_pending_returns(&mut self) {
-        if let Ok(mut pending) = self.pending_texture_returns.lock() {
-            for tex in pending.drain(..) {
-                self.tex_pool.release(tex);
-            }
-        }
-        if let Ok(mut pending) = self.pending_owned_returns.lock() {
-            for (buf, name) in pending.drain(..) {
-                self.pool.return_buf(buf, name);
-            }
-        }
     }
 }
 
@@ -967,9 +677,7 @@ pub(crate) mod tests {
     /// [`GpuTestDevice`] for the full test body so WARP serialization stays active.
     pub(crate) fn make_device_and_persistent() -> Option<(GpuTestDevice, PersistentState)> {
         let gpu = try_create_gpu_test_device()?;
-        let mut persistent = PersistentState::new(&gpu);
-        let pending = persistent.pending_owned_returns.clone();
-        persistent.pool.set_pending_returns(pending);
+        let persistent = PersistentState::new(&gpu);
         Some((gpu, persistent))
     }
 
@@ -978,44 +686,44 @@ pub(crate) mod tests {
         let device = goldy::test_support::mock_device();
         let mut p = PersistentState::new(&device);
         let layers = [
-            p.tex_pool
-                .acquire(
-                    &device,
+            p.retained_pool
+                .acquire_texture(
                     8,
                     8,
                     TextureFormat::Rgba8Unorm,
                     goldy::types::TextureKind::DirectInterpolated,
                     goldy::types::TextureFlags::empty(),
+                    None,
                 )
                 .expect("layer0"),
-            p.tex_pool
-                .acquire(
-                    &device,
+            p.retained_pool
+                .acquire_texture(
                     8,
                     8,
                     TextureFormat::Rgba8Unorm,
                     goldy::types::TextureKind::DirectInterpolated,
                     goldy::types::TextureFlags::empty(),
+                    None,
                 )
                 .expect("layer1"),
-            p.tex_pool
-                .acquire(
-                    &device,
+            p.retained_pool
+                .acquire_texture(
                     8,
                     8,
                     TextureFormat::Rgba8Unorm,
                     goldy::types::TextureKind::DirectInterpolated,
                     goldy::types::TextureFlags::empty(),
+                    None,
                 )
                 .expect("layer2"),
-            p.tex_pool
-                .acquire(
-                    &device,
+            p.retained_pool
+                .acquire_texture(
                     8,
                     8,
                     TextureFormat::Rgba8Unorm,
                     goldy::types::TextureKind::DirectInterpolated,
                     goldy::types::TextureFlags::empty(),
+                    None,
                 )
                 .expect("layer3"),
         ];

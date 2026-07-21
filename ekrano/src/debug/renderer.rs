@@ -153,8 +153,8 @@ impl DebugRenderer {
             });
         }
 
-        recorder.defer_owned_buffer(uniforms_buf, "ekrano.debug_uniforms");
-        recorder.defer_owned_buffer(linepoints_uniforms_buf, "ekrano.debug.linepoints_uniforms");
+        recorder.defer_owned_buffer(uniforms_buf);
+        recorder.defer_owned_buffer(linepoints_uniforms_buf);
     }
 }
 

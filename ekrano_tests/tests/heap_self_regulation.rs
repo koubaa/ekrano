@@ -3,10 +3,10 @@
 
 //! Heap self-regulation tests at the ekrano renderer level.
 //!
-//! These tests verify that the Metal buffer heap allocator + ekrano `ResourcePool`
-//! cooperate correctly under realistic rendering workloads:
+//! These tests verify that the Metal buffer heap allocator + ekrano retained/transient
+//! pools cooperate correctly under realistic rendering workloads:
 //!
-//! - The resource pool replenishes from deferred returns (no unbounded fresh allocations)
+//! - Retained deeds and transient scratch stabilize after warmup (no unbounded fresh allocs)
 //! - Overflow heaps compact after steady-state is reached
 //! - Single-frame scheduling (depth=1) survives sustained rendering
 //! - Varying scene complexity (warmup pressure) doesn't exhaust the heap
@@ -15,8 +15,8 @@
 //!
 //! These tests assert heap/pool/deferred-ring survival, not byte-level VRAM accounting.
 //! Budget and tracking policies are tested in goldy (`allocation_policy`, `vram_allocator`);
-//! ekrano production paths run with [`NoPolicy`](goldy::NoPolicy) unless the caller installs
-//! one via [`Device::set_allocation_policy`](goldy::Device::set_allocation_policy).
+//! ekrano production paths run without a tracking policy unless the caller installs
+//! one via [`Device::ensure_allocation_policy`](goldy::Device::ensure_allocation_policy).
 
 #[path = "common/submission.rs"]
 mod submission;
@@ -30,7 +30,7 @@ use goldy::types::{TextureFlags, TextureFormat, TextureKind};
 #[cfg(target_os = "windows")]
 fn gpu_test_lock() -> Option<std::sync::MutexGuard<'static, ()>> {
     use std::sync::{Mutex, OnceLock};
-    if goldy::backend::dx12::is_debug_mode() {
+    if goldy::dx12_debug_mode() {
         static GPU_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         return Some(
             GPU_LOCK
@@ -240,24 +240,30 @@ fn resource_pool_stabilizes_after_warmup() {
             .unwrap_or_else(|e| panic!("warmup frame {i} failed: {e}"));
     }
 
-    let baseline_pool = renderer.resource_pool_stats();
+    let baseline_retained = renderer.resource_pool_stats().retained_pool_buffer_bytes;
+    let baseline_transient_allocs = renderer.submission_context().transient_buffer_alloc_count();
 
-    // Steady state: 50 more frames — pool should not grow
-    let mut max_pooled = baseline_pool.total_pooled_buffers;
+    // Steady state: 50 more frames — accounting should not grow
+    let mut max_retained = baseline_retained;
     for i in 0..50 {
         renderer
             .render_to_texture(&scene, &texture, &params)
             .unwrap_or_else(|e| panic!("steady frame {i} failed: {e}"));
-        let stats = renderer.resource_pool_stats();
-        max_pooled = max_pooled.max(stats.total_pooled_buffers);
+        max_retained = max_retained.max(renderer.resource_pool_stats().retained_pool_buffer_bytes);
     }
 
-    // Pool should not have grown unboundedly. Allow some leeway for double-buffering.
-    let growth = max_pooled.saturating_sub(baseline_pool.total_pooled_buffers);
+    let retained_growth = max_retained.saturating_sub(baseline_retained);
     assert!(
-        growth <= baseline_pool.total_pooled_buffers.max(10),
-        "resource pool grew excessively after warmup: baseline={} max_seen={max_pooled} growth={growth}",
-        baseline_pool.total_pooled_buffers,
+        retained_growth == 0,
+        "retained pool grew after warmup: baseline={baseline_retained} max_seen={max_retained}"
+    );
+    // Includes scratch + scheme upload-staging leases; allow a small absolute bump.
+    let transient_allocs = renderer.submission_context().transient_buffer_alloc_count();
+    let transient_growth = transient_allocs.saturating_sub(baseline_transient_allocs);
+    assert!(
+        transient_growth <= 10,
+        "transient buffer fresh allocs grew excessively after warmup: \
+         baseline={baseline_transient_allocs} after={transient_allocs} growth={transient_growth}"
     );
 }
 
@@ -394,12 +400,12 @@ fn shrinking_scene_does_not_leak_buffers() {
     }
 
     // Just surviving without OOM is the assertion.
-    // Additionally, check the pool hasn't exploded.
+    // Additionally, check retained deeds haven't exploded for a trivial scene.
     let stats = renderer.resource_pool_stats();
     assert!(
-        stats.total_pooled_buffers < 100,
-        "pool should not have >100 buffers for a trivial scene: got {}",
-        stats.total_pooled_buffers,
+        stats.retained_pool_buffer_bytes < 64 * 1024 * 1024,
+        "retained pool should stay under 64 MiB for a trivial scene: got {} bytes",
+        stats.retained_pool_buffer_bytes,
     );
 }
 

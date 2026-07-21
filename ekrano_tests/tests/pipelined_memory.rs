@@ -20,7 +20,7 @@ use goldy::types::{TextureFlags, TextureFormat, TextureKind};
 #[cfg(target_os = "windows")]
 fn gpu_test_lock() -> Option<std::sync::MutexGuard<'static, ()>> {
     use std::sync::{Mutex, OnceLock};
-    if goldy::backend::dx12::is_debug_mode() {
+    if goldy::dx12_debug_mode() {
         static GPU_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         return Some(
             GPU_LOCK
@@ -112,7 +112,7 @@ fn single_frame_ring_depth_bounded() {
     }
 }
 
-/// Verify the resource pool stabilises after warmup under the single-frame model.
+/// Verify retained + transient buffer accounting stabilises after warmup under the single-frame model.
 fn resource_pool_stable_under_single_frame() {
     env_logger::try_init().ok();
     let _gpu_guard = gpu_test_lock();
@@ -141,21 +141,30 @@ fn resource_pool_stable_under_single_frame() {
             .unwrap_or_else(|e| panic!("warmup frame {i} failed: {e}"));
     }
 
-    let baseline = renderer.resource_pool_stats();
-    let mut max_pooled = baseline.total_pooled_buffers;
+    let baseline_retained = renderer.resource_pool_stats().retained_pool_buffer_bytes;
+    let baseline_transient_allocs = renderer.submission_context().transient_buffer_alloc_count();
+    let mut max_retained = baseline_retained;
 
     for i in 0..50 {
         renderer
             .render_to_texture(&scene, &texture, &params)
             .unwrap_or_else(|e| panic!("steady frame {i} failed: {e}"));
-        max_pooled = max_pooled.max(renderer.resource_pool_stats().total_pooled_buffers);
+        max_retained = max_retained.max(renderer.resource_pool_stats().retained_pool_buffer_bytes);
     }
 
-    let growth = max_pooled.saturating_sub(baseline.total_pooled_buffers);
+    let retained_growth = max_retained.saturating_sub(baseline_retained);
     assert!(
-        growth <= baseline.total_pooled_buffers.max(10),
-        "resource pool grew excessively after warmup: baseline={} max_seen={max_pooled} growth={growth}",
-        baseline.total_pooled_buffers,
+        retained_growth == 0,
+        "retained pool grew after warmup: baseline={baseline_retained} max_seen={max_retained}"
+    );
+    // Transient alloc count includes scratch *and* scheme upload-staging leases; allow a
+    // small absolute bump (e.g. an extra staging chunk) but not unbounded growth.
+    let transient_allocs = renderer.submission_context().transient_buffer_alloc_count();
+    let transient_growth = transient_allocs.saturating_sub(baseline_transient_allocs);
+    assert!(
+        transient_growth <= 10,
+        "transient buffer fresh allocs grew excessively after warmup: \
+         baseline={baseline_transient_allocs} after={transient_allocs} growth={transient_growth}"
     );
 }
 

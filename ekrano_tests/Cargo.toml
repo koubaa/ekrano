@@ -62,10 +62,6 @@ name = "pipelined_memory"
 harness = false
 
 [[test]]
-name = "placement_heap_trace"
-harness = false
-
-[[test]]
 name = "property"
 harness = false
 

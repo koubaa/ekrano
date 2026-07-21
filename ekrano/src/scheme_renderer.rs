@@ -25,15 +25,18 @@
 //!    [`SchemeRenderer::submit_to_swapchain`] + velato's `Presenter`.
 
 use std::mem;
-use std::mem::size_of;
 use std::sync::Arc;
 
+#[cfg(feature = "debug_layers")]
+use goldy::Buffer;
 use goldy::types::{BackendType, ResourceAccess, TextureFlags, TextureFormat, TextureKind};
 use goldy::{
-    BudgetPolicy, Buffer, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator, NodeAccess, Scheme,
-    ShaderModule, Signal, Texture,
+    BudgetPolicy, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator, NodeAccess, Scheme, ShaderModule,
+    Signal, Texture,
 };
 
+#[cfg(feature = "debug_layers")]
+use crate::scheme_gpu_resources::record_upload_bytes_owned;
 #[cfg(debug_assertions)]
 use crate::worker_retention::{debug_assert_retained_worker_resources, worker_resource_handles};
 use crate::{
@@ -44,9 +47,7 @@ use crate::{
         defer_frame_gpu_resources, env_robust_override, sanitize_bump,
     },
     resource_proxy::{BindType, ShaderId},
-    scheme_gpu_resources::{
-        GpuBinding, acquire_texture_rgba, bind_type_to_node_access, record_upload_bytes, record_upload_bytes_owned,
-    },
+    scheme_gpu_resources::{GpuBinding, acquire_texture_rgba, bind_type_to_node_access},
     scheme_render::Render,
     shaders::{self, FullShaders},
     worker_retention::{predict_worker_stale, upload_key, worker_stale_reasons, worker_topology},
@@ -71,7 +72,7 @@ pub struct SchemeRenderer {
     /// Cross-frame GPU resources: pools, texture cache, bump readback.
     persistent: PersistentState,
     /// Pipelined frame scheduling: depth enforcement and timeline tracking.
-    frame_pipeline: FrameOrchestrator<()>,
+    frame_pipeline: FrameOrchestrator,
     /// When true (DX12/Vulkan/Metal), reuse ordering is enforced via scheme submit sidecars and
     /// frames close with [`FrameOrchestrator::end_frame_externally_ordered`] — no
     /// coarse `begin_frame` GPU wait. Backends without `host_sidecar_on_submit_worker`
@@ -144,8 +145,6 @@ impl SchemeRenderer {
             shaders::goldy_full_shaders_scheme(&mut renderer)?
         };
         renderer.shaders = shaders;
-        let pending_returns = renderer.persistent.pending_owned_returns.clone();
-        renderer.persistent.pool.set_pending_returns(pending_returns);
         {
             let _tz = goldy::tracy_zone!("ekrano.SchemeRenderer::new.release_compiler");
             device.release_idle_shader_compiler();
@@ -238,7 +237,6 @@ impl SchemeRenderer {
         for signal in self.context.poll_signals_and_service() {
             match signal {
                 Signal::BoundaryCrossed { epoch } => {
-                    self.persistent.drain_pending_returns();
                     self.frame_pipeline.note_presented(epoch);
                 }
                 Signal::Oversubscribed { .. } => {
@@ -248,7 +246,6 @@ impl SchemeRenderer {
                         break;
                     }
                     self.context.flush_deferred_deletions();
-                    self.persistent.drain_pending_returns();
                 }
                 Signal::SwapchainReturned { .. } => {}
                 Signal::SwapchainAcquired { .. } => {}
@@ -414,11 +411,9 @@ impl SchemeRenderer {
         &self.device
     }
 
-    /// Query the resource pool's current state for diagnostics or test assertions.
+    /// Query retained-pool buffer accounting for diagnostics or test assertions.
     pub fn resource_pool_stats(&self) -> ResourcePoolStats {
         ResourcePoolStats {
-            total_pooled_buffers: self.persistent.pool.total_pooled_buffers(),
-            distinct_keys: self.persistent.pool.distinct_keys(),
             retained_pool_buffer_bytes: self.persistent.retained_pool.bytes_by_kind().buffer,
         }
     }
@@ -433,18 +428,13 @@ impl SchemeRenderer {
         self.context.flush_deferred_deletions();
     }
 
-    /// Query the render context's placement heap state for diagnostics / tests.
-    pub fn placement_heap_stats(&self) -> Option<goldy::placement_heap::PlacementHeapStats> {
-        self.context.placement_heap_stats()
-    }
-
     /// Render a scene and return the pixel data as RGBA bytes (synchronous).
     pub fn render_to_buffer(&mut self, scene: &Scene, params: &RenderParams) -> Result<Vec<u8>> {
         for _attempt in 0..=MAX_BUMP_RETRIES {
             self.poll_and_reclaim();
             self.run_frame(scene, params, None, None)?;
             self.frame_pipeline
-                .drain_all(|_, _| Ok::<(), Error>(()))
+                .drain_all()
                 .map_err(|e| Error::Shader(e.to_string()))?;
             self.drain_ready_bump_readbacks()?;
             self.context.flush_deferred_deletions();
@@ -580,8 +570,6 @@ impl SchemeRenderer {
         let mut stats = FrameStats::default();
         let t_resolve = frame_start.elapsed();
 
-        self.persistent.drain_pending_returns();
-
         let out_image_format = surface.map(|s| s.format()).unwrap_or(TextureFormat::Rgba8Unorm);
         // Metal: write fine/filter output straight into the drawable. Other backends keep
         // the intermediate `out_image` + copy blit (DX12 flip-model cannot UAV the backbuffer).
@@ -601,12 +589,11 @@ impl SchemeRenderer {
         let _tz_begin = goldy::tracy_zone!("ekrano.begin_frame");
         let frame_handle = self
             .frame_pipeline
-            .begin_frame(|_, _| Ok::<(), Error>(()))
+            .begin_frame()
             .map_err(|e| Error::Shader(e.to_string()))?;
         self.drain_ready_bump_readbacks()?;
         self.cleanup_frame_counter = self.cleanup_frame_counter.wrapping_add(1);
         if self.cleanup_frame_counter.is_multiple_of(64) {
-            self.persistent.pool.cap_pool_depth(12);
             self.device.compact_overflow_heaps();
         }
         let t_drain = t_drain_start.elapsed();
@@ -624,10 +611,6 @@ impl SchemeRenderer {
                 Some(goldy::Sampler::nearest(&self.device).map_err(|e| Error::Gpu(e.to_string()))?);
         }
         self.context.flush_deferred_deletions();
-        // Reclaim owned buffers whose defer epoch just retired during the begin_frame wait.
-        // Without this, prepare() pool-misses and allocates duplicates (scene+bump) while
-        // the prior frame's buffers sit in pending_owned_returns.
-        self.persistent.drain_pending_returns();
         let t_pool = t1.elapsed();
 
         let t2 = Instant::now();
@@ -968,7 +951,6 @@ impl SchemeRenderer {
         let FrameFinishOutcome {
             timeline: frame_tv,
             deferred_textures,
-            recyclable_owned,
             scheme_submission,
         } = {
             let _tz = goldy::tracy_zone!("ekrano.finish");
@@ -1024,13 +1006,7 @@ impl SchemeRenderer {
             log::debug!("[RT-CACHE] stamp scheme render targets timeline={frame_tv}");
             entry.2 = frame_tv;
         }
-        defer_frame_gpu_resources(
-            &self.context,
-            &self.persistent,
-            frame_tv,
-            deferred_textures,
-            recyclable_owned,
-        );
+        defer_frame_gpu_resources(&self.context, &self.persistent, deferred_textures);
 
         {
             let _tz = goldy::tracy_zone!("ekrano.run_frame.post_submit");
@@ -1041,12 +1017,11 @@ impl SchemeRenderer {
             let label = if surface.is_some() { "swapchain" } else { "" };
 
             let ring_depth = self.frame_pipeline.pending_frames();
-            let (transient_views, transient_textures) = self.context.transient_cache_counts();
             let rt_slots = self.persistent.cached_scheme_rt.is_some() as usize;
             let pipe_slots = self.persistent.cached_pipeline.is_some() as usize;
 
             log::debug!(
-                "[PERF] frame={} drain={:.2}ms resolve={:.2}ms pool={:.2}ms coarse_record={:.2}ms fine_record={:.2}ms submit={:.2}ms total={:.2}ms ring={} rt_slots={rt_slots} pipe_slots={pipe_slots} tv={} tt={} {label}",
+                "[PERF] frame={} drain={:.2}ms resolve={:.2}ms pool={:.2}ms coarse_record={:.2}ms fine_record={:.2}ms submit={:.2}ms total={:.2}ms ring={} rt_slots={rt_slots} pipe_slots={pipe_slots} {label}",
                 frame_num,
                 t_drain.as_secs_f64() * 1000.0,
                 t_resolve.as_secs_f64() * 1000.0,
@@ -1056,8 +1031,6 @@ impl SchemeRenderer {
                 t_submit.as_secs_f64() * 1000.0,
                 frame_start.elapsed().as_secs_f64() * 1000.0,
                 ring_depth,
-                transient_views,
-                transient_textures,
             );
         }
 
@@ -1143,14 +1116,15 @@ pub(crate) struct SchemeRecorder<'a> {
     pub(crate) upload_needs_record: bool,
     /// Nonblocking head-chases-tail path: deferred host writes + reuse epochs; no ring wait.
     pub(crate) nonblocking_reuse: bool,
-    frame_pipeline: &'a mut FrameOrchestrator<()>,
+    frame_pipeline: &'a mut FrameOrchestrator,
     frame_handle: FrameHandle,
     pub(crate) persistent: &'a mut PersistentState,
     pub(crate) shaders: &'a [GoldyShader],
     /// Set to `true` by `finish` or `abort`; the `Drop` impl aborts the open frame
     /// if the recorder is dropped without being properly completed (e.g. on a `?` return).
     finished: bool,
-    deferred_owned_buffers: Vec<(Buffer, &'static str)>,
+    #[cfg(feature = "debug_layers")]
+    deferred_owned_buffers: Vec<Buffer>,
     deferred_textures: Vec<Texture>,
     /// Per-frame filter dispatch slot counter, incremented by each `filter_dispatch` call.
     /// Used to index into `PersistentState::cached_filter_uniforms` for cache lookup.
@@ -1197,13 +1171,12 @@ impl<'a> SchemeRecorder<'a> {
         upload_needs_record: bool,
         metal_fused_upload: bool,
         nonblocking_reuse: bool,
-        frame_pipeline: &'a mut FrameOrchestrator<()>,
+        frame_pipeline: &'a mut FrameOrchestrator,
         frame_handle: FrameHandle,
         persistent: &'a mut PersistentState,
         shaders: &'a [GoldyShader],
     ) -> Self {
         // Read capacity hints before persistent is moved into Self.
-        let owned_cap = persistent.deferred_owned_cap_hint;
         let tex_cap = persistent.deferred_textures_cap_hint;
 
         Self {
@@ -1218,7 +1191,8 @@ impl<'a> SchemeRecorder<'a> {
             frame_handle,
             persistent,
             shaders,
-            deferred_owned_buffers: Vec::with_capacity(owned_cap),
+            #[cfg(feature = "debug_layers")]
+            deferred_owned_buffers: Vec::new(),
             deferred_textures: Vec::with_capacity(tex_cap),
             finished: false,
             filter_dispatch_slot: 0,
@@ -1320,17 +1294,14 @@ impl<'a> SchemeRecorder<'a> {
         outcome
     }
 
-    #[allow(dead_code, reason = "parity stub; scheme debug renderer not wired yet")]
+    #[cfg(feature = "debug_layers")]
     pub fn upload(&mut self, name: &'static str, data: impl Into<Vec<u8>>) -> Buffer {
         record_upload_bytes_owned(self, name, 1, data.into()).expect("upload failed")
     }
 
+    #[cfg(feature = "debug_layers")]
     pub fn upload_strided(&mut self, name: &'static str, element_stride: u32, data: impl Into<Vec<u8>>) -> Buffer {
         record_upload_bytes_owned(self, name, element_stride, data.into()).expect("upload_strided failed")
-    }
-
-    pub fn upload_typed<T: bytemuck::Pod>(&mut self, name: &'static str, data: &T) -> Buffer {
-        record_upload_bytes(self, name, size_of::<T>() as u32, bytemuck::bytes_of(data)).expect("upload_typed failed")
     }
 
     pub fn dispatch(&mut self, shader: ShaderId, wg_size: (u32, u32, u32), bindings: &[GpuBinding<'_>]) {
@@ -1436,7 +1407,7 @@ impl<'a> SchemeRecorder<'a> {
                 }
             };
         }
-        node.dispatch_shape(shape).expect("dispatch_shape failed");
+        node.dispatch_shape_parcel(shape).expect("dispatch_shape_parcel failed");
     }
 
     /// Stub for debug-layer draw commands (not yet implemented in Goldy).
@@ -1444,10 +1415,10 @@ impl<'a> SchemeRecorder<'a> {
     #[allow(dead_code, reason = "parity stub; scheme debug renderer not wired yet")]
     pub fn draw(&mut self, params: crate::resource_proxy::DrawParams) {
         if let Some(vb) = params.vertex_buffer {
-            self.defer_owned_buffer(vb, "ekrano.debug.vertex_buffer");
+            self.defer_owned_buffer(vb);
         }
         for b in params.resources {
-            self.defer_owned_buffer(b, "ekrano.debug.resource");
+            self.defer_owned_buffer(b);
         }
         if let Some(tex) = params.target {
             self.defer_texture(tex);
@@ -1456,8 +1427,8 @@ impl<'a> SchemeRecorder<'a> {
 
     #[cfg(feature = "debug_layers")]
     #[allow(dead_code, reason = "parity stub; scheme debug renderer not wired yet")]
-    pub(crate) fn defer_owned_buffer(&mut self, buf: Buffer, name: &'static str) {
-        self.deferred_owned_buffers.push((buf, name));
+    pub(crate) fn defer_owned_buffer(&mut self, buf: Buffer) {
+        self.deferred_owned_buffers.push(buf);
     }
 
     /// Finish dispatch: flush the final graph and register a frame slot with
@@ -1465,9 +1436,8 @@ impl<'a> SchemeRecorder<'a> {
     ///
     /// Returns the submit timeline and an optional surface frame awaiting present.
     ///
-    /// Surface paths call [`goldy::Frame::submit_frame`] before returning so the
-    /// timeline is valid for cache stamping before [`goldy::Frame::present`].
-    /// Surface paths with deferred scanout call `finish` with `deferred_present: true`; headless /
+    /// Surface paths submit through [`goldy::SurfaceExchange`] and [`goldy::Transaction`]
+    /// so the timeline is valid for cache stamping before present.
     /// render-to-texture paths call `finish` with `deferred_present: false`.
     pub(crate) fn finish<F>(
         mut self,
@@ -1480,11 +1450,15 @@ impl<'a> SchemeRecorder<'a> {
     {
         // Keep `finished` false until success so Drop aborts the orchestrator frame
         // if upload/submit/end_frame fails (otherwise begin_frame stays stuck open).
-        self.persistent.deferred_owned_cap_hint = self.deferred_owned_buffers.capacity();
         self.persistent.deferred_textures_cap_hint = self.deferred_textures.capacity();
 
         let deferred_textures = mem::take(&mut self.deferred_textures);
-        let recyclable_owned = mem::take(&mut self.deferred_owned_buffers);
+        #[cfg(feature = "debug_layers")]
+        {
+            for buf in mem::take(&mut self.deferred_owned_buffers) {
+                self.context.return_transient_buffer(buf);
+            }
+        }
 
         let frame_handle = self.frame_handle;
 
@@ -1522,11 +1496,11 @@ impl<'a> SchemeRecorder<'a> {
                 scheme_tv
             } else if deferred_present {
                 self.frame_pipeline
-                    .end_frame_for_present(frame_handle, scheme_tv, ())
+                    .end_frame_for_present(frame_handle, scheme_tv)
                     .map_err(|e| Error::Shader(e.to_string()))?
             } else {
                 self.frame_pipeline
-                    .end_frame_standalone(frame_handle, scheme_tv, ())
+                    .end_frame_standalone(frame_handle, scheme_tv)
                     .map_err(|e| Error::Shader(e.to_string()))?
             }
         };
@@ -1534,7 +1508,6 @@ impl<'a> SchemeRecorder<'a> {
         Ok(FrameFinishOutcome {
             timeline: tv,
             deferred_textures,
-            recyclable_owned,
             scheme_submission: Some(submission),
         })
     }
@@ -1588,9 +1561,7 @@ mod tests {
             let mut worker = Scheme::new(&ctx);
             let mut upload = Scheme::new(&ctx);
             let mut frame_pipeline = FrameOrchestrator::new(&ctx, FRAME_PIPELINE_DEPTH);
-            let frame_handle = frame_pipeline
-                .begin_frame(|_, _| Ok::<(), Error>(()))
-                .expect("begin_frame");
+            let frame_handle = frame_pipeline.begin_frame().expect("begin_frame");
             let pipeline = {
                 let mut recorder = SchemeRecorder::new(
                     &gpu,

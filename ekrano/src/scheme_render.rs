@@ -13,9 +13,10 @@ use ekrano_encoding::{
     FilterPrimitive, FilterUniform, LayerFilterEffect, WorkgroupCountsGpu, WorkgroupSize, make_mask_lut,
     make_mask_lut_16,
 };
-use goldy::types::{TextureFlags, TextureKind};
+use goldy::types::{BufferFlags, BufferKind, TextureFlags, TextureKind};
 use goldy::{Buffer, NodeAccess, PresentLease, Texture};
 use peniko::color::{PremulColor, Srgb};
+use std::mem::size_of;
 
 use ekrano_encoding::{
     STAGE_BACKDROP, STAGE_BBOX_CLEAR, STAGE_BINNING, STAGE_CLIP_LEAF, STAGE_CLIP_REDUCE, STAGE_COARSE, STAGE_DRAW_LEAF,
@@ -474,20 +475,10 @@ impl Render {
                 .expect("shaders not configured to support AA mode: msaa8"),
         };
 
-        // Obtain a persistent mask LUT buffer for MSAA modes.  The LUT is static
-        // (does not depend on scene content), so it is uploaded exactly once and
-        // reused across frames without re-recording a WriteBuffer node.  This
-        // keeps the fine command list free of staging-belt CopyBufferRegion
-        // commands, allowing it to be safely retained and resubmitted.
-        //
-        // On first MSAA use: upload the LUT (adds a WriteBuffer node → fine CL
-        // will not be retained this frame due to the `has_write_buffer()` guard).
-        // On subsequent frames: the slot is `Some`, so we skip the upload and
-        // only record the dispatch; the retained CL can then be safely reused.
-        //
-        // The check and upload are separated into two steps to satisfy the borrow
-        // checker: `upload_strided` needs `&mut recorder`, so we cannot hold a
-        // `&mut recorder.persistent.stable_mask_lut_*` across the call.
+        // Obtain a persistent mask LUT buffer for MSAA modes. The LUT is static
+        // (does not depend on scene content), so it is acquired once from the
+        // retained pool with init data and reused across frames — no per-frame
+        // WriteBuffer / staging copy on the fine command list.
         let uses_mask_lut = matches!(self.aa_config, AaConfig::Msaa16 | AaConfig::Msaa8);
         if uses_mask_lut {
             let needs_upload = match self.aa_config {
@@ -501,7 +492,17 @@ impl Render {
                     AaConfig::Msaa8 => make_mask_lut(),
                     _ => unreachable!(),
                 };
-                let buf = recorder.upload_strided("ekrano.mask_lut", 4, lut_data);
+                let buf = recorder
+                    .persistent
+                    .retained_pool
+                    .acquire_buffer(
+                        lut_data.len() as u64,
+                        BufferKind::Scattered,
+                        Some(4),
+                        BufferFlags::empty(),
+                        Some(&lut_data),
+                    )
+                    .expect("mask_lut retained acquire failed");
                 match self.aa_config {
                     AaConfig::Msaa16 => recorder.persistent.stable_mask_lut_msaa16 = Some(buf),
                     AaConfig::Msaa8 => recorder.persistent.stable_mask_lut_msaa8 = Some(buf),
@@ -584,6 +585,41 @@ fn premul_srgb_u32(c: PremulColor<Srgb>) -> u32 {
     c.to_rgba8().to_u32()
 }
 
+/// Acquire a sticky filter-uniform deed from the retained pool (init upload at alloc).
+fn acquire_retained_filter_uniform(recorder: &mut SchemeRecorder<'_>, uniform: &FilterUniform) -> Buffer {
+    let bytes = bytemuck::bytes_of(uniform);
+    recorder
+        .persistent
+        .retained_pool
+        .acquire_buffer(
+            bytes.len() as u64,
+            BufferKind::Scattered,
+            Some(size_of::<FilterUniform>() as u32),
+            BufferFlags::empty(),
+            Some(bytes),
+        )
+        .expect("filter_uniform retained acquire failed")
+}
+
+/// Content-keyed filter-uniform buffer: reuse on hit; release old deed and reacquire on miss.
+fn take_or_refresh_filter_uniform(
+    recorder: &mut SchemeRecorder<'_>,
+    cached: Option<(FilterUniform, Buffer)>,
+    uniform: &FilterUniform,
+) -> Buffer {
+    match cached {
+        Some((ref val, buf)) if val == uniform => buf,
+        Some((_, old_buf)) => {
+            recorder
+                .persistent
+                .retained_pool
+                .release_buffer(recorder.context(), old_buf);
+            acquire_retained_filter_uniform(recorder, uniform)
+        }
+        None => acquire_retained_filter_uniform(recorder, uniform),
+    }
+}
+
 fn filter_dispatch_to_output(
     recorder: &mut SchemeRecorder<'_>,
     shader: crate::ShaderId,
@@ -601,14 +637,7 @@ fn filter_dispatch_to_output(
         .get_mut(slot)
         .and_then(|e| e.take());
 
-    let buf = match cached {
-        Some((ref val, buf)) if val == uniform => buf,
-        Some((_, old_buf)) => {
-            recorder.persistent.pool.return_buf(old_buf, "ekrano.filter_uniform");
-            recorder.upload_typed("ekrano.filter_uniform", uniform)
-        }
-        None => recorder.upload_typed("ekrano.filter_uniform", uniform),
-    };
+    let buf = take_or_refresh_filter_uniform(recorder, cached, uniform);
 
     let persistent = &*recorder.persistent;
     let bindings = [
@@ -647,23 +676,13 @@ fn filter_dispatch(
     let slot = recorder.filter_dispatch_slot;
     recorder.filter_dispatch_slot += 1;
 
-    // Take the cached entry for this slot (leaves None in its place temporarily).
     let cached = recorder
         .persistent
         .cached_filter_uniforms
         .get_mut(slot)
         .and_then(|e| e.take());
 
-    // Produce the buffer: reuse cached on hit, upload fresh on miss.
-    let buf = match cached {
-        Some((ref val, buf)) if val == uniform => buf,
-        Some((_, old_buf)) => {
-            // Value changed: return stale buffer to pool, upload fresh.
-            recorder.persistent.pool.return_buf(old_buf, "ekrano.filter_uniform");
-            recorder.upload_typed("ekrano.filter_uniform", uniform)
-        }
-        None => recorder.upload_typed("ekrano.filter_uniform", uniform),
-    };
+    let buf = take_or_refresh_filter_uniform(recorder, cached, uniform);
 
     let persistent = &*recorder.persistent;
     let bindings = [
@@ -680,7 +699,7 @@ fn filter_dispatch(
     ];
     SchemeRecorder::record_dispatch(recorder.scheme, recorder.shaders, shader, wg, &bindings, &[]);
 
-    // Restore buffer to persistent cache. Do NOT call defer_owned_buffer.
+    // Restore buffer to persistent cache. Do NOT defer — sticky retained deed.
     let cache = &mut recorder.persistent.cached_filter_uniforms;
     if slot < cache.len() {
         cache[slot] = Some((*uniform, buf));
@@ -713,14 +732,7 @@ fn filter_dispatch_two_src(
         .get_mut(slot)
         .and_then(|e| e.take());
 
-    let buf = match cached {
-        Some((ref val, buf)) if val == uniform => buf,
-        Some((_, old_buf)) => {
-            recorder.persistent.pool.return_buf(old_buf, "ekrano.filter_uniform");
-            recorder.upload_typed("ekrano.filter_uniform", uniform)
-        }
-        None => recorder.upload_typed("ekrano.filter_uniform", uniform),
-    };
+    let buf = take_or_refresh_filter_uniform(recorder, cached, uniform);
 
     let persistent = &*recorder.persistent;
     let bindings = [
