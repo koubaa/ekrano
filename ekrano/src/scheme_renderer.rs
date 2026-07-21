@@ -72,7 +72,7 @@ pub struct SchemeRenderer {
     /// Cross-frame GPU resources: pools, texture cache, bump readback.
     persistent: PersistentState,
     /// Pipelined frame scheduling: depth enforcement and timeline tracking.
-    frame_pipeline: FrameOrchestrator<()>,
+    frame_pipeline: FrameOrchestrator,
     /// When true (DX12/Vulkan/Metal), reuse ordering is enforced via scheme submit sidecars and
     /// frames close with [`FrameOrchestrator::end_frame_externally_ordered`] — no
     /// coarse `begin_frame` GPU wait. Backends without `host_sidecar_on_submit_worker`
@@ -434,7 +434,7 @@ impl SchemeRenderer {
             self.poll_and_reclaim();
             self.run_frame(scene, params, None, None)?;
             self.frame_pipeline
-                .drain_all(|_, _| Ok::<(), Error>(()))
+                .drain_all()
                 .map_err(|e| Error::Shader(e.to_string()))?;
             self.drain_ready_bump_readbacks()?;
             self.context.flush_deferred_deletions();
@@ -589,7 +589,7 @@ impl SchemeRenderer {
         let _tz_begin = goldy::tracy_zone!("ekrano.begin_frame");
         let frame_handle = self
             .frame_pipeline
-            .begin_frame(|_, _| Ok::<(), Error>(()))
+            .begin_frame()
             .map_err(|e| Error::Shader(e.to_string()))?;
         self.drain_ready_bump_readbacks()?;
         self.cleanup_frame_counter = self.cleanup_frame_counter.wrapping_add(1);
@@ -1116,7 +1116,7 @@ pub(crate) struct SchemeRecorder<'a> {
     pub(crate) upload_needs_record: bool,
     /// Nonblocking head-chases-tail path: deferred host writes + reuse epochs; no ring wait.
     pub(crate) nonblocking_reuse: bool,
-    frame_pipeline: &'a mut FrameOrchestrator<()>,
+    frame_pipeline: &'a mut FrameOrchestrator,
     frame_handle: FrameHandle,
     pub(crate) persistent: &'a mut PersistentState,
     pub(crate) shaders: &'a [GoldyShader],
@@ -1171,7 +1171,7 @@ impl<'a> SchemeRecorder<'a> {
         upload_needs_record: bool,
         metal_fused_upload: bool,
         nonblocking_reuse: bool,
-        frame_pipeline: &'a mut FrameOrchestrator<()>,
+        frame_pipeline: &'a mut FrameOrchestrator,
         frame_handle: FrameHandle,
         persistent: &'a mut PersistentState,
         shaders: &'a [GoldyShader],
@@ -1497,11 +1497,11 @@ impl<'a> SchemeRecorder<'a> {
                 scheme_tv
             } else if deferred_present {
                 self.frame_pipeline
-                    .end_frame_for_present(frame_handle, scheme_tv, ())
+                    .end_frame_for_present(frame_handle, scheme_tv)
                     .map_err(|e| Error::Shader(e.to_string()))?
             } else {
                 self.frame_pipeline
-                    .end_frame_standalone(frame_handle, scheme_tv, ())
+                    .end_frame_standalone(frame_handle, scheme_tv)
                     .map_err(|e| Error::Shader(e.to_string()))?
             }
         };
@@ -1563,7 +1563,7 @@ mod tests {
             let mut upload = Scheme::new(&ctx);
             let mut frame_pipeline = FrameOrchestrator::new(&ctx, FRAME_PIPELINE_DEPTH);
             let frame_handle = frame_pipeline
-                .begin_frame(|_, _| Ok::<(), Error>(()))
+                .begin_frame()
                 .expect("begin_frame");
             let pipeline = {
                 let mut recorder = SchemeRecorder::new(

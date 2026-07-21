@@ -145,10 +145,7 @@ pub(crate) fn maybe_log_gpu_memory(device: &Device) {
 // Deferred per-frame work
 // -----------------------------------------------------------------------
 //
-// The `FrameOrchestrator` ring now carries `()` — all resource retirement
-// (render targets, pipeline buffers, owned buffers, bump readback) bypasses
-// the ring via timeline-guarded cache slots + bump `ReadGrant` drain.
-// The ring is a pure scheduling primitive: depth enforcement + timeline tracking only.
+// `FrameOrchestrator` is scheduling-only (depth + timeline ring).
 
 /// Which caches received new entries during pipeline cleanup.
 #[derive(Debug, Default)]
