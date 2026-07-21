@@ -1407,7 +1407,7 @@ impl<'a> SchemeRecorder<'a> {
                 }
             };
         }
-        node.dispatch_shape(shape).expect("dispatch_shape failed");
+        node.dispatch_shape_parcel(shape).expect("dispatch_shape_parcel failed");
     }
 
     /// Stub for debug-layer draw commands (not yet implemented in Goldy).
@@ -1436,9 +1436,8 @@ impl<'a> SchemeRecorder<'a> {
     ///
     /// Returns the submit timeline and an optional surface frame awaiting present.
     ///
-    /// Surface paths call [`goldy::Frame::submit_frame`] before returning so the
-    /// timeline is valid for cache stamping before [`goldy::Frame::present`].
-    /// Surface paths with deferred scanout call `finish` with `deferred_present: true`; headless /
+    /// Surface paths submit through [`goldy::SurfaceExchange`] and [`goldy::Transaction`]
+    /// so the timeline is valid for cache stamping before present.
     /// render-to-texture paths call `finish` with `deferred_present: false`.
     pub(crate) fn finish<F>(
         mut self,
