@@ -636,7 +636,8 @@ fn al_cached_opt(
 
 /// The seven large pipeline buffers whose sizes are fixed or change only on coarse
 /// config changes — retained parcels in [`crate::goldy_renderer::PersistentState::retained_pool`].
-/// See `resource-pool.md §1` for the rationale behind this split from [`ScratchPipelineBuffers`].
+/// Split from [`ScratchPipelineBuffers`]: stable buffers live in the retained pool
+/// and are reused while `buffer_sizes` match; scratch buffers use the transient pool.
 ///
 /// Cross-frame reuse is ordered by [`goldy::Scheme::record_reuse_epochs`] on the worker
 /// scheme (DX12/Vulkan/Metal) or by the frame-orchestrator `begin_frame` wait (backends
@@ -714,7 +715,7 @@ fn alloc_stable_buffer(
 /// The fourteen count-derived scratch buffers whose sizes track scene complexity.
 /// Acquired via [`goldy::Context::acquire_transient_buffer`]; sticky across frames in
 /// [`crate::goldy_renderer::PersistentState::cached_pipeline`] when sizes match.
-/// See `resource-pool.md §1` for the rationale behind this split from [`StablePipelineBuffers`].
+/// Split from [`StablePipelineBuffers`]: scratch is transient-pooled; stable is retained.
 pub(crate) struct ScratchPipelineBuffers {
     pub reduced: Buffer,
     pub reduced2: Buffer,

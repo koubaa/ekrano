@@ -411,11 +411,25 @@ impl SchemeRenderer {
         &self.device
     }
 
-    /// Query retained-pool buffer accounting for diagnostics or test assertions.
+    /// Query retained-pool accounting for diagnostics or test assertions.
     pub fn resource_pool_stats(&self) -> ResourcePoolStats {
+        let by_kind = self.persistent.retained_pool.bytes_by_kind();
         ResourcePoolStats {
-            retained_pool_buffer_bytes: self.persistent.retained_pool.bytes_by_kind().buffer,
+            retained_pool_buffer_bytes: by_kind.buffer,
+            retained_pool_texture_bytes: by_kind.texture,
         }
+    }
+
+    /// Number of retained filter-uniform cache slots (tests / diagnostics).
+    #[cfg(test)]
+    pub(crate) fn filter_uniform_cache_len(&self) -> usize {
+        self.persistent.cached_filter_uniforms.len()
+    }
+
+    /// Cached mask-atlas dimensions, if any (tests / diagnostics).
+    #[cfg(test)]
+    pub(crate) fn cached_mask_atlas_dims(&self) -> Option<(u32, u32)> {
+        self.persistent.cached_mask_atlas.as_ref().map(|(w, h, _)| (*w, *h))
     }
 
     /// `true` if the submission context still holds unreclaimed deferred payloads.
@@ -580,6 +594,7 @@ impl SchemeRenderer {
             params.width,
             params.height,
             out_image_format,
+            direct_present,
         ) {
             self.device.compact_overflow_heaps();
         }
@@ -2144,6 +2159,160 @@ mod tests {
         assert!(
             renderer.cached_scheme_has_out_image(),
             "headless readback path must retain out_image"
+        );
+    }
+
+    #[test]
+    fn filter_uniform_cache_shrinks_when_filters_removed() {
+        let Some((gpu, _)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
+            return;
+        };
+
+        let mut renderer = SchemeRenderer::new(&gpu).expect("SchemeRenderer::new");
+        let params = RenderParams {
+            base_color: peniko::color::palette::css::BLACK,
+            width: 64,
+            height: 64,
+            antialiasing_method: crate::AaConfig::Area,
+            robust: false,
+        };
+        let texture = {
+            use goldy::RetainedPool;
+            use std::sync::Arc;
+            RetainedPool::new(Arc::new(gpu.clone()))
+                .acquire_texture(
+                    params.width,
+                    params.height,
+                    TextureFormat::Rgba8Unorm,
+                    TextureKind::Direct,
+                    TextureFlags::COPY_DST,
+                    None,
+                )
+                .expect("tex")
+        };
+
+        let mut filtered = Scene::new();
+        let blur = ekrano_encoding::Filter(ekrano_encoding::FilterPrimitive::GaussianBlur {
+            std_dev: 2.0,
+            edge_mode: ekrano_encoding::FilterEdgeMode::Duplicate,
+        });
+        filtered.push_filter_layer(
+            blur,
+            peniko::Fill::NonZero,
+            peniko::kurbo::Affine::IDENTITY,
+            &peniko::kurbo::Rect::new(0.0, 0.0, 64.0, 64.0),
+        );
+        filtered.fill(
+            peniko::Fill::NonZero,
+            peniko::kurbo::Affine::IDENTITY,
+            peniko::Color::from_rgb8(200, 100, 50),
+            None,
+            &peniko::kurbo::Circle::new((32.0, 32.0), 16.0),
+        );
+        filtered.pop_layer();
+
+        for _ in 0..2 {
+            renderer
+                .render_to_texture(&filtered, &texture, &params)
+                .expect("filtered render");
+        }
+        assert!(
+            renderer.filter_uniform_cache_len() > 0,
+            "filtered scene must populate filter-uniform cache"
+        );
+
+        let mut plain = Scene::new();
+        plain.fill(
+            peniko::Fill::NonZero,
+            peniko::kurbo::Affine::IDENTITY,
+            peniko::Color::from_rgb8(40, 80, 120),
+            None,
+            &peniko::kurbo::Rect::new(0.0, 0.0, 32.0, 32.0),
+        );
+        renderer
+            .render_to_texture(&plain, &texture, &params)
+            .expect("plain render");
+        assert_eq!(
+            renderer.filter_uniform_cache_len(),
+            0,
+            "removing filters must trim retained filter-uniform cache to zero"
+        );
+    }
+
+    #[test]
+    fn mask_atlas_replacement_updates_dims_and_releases_old() {
+        let Some((gpu, _)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
+            return;
+        };
+
+        let mut renderer = SchemeRenderer::new(&gpu).expect("SchemeRenderer::new");
+        let texture = {
+            use goldy::RetainedPool;
+            use std::sync::Arc;
+            RetainedPool::new(Arc::new(gpu.clone()))
+                .acquire_texture(
+                    64,
+                    64,
+                    TextureFormat::Rgba8Unorm,
+                    TextureKind::Direct,
+                    TextureFlags::COPY_DST,
+                    None,
+                )
+                .expect("tex")
+        };
+        let params = RenderParams {
+            base_color: peniko::color::palette::css::BLACK,
+            width: 64,
+            height: 64,
+            antialiasing_method: crate::AaConfig::Area,
+            robust: false,
+        };
+
+        // No mask → 1×1 sentinel atlas.
+        let mut scene = Scene::new();
+        scene.fill(
+            peniko::Fill::NonZero,
+            peniko::kurbo::Affine::IDENTITY,
+            peniko::Color::from_rgb8(200, 100, 50),
+            None,
+            &peniko::kurbo::Circle::new((32.0, 32.0), 16.0),
+        );
+        renderer.render_to_texture(&scene, &texture, &params).expect("no-mask");
+        assert_eq!(renderer.cached_mask_atlas_dims(), Some((1, 1)));
+        let tex_bytes_1x1 = renderer.resource_pool_stats().retained_pool_texture_bytes;
+
+        // Full-frame coverage mask → 64×64 atlas; old 1×1 deed released from retained pool.
+        let mask_data = vec![255_u8; 64 * 64];
+        let mask = ekrano_encoding::CoverageMask::new(64, 64, mask_data).expect("mask");
+        scene.set_coverage_mask(mask);
+        renderer
+            .render_to_texture(&scene, &texture, &params)
+            .expect("with-mask");
+        assert_eq!(renderer.cached_mask_atlas_dims(), Some((64, 64)));
+        let tex_bytes_64 = renderer.resource_pool_stats().retained_pool_texture_bytes;
+        assert!(
+            tex_bytes_64 > tex_bytes_1x1,
+            "64×64 mask atlas must increase retained texture bytes"
+        );
+
+        // Back to no mask → 1×1 again; retained texture accounting must not keep both atlases.
+        let mut plain = Scene::new();
+        plain.fill(
+            peniko::Fill::NonZero,
+            peniko::kurbo::Affine::IDENTITY,
+            peniko::Color::from_rgb8(40, 80, 120),
+            None,
+            &peniko::kurbo::Rect::new(0.0, 0.0, 32.0, 32.0),
+        );
+        renderer
+            .render_to_texture(&plain, &texture, &params)
+            .expect("mask cleared");
+        renderer.flush_deferred_deletions();
+        assert_eq!(renderer.cached_mask_atlas_dims(), Some((1, 1)));
+        let tex_bytes_back = renderer.resource_pool_stats().retained_pool_texture_bytes;
+        assert!(
+            tex_bytes_back < tex_bytes_64,
+            "releasing 64×64 mask atlas must drop retained texture bytes (was {tex_bytes_64}, now {tex_bytes_back})"
         );
     }
 }
