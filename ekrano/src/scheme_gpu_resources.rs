@@ -216,7 +216,7 @@ pub(crate) fn record_upload_bytes_owned(
         .map_err(|e| Error::Gpu(e.to_string()))?;
     recorder
         .upload_scheme()
-        .commit_write_parcel(&buf, 0, bytes)
+        .write_parcel(&buf, 0, bytes)
         .map_err(|e| Error::Shader(e.to_string()))?;
     Ok(buf)
 }
@@ -292,7 +292,7 @@ pub(crate) fn clear_gpu_buf(
     let sz = size.unwrap_or_else(|| buf.byte_size().saturating_sub(off));
     recorder
         .upload_scheme()
-        .commit_clear_parcel(buf, off, sz)
+        .clear_parcel(buf, off, sz)
         .map_err(|e| Error::Shader(e.to_string()))?;
     Ok(())
 }
