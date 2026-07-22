@@ -884,9 +884,8 @@ pub(crate) struct PipelineResources {
     pub frame_height: u32,
     /// Buffer sizes used this frame, stored for cache-key comparison next frame.
     pub buffer_sizes: ekrano_encoding::BufferSizes,
-    /// The `ConfigUniform` value uploaded to `config`, stored so that
-    /// `schedule_pipeline_cleanup` can stash the buffer back into
-    /// `PersistentState::cached_config_uniform` without re-reading GPU memory.
+    /// The `ConfigUniform` value last written to `config`, stored so
+    /// `schedule_pipeline_cleanup` can stash `(value, buffer)` together.
     pub config_uniform_value: ekrano_encoding::ConfigUniform,
 }
 
@@ -998,6 +997,10 @@ impl PipelineResources {
                     )
                     .map_err(|e| Error::Gpu(e.to_string()))?
             };
+            // Always stage: the retained upload scheme keeps a config copy node, and Goldy
+            // requires every referenced UploadBuffer to be staged each submit. Content-keyed
+            // skip fails with `UploadBuffer was not staged before submit`. (The cached value
+            // is still stored for diagnostics / a possible future Init-style path.)
             stage_config_bytes(recorder, &config_buf, bytemuck::bytes_of(&config_uniform_value))?;
             config_buf
         };

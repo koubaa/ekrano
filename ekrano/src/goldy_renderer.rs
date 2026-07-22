@@ -289,8 +289,12 @@ pub(crate) struct PersistentState {
     pub(crate) stable_mask_lut_msaa8: Option<Buffer>,
     /// Static MSAA16 mask LUT buffer (same rationale as `stable_mask_lut_msaa8`).
     pub(crate) stable_mask_lut_msaa16: Option<Buffer>,
-    /// Cached GPU `ConfigUniform` buffer. Stable across frames once bump estimates
-    /// converge; eliminates `WriteBuffer` from the dispatch graph at steady state.
+    /// Cached GPU `ConfigUniform` buffer + last uploaded value.
+    ///
+    /// The buffer is overwritten in place each frame via the upload scheme (same
+    /// `ResourceHandle`, so a retained worker stays valid across e.g. `base_color`
+    /// changes). The cached value is not used to skip staging: Goldy requires every
+    /// `UploadBuffer` referenced by a retained upload scheme to be staged each submit.
     pub(crate) cached_config_uniform: Option<(ekrano_encoding::ConfigUniform, Buffer)>,
     /// Per-slot cached `FilterUniform` buffers, indexed by filter dispatch order.
     /// Retained deeds; stable for scenes with fixed filter effects (e.g. a static drop shadow).
