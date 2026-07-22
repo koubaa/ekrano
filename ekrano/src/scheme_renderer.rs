@@ -666,85 +666,49 @@ impl SchemeRenderer {
         }
 
         let output_tex_handle = output_texture.map(|t| t.gpu_handle());
-        // Metal fused: upload + worker topology share one scheme. When a re-record is
-        // required, replace the worker *before* prepare and prepare once onto it —
-        // otherwise the first prepare consumes cached_pipeline / RTs and the re-prepare
-        // allocates a duplicate set while the first PipelineResources is still alive.
-        let metal_fused_rerecord = self.metal_fused_upload
-            && (upload_needs_record
-                || predict_worker_stale(
-                    &self.persistent,
-                    &topology,
-                    &layer_filter_effects,
-                    output_tex_handle,
-                    params.width,
-                    params.height,
-                    out_image_format,
-                ));
+        // Predict worker re-record *before* prepare whenever the worker must be replaced.
+        // Filter frames always re-record (one-shot scratch deeds). Metal fused also
+        // replaces early so prepare cannot consume cached_pipeline/RTs onto a throwaway
+        // worker and then allocate a duplicate set on re-prepare.
+        let worker_stale_predicted = predict_worker_stale(
+            &self.persistent,
+            &topology,
+            &layer_filter_effects,
+            output_tex_handle,
+            params.width,
+            params.height,
+            out_image_format,
+        );
+        let replace_worker_before_prepare =
+            worker_stale_predicted || (self.metal_fused_upload && upload_needs_record);
+        let metal_fused_rerecord = self.metal_fused_upload && replace_worker_before_prepare;
 
-        let (mut pipeline, out_image_handle, worker_stale) = if metal_fused_rerecord {
+        if replace_worker_before_prepare {
+            let _tz = goldy::tracy_zone!("ekrano.worker_record");
+            self.worker = Scheme::new(&self.context);
+            self.persistent.cached_bump_grant = None;
+            self.persistent.cached_present_tx = None;
+            #[cfg(debug_assertions)]
             {
-                let _tz = goldy::tracy_zone!("ekrano.worker_record");
-                self.worker = Scheme::new(&self.context);
-                self.persistent.cached_bump_grant = None;
-                self.persistent.cached_present_tx = None;
+                self.persistent.cached_worker_resources = None;
+            }
+            if self.metal_fused_upload {
                 // Upload topology lives on the worker scheme; drop cached declarations.
                 self.persistent.clear_upload_declarations();
-            }
-            #[cfg(test)]
-            {
-                self.upload_record_epochs += 1;
-            }
-            let mut recorder = SchemeRecorder::new(
-                &self.device,
-                &self.context,
-                &mut self.worker,
-                &mut self.upload,
-                true, // re-record fused upload topology on the new worker
-                self.metal_fused_upload,
-                self.nonblocking_reuse,
-                &mut self.frame_pipeline,
-                frame_handle,
-                &mut self.persistent,
-                &self.engine_shaders,
-            );
-            let pipeline = {
-                let _tz = goldy::tracy_zone!("ekrano.prepare");
-                let pipeline_result = recorder.prepare_pipeline_resources(
-                    coverage_mask.as_ref(),
-                    packed,
-                    ramps,
-                    images,
-                    &params,
-                    &config,
-                    out_image_format,
-                    direct_present,
-                );
-                self.resolver = resolver;
-                match pipeline_result {
-                    Ok(p) => p,
-                    Err(e) => {
-                        recorder.dismiss();
-                        return Err(e);
-                    }
+                #[cfg(test)]
+                {
+                    self.upload_record_epochs += 1;
                 }
-            };
-            let out_image_handle = pipeline
-                .out_image
-                .as_ref()
-                .and_then(|t| t.handle(ResourceAccess::Write));
-            recorder.dismiss();
-            if upload_needs_record {
-                self.persistent.cached_upload_key = Some(upload_key);
             }
-            (pipeline, out_image_handle, true)
-        } else {
+        }
+
+        let (mut pipeline, out_image_handle, worker_stale) = {
             let mut recorder = SchemeRecorder::new(
                 &self.device,
                 &self.context,
                 &mut self.worker,
                 &mut self.upload,
-                upload_needs_record,
+                upload_needs_record || metal_fused_rerecord,
                 self.metal_fused_upload,
                 self.nonblocking_reuse,
                 &mut self.frame_pipeline,
@@ -782,7 +746,9 @@ impl SchemeRenderer {
                 self.persistent.cached_upload_key = Some(upload_key);
             }
 
-            let worker_stale = {
+            let worker_stale = if replace_worker_before_prepare {
+                true
+            } else {
                 let _tz = goldy::tracy_zone!("ekrano.worker_stale_check");
                 worker_stale_reasons(
                     &self.persistent,
@@ -793,7 +759,7 @@ impl SchemeRenderer {
                 )
             };
             debug_assert!(
-                !(self.metal_fused_upload && worker_stale),
+                !(self.metal_fused_upload && worker_stale && !replace_worker_before_prepare),
                 "Metal fused worker re-record should have been predicted before prepare"
             );
             (pipeline, out_image_handle, worker_stale)
@@ -815,11 +781,15 @@ impl SchemeRenderer {
         #[cfg(debug_assertions)]
         let mut debug_recorded_resources = None;
 
-        if worker_stale && !metal_fused_rerecord {
+        if worker_stale && !replace_worker_before_prepare {
             let _tz = goldy::tracy_zone!("ekrano.worker_record");
             self.worker = Scheme::new(&self.context);
             self.persistent.cached_bump_grant = None;
             self.persistent.cached_present_tx = None;
+            #[cfg(debug_assertions)]
+            {
+                self.persistent.cached_worker_resources = None;
+            }
         }
 
         let mut recorder = SchemeRecorder::new(
@@ -914,6 +884,12 @@ impl SchemeRenderer {
                 None
             };
 
+            // Sticky worker retention only when the recorded graph has no one-shot
+            // filter scratches. Filter frames always re-record; publishing a full
+            // retention cache would claim a sticky worker while it still binds deeds
+            // that are retired when scratches return to the transient pool.
+            // Apply present/bump (and filter-effects bookkeeping) after `finish` so we
+            // do not mutate `persistent` while `recorder` still borrows it.
             worker_cache = Some((
                 present_tx,
                 bump_grant,
@@ -960,13 +936,26 @@ impl SchemeRenderer {
         if let Some((present, bump, topology, filter_effects, out_image)) = worker_cache {
             self.persistent.cached_present_tx = present;
             self.persistent.cached_bump_grant = bump;
-            self.persistent.cached_worker_topology = Some(topology);
-            self.persistent.cached_worker_filter_effects = filter_effects;
-            self.persistent.cached_worker_out_image = out_image;
-            self.persistent.cached_worker_output_texture = output_texture.map(|t| t.gpu_handle());
-            #[cfg(debug_assertions)]
-            if let Some(resources) = debug_recorded_resources {
-                self.persistent.cached_worker_resources = Some(resources);
+            if filter_effects.is_empty() {
+                self.persistent.cached_worker_topology = Some(topology);
+                self.persistent.cached_worker_filter_effects = filter_effects;
+                self.persistent.cached_worker_out_image = out_image;
+                self.persistent.cached_worker_output_texture = output_texture.map(|t| t.gpu_handle());
+                #[cfg(debug_assertions)]
+                if let Some(resources) = debug_recorded_resources {
+                    self.persistent.cached_worker_resources = Some(resources);
+                }
+            } else {
+                // Remember filter presence for the next frame's staleness check when
+                // filters are removed, without retaining the scratch-bound worker.
+                self.persistent.cached_worker_filter_effects = filter_effects;
+                self.persistent.cached_worker_topology = None;
+                self.persistent.cached_worker_out_image = None;
+                self.persistent.cached_worker_output_texture = None;
+                #[cfg(debug_assertions)]
+                {
+                    self.persistent.cached_worker_resources = None;
+                }
             }
         }
 
@@ -1007,6 +996,18 @@ impl SchemeRenderer {
             entry.2 = frame_tv;
         }
         defer_frame_gpu_resources(&self.context, &self.persistent, deferred_textures);
+        // Filter scratches are returned above; their stamps are now dead on the worker.
+        // Drop that scheme so the next frame cannot submit (or prepare against) retired
+        // deeds — re-record must mint a fresh worker with new scratch identities.
+        if !self.persistent.cached_worker_filter_effects.is_empty() {
+            self.worker = Scheme::new(&self.context);
+            self.persistent.cached_bump_grant = None;
+            // Keep cached_present_tx: present claim for this frame may still be in flight.
+            #[cfg(debug_assertions)]
+            {
+                self.persistent.cached_worker_resources = None;
+            }
+        }
 
         {
             let _tz = goldy::tracy_zone!("ekrano.run_frame.post_submit");
