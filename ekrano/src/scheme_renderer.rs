@@ -2162,6 +2162,8 @@ mod tests {
         );
     }
 
+    /// Filter frames re-record each submit (scratches are one-shot). Removing filters
+    /// must still trim the sticky filter-uniform cache so retained deeds are released.
     #[test]
     fn filter_uniform_cache_shrinks_when_filters_removed() {
         let Some((gpu, _)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
