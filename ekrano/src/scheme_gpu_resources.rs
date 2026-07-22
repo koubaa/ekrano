@@ -140,10 +140,6 @@ pub(crate) enum GpuBinding<'a> {
     Tex(&'a Texture),
     /// A GPU sampler from [`crate::goldy_renderer::PersistentState`].
     Sampler(&'a Sampler),
-    /// A persistent (pre-initialized) buffer from [`crate::goldy_renderer::PersistentState`].
-    /// Use for buffers uploaded exactly once (e.g. static LUTs) that are GPU-readable on
-    /// every frame after their first upload, without additional write nodes.
-    PersistentBuf(&'a Buffer),
     /// Swapchain drawable bound at submit time via a present-lease placeholder slot.
     Present(&'a PresentLease, NodeAccess),
 }
@@ -254,7 +250,7 @@ pub(crate) fn write_image_region(
         raw_bytes
     };
 
-    upload_texture_region(recorder, tex, x, y, image_data.width, image_data.height, bytes.to_vec())
+    upload_texture_region(recorder, tex, x, y, image_data.width, image_data.height, bytes)
 }
 
 /// Premultiply every RGBA8 pixel: `(r, g, b, a)` → `(r*a/255, g*a/255, b*a/255, a)`.
@@ -411,29 +407,42 @@ pub(crate) fn alloc_or_reuse_bump(recorder: &mut SchemeRecorder<'_>, size: u64) 
         .map_err(|e| Error::Gpu(e.to_string()))
 }
 
-fn take_cached_texture(
-    cached: &mut Option<(u32, u32, Texture)>,
+enum AtlasCache {
+    Gradient,
+    Image,
+    Mask,
+}
+
+fn acquire_or_reuse_retained_atlas(
+    recorder: &mut SchemeRecorder<'_>,
+    which: AtlasCache,
     width: u32,
     height: u32,
-) -> Result<Texture, Box<Option<Texture>>> {
-    let Some((cw, ch, tex)) = cached.as_ref() else {
-        return Err(Box::new(None));
+    flags: TextureFlags,
+) -> Result<Texture, Error> {
+    let cached = match which {
+        AtlasCache::Gradient => &mut recorder.persistent.cached_gradient,
+        AtlasCache::Image => &mut recorder.persistent.cached_image_atlas,
+        AtlasCache::Mask => &mut recorder.persistent.cached_mask_atlas,
     };
-    if *cw == width && *ch == height {
-        Ok(tex.borrow())
-    } else {
-        Err(Box::new(Some(cached.take().unwrap().2)))
+    if let Some((cw, ch, tex)) = cached.as_ref()
+        && *cw == width
+        && *ch == height
+    {
+        return Ok(tex.borrow());
     }
-}
-
-fn install_cached_texture(cached: &mut Option<(u32, u32, Texture)>, width: u32, height: u32, tex: Texture) -> Texture {
+    let stale = cached.take().map(|(_, _, tex)| tex);
+    if let Some(stale) = stale {
+        release_retained_texture(recorder, stale);
+    }
+    let tex = acquire_retained_texture_rgba(recorder, width, height, TextureKind::Interpolated, flags)?;
+    let cached = match which {
+        AtlasCache::Gradient => &mut recorder.persistent.cached_gradient,
+        AtlasCache::Image => &mut recorder.persistent.cached_image_atlas,
+        AtlasCache::Mask => &mut recorder.persistent.cached_mask_atlas,
+    };
     cached.replace((width, height, tex));
-    cached.as_ref().unwrap().2.borrow()
-}
-
-enum TextureStagingCache {
-    Gradient,
-    Mask,
+    Ok(cached.as_ref().unwrap().2.borrow())
 }
 
 fn alloc_or_reuse_full_texture_upload(
@@ -495,46 +504,10 @@ fn alloc_or_reuse_region_texture_upload(
     Ok(ub)
 }
 
-fn stage_texture_full(
-    recorder: &mut SchemeRecorder<'_>,
-    cached_upload: &mut Option<(u32, u32, u64, goldy::UploadBuffer)>,
-    texture: &Texture,
-    bytes: &[u8],
-) -> Result<(), Error> {
-    let width = texture.width();
-    let height = texture.height();
-    record_texture_reuse(recorder.upload_scheme(), texture);
-    let layout = recorder
-        .device()
-        .texture_copy_footprint(width, height, texture.format())
-        .map_err(|e| Error::Gpu(e.to_string()))?;
-    let pitched = if layout.row_pitch == layout.tight_row_bytes() {
-        bytes.to_vec()
-    } else {
-        pack_rgba_to_pitch(bytes, width, height, layout.row_pitch)
-    };
-    let staging_bytes = layout.staging_bytes.max(pitched.len() as u64);
-    let upload = alloc_or_reuse_full_texture_upload(recorder, cached_upload, width, height, staging_bytes)?;
-    stage_upload(recorder, upload, &pitched, "texture_full")?;
-    if recorder.upload_needs_record {
-        recorder
-            .upload_scheme()
-            .copy_upload_buffer_to_texture(
-                &upload,
-                layout.footprint_offset,
-                layout.row_pitch,
-                texture,
-                0,
-                0,
-                width,
-                height,
-            )
-            .map_err(|e| Error::Shader(e.to_string()))?;
-    }
-    Ok(())
-}
-
-fn stage_texture_region(
+/// Stage RGBA bytes into an upload buffer and optionally record a texture copy.
+///
+/// `declare_upload` selects/allocates the staging declaration given the pitched byte size.
+fn stage_texture_bytes(
     recorder: &mut SchemeRecorder<'_>,
     texture: &Texture,
     x: u32,
@@ -542,20 +515,24 @@ fn stage_texture_region(
     width: u32,
     height: u32,
     bytes: &[u8],
+    what: &'static str,
+    declare_upload: impl FnOnce(&mut SchemeRecorder<'_>, u64) -> Result<goldy::UploadBuffer, Error>,
 ) -> Result<(), Error> {
     record_texture_reuse(recorder.upload_scheme(), texture);
     let layout = recorder
         .device()
         .texture_copy_footprint(width, height, texture.format())
         .map_err(|e| Error::Gpu(e.to_string()))?;
-    let pitched = if layout.row_pitch == layout.tight_row_bytes() {
-        bytes.to_vec()
+    let pitched;
+    let staged: &[u8] = if layout.row_pitch == layout.tight_row_bytes() {
+        bytes
     } else {
-        pack_rgba_to_pitch(bytes, width, height, layout.row_pitch)
+        pitched = pack_rgba_to_pitch(bytes, width, height, layout.row_pitch);
+        &pitched
     };
-    let staging_bytes = layout.staging_bytes.max(pitched.len() as u64);
-    let upload = alloc_or_reuse_region_texture_upload(recorder, x, y, width, height, staging_bytes)?;
-    stage_upload(recorder, upload, &pitched, "texture_region")?;
+    let staging_bytes = layout.staging_bytes.max(staged.len() as u64);
+    let upload = declare_upload(recorder, staging_bytes)?;
+    stage_upload(recorder, upload, staged, what)?;
     if recorder.upload_needs_record {
         recorder
             .upload_scheme()
@@ -574,22 +551,58 @@ fn stage_texture_region(
     Ok(())
 }
 
-fn upload_texture_full(
+fn stage_texture_full(
     recorder: &mut SchemeRecorder<'_>,
-    cache: TextureStagingCache,
+    cached_upload: &mut Option<(u32, u32, u64, goldy::UploadBuffer)>,
     texture: &Texture,
     bytes: &[u8],
 ) -> Result<(), Error> {
-    let mut slot = match cache {
-        TextureStagingCache::Gradient => std::mem::take(&mut recorder.persistent.cached_gradient_upload),
-        TextureStagingCache::Mask => std::mem::take(&mut recorder.persistent.cached_mask_upload),
-    };
-    stage_texture_full(recorder, &mut slot, texture, bytes)?;
-    match cache {
-        TextureStagingCache::Gradient => recorder.persistent.cached_gradient_upload = slot,
-        TextureStagingCache::Mask => recorder.persistent.cached_mask_upload = slot,
-    }
-    Ok(())
+    let width = texture.width();
+    let height = texture.height();
+    stage_texture_bytes(
+        recorder,
+        texture,
+        0,
+        0,
+        width,
+        height,
+        bytes,
+        "texture_full",
+        |recorder, staging_bytes| {
+            alloc_or_reuse_full_texture_upload(recorder, cached_upload, width, height, staging_bytes)
+        },
+    )
+}
+
+fn stage_texture_region(
+    recorder: &mut SchemeRecorder<'_>,
+    texture: &Texture,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    bytes: &[u8],
+) -> Result<(), Error> {
+    stage_texture_bytes(
+        recorder,
+        texture,
+        x,
+        y,
+        width,
+        height,
+        bytes,
+        "texture_region",
+        |recorder, staging_bytes| alloc_or_reuse_region_texture_upload(recorder, x, y, width, height, staging_bytes),
+    )
+}
+
+fn upload_texture_full(
+    recorder: &mut SchemeRecorder<'_>,
+    cached_upload: &mut Option<(u32, u32, u64, goldy::UploadBuffer)>,
+    texture: &Texture,
+    bytes: &[u8],
+) -> Result<(), Error> {
+    stage_texture_full(recorder, cached_upload, texture, bytes)
 }
 
 fn upload_texture_region(
@@ -599,9 +612,9 @@ fn upload_texture_region(
     y: u32,
     width: u32,
     height: u32,
-    bytes: Vec<u8>,
+    bytes: &[u8],
 ) -> Result<(), Error> {
-    stage_texture_region(recorder, texture, x, y, width, height, &bytes)
+    stage_texture_region(recorder, texture, x, y, width, height, bytes)
 }
 
 /// Reuse a cached buffer if one is available, or allocate a fresh one from the pool.
@@ -906,49 +919,14 @@ impl PipelineResources {
 
         let gradient = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.gradient");
-            if ramps.height == 0 {
-                match take_cached_texture(&mut recorder.persistent.cached_gradient, 1, 1) {
-                    Ok(tex) => tex,
-                    Err(stale) => {
-                        if let Some(tex) = *stale {
-                            release_retained_texture(recorder, tex);
-                        }
-                        let tex = acquire_retained_texture_rgba(
-                            recorder,
-                            1,
-                            1,
-                            TextureKind::Interpolated,
-                            TextureFlags::COPY_DST,
-                        )?;
-                        install_cached_texture(&mut recorder.persistent.cached_gradient, 1, 1, tex)
-                    }
-                }
-            } else {
-                let tex = match take_cached_texture(&mut recorder.persistent.cached_gradient, ramps.width, ramps.height)
-                {
-                    Ok(tex) => tex,
-                    Err(stale) => {
-                        if let Some(tex) = *stale {
-                            release_retained_texture(recorder, tex);
-                        }
-                        let tex = acquire_retained_texture_rgba(
-                            recorder,
-                            ramps.width,
-                            ramps.height,
-                            TextureKind::Interpolated,
-                            TextureFlags::COPY_DST,
-                        )?;
-                        install_cached_texture(&mut recorder.persistent.cached_gradient, ramps.width, ramps.height, tex)
-                    }
-                };
-                upload_texture_full(
-                    recorder,
-                    TextureStagingCache::Gradient,
-                    &tex,
-                    bytemuck::cast_slice(ramps.data),
-                )?;
-                tex
+            let (gw, gh) = crate::worker_retention::normalize_gradient_atlas(ramps.width, ramps.height);
+            let tex = acquire_or_reuse_retained_atlas(recorder, AtlasCache::Gradient, gw, gh, TextureFlags::COPY_DST)?;
+            if ramps.height != 0 {
+                let mut upload_slot = std::mem::take(&mut recorder.persistent.cached_gradient_upload);
+                upload_texture_full(recorder, &mut upload_slot, &tex, bytemuck::cast_slice(ramps.data))?;
+                recorder.persistent.cached_gradient_upload = upload_slot;
             }
+            tex
         };
 
         let (image_atlas, _) = {
@@ -956,103 +934,40 @@ impl PipelineResources {
             if recorder.upload_needs_record {
                 recorder.persistent.cached_image_region_uploads.clear();
             }
-            if images.images.is_empty() {
-                let t = match take_cached_texture(&mut recorder.persistent.cached_image_atlas, 1, 1) {
-                    Ok(tex) => tex,
-                    Err(stale) => {
-                        if let Some(tex) = *stale {
-                            release_retained_texture(recorder, tex);
-                        }
-                        let tex = acquire_retained_texture_rgba(
-                            recorder,
-                            1,
-                            1,
-                            TextureKind::Interpolated,
-                            TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
-                        )?;
-                        install_cached_texture(&mut recorder.persistent.cached_image_atlas, 1, 1, tex)
-                    }
-                };
-                (t, (1_u32, 1_u32))
-            } else {
-                let t =
-                    match take_cached_texture(&mut recorder.persistent.cached_image_atlas, images.width, images.height)
-                    {
-                        Ok(tex) => tex,
-                        Err(stale) => {
-                            if let Some(tex) = *stale {
-                                release_retained_texture(recorder, tex);
-                            }
-                            let tex = acquire_retained_texture_rgba(
-                                recorder,
-                                images.width,
-                                images.height,
-                                TextureKind::Interpolated,
-                                TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
-                            )?;
-                            install_cached_texture(
-                                &mut recorder.persistent.cached_image_atlas,
-                                images.width,
-                                images.height,
-                                tex,
-                            )
-                        }
-                    };
-                for image in images.images {
-                    write_image_region(recorder, &t, image.1, image.2, &image.0)?;
-                }
-                (t, (images.width, images.height))
+            let (aw, ah) =
+                crate::worker_retention::normalize_image_atlas(images.images.len(), images.width, images.height);
+            let t = acquire_or_reuse_retained_atlas(
+                recorder,
+                AtlasCache::Image,
+                aw,
+                ah,
+                TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
+            )?;
+            for image in images.images {
+                write_image_region(recorder, &t, image.1, image.2, &image.0)?;
             }
+            (t, (aw, ah))
         };
 
         let mask_atlas = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.mask_atlas");
+            let (mw, mh) = crate::worker_retention::normalize_mask_atlas(coverage_mask.map(|m| (m.width, m.height)));
+            let tex = acquire_or_reuse_retained_atlas(recorder, AtlasCache::Mask, mw, mh, TextureFlags::COPY_DST)?;
+            let mut upload_slot = std::mem::take(&mut recorder.persistent.cached_mask_upload);
             match coverage_mask {
                 Some(m) => {
-                    let tex = match take_cached_texture(&mut recorder.persistent.cached_mask_atlas, m.width, m.height) {
-                        Ok(tex) => tex,
-                        Err(stale) => {
-                            if let Some(tex) = *stale {
-                                release_retained_texture(recorder, tex);
-                            }
-                            let tex = acquire_retained_texture_rgba(
-                                recorder,
-                                m.width,
-                                m.height,
-                                TextureKind::Interpolated,
-                                TextureFlags::COPY_DST,
-                            )?;
-                            install_cached_texture(&mut recorder.persistent.cached_mask_atlas, m.width, m.height, tex)
-                        }
-                    };
                     let mut rgba = Vec::with_capacity(m.data.len() * 4);
                     for &b in m.data.iter() {
                         rgba.extend_from_slice(&[b, b, b, 255]);
                     }
-                    upload_texture_full(recorder, TextureStagingCache::Mask, &tex, &rgba)?;
-                    tex
+                    upload_texture_full(recorder, &mut upload_slot, &tex, &rgba)?;
                 }
                 None => {
-                    let tex = match take_cached_texture(&mut recorder.persistent.cached_mask_atlas, 1, 1) {
-                        Ok(tex) => tex,
-                        Err(stale) => {
-                            if let Some(tex) = *stale {
-                                release_retained_texture(recorder, tex);
-                            }
-                            let tex = acquire_retained_texture_rgba(
-                                recorder,
-                                1,
-                                1,
-                                TextureKind::Interpolated,
-                                TextureFlags::COPY_DST,
-                            )?;
-                            install_cached_texture(&mut recorder.persistent.cached_mask_atlas, 1, 1, tex)
-                        }
-                    };
-                    upload_texture_full(recorder, TextureStagingCache::Mask, &tex, &[255, 255, 255, 255])?;
-                    tex
+                    upload_texture_full(recorder, &mut upload_slot, &tex, &[255, 255, 255, 255])?;
                 }
             }
+            recorder.persistent.cached_mask_upload = upload_slot;
+            tex
         };
 
         let scene = {

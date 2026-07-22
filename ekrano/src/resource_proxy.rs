@@ -6,7 +6,7 @@
 //!
 //! Historical note: this module used to define `ResourceProxy` / `BufferProxy` handles for a
 //! bind-map recording layer; the render path now uses direct [`goldy::Buffer`] / [`goldy::Texture`]
-//! handles (`crate::gpu_resources`).
+//! handles (`crate::scheme_gpu_resources`).
 
 /// Shader entry index in the renderer's pipeline table (matches Slang entry-point order).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]

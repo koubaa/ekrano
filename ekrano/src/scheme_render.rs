@@ -545,7 +545,7 @@ impl Render {
                 _ => None,
             };
             if let Some(lut) = lut {
-                fine_resources.push(GpuBinding::PersistentBuf(lut));
+                fine_resources.push(GpuBinding::Buf(lut));
             }
         }
         for fl in &pipeline.filter_layers {
@@ -620,58 +620,30 @@ fn take_or_refresh_filter_uniform(
     }
 }
 
-fn filter_dispatch_to_output(
-    recorder: &mut SchemeRecorder<'_>,
-    shader: crate::ShaderId,
-    uniform: &FilterUniform,
-    wg: (u32, u32, u32),
-    src: &Texture,
-    dst: RenderOutput<'_>,
-) {
-    let slot = recorder.filter_dispatch_slot;
-    recorder.filter_dispatch_slot += 1;
+/// Destination binding for a filter pass (texture UAV or present lease).
+enum FilterDst<'a> {
+    Tex(&'a Texture),
+    Output(RenderOutput<'a>),
+}
 
-    let cached = recorder
-        .persistent
-        .cached_filter_uniforms
-        .get_mut(slot)
-        .and_then(|e| e.take());
-
-    let buf = take_or_refresh_filter_uniform(recorder, cached, uniform);
-
-    let persistent = &*recorder.persistent;
-    let bindings = [
-        GpuBinding::Buf(&buf),
-        GpuBinding::Tex(src),
-        GpuBinding::Tex(src),
-        dst.filter_dst_binding(),
-        GpuBinding::Sampler(
-            persistent
-                .linear_clamp_sampler
-                .as_ref()
-                .expect("linear_clamp_sampler must be initialised before filter pass"),
-        ),
-    ];
-    SchemeRecorder::record_dispatch(recorder.scheme, recorder.shaders, shader, wg, &bindings, &[]);
-
-    let cache = &mut recorder.persistent.cached_filter_uniforms;
-    if slot < cache.len() {
-        cache[slot] = Some((*uniform, buf));
-    } else {
-        while cache.len() < slot {
-            cache.push(None);
+impl<'a> FilterDst<'a> {
+    fn binding(self) -> GpuBinding<'a> {
+        match self {
+            Self::Tex(tex) => GpuBinding::Tex(tex),
+            Self::Output(out) => out.filter_dst_binding(),
         }
-        cache.push(Some((*uniform, buf)));
     }
 }
 
-fn filter_dispatch(
+/// Shared filter dispatch: slot cache, uniform buffer, sampler, and record.
+fn filter_dispatch_impl(
     recorder: &mut SchemeRecorder<'_>,
     shader: crate::ShaderId,
     uniform: &FilterUniform,
     wg: (u32, u32, u32),
-    src: &Texture,
-    dst: &Texture,
+    sampled_src: &Texture,
+    uav_src: &Texture,
+    dst: FilterDst<'_>,
 ) {
     let slot = recorder.filter_dispatch_slot;
     recorder.filter_dispatch_slot += 1;
@@ -687,9 +659,9 @@ fn filter_dispatch(
     let persistent = &*recorder.persistent;
     let bindings = [
         GpuBinding::Buf(&buf),
-        GpuBinding::Tex(src), // src_sampled (Interpolated — SRV)
-        GpuBinding::Tex(src), // src (DirectSpatial — UAV)
-        GpuBinding::Tex(dst), // dst (DirectSpatial — UAV)
+        GpuBinding::Tex(sampled_src), // src_sampled (Interpolated — SRV)
+        GpuBinding::Tex(uav_src),     // src (DirectSpatial — UAV)
+        dst.binding(),
         GpuBinding::Sampler(
             persistent
                 .linear_clamp_sampler
@@ -711,6 +683,28 @@ fn filter_dispatch(
     }
 }
 
+fn filter_dispatch_to_output(
+    recorder: &mut SchemeRecorder<'_>,
+    shader: crate::ShaderId,
+    uniform: &FilterUniform,
+    wg: (u32, u32, u32),
+    src: &Texture,
+    dst: RenderOutput<'_>,
+) {
+    filter_dispatch_impl(recorder, shader, uniform, wg, src, src, FilterDst::Output(dst));
+}
+
+fn filter_dispatch(
+    recorder: &mut SchemeRecorder<'_>,
+    shader: crate::ShaderId,
+    uniform: &FilterUniform,
+    wg: (u32, u32, u32),
+    src: &Texture,
+    dst: &Texture,
+) {
+    filter_dispatch_impl(recorder, shader, uniform, wg, src, src, FilterDst::Tex(dst));
+}
+
 /// Like `filter_dispatch` but uses `sampled_src` for the SRV slot and `uav_src` for the UAV slot.
 /// Used by pyramid shadow composite `pass_kinds` (13/14) where the pre-blurred source and the
 /// original foreground layer are different textures.
@@ -723,41 +717,7 @@ fn filter_dispatch_two_src(
     uav_src: &Texture,
     dst: &Texture,
 ) {
-    let slot = recorder.filter_dispatch_slot;
-    recorder.filter_dispatch_slot += 1;
-
-    let cached = recorder
-        .persistent
-        .cached_filter_uniforms
-        .get_mut(slot)
-        .and_then(|e| e.take());
-
-    let buf = take_or_refresh_filter_uniform(recorder, cached, uniform);
-
-    let persistent = &*recorder.persistent;
-    let bindings = [
-        GpuBinding::Buf(&buf),
-        GpuBinding::Tex(sampled_src), // src_sampled (Interpolated — SRV)
-        GpuBinding::Tex(uav_src),     // src (DirectSpatial — UAV)
-        GpuBinding::Tex(dst),         // dst (DirectSpatial — UAV)
-        GpuBinding::Sampler(
-            persistent
-                .linear_clamp_sampler
-                .as_ref()
-                .expect("linear_clamp_sampler must be initialised before filter pass"),
-        ),
-    ];
-    SchemeRecorder::record_dispatch(recorder.scheme, recorder.shaders, shader, wg, &bindings, &[]);
-
-    let cache = &mut recorder.persistent.cached_filter_uniforms;
-    if slot < cache.len() {
-        cache[slot] = Some((*uniform, buf));
-    } else {
-        while cache.len() < slot {
-            cache.push(None);
-        }
-        cache.push(Some((*uniform, buf)));
-    }
+    filter_dispatch_impl(recorder, shader, uniform, wg, sampled_src, uav_src, FilterDst::Tex(dst));
 }
 
 /// Apply a 2D pyramid blur on `src`, writing the blurred full-resolution result into `dst`.

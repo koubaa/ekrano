@@ -31,8 +31,8 @@ use std::sync::Arc;
 use goldy::Buffer;
 use goldy::types::{BackendType, ResourceAccess, TextureFlags, TextureFormat, TextureKind};
 use goldy::{
-    BudgetPolicy, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator, NodeAccess, Scheme, ShaderModule,
-    Signal, Texture,
+    BudgetPolicy, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator, Scheme, ShaderModule, Signal,
+    Texture,
 };
 
 #[cfg(feature = "debug_layers")]
@@ -50,7 +50,7 @@ use crate::{
     scheme_gpu_resources::{GpuBinding, acquire_texture_rgba, bind_type_to_node_access},
     scheme_render::Render,
     shaders::{self, FullShaders},
-    worker_retention::{predict_worker_stale, upload_key, worker_stale_reasons, worker_topology},
+    worker_retention::{predict_worker_stale, resource_dims, upload_key_from, worker_stale_reasons, worker_topology},
 };
 use ekrano_encoding::{BumpAllocators, Images, Layout, Ramps, RenderConfig, Resolver};
 
@@ -616,29 +616,11 @@ impl SchemeRenderer {
         let t2 = Instant::now();
         let scene_bucket = crate::worker_retention::scene_size_bucket(packed.len());
         let coverage_mask_dims = coverage_mask.as_ref().map(|m| (m.width, m.height));
-        let topology = worker_topology(
-            &params,
-            &config,
-            out_image_format,
-            coverage_mask.is_some(),
-            ramps_width,
-            ramps_height,
-            images_width,
-            images_height,
-            image_entries.len(),
-            surface.is_some(),
-            direct_present,
-            scene_bucket,
-            coverage_mask_dims,
-        );
-
-        let mut image_regions: Vec<(u32, u32, u32, u32)> = image_entries
+        let image_regions: Vec<(u32, u32, u32, u32)> = image_entries
             .iter()
             .map(|(img, x, y)| (*x, *y, img.width, img.height))
             .collect();
-        image_regions.sort_unstable();
-        image_regions.dedup();
-        let upload_key = upload_key(
+        let dims = resource_dims(
             scene_bucket,
             ramps_width,
             ramps_height,
@@ -648,15 +630,20 @@ impl SchemeRenderer {
             coverage_mask_dims,
             &image_regions,
         );
+        let topology = worker_topology(
+            &params,
+            &config,
+            out_image_format,
+            &dims,
+            surface.is_some(),
+            direct_present,
+        );
+        let upload_key = upload_key_from(&dims);
         let upload_needs_record = crate::worker_retention::upload_stale(&self.persistent, &upload_key);
         if upload_needs_record && !self.metal_fused_upload {
             self.upload = Scheme::new(&self.context);
             // Logical upload declarations live on the scheme; drop cached handles.
-            self.persistent.cached_scene_upload = None;
-            self.persistent.cached_config_upload = None;
-            self.persistent.cached_gradient_upload = None;
-            self.persistent.cached_mask_upload = None;
-            self.persistent.cached_image_region_uploads.clear();
+            self.persistent.clear_upload_declarations();
             #[cfg(test)]
             {
                 self.upload_record_epochs += 1;
@@ -687,11 +674,7 @@ impl SchemeRenderer {
                 self.persistent.cached_bump_grant = None;
                 self.persistent.cached_present_tx = None;
                 // Upload topology lives on the worker scheme; drop cached declarations.
-                self.persistent.cached_scene_upload = None;
-                self.persistent.cached_config_upload = None;
-                self.persistent.cached_gradient_upload = None;
-                self.persistent.cached_mask_upload = None;
-                self.persistent.cached_image_region_uploads.clear();
+                self.persistent.clear_upload_declarations();
             }
             #[cfg(test)]
             {
@@ -889,6 +872,8 @@ impl SchemeRenderer {
                     &pipeline,
                     render_output,
                 );
+                let keep = recorder.filter_dispatch_slot;
+                recorder.persistent.trim_filter_uniform_cache(recorder.context(), keep);
             }
             let t_fine_record = t3.elapsed();
 
@@ -1352,23 +1337,26 @@ impl<'a> SchemeRecorder<'a> {
         }
         let bind_types = &shaders[shader_id.0].bindings;
         let label = shaders[shader_id.0].label;
+        debug_assert_eq!(
+            bind_types.len(),
+            bindings.len(),
+            "shader {} bind metadata count ({}) must match runtime binding count ({})",
+            label,
+            bind_types.len(),
+            bindings.len(),
+        );
 
         let mut node = scheme.node(label, &shaders[shader_id.0].pipeline);
         for (i, binding) in bindings.iter().enumerate() {
             node = if let GpuBinding::Present(lease, present_access) = binding {
                 node.with_present_access(lease, *present_access)
             } else {
-                let access = bind_types
-                    .get(i)
-                    .copied()
-                    .map(bind_type_to_node_access)
-                    .unwrap_or(NodeAccess::ReadWrite);
+                let access = bind_type_to_node_access(bind_types[i]);
                 match binding {
                     GpuBinding::Buf(b) => node.with_parcel(*b, access),
                     GpuBinding::Parcel(p) => node.with_parcel(*p, access),
                     GpuBinding::Tex(t) => node.with_parcel(*t, access),
                     GpuBinding::Sampler(s) => node.with_parcel(*s, access),
-                    GpuBinding::PersistentBuf(b) => node.with_parcel(*b, access),
                     GpuBinding::Present(..) => unreachable!(),
                 }
             };
@@ -1387,22 +1375,25 @@ impl<'a> SchemeRecorder<'a> {
     pub fn dispatch_shape(&mut self, shader: ShaderId, shape: &goldy::Parcel, bindings: &[GpuBinding<'_>]) {
         let bind_types = &self.shaders[shader.0].bindings;
         let label = self.shaders[shader.0].label;
+        debug_assert_eq!(
+            bind_types.len(),
+            bindings.len(),
+            "shader {} bind metadata count ({}) must match runtime binding count ({})",
+            label,
+            bind_types.len(),
+            bindings.len(),
+        );
         let mut node = self.scheme.node(label, &self.shaders[shader.0].pipeline);
         for (i, binding) in bindings.iter().enumerate() {
             node = if let GpuBinding::Present(lease, present_access) = binding {
                 node.with_present_access(lease, *present_access)
             } else {
-                let access = bind_types
-                    .get(i)
-                    .copied()
-                    .map(bind_type_to_node_access)
-                    .unwrap_or(NodeAccess::ReadWrite);
+                let access = bind_type_to_node_access(bind_types[i]);
                 match binding {
                     GpuBinding::Buf(b) => node.with_parcel(*b, access),
                     GpuBinding::Parcel(p) => node.with_parcel(*p, access),
                     GpuBinding::Tex(t) => node.with_parcel(*t, access),
                     GpuBinding::Sampler(s) => node.with_parcel(*s, access),
-                    GpuBinding::PersistentBuf(b) => node.with_parcel(*b, access),
                     GpuBinding::Present(..) => unreachable!(),
                 }
             };

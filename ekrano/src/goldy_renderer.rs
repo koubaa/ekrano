@@ -383,6 +383,31 @@ impl PersistentState {
         }
     }
 
+    /// Drop logical upload declarations that are tied to a Scheme instance.
+    ///
+    /// Call whenever the upload scheme (or fused worker scheme) is replaced so
+    /// stale `UploadBuffer` ids cannot be reused against a new IR.
+    pub(crate) fn clear_upload_declarations(&mut self) {
+        self.cached_scene_upload = None;
+        self.cached_config_upload = None;
+        self.cached_gradient_upload = None;
+        self.cached_mask_upload = None;
+        self.cached_image_region_uploads.clear();
+    }
+
+    /// Release retained filter-uniform deeds beyond `keep` and truncate the cache.
+    ///
+    /// Call after a worker re-record so a shorter filter chain does not pin
+    /// leftover buffers from a previous, longer scene.
+    pub(crate) fn trim_filter_uniform_cache(&mut self, ctx: &Context, keep: usize) {
+        if self.cached_filter_uniforms.len() <= keep {
+            return;
+        }
+        for (_, buf) in self.cached_filter_uniforms.drain(keep..).flatten() {
+            self.retained_pool.release_buffer(ctx, buf);
+        }
+    }
+
     pub(crate) fn acquire_readback_host_buf(&mut self, ctx: &Context, staging_bytes: u64) -> Result<Buffer, Error> {
         let needs_new = self
             .readback_host_buf
