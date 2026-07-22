@@ -44,22 +44,86 @@ pub(crate) struct WorkerTopology {
     pub mask_atlas_height: u32,
 }
 
+/// Normalized atlas / scene dimensions shared by retention keys and prepare.
+///
+/// Empty atlases are represented as 1×1 so keys match the textures actually allocated.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct ResourceDims {
+    pub scene_bucket: u64,
+    pub gradient_width: u32,
+    pub gradient_height: u32,
+    pub image_atlas_width: u32,
+    pub image_atlas_height: u32,
+    pub mask_atlas_width: u32,
+    pub mask_atlas_height: u32,
+    pub image_count: usize,
+    /// Sorted unique `(x, y, width, height)` region copy keys for the image atlas.
+    pub image_regions: Vec<(u32, u32, u32, u32)>,
+    pub ramps_width: u32,
+    pub ramps_height: u32,
+    pub images_width: u32,
+    pub images_height: u32,
+    pub has_coverage_mask: bool,
+}
+
+/// `ramps_height == 0` → 1×1 gradient atlas (prepare sentinel).
+pub(crate) fn normalize_gradient_atlas(width: u32, height: u32) -> (u32, u32) {
+    if height == 0 { (1, 1) } else { (width, height) }
+}
+
+/// `image_count == 0` → 1×1 image atlas (prepare sentinel).
+pub(crate) fn normalize_image_atlas(image_count: usize, width: u32, height: u32) -> (u32, u32) {
+    if image_count == 0 { (1, 1) } else { (width, height) }
+}
+
+/// `None` coverage mask → 1×1 mask atlas (prepare sentinel).
+pub(crate) fn normalize_mask_atlas(coverage_mask_dims: Option<(u32, u32)>) -> (u32, u32) {
+    coverage_mask_dims.unwrap_or((1, 1))
+}
+
+/// Build normalized resource dimensions from per-frame resolve outputs.
+pub(crate) fn resource_dims(
+    scene_bucket: u64,
+    ramps_width: u32,
+    ramps_height: u32,
+    image_count: usize,
+    images_width: u32,
+    images_height: u32,
+    coverage_mask_dims: Option<(u32, u32)>,
+    image_regions: &[(u32, u32, u32, u32)],
+) -> ResourceDims {
+    let (gradient_width, gradient_height) = normalize_gradient_atlas(ramps_width, ramps_height);
+    let (image_atlas_width, image_atlas_height) = normalize_image_atlas(image_count, images_width, images_height);
+    let (mask_atlas_width, mask_atlas_height) = normalize_mask_atlas(coverage_mask_dims);
+    let mut image_regions = image_regions.to_vec();
+    image_regions.sort_unstable();
+    image_regions.dedup();
+    ResourceDims {
+        scene_bucket,
+        gradient_width,
+        gradient_height,
+        image_atlas_width,
+        image_atlas_height,
+        mask_atlas_width,
+        mask_atlas_height,
+        image_count,
+        image_regions,
+        ramps_width,
+        ramps_height,
+        images_width,
+        images_height,
+        has_coverage_mask: coverage_mask_dims.is_some(),
+    }
+}
+
 pub(crate) fn worker_topology(
     params: &crate::RenderParams,
     config: &RenderConfig,
     out_format: TextureFormat,
-    has_coverage_mask: bool,
-    ramps_width: u32,
-    ramps_height: u32,
-    images_width: u32,
-    images_height: u32,
-    image_count: usize,
+    dims: &ResourceDims,
     swapchain_present: bool,
     direct_present: bool,
-    scene_bucket: u64,
-    coverage_mask_dims: Option<(u32, u32)>,
 ) -> WorkerTopology {
-    let (mask_atlas_width, mask_atlas_height) = coverage_mask_dims.unwrap_or((1, 1));
     WorkerTopology {
         aa: params.antialiasing_method,
         robust: params.robust,
@@ -67,17 +131,17 @@ pub(crate) fn worker_topology(
         width: params.width,
         height: params.height,
         buffer_sizes: config.buffer_sizes,
-        has_coverage_mask,
-        ramps_width,
-        ramps_height,
-        images_width,
-        images_height,
-        image_count,
+        has_coverage_mask: dims.has_coverage_mask,
+        ramps_width: dims.ramps_width,
+        ramps_height: dims.ramps_height,
+        images_width: dims.images_width,
+        images_height: dims.images_height,
+        image_count: dims.image_count,
         swapchain_present,
         direct_present,
-        scene_bucket,
-        mask_atlas_width,
-        mask_atlas_height,
+        scene_bucket: dims.scene_bucket,
+        mask_atlas_width: dims.mask_atlas_width,
+        mask_atlas_height: dims.mask_atlas_height,
     }
 }
 
@@ -104,44 +168,17 @@ pub(crate) struct UploadKey {
     pub image_regions: Vec<(u32, u32, u32, u32)>,
 }
 
-/// Build an [`UploadKey`] from the per-frame inputs visible before `prepare_pipeline_resources`.
-///
-/// `ramps_height == 0` → 1×1 gradient atlas.  
-/// `image_count == 0` → 1×1 image atlas.  
-/// `coverage_mask_dims == None` → 1×1 mask atlas.
-pub(crate) fn upload_key(
-    scene_bucket: u64,
-    ramps_width: u32,
-    ramps_height: u32,
-    image_count: usize,
-    images_width: u32,
-    images_height: u32,
-    coverage_mask_dims: Option<(u32, u32)>,
-    image_regions: &[(u32, u32, u32, u32)],
-) -> UploadKey {
-    let (gradient_width, gradient_height) = if ramps_height == 0 {
-        (1, 1)
-    } else {
-        (ramps_width, ramps_height)
-    };
-    let (image_atlas_width, image_atlas_height) = if image_count == 0 {
-        (1, 1)
-    } else {
-        (images_width, images_height)
-    };
-    let (mask_atlas_width, mask_atlas_height) = coverage_mask_dims.unwrap_or((1, 1));
-    let mut image_regions = image_regions.to_vec();
-    image_regions.sort_unstable();
-    image_regions.dedup();
+/// Build an [`UploadKey`] from normalized [`ResourceDims`].
+pub(crate) fn upload_key_from(dims: &ResourceDims) -> UploadKey {
     UploadKey {
-        scene_bucket,
-        gradient_width,
-        gradient_height,
-        image_atlas_width,
-        image_atlas_height,
-        mask_atlas_width,
-        mask_atlas_height,
-        image_regions,
+        scene_bucket: dims.scene_bucket,
+        gradient_width: dims.gradient_width,
+        gradient_height: dims.gradient_height,
+        image_atlas_width: dims.image_atlas_width,
+        image_atlas_height: dims.image_atlas_height,
+        mask_atlas_width: dims.mask_atlas_width,
+        mask_atlas_height: dims.mask_atlas_height,
+        image_regions: dims.image_regions.clone(),
     }
 }
 
@@ -193,6 +230,11 @@ fn sampled_texture_handle(tex: &Texture) -> ResourceHandle {
 /// The topology comparison covers both graph-structure inputs (AA, resolution, …) *and*
 /// resource-identity inputs (`scene_bucket`, `mask_atlas_width/height`) that, if changed,
 /// mean the worker's recorded dispatch nodes bind stale `ResourceHandle`s.
+///
+/// Non-empty filter effects always force a re-record: `record_filter_effects` binds
+/// per-frame scratch textures that are returned to the transient pool after submit.
+/// Those scratches are true one-shot deeds — retaining the worker would resubmit a
+/// scheme whose stamps were retired on return (`GoldyError::StaleResource`).
 pub(crate) fn worker_stale_reasons(
     persistent: &PersistentState,
     topology: &WorkerTopology,
@@ -200,6 +242,10 @@ pub(crate) fn worker_stale_reasons(
     out_image: Option<ResourceHandle>,
     output_texture: Option<goldy::TextureHandle>,
 ) -> bool {
+    // Filter scratches outrank retention: cannot keep a scheme that bound returned deeds.
+    if !filter_effects.is_empty() {
+        return true;
+    }
     let out_image_mismatch = if topology.direct_present {
         false
     } else {
@@ -226,6 +272,10 @@ pub(crate) fn predict_worker_stale(
     height: u32,
     out_format: TextureFormat,
 ) -> bool {
+    // Same rule as `worker_stale_reasons`: filter frames always re-record.
+    if !filter_effects.is_empty() {
+        return true;
+    }
     if persistent.cached_worker_topology.as_ref() != Some(topology) {
         return true;
     }
@@ -385,6 +435,28 @@ mod tests {
 
     fn premul_srgb(color: AlphaColor<Srgb>) -> peniko::color::PremulColor<Srgb> {
         color.premultiply()
+    }
+
+    fn upload_key(
+        scene_bucket: u64,
+        ramps_width: u32,
+        ramps_height: u32,
+        image_count: usize,
+        images_width: u32,
+        images_height: u32,
+        coverage_mask_dims: Option<(u32, u32)>,
+        image_regions: &[(u32, u32, u32, u32)],
+    ) -> UploadKey {
+        upload_key_from(&resource_dims(
+            scene_bucket,
+            ramps_width,
+            ramps_height,
+            image_count,
+            images_width,
+            images_height,
+            coverage_mask_dims,
+            image_regions,
+        ))
     }
 
     fn base_upload_key() -> UploadKey {
@@ -592,6 +664,47 @@ mod tests {
         assert!(worker_stale_reasons(&p, &direct_topo, &[], None, None,));
         p.cached_worker_topology = Some(direct_topo.clone());
         assert!(!worker_stale_reasons(&p, &direct_topo, &[], None, None,));
+    }
+
+    #[test]
+    fn worker_stale_when_filter_effects_non_empty() {
+        let mut p = PersistentState::new_test_only();
+        let topo = sample_topology(false);
+        p.cached_worker_topology = Some(topo.clone());
+        let effect = LayerFilterEffect {
+            primitive: FilterPrimitive::GaussianBlur {
+                std_dev: 2.0,
+                edge_mode: FilterEdgeMode::Duplicate,
+            },
+            layer_blend: 1,
+            layer_alpha: 1.0,
+            layer_index: 0,
+            is_nested: false,
+        };
+        // Cached effects match — descriptor equality alone is not enough to retain.
+        p.cached_worker_filter_effects = vec![effect.clone()];
+        assert!(
+            worker_stale_reasons(&p, &topo, &[effect], None, None),
+            "filter frames bind per-submit scratches; worker must not be retained"
+        );
+        assert!(predict_worker_stale(
+            &p,
+            &topo,
+            &[LayerFilterEffect {
+                primitive: FilterPrimitive::GaussianBlur {
+                    std_dev: 2.0,
+                    edge_mode: FilterEdgeMode::Duplicate,
+                },
+                layer_blend: 1,
+                layer_alpha: 1.0,
+                layer_index: 0,
+                is_nested: false,
+            }],
+            None,
+            64,
+            64,
+            TextureFormat::Rgba8Unorm,
+        ));
     }
 
     #[test]

@@ -31,8 +31,8 @@ use std::sync::Arc;
 use goldy::Buffer;
 use goldy::types::{BackendType, ResourceAccess, TextureFlags, TextureFormat, TextureKind};
 use goldy::{
-    BudgetPolicy, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator, NodeAccess, Scheme, ShaderModule,
-    Signal, Texture,
+    BudgetPolicy, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator, Scheme, ShaderModule, Signal,
+    Texture,
 };
 
 #[cfg(feature = "debug_layers")]
@@ -50,7 +50,7 @@ use crate::{
     scheme_gpu_resources::{GpuBinding, acquire_texture_rgba, bind_type_to_node_access},
     scheme_render::Render,
     shaders::{self, FullShaders},
-    worker_retention::{predict_worker_stale, upload_key, worker_stale_reasons, worker_topology},
+    worker_retention::{predict_worker_stale, resource_dims, upload_key_from, worker_stale_reasons, worker_topology},
 };
 use ekrano_encoding::{BumpAllocators, Images, Layout, Ramps, RenderConfig, Resolver};
 
@@ -411,11 +411,25 @@ impl SchemeRenderer {
         &self.device
     }
 
-    /// Query retained-pool buffer accounting for diagnostics or test assertions.
+    /// Query retained-pool accounting for diagnostics or test assertions.
     pub fn resource_pool_stats(&self) -> ResourcePoolStats {
+        let by_kind = self.persistent.retained_pool.bytes_by_kind();
         ResourcePoolStats {
-            retained_pool_buffer_bytes: self.persistent.retained_pool.bytes_by_kind().buffer,
+            retained_pool_buffer_bytes: by_kind.buffer,
+            retained_pool_texture_bytes: by_kind.texture,
         }
+    }
+
+    /// Number of retained filter-uniform cache slots (tests / diagnostics).
+    #[cfg(test)]
+    pub(crate) fn filter_uniform_cache_len(&self) -> usize {
+        self.persistent.cached_filter_uniforms.len()
+    }
+
+    /// Cached mask-atlas dimensions, if any (tests / diagnostics).
+    #[cfg(test)]
+    pub(crate) fn cached_mask_atlas_dims(&self) -> Option<(u32, u32)> {
+        self.persistent.cached_mask_atlas.as_ref().map(|(w, h, _)| (*w, *h))
     }
 
     /// `true` if the submission context still holds unreclaimed deferred payloads.
@@ -580,6 +594,7 @@ impl SchemeRenderer {
             params.width,
             params.height,
             out_image_format,
+            direct_present,
         ) {
             self.device.compact_overflow_heaps();
         }
@@ -616,29 +631,11 @@ impl SchemeRenderer {
         let t2 = Instant::now();
         let scene_bucket = crate::worker_retention::scene_size_bucket(packed.len());
         let coverage_mask_dims = coverage_mask.as_ref().map(|m| (m.width, m.height));
-        let topology = worker_topology(
-            &params,
-            &config,
-            out_image_format,
-            coverage_mask.is_some(),
-            ramps_width,
-            ramps_height,
-            images_width,
-            images_height,
-            image_entries.len(),
-            surface.is_some(),
-            direct_present,
-            scene_bucket,
-            coverage_mask_dims,
-        );
-
-        let mut image_regions: Vec<(u32, u32, u32, u32)> = image_entries
+        let image_regions: Vec<(u32, u32, u32, u32)> = image_entries
             .iter()
             .map(|(img, x, y)| (*x, *y, img.width, img.height))
             .collect();
-        image_regions.sort_unstable();
-        image_regions.dedup();
-        let upload_key = upload_key(
+        let dims = resource_dims(
             scene_bucket,
             ramps_width,
             ramps_height,
@@ -648,15 +645,20 @@ impl SchemeRenderer {
             coverage_mask_dims,
             &image_regions,
         );
+        let topology = worker_topology(
+            &params,
+            &config,
+            out_image_format,
+            &dims,
+            surface.is_some(),
+            direct_present,
+        );
+        let upload_key = upload_key_from(&dims);
         let upload_needs_record = crate::worker_retention::upload_stale(&self.persistent, &upload_key);
         if upload_needs_record && !self.metal_fused_upload {
             self.upload = Scheme::new(&self.context);
             // Logical upload declarations live on the scheme; drop cached handles.
-            self.persistent.cached_scene_upload = None;
-            self.persistent.cached_config_upload = None;
-            self.persistent.cached_gradient_upload = None;
-            self.persistent.cached_mask_upload = None;
-            self.persistent.cached_image_region_uploads.clear();
+            self.persistent.clear_upload_declarations();
             #[cfg(test)]
             {
                 self.upload_record_epochs += 1;
@@ -664,89 +666,48 @@ impl SchemeRenderer {
         }
 
         let output_tex_handle = output_texture.map(|t| t.gpu_handle());
-        // Metal fused: upload + worker topology share one scheme. When a re-record is
-        // required, replace the worker *before* prepare and prepare once onto it —
-        // otherwise the first prepare consumes cached_pipeline / RTs and the re-prepare
-        // allocates a duplicate set while the first PipelineResources is still alive.
-        let metal_fused_rerecord = self.metal_fused_upload
-            && (upload_needs_record
-                || predict_worker_stale(
-                    &self.persistent,
-                    &topology,
-                    &layer_filter_effects,
-                    output_tex_handle,
-                    params.width,
-                    params.height,
-                    out_image_format,
-                ));
+        // Predict worker re-record *before* prepare whenever the worker must be replaced.
+        // Filter frames always re-record (one-shot scratch deeds). Metal fused also
+        // replaces early so prepare cannot consume cached_pipeline/RTs onto a throwaway
+        // worker and then allocate a duplicate set on re-prepare.
+        let worker_stale_predicted = predict_worker_stale(
+            &self.persistent,
+            &topology,
+            &layer_filter_effects,
+            output_tex_handle,
+            params.width,
+            params.height,
+            out_image_format,
+        );
+        let replace_worker_before_prepare = worker_stale_predicted || (self.metal_fused_upload && upload_needs_record);
+        let metal_fused_rerecord = self.metal_fused_upload && replace_worker_before_prepare;
 
-        let (mut pipeline, out_image_handle, worker_stale) = if metal_fused_rerecord {
+        if replace_worker_before_prepare {
+            let _tz = goldy::tracy_zone!("ekrano.worker_record");
+            self.worker = Scheme::new(&self.context);
+            self.persistent.cached_bump_grant = None;
+            self.persistent.cached_present_tx = None;
+            #[cfg(debug_assertions)]
             {
-                let _tz = goldy::tracy_zone!("ekrano.worker_record");
-                self.worker = Scheme::new(&self.context);
-                self.persistent.cached_bump_grant = None;
-                self.persistent.cached_present_tx = None;
+                self.persistent.cached_worker_resources = None;
+            }
+            if self.metal_fused_upload {
                 // Upload topology lives on the worker scheme; drop cached declarations.
-                self.persistent.cached_scene_upload = None;
-                self.persistent.cached_config_upload = None;
-                self.persistent.cached_gradient_upload = None;
-                self.persistent.cached_mask_upload = None;
-                self.persistent.cached_image_region_uploads.clear();
-            }
-            #[cfg(test)]
-            {
-                self.upload_record_epochs += 1;
-            }
-            let mut recorder = SchemeRecorder::new(
-                &self.device,
-                &self.context,
-                &mut self.worker,
-                &mut self.upload,
-                true, // re-record fused upload topology on the new worker
-                self.metal_fused_upload,
-                self.nonblocking_reuse,
-                &mut self.frame_pipeline,
-                frame_handle,
-                &mut self.persistent,
-                &self.engine_shaders,
-            );
-            let pipeline = {
-                let _tz = goldy::tracy_zone!("ekrano.prepare");
-                let pipeline_result = recorder.prepare_pipeline_resources(
-                    coverage_mask.as_ref(),
-                    packed,
-                    ramps,
-                    images,
-                    &params,
-                    &config,
-                    out_image_format,
-                    direct_present,
-                );
-                self.resolver = resolver;
-                match pipeline_result {
-                    Ok(p) => p,
-                    Err(e) => {
-                        recorder.dismiss();
-                        return Err(e);
-                    }
+                self.persistent.clear_upload_declarations();
+                #[cfg(test)]
+                {
+                    self.upload_record_epochs += 1;
                 }
-            };
-            let out_image_handle = pipeline
-                .out_image
-                .as_ref()
-                .and_then(|t| t.handle(ResourceAccess::Write));
-            recorder.dismiss();
-            if upload_needs_record {
-                self.persistent.cached_upload_key = Some(upload_key);
             }
-            (pipeline, out_image_handle, true)
-        } else {
+        }
+
+        let (mut pipeline, out_image_handle, worker_stale) = {
             let mut recorder = SchemeRecorder::new(
                 &self.device,
                 &self.context,
                 &mut self.worker,
                 &mut self.upload,
-                upload_needs_record,
+                upload_needs_record || metal_fused_rerecord,
                 self.metal_fused_upload,
                 self.nonblocking_reuse,
                 &mut self.frame_pipeline,
@@ -784,7 +745,9 @@ impl SchemeRenderer {
                 self.persistent.cached_upload_key = Some(upload_key);
             }
 
-            let worker_stale = {
+            let worker_stale = if replace_worker_before_prepare {
+                true
+            } else {
                 let _tz = goldy::tracy_zone!("ekrano.worker_stale_check");
                 worker_stale_reasons(
                     &self.persistent,
@@ -795,7 +758,7 @@ impl SchemeRenderer {
                 )
             };
             debug_assert!(
-                !(self.metal_fused_upload && worker_stale),
+                !(self.metal_fused_upload && worker_stale && !replace_worker_before_prepare),
                 "Metal fused worker re-record should have been predicted before prepare"
             );
             (pipeline, out_image_handle, worker_stale)
@@ -817,11 +780,15 @@ impl SchemeRenderer {
         #[cfg(debug_assertions)]
         let mut debug_recorded_resources = None;
 
-        if worker_stale && !metal_fused_rerecord {
+        if worker_stale && !replace_worker_before_prepare {
             let _tz = goldy::tracy_zone!("ekrano.worker_record");
             self.worker = Scheme::new(&self.context);
             self.persistent.cached_bump_grant = None;
             self.persistent.cached_present_tx = None;
+            #[cfg(debug_assertions)]
+            {
+                self.persistent.cached_worker_resources = None;
+            }
         }
 
         let mut recorder = SchemeRecorder::new(
@@ -889,6 +856,8 @@ impl SchemeRenderer {
                     &pipeline,
                     render_output,
                 );
+                let keep = recorder.filter_dispatch_slot;
+                recorder.persistent.trim_filter_uniform_cache(recorder.context(), keep);
             }
             let t_fine_record = t3.elapsed();
 
@@ -914,6 +883,12 @@ impl SchemeRenderer {
                 None
             };
 
+            // Sticky worker retention only when the recorded graph has no one-shot
+            // filter scratches. Filter frames always re-record; publishing a full
+            // retention cache would claim a sticky worker while it still binds deeds
+            // that are retired when scratches return to the transient pool.
+            // Apply present/bump (and filter-effects bookkeeping) after `finish` so we
+            // do not mutate `persistent` while `recorder` still borrows it.
             worker_cache = Some((
                 present_tx,
                 bump_grant,
@@ -960,13 +935,26 @@ impl SchemeRenderer {
         if let Some((present, bump, topology, filter_effects, out_image)) = worker_cache {
             self.persistent.cached_present_tx = present;
             self.persistent.cached_bump_grant = bump;
-            self.persistent.cached_worker_topology = Some(topology);
-            self.persistent.cached_worker_filter_effects = filter_effects;
-            self.persistent.cached_worker_out_image = out_image;
-            self.persistent.cached_worker_output_texture = output_texture.map(|t| t.gpu_handle());
-            #[cfg(debug_assertions)]
-            if let Some(resources) = debug_recorded_resources {
-                self.persistent.cached_worker_resources = Some(resources);
+            if filter_effects.is_empty() {
+                self.persistent.cached_worker_topology = Some(topology);
+                self.persistent.cached_worker_filter_effects = filter_effects;
+                self.persistent.cached_worker_out_image = out_image;
+                self.persistent.cached_worker_output_texture = output_texture.map(|t| t.gpu_handle());
+                #[cfg(debug_assertions)]
+                if let Some(resources) = debug_recorded_resources {
+                    self.persistent.cached_worker_resources = Some(resources);
+                }
+            } else {
+                // Remember filter presence for the next frame's staleness check when
+                // filters are removed, without retaining the scratch-bound worker.
+                self.persistent.cached_worker_filter_effects = filter_effects;
+                self.persistent.cached_worker_topology = None;
+                self.persistent.cached_worker_out_image = None;
+                self.persistent.cached_worker_output_texture = None;
+                #[cfg(debug_assertions)]
+                {
+                    self.persistent.cached_worker_resources = None;
+                }
             }
         }
 
@@ -1007,6 +995,18 @@ impl SchemeRenderer {
             entry.2 = frame_tv;
         }
         defer_frame_gpu_resources(&self.context, &self.persistent, deferred_textures);
+        // Filter scratches are returned above; their stamps are now dead on the worker.
+        // Drop that scheme so the next frame cannot submit (or prepare against) retired
+        // deeds — re-record must mint a fresh worker with new scratch identities.
+        if !self.persistent.cached_worker_filter_effects.is_empty() {
+            self.worker = Scheme::new(&self.context);
+            self.persistent.cached_bump_grant = None;
+            // Keep cached_present_tx: present claim for this frame may still be in flight.
+            #[cfg(debug_assertions)]
+            {
+                self.persistent.cached_worker_resources = None;
+            }
+        }
 
         {
             let _tz = goldy::tracy_zone!("ekrano.run_frame.post_submit");
@@ -1352,23 +1352,26 @@ impl<'a> SchemeRecorder<'a> {
         }
         let bind_types = &shaders[shader_id.0].bindings;
         let label = shaders[shader_id.0].label;
+        debug_assert_eq!(
+            bind_types.len(),
+            bindings.len(),
+            "shader {} bind metadata count ({}) must match runtime binding count ({})",
+            label,
+            bind_types.len(),
+            bindings.len(),
+        );
 
         let mut node = scheme.node(label, &shaders[shader_id.0].pipeline);
         for (i, binding) in bindings.iter().enumerate() {
             node = if let GpuBinding::Present(lease, present_access) = binding {
                 node.with_present_access(lease, *present_access)
             } else {
-                let access = bind_types
-                    .get(i)
-                    .copied()
-                    .map(bind_type_to_node_access)
-                    .unwrap_or(NodeAccess::ReadWrite);
+                let access = bind_type_to_node_access(bind_types[i]);
                 match binding {
                     GpuBinding::Buf(b) => node.with_parcel(*b, access),
                     GpuBinding::Parcel(p) => node.with_parcel(*p, access),
                     GpuBinding::Tex(t) => node.with_parcel(*t, access),
                     GpuBinding::Sampler(s) => node.with_parcel(*s, access),
-                    GpuBinding::PersistentBuf(b) => node.with_parcel(*b, access),
                     GpuBinding::Present(..) => unreachable!(),
                 }
             };
@@ -1387,22 +1390,25 @@ impl<'a> SchemeRecorder<'a> {
     pub fn dispatch_shape(&mut self, shader: ShaderId, shape: &goldy::Parcel, bindings: &[GpuBinding<'_>]) {
         let bind_types = &self.shaders[shader.0].bindings;
         let label = self.shaders[shader.0].label;
+        debug_assert_eq!(
+            bind_types.len(),
+            bindings.len(),
+            "shader {} bind metadata count ({}) must match runtime binding count ({})",
+            label,
+            bind_types.len(),
+            bindings.len(),
+        );
         let mut node = self.scheme.node(label, &self.shaders[shader.0].pipeline);
         for (i, binding) in bindings.iter().enumerate() {
             node = if let GpuBinding::Present(lease, present_access) = binding {
                 node.with_present_access(lease, *present_access)
             } else {
-                let access = bind_types
-                    .get(i)
-                    .copied()
-                    .map(bind_type_to_node_access)
-                    .unwrap_or(NodeAccess::ReadWrite);
+                let access = bind_type_to_node_access(bind_types[i]);
                 match binding {
                     GpuBinding::Buf(b) => node.with_parcel(*b, access),
                     GpuBinding::Parcel(p) => node.with_parcel(*p, access),
                     GpuBinding::Tex(t) => node.with_parcel(*t, access),
                     GpuBinding::Sampler(s) => node.with_parcel(*s, access),
-                    GpuBinding::PersistentBuf(b) => node.with_parcel(*b, access),
                     GpuBinding::Present(..) => unreachable!(),
                 }
             };
@@ -2153,6 +2159,162 @@ mod tests {
         assert!(
             renderer.cached_scheme_has_out_image(),
             "headless readback path must retain out_image"
+        );
+    }
+
+    /// Filter frames re-record each submit (scratches are one-shot). Removing filters
+    /// must still trim the sticky filter-uniform cache so retained deeds are released.
+    #[test]
+    fn filter_uniform_cache_shrinks_when_filters_removed() {
+        let Some((gpu, _)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
+            return;
+        };
+
+        let mut renderer = SchemeRenderer::new(&gpu).expect("SchemeRenderer::new");
+        let params = RenderParams {
+            base_color: peniko::color::palette::css::BLACK,
+            width: 64,
+            height: 64,
+            antialiasing_method: crate::AaConfig::Area,
+            robust: false,
+        };
+        let texture = {
+            use goldy::RetainedPool;
+            use std::sync::Arc;
+            RetainedPool::new(Arc::new(gpu.clone()))
+                .acquire_texture(
+                    params.width,
+                    params.height,
+                    TextureFormat::Rgba8Unorm,
+                    TextureKind::Direct,
+                    TextureFlags::COPY_DST,
+                    None,
+                )
+                .expect("tex")
+        };
+
+        let mut filtered = Scene::new();
+        let blur = ekrano_encoding::Filter(ekrano_encoding::FilterPrimitive::GaussianBlur {
+            std_dev: 2.0,
+            edge_mode: ekrano_encoding::FilterEdgeMode::Duplicate,
+        });
+        filtered.push_filter_layer(
+            blur,
+            peniko::Fill::NonZero,
+            peniko::kurbo::Affine::IDENTITY,
+            &peniko::kurbo::Rect::new(0.0, 0.0, 64.0, 64.0),
+        );
+        filtered.fill(
+            peniko::Fill::NonZero,
+            peniko::kurbo::Affine::IDENTITY,
+            peniko::Color::from_rgb8(200, 100, 50),
+            None,
+            &peniko::kurbo::Circle::new((32.0, 32.0), 16.0),
+        );
+        filtered.pop_layer();
+
+        for _ in 0..2 {
+            renderer
+                .render_to_texture(&filtered, &texture, &params)
+                .expect("filtered render");
+        }
+        assert!(
+            renderer.filter_uniform_cache_len() > 0,
+            "filtered scene must populate filter-uniform cache"
+        );
+
+        let mut plain = Scene::new();
+        plain.fill(
+            peniko::Fill::NonZero,
+            peniko::kurbo::Affine::IDENTITY,
+            peniko::Color::from_rgb8(40, 80, 120),
+            None,
+            &peniko::kurbo::Rect::new(0.0, 0.0, 32.0, 32.0),
+        );
+        renderer
+            .render_to_texture(&plain, &texture, &params)
+            .expect("plain render");
+        assert_eq!(
+            renderer.filter_uniform_cache_len(),
+            0,
+            "removing filters must trim retained filter-uniform cache to zero"
+        );
+    }
+
+    #[test]
+    fn mask_atlas_replacement_updates_dims_and_releases_old() {
+        let Some((gpu, _)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
+            return;
+        };
+
+        let mut renderer = SchemeRenderer::new(&gpu).expect("SchemeRenderer::new");
+        let texture = {
+            use goldy::RetainedPool;
+            use std::sync::Arc;
+            RetainedPool::new(Arc::new(gpu.clone()))
+                .acquire_texture(
+                    64,
+                    64,
+                    TextureFormat::Rgba8Unorm,
+                    TextureKind::Direct,
+                    TextureFlags::COPY_DST,
+                    None,
+                )
+                .expect("tex")
+        };
+        let params = RenderParams {
+            base_color: peniko::color::palette::css::BLACK,
+            width: 64,
+            height: 64,
+            antialiasing_method: crate::AaConfig::Area,
+            robust: false,
+        };
+
+        // No mask → 1×1 sentinel atlas.
+        let mut scene = Scene::new();
+        scene.fill(
+            peniko::Fill::NonZero,
+            peniko::kurbo::Affine::IDENTITY,
+            peniko::Color::from_rgb8(200, 100, 50),
+            None,
+            &peniko::kurbo::Circle::new((32.0, 32.0), 16.0),
+        );
+        renderer.render_to_texture(&scene, &texture, &params).expect("no-mask");
+        assert_eq!(renderer.cached_mask_atlas_dims(), Some((1, 1)));
+        let tex_bytes_1x1 = renderer.resource_pool_stats().retained_pool_texture_bytes;
+
+        // Full-frame coverage mask → 64×64 atlas; old 1×1 deed released from retained pool.
+        let mask_data = vec![255_u8; 64 * 64];
+        let mask = ekrano_encoding::CoverageMask::new(64, 64, mask_data).expect("mask");
+        scene.set_coverage_mask(mask);
+        renderer
+            .render_to_texture(&scene, &texture, &params)
+            .expect("with-mask");
+        assert_eq!(renderer.cached_mask_atlas_dims(), Some((64, 64)));
+        let tex_bytes_64 = renderer.resource_pool_stats().retained_pool_texture_bytes;
+        assert!(
+            tex_bytes_64 > tex_bytes_1x1,
+            "64×64 mask atlas must increase retained texture bytes"
+        );
+
+        // Back to no mask → 1×1 again; retained texture accounting must not keep both atlases.
+        let mut plain = Scene::new();
+        plain.fill(
+            peniko::Fill::NonZero,
+            peniko::kurbo::Affine::IDENTITY,
+            peniko::Color::from_rgb8(40, 80, 120),
+            None,
+            &peniko::kurbo::Rect::new(0.0, 0.0, 32.0, 32.0),
+        );
+        renderer
+            .render_to_texture(&plain, &texture, &params)
+            .expect("mask cleared");
+        renderer.flush_deferred_deletions();
+        assert_eq!(renderer.cached_mask_atlas_dims(), Some((1, 1)));
+        let tex_bytes_back = renderer.resource_pool_stats().retained_pool_texture_bytes;
+        assert!(
+            tex_bytes_back < tex_bytes_64,
+            "releasing 64×64 mask atlas must drop retained texture bytes (was {tex_bytes_64}, now {tex_bytes_back})"
         );
     }
 }

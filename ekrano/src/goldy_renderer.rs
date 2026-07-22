@@ -49,16 +49,18 @@ pub struct AllocatorStats {
     pub cleanup_ring_depth: usize,
 }
 
-/// Snapshot of retained-pool buffer accounting, useful for tests and diagnostics.
+/// Snapshot of retained-pool accounting, useful for tests and diagnostics.
 #[derive(Debug, Clone, Copy)]
 pub struct ResourcePoolStats {
-    /// Committed bytes held in the retained pool.
+    /// Committed buffer bytes held in the retained pool.
     ///
     /// Increases when `retain_pool.acquire_*` adds a new buffer, stays flat when
     /// existing allocations are reused. Useful for asserting that the
     /// `cached_scheme_indirect` composite buffer is reused rather than reallocated
     /// frame-to-frame.
     pub retained_pool_buffer_bytes: u64,
+    /// Committed texture bytes held in the retained pool (atlases, RTs, filter layers).
+    pub retained_pool_texture_bytes: u64,
 }
 
 /// Upper bound applied to observed bump counters before they're fed into
@@ -222,15 +224,12 @@ impl PreparedFrame {
 
 /// Return filter-scratch textures to the context transient pool (epoch-gated).
 ///
-/// On Metal, mismatched/resize-prone scratches are dropped instead of parked
-/// (overflow-heap pin avoidance).
-pub(crate) fn defer_frame_gpu_resources(ctx: &Context, persistent: &PersistentState, textures: Vec<Texture>) {
-    if persistent.metal_heap_sensitive {
-        drop(textures);
-    } else {
-        for tex in textures {
-            ctx.return_transient_texture(tex);
-        }
+/// Always park in the transient pool — including on Metal. Same-size scratches are
+/// reusable across filter re-records; resize purge (`clear_transient_textures`) still
+/// drops bins so obsolete sizes cannot pin overflow heaps.
+pub(crate) fn defer_frame_gpu_resources(ctx: &Context, _persistent: &PersistentState, textures: Vec<Texture>) {
+    for tex in textures {
+        ctx.return_transient_texture(tex);
     }
 }
 
@@ -258,8 +257,9 @@ pub(crate) fn env_robust_override() -> Option<bool> {
 /// GPU resources that live for the lifetime of the renderer and are reused
 /// across frames. Pool growth, texture reuse, and bump estimates all live here.
 pub(crate) struct PersistentState {
-    /// Retained pool for the seven stable pipeline buffers (`resource-pool.md` §4).
-    /// Valid only at [`FRAME_PIPELINE_DEPTH`] = 1; see [`StablePipelineBuffers`](crate::scheme_gpu_resources::StablePipelineBuffers).
+    /// Retained pool for the seven stable pipeline buffers (see
+    /// [`StablePipelineBuffers`](crate::scheme_gpu_resources::StablePipelineBuffers)).
+    /// Valid only at [`FRAME_PIPELINE_DEPTH`] = 1.
     pub(crate) retained_pool: RetainedPool,
     /// Bump allocator counters from the most recently drained frame.
     /// `None` until the first GPU readback completes.
@@ -286,8 +286,12 @@ pub(crate) struct PersistentState {
     pub(crate) stable_mask_lut_msaa8: Option<Buffer>,
     /// Static MSAA16 mask LUT buffer (same rationale as `stable_mask_lut_msaa8`).
     pub(crate) stable_mask_lut_msaa16: Option<Buffer>,
-    /// Cached GPU `ConfigUniform` buffer. Stable across frames once bump estimates
-    /// converge; eliminates `WriteBuffer` from the dispatch graph at steady state.
+    /// Cached GPU `ConfigUniform` buffer + last uploaded value.
+    ///
+    /// The buffer is overwritten in place each frame via the upload scheme (same
+    /// `ResourceHandle`, so a retained worker stays valid across e.g. `base_color`
+    /// changes). The cached value is not used to skip staging: Goldy requires every
+    /// `UploadBuffer` referenced by a retained upload scheme to be staged each submit.
     pub(crate) cached_config_uniform: Option<(ekrano_encoding::ConfigUniform, Buffer)>,
     /// Per-slot cached `FilterUniform` buffers, indexed by filter dispatch order.
     /// Retained deeds; stable for scenes with fixed filter effects (e.g. a static drop shadow).
@@ -383,6 +387,31 @@ impl PersistentState {
         }
     }
 
+    /// Drop logical upload declarations that are tied to a Scheme instance.
+    ///
+    /// Call whenever the upload scheme (or fused worker scheme) is replaced so
+    /// stale `UploadBuffer` ids cannot be reused against a new IR.
+    pub(crate) fn clear_upload_declarations(&mut self) {
+        self.cached_scene_upload = None;
+        self.cached_config_upload = None;
+        self.cached_gradient_upload = None;
+        self.cached_mask_upload = None;
+        self.cached_image_region_uploads.clear();
+    }
+
+    /// Release retained filter-uniform deeds beyond `keep` and truncate the cache.
+    ///
+    /// Call after a worker re-record so a shorter filter chain does not pin
+    /// leftover buffers from a previous, longer scene.
+    pub(crate) fn trim_filter_uniform_cache(&mut self, ctx: &Context, keep: usize) {
+        if self.cached_filter_uniforms.len() <= keep {
+            return;
+        }
+        for (_, buf) in self.cached_filter_uniforms.drain(keep..).flatten() {
+            self.retained_pool.release_buffer(ctx, buf);
+        }
+    }
+
     pub(crate) fn acquire_readback_host_buf(&mut self, ctx: &Context, staging_bytes: u64) -> Result<Buffer, Error> {
         let needs_new = self
             .readback_host_buf
@@ -430,12 +459,7 @@ impl PersistentState {
         direct_present: bool,
     ) -> Option<(Option<Texture>, [Texture; 4])> {
         let (out, layers, tv) = self.cached_scheme_rt.take()?;
-        let out_matches = match (&out, direct_present) {
-            (None, true) => true,
-            (Some(tex), false) => tex.width() == width && tex.height() == height && tex.format() == out_format,
-            _ => false,
-        };
-        if out_matches {
+        if scheme_render_targets_compatible(&out, &layers, width, height, out_format, direct_present) {
             let _ = tv;
             return Some((out, layers));
         }
@@ -446,11 +470,7 @@ impl PersistentState {
                 .map(|t| format!("{}x{}", t.width(), t.height()))
                 .unwrap_or_else(|| "none".into()),
         );
-        if let Some(out_tex) = out {
-            self.reclaim_scheme_render_targets(ctx, Some(out_tex), layers, tv);
-        } else {
-            self.reclaim_scheme_render_targets(ctx, None, layers, tv);
-        }
+        self.reclaim_scheme_render_targets(ctx, out, layers, tv);
         None
     }
 
@@ -513,8 +533,8 @@ impl PersistentState {
 
 impl PersistentState {
     /// Drop all cached render targets when any occupied slot no longer matches the
-    /// requested dimensions. Waits for the oldest slot timeline so heap-backed textures
-    /// are retired before new allocations during resize.
+    /// requested dimensions / present mode. Waits for the oldest slot timeline so
+    /// heap-backed textures are retired before new allocations during resize.
     ///
     /// On Metal, also clears [`Self::cached_scheme_rt`] and the context transient
     /// texture bins so obsolete sizes cannot pin overflow heaps across continuous
@@ -525,13 +545,10 @@ impl PersistentState {
         width: u32,
         height: u32,
         out_format: TextureFormat,
+        direct_present: bool,
     ) -> bool {
         let scheme_mismatch = self.cached_scheme_rt.as_ref().is_some_and(|(out, layers, _)| {
-            layers[0].width() != width
-                || layers[0].height() != height
-                || out
-                    .as_ref()
-                    .is_some_and(|tex| tex.format() != out_format || tex.width() != width || tex.height() != height)
+            !scheme_render_targets_compatible(out, layers, width, height, out_format, direct_present)
         });
         if !scheme_mismatch {
             return false;
@@ -565,6 +582,28 @@ impl PersistentState {
 
         true
     }
+}
+
+/// Shared compatibility predicate for scheme RT cache hit / early resize purge.
+///
+/// `direct_present`: cache must hold `out == None` (fine writes the present lease).
+/// Copy path: `out` must match `width`/`height`/`out_format`. Filter layers always
+/// match the frame dimensions.
+pub(crate) fn scheme_render_targets_compatible(
+    out: &Option<Texture>,
+    layers: &[Texture; 4],
+    width: u32,
+    height: u32,
+    out_format: TextureFormat,
+    direct_present: bool,
+) -> bool {
+    let layers_match = layers[0].width() == width && layers[0].height() == height;
+    let out_matches = match (out, direct_present) {
+        (None, true) => true,
+        (Some(tex), false) => tex.width() == width && tex.height() == height && tex.format() == out_format,
+        _ => false,
+    };
+    layers_match && out_matches
 }
 
 impl PersistentState {
@@ -681,57 +720,147 @@ pub(crate) mod tests {
         Some((gpu, persistent))
     }
 
+    fn acquire_test_layers(p: &mut PersistentState, w: u32, h: u32) -> [Texture; 4] {
+        let kind = goldy::types::TextureKind::DirectInterpolated;
+        let flags = goldy::types::TextureFlags::empty();
+        [
+            p.retained_pool
+                .acquire_texture(w, h, TextureFormat::Rgba8Unorm, kind, flags, None)
+                .expect("layer0"),
+            p.retained_pool
+                .acquire_texture(w, h, TextureFormat::Rgba8Unorm, kind, flags, None)
+                .expect("layer1"),
+            p.retained_pool
+                .acquire_texture(w, h, TextureFormat::Rgba8Unorm, kind, flags, None)
+                .expect("layer2"),
+            p.retained_pool
+                .acquire_texture(w, h, TextureFormat::Rgba8Unorm, kind, flags, None)
+                .expect("layer3"),
+        ]
+    }
+
     #[test]
     fn scheme_rt_cache_reuses_none_out_image_in_direct_present_mode() {
         let device = goldy::test_support::mock_device();
         let mut p = PersistentState::new(&device);
-        let layers = [
-            p.retained_pool
-                .acquire_texture(
-                    8,
-                    8,
-                    TextureFormat::Rgba8Unorm,
-                    goldy::types::TextureKind::DirectInterpolated,
-                    goldy::types::TextureFlags::empty(),
-                    None,
-                )
-                .expect("layer0"),
-            p.retained_pool
-                .acquire_texture(
-                    8,
-                    8,
-                    TextureFormat::Rgba8Unorm,
-                    goldy::types::TextureKind::DirectInterpolated,
-                    goldy::types::TextureFlags::empty(),
-                    None,
-                )
-                .expect("layer1"),
-            p.retained_pool
-                .acquire_texture(
-                    8,
-                    8,
-                    TextureFormat::Rgba8Unorm,
-                    goldy::types::TextureKind::DirectInterpolated,
-                    goldy::types::TextureFlags::empty(),
-                    None,
-                )
-                .expect("layer2"),
-            p.retained_pool
-                .acquire_texture(
-                    8,
-                    8,
-                    TextureFormat::Rgba8Unorm,
-                    goldy::types::TextureKind::DirectInterpolated,
-                    goldy::types::TextureFlags::empty(),
-                    None,
-                )
-                .expect("layer3"),
-        ];
+        let layers = acquire_test_layers(&mut p, 8, 8);
         p.store_scheme_render_targets(None, layers, 1);
         let ctx = device.create_context().expect("ctx");
         let hit = p.take_scheme_render_targets(&ctx, 8, 8, TextureFormat::Rgba8Unorm, true);
         assert!(hit.is_some());
         let (out, _) = hit.unwrap();
         assert!(out.is_none(), "direct-present cache must not retain out_image");
+    }
+
+    #[test]
+    fn scheme_render_targets_compatible_matches_take_and_purge() {
+        let device = goldy::test_support::mock_device();
+        let mut p = PersistentState::new(&device);
+        let layers = acquire_test_layers(&mut p, 16, 16);
+        let out = p
+            .retained_pool
+            .acquire_texture(
+                16,
+                16,
+                TextureFormat::Rgba8Unorm,
+                goldy::types::TextureKind::Direct,
+                goldy::types::TextureFlags::COPY_DST | goldy::types::TextureFlags::COPY_SRC,
+                None,
+            )
+            .expect("out");
+        assert!(scheme_render_targets_compatible(
+            &Some(out.borrow()),
+            &layers,
+            16,
+            16,
+            TextureFormat::Rgba8Unorm,
+            false,
+        ));
+        assert!(!scheme_render_targets_compatible(
+            &Some(out.borrow()),
+            &layers,
+            32,
+            16,
+            TextureFormat::Rgba8Unorm,
+            false,
+        ));
+        assert!(!scheme_render_targets_compatible(
+            &Some(out.borrow()),
+            &layers,
+            16,
+            16,
+            TextureFormat::Rgba8Unorm,
+            true, // direct-present expects no out_image
+        ));
+        assert!(scheme_render_targets_compatible(
+            &None,
+            &layers,
+            16,
+            16,
+            TextureFormat::Rgba8Unorm,
+            true,
+        ));
+        assert!(!scheme_render_targets_compatible(
+            &None,
+            &layers,
+            16,
+            16,
+            TextureFormat::Rgba8Unorm,
+            false, // copy path expects out_image
+        ));
+        drop(out);
+        drop(layers);
+    }
+
+    #[test]
+    fn purge_uses_shared_compatibility_for_present_mode_mismatch() {
+        let device = goldy::test_support::mock_device();
+        let mut p = PersistentState::new(&device);
+        let layers = acquire_test_layers(&mut p, 8, 8);
+        // Cached as direct-present (no out_image).
+        p.store_scheme_render_targets(None, layers, 1);
+        let ctx = device.create_context().expect("ctx");
+        // Copy-path request must purge (mode mismatch via shared predicate).
+        assert!(p.purge_render_target_cache_if_mismatch(&ctx, 8, 8, TextureFormat::Rgba8Unorm, false));
+        assert!(p.cached_scheme_rt.is_none());
+    }
+
+    #[test]
+    fn purge_noop_when_compatible() {
+        let device = goldy::test_support::mock_device();
+        let mut p = PersistentState::new(&device);
+        let layers = acquire_test_layers(&mut p, 8, 8);
+        p.store_scheme_render_targets(None, layers, 1);
+        let ctx = device.create_context().expect("ctx");
+        assert!(!p.purge_render_target_cache_if_mismatch(&ctx, 8, 8, TextureFormat::Rgba8Unorm, true));
+        assert!(p.cached_scheme_rt.is_some());
+    }
+
+    #[test]
+    fn trim_filter_uniform_cache_releases_tail() {
+        let device = goldy::test_support::mock_device();
+        let mut p = PersistentState::new(&device);
+        let ctx = device.create_context().expect("ctx");
+        let buf0 = p
+            .retained_pool
+            .acquire_buffer(64, BufferKind::Scattered, Some(4), BufferFlags::empty(), None)
+            .expect("buf0");
+        let buf1 = p
+            .retained_pool
+            .acquire_buffer(64, BufferKind::Scattered, Some(4), BufferFlags::empty(), None)
+            .expect("buf1");
+        let buf2 = p
+            .retained_pool
+            .acquire_buffer(64, BufferKind::Scattered, Some(4), BufferFlags::empty(), None)
+            .expect("buf2");
+        let dummy = ekrano_encoding::FilterUniform::clear_transparent(1, 1);
+        p.cached_filter_uniforms = vec![Some((dummy, buf0)), Some((dummy, buf1)), Some((dummy, buf2))];
+        let bytes_before = p.retained_pool.bytes_by_kind().buffer;
+        p.trim_filter_uniform_cache(&ctx, 1);
+        assert_eq!(p.cached_filter_uniforms.len(), 1);
+        assert!(
+            p.retained_pool.bytes_by_kind().buffer < bytes_before,
+            "trim must release retained filter-uniform deeds"
+        );
     }
 }

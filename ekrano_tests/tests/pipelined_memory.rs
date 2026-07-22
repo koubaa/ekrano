@@ -288,6 +288,7 @@ fn resize_churn_keeps_ring_empty_and_pool_bounded() {
     ];
 
     let mut max_retained = 0_u64;
+    let mut max_tex = 0_u64;
     for (i, &(w, h)) in sizes.iter().cycle().take(40).enumerate() {
         let texture = test_alloc_texture(
             renderer.device(),
@@ -313,15 +314,149 @@ fn resize_churn_keeps_ring_empty_and_pool_bounded() {
             depth, 0,
             "frame {i}: nonblocking scheme resize must not create retirement-ring slots (depth={depth})"
         );
-        max_retained = max_retained.max(renderer.resource_pool_stats().retained_pool_buffer_bytes);
+        let stats = renderer.resource_pool_stats();
+        max_retained = max_retained.max(stats.retained_pool_buffer_bytes);
+        max_tex = max_tex.max(stats.retained_pool_texture_bytes);
     }
 
     assert!(max_retained > 0, "retained pool never allocated during resize churn");
+    assert!(max_tex > 0, "retained texture pool never allocated during resize churn");
     // Bound growth: after cycling sizes, bytes should stay within a few scene/config buckets.
-    let final_bytes = renderer.resource_pool_stats().retained_pool_buffer_bytes;
+    let final_stats = renderer.resource_pool_stats();
     assert!(
-        final_bytes <= max_retained,
-        "retained pool bytes regress after churn: final={final_bytes} max_seen={max_retained}"
+        final_stats.retained_pool_buffer_bytes <= max_retained,
+        "retained pool bytes regress after churn: final={} max_seen={max_retained}",
+        final_stats.retained_pool_buffer_bytes
+    );
+    assert!(
+        final_stats.retained_pool_texture_bytes <= max_tex,
+        "retained texture bytes regress after churn: final={} max_seen={max_tex}",
+        final_stats.retained_pool_texture_bytes
+    );
+}
+
+/// After resize settles back to a fixed size, retained RT texture bytes must converge
+/// (shared purge/take compatibility — no dual-size RT sets retained).
+fn render_target_resize_texture_bytes_converge() {
+    env_logger::try_init().ok();
+    let _gpu_guard = gpu_test_lock();
+
+    let (_device, mut renderer) = make_renderer();
+    let scene = tiny_scene();
+
+    let mut last_tex_bytes = 0_u64;
+    for &(w, h) in &[(64, 64), (128, 64), (64, 128), (64, 64), (64, 64), (64, 64)] {
+        let texture = test_alloc_texture(
+            renderer.device(),
+            w,
+            h,
+            TextureFormat::Rgba8Unorm,
+            TextureKind::Direct,
+            TextureFlags::COPY_DST,
+        );
+        let params = RenderParams {
+            base_color: palette::css::BLACK,
+            width: w,
+            height: h,
+            antialiasing_method: AaConfig::Area,
+            robust: false,
+        };
+        renderer
+            .render_to_texture(&scene, &texture, &params)
+            .unwrap_or_else(|e| panic!("resize {w}x{h}: {e}"));
+        renderer.flush_deferred_deletions();
+        last_tex_bytes = renderer.resource_pool_stats().retained_pool_texture_bytes;
+    }
+
+    // Three more frames at the settled size — texture bytes must not grow.
+    let texture = test_alloc_texture(
+        renderer.device(),
+        64,
+        64,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::Direct,
+        TextureFlags::COPY_DST,
+    );
+    let params = RenderParams {
+        base_color: palette::css::BLACK,
+        width: 64,
+        height: 64,
+        antialiasing_method: AaConfig::Area,
+        robust: false,
+    };
+    for i in 0..3 {
+        renderer
+            .render_to_texture(&scene, &texture, &params)
+            .unwrap_or_else(|e| panic!("settle frame {i}: {e}"));
+        let tex = renderer.resource_pool_stats().retained_pool_texture_bytes;
+        assert_eq!(
+            tex, last_tex_bytes,
+            "frame {i}: retained RT texture bytes must stay flat after resize settles \
+             ({last_tex_bytes} → {tex})"
+        );
+    }
+}
+
+/// Filter-scratch transient textures plateau after warmup (no unbounded fresh allocs).
+fn transient_texture_allocs_plateau_with_filters() {
+    env_logger::try_init().ok();
+    let _gpu_guard = gpu_test_lock();
+
+    let (_device, mut renderer) = make_renderer();
+    let texture = test_alloc_texture(
+        renderer.device(),
+        WIDTH,
+        HEIGHT,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::Direct,
+        TextureFlags::COPY_DST,
+    );
+    let params = RenderParams {
+        base_color: palette::css::BLACK,
+        width: WIDTH,
+        height: HEIGHT,
+        antialiasing_method: AaConfig::Area,
+        robust: false,
+    };
+
+    let mut filtered = Scene::new();
+    let blur = ekrano_encoding::Filter(ekrano_encoding::FilterPrimitive::GaussianBlur {
+        std_dev: 2.0,
+        edge_mode: ekrano_encoding::FilterEdgeMode::Duplicate,
+    });
+    filtered.push_filter_layer(
+        blur,
+        Fill::NonZero,
+        Affine::IDENTITY,
+        &Rect::new(0.0, 0.0, WIDTH as f64, HEIGHT as f64),
+    );
+    filtered.fill(
+        Fill::NonZero,
+        Affine::IDENTITY,
+        palette::css::RED,
+        None,
+        &Rect::new(8.0, 8.0, 40.0, 40.0),
+    );
+    filtered.pop_layer();
+
+    for i in 0..20 {
+        renderer
+            .render_to_texture(&filtered, &texture, &params)
+            .unwrap_or_else(|e| panic!("warmup filter frame {i}: {e}"));
+    }
+
+    let baseline = renderer.submission_context().transient_texture_alloc_count();
+    for i in 0..30 {
+        renderer
+            .render_to_texture(&filtered, &texture, &params)
+            .unwrap_or_else(|e| panic!("steady filter frame {i}: {e}"));
+    }
+    let after = renderer.submission_context().transient_texture_alloc_count();
+    let growth = after.saturating_sub(baseline);
+    assert!(
+        growth <= 4,
+        "transient texture fresh allocs grew excessively after filter warmup: \
+         baseline={baseline} after={after} growth={growth}"
     );
 }
 
@@ -351,6 +486,20 @@ fn main() {
     trials.push(
         libtest_mimic::Trial::test("resize_churn_keeps_ring_empty_and_pool_bounded", || {
             resize_churn_keeps_ring_empty_and_pool_bounded();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("render_target_resize_texture_bytes_converge", || {
+            render_target_resize_texture_bytes_converge();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("transient_texture_allocs_plateau_with_filters", || {
+            transient_texture_allocs_plateau_with_filters();
             Ok(())
         })
         .with_ignored_flag(false),
