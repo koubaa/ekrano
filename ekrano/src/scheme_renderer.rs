@@ -44,13 +44,16 @@ use crate::{
     goldy_renderer::{
         AllocatorStats, CacheScheduleOutcome, FRAME_COUNTER, FRAME_PIPELINE_DEPTH, FrameFinishOutcome, FrameStats,
         GoldyShader, MAX_BUMP_RETRIES, PersistentState, PreparedFrame, PresentToken, ResourcePoolStats,
-        defer_frame_gpu_resources, env_robust_override, sanitize_bump,
+        SceneGrowthStats, defer_frame_gpu_resources, env_robust_override, sanitize_bump,
     },
     resource_proxy::{BindType, ShaderId},
     scheme_gpu_resources::{GpuBinding, acquire_texture_rgba, bind_type_to_node_access},
     scheme_render::Render,
     shaders::{self, FullShaders},
-    worker_retention::{predict_worker_stale, resource_dims, upload_key_from, worker_stale_reasons, worker_topology},
+    worker_retention::{
+        note_scene_growth_frame, note_upload_rerecord_scene_bucket, note_worker_rerecord_scene_bucket,
+        predict_worker_stale, resource_dims, upload_key_from, worker_stale_reasons, worker_topology,
+    },
 };
 use ekrano_encoding::{BumpAllocators, Images, Layout, Ramps, RenderConfig, Resolver};
 
@@ -420,6 +423,27 @@ impl SchemeRenderer {
         }
     }
 
+    /// Scene capacity growth counters (bucket crossings / topology invalidations).
+    pub fn scene_growth_stats(&self) -> SceneGrowthStats {
+        self.persistent.scene_growth
+    }
+
+    /// Log a cumulative scene-growth summary (`RUST_LOG=ekrano::scene_growth=info`).
+    pub fn log_scene_growth_summary(&self) {
+        let stats = self.scene_growth_stats();
+        log::info!(
+            target: "ekrano::scene_growth",
+            "scene growth summary: frames={} scene_bucket_crossings={} worker_rerecord_scene_bucket={} upload_rerecord_scene_bucket={} current_scene_bucket={} peak_scene_bucket={} peak_live_scene_bytes={}",
+            stats.frames,
+            stats.scene_bucket_crossings,
+            stats.worker_rerecord_scene_bucket,
+            stats.upload_rerecord_scene_bucket,
+            stats.current_scene_bucket,
+            stats.peak_scene_bucket,
+            stats.peak_live_scene_bytes,
+        );
+    }
+
     /// Number of retained filter-uniform cache slots (tests / diagnostics).
     #[cfg(test)]
     pub(crate) fn filter_uniform_cache_len(&self) -> usize {
@@ -630,6 +654,7 @@ impl SchemeRenderer {
 
         let t2 = Instant::now();
         let scene_bucket = crate::worker_retention::scene_size_bucket(packed.len());
+        note_scene_growth_frame(&mut self.persistent.scene_growth, packed.len(), scene_bucket);
         let coverage_mask_dims = coverage_mask.as_ref().map(|m| (m.width, m.height));
         let image_regions: Vec<(u32, u32, u32, u32)> = image_entries
             .iter()
@@ -655,6 +680,17 @@ impl SchemeRenderer {
         );
         let upload_key = upload_key_from(&dims);
         let upload_needs_record = crate::worker_retention::upload_stale(&self.persistent, &upload_key);
+        if upload_needs_record {
+            if let Some(old_key) = self.persistent.cached_upload_key.as_ref() {
+                if old_key.scene_bucket != upload_key.scene_bucket {
+                    note_upload_rerecord_scene_bucket(
+                        &mut self.persistent.scene_growth,
+                        old_key.scene_bucket,
+                        upload_key.scene_bucket,
+                    );
+                }
+            }
+        }
         if upload_needs_record && !self.metal_fused_upload {
             self.upload = Scheme::new(&self.context);
             // Logical upload declarations live on the scheme; drop cached handles.
@@ -788,6 +824,18 @@ impl SchemeRenderer {
             #[cfg(debug_assertions)]
             {
                 self.persistent.cached_worker_resources = None;
+            }
+        }
+
+        if worker_stale {
+            if let Some(old_topo) = self.persistent.cached_worker_topology.as_ref() {
+                if old_topo.scene_bucket != topology.scene_bucket {
+                    note_worker_rerecord_scene_bucket(
+                        &mut self.persistent.scene_growth,
+                        old_topo.scene_bucket,
+                        topology.scene_bucket,
+                    );
+                }
             }
         }
 

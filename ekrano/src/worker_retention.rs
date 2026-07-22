@@ -8,7 +8,7 @@ use goldy::types::{ResourceAccess, ResourceHandle, TextureFormat};
 use goldy::{Buffer, Texture};
 
 use crate::AaConfig;
-use crate::goldy_renderer::PersistentState;
+use crate::goldy_renderer::{PersistentState, SceneGrowthStats};
 use ekrano_encoding::{BufferSizes, FilterPrimitive, LayerFilterEffect, RenderConfig};
 
 /// Inputs that change the compute/present node graph — not per-frame payload bytes.
@@ -422,6 +422,46 @@ pub(crate) fn upload_stale(persistent: &PersistentState, key: &UploadKey) -> boo
 /// node always targets the same allocation.
 pub(crate) fn scene_size_bucket(bytes: usize) -> u64 {
     bytes.max(4).next_power_of_two() as u64
+}
+
+/// Update per-frame scene growth counters.
+pub(crate) fn note_scene_growth_frame(stats: &mut SceneGrowthStats, live_bytes: usize, scene_bucket: u64) {
+    stats.frames += 1;
+    stats.current_scene_bucket = scene_bucket;
+    stats.peak_scene_bucket = stats.peak_scene_bucket.max(scene_bucket);
+    stats.peak_live_scene_bytes = stats.peak_live_scene_bytes.max(live_bytes as u64);
+}
+
+/// Log and count a scene buffer bucket crossing (physical reallocation).
+pub(crate) fn note_scene_bucket_crossing(
+    stats: &mut SceneGrowthStats,
+    old_bucket: u64,
+    new_bucket: u64,
+    live_bytes: usize,
+) {
+    stats.scene_bucket_crossings += 1;
+    log::info!(
+        target: "ekrano::scene_growth",
+        "scene buffer bucket crossing: old_bucket={old_bucket} new_bucket={new_bucket} live_bytes={live_bytes}"
+    );
+}
+
+/// Log and count a worker topology invalidation driven by scene bucket growth.
+pub(crate) fn note_worker_rerecord_scene_bucket(stats: &mut SceneGrowthStats, old_bucket: u64, new_bucket: u64) {
+    stats.worker_rerecord_scene_bucket += 1;
+    log::info!(
+        target: "ekrano::scene_growth",
+        "worker topology invalidation (scene bucket): old_bucket={old_bucket} new_bucket={new_bucket}"
+    );
+}
+
+/// Log and count an upload topology invalidation driven by scene bucket growth.
+pub(crate) fn note_upload_rerecord_scene_bucket(stats: &mut SceneGrowthStats, old_bucket: u64, new_bucket: u64) {
+    stats.upload_rerecord_scene_bucket += 1;
+    log::info!(
+        target: "ekrano::scene_growth",
+        "upload topology invalidation (scene bucket): old_bucket={old_bucket} new_bucket={new_bucket}"
+    );
 }
 
 #[cfg(test)]

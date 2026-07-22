@@ -12,7 +12,7 @@ use goldy::{
 
 use crate::resource_proxy::BindType;
 use crate::scheme_renderer::SchemeRecorder;
-use crate::worker_retention::scene_size_bucket;
+use crate::worker_retention::{note_scene_bucket_crossing, scene_size_bucket};
 use crate::{Error, RenderParams, Result};
 use ekrano_encoding::{
     BumpAllocators, CoverageMask, Images, N_INDIRECT_STAGES, Ramps, RenderConfig, STAGE_PATH_COUNT, STAGE_PATH_TILING,
@@ -305,6 +305,12 @@ pub(crate) fn alloc_or_reuse_scene(recorder: &mut SchemeRecorder<'_>, live_bytes
             record_buffer_reuse(recorder.upload_scheme(), &buf);
             return Ok(buf);
         }
+        note_scene_bucket_crossing(
+            &mut recorder.persistent.scene_growth,
+            cached_bucket,
+            bucket,
+            live_bytes,
+        );
         defer_buffer_until_retired(recorder.context(), buf);
     }
     recorder

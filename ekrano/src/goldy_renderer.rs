@@ -49,6 +49,27 @@ pub struct AllocatorStats {
     pub cleanup_ring_depth: usize,
 }
 
+/// Cumulative scene-capacity growth counters (Velato / diagnostics).
+///
+/// Enable per-event logs with `RUST_LOG=ekrano::scene_growth=info`.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SceneGrowthStats {
+    /// Frames processed since renderer creation.
+    pub frames: u64,
+    /// Scene buffer reallocated because live bytes crossed into a higher bucket.
+    pub scene_bucket_crossings: u64,
+    /// Worker scheme replaced after [`WorkerTopology::scene_bucket`] changed.
+    pub worker_rerecord_scene_bucket: u64,
+    /// Upload scheme replaced after upload-key `scene_bucket` changed.
+    pub upload_rerecord_scene_bucket: u64,
+    /// Current scene byte bucket (power-of-two capacity).
+    pub current_scene_bucket: u64,
+    /// Maximum scene byte bucket observed.
+    pub peak_scene_bucket: u64,
+    /// Maximum packed scene bytes observed (live extent, not bucket).
+    pub peak_live_scene_bytes: u64,
+}
+
 /// Snapshot of retained-pool accounting, useful for tests and diagnostics.
 #[derive(Debug, Clone, Copy)]
 pub struct ResourcePoolStats {
@@ -345,6 +366,8 @@ pub(crate) struct PersistentState {
     /// Metal overflow texture heaps stay pinned if mismatched-size RTs are pooled across
     /// resize. When set, reclaim/purge drop and clear aggressively instead of deferred pooling.
     pub(crate) metal_heap_sensitive: bool,
+    /// Scene capacity growth instrumentation (bucket crossings / topology invalidations).
+    pub(crate) scene_growth: SceneGrowthStats,
 }
 
 impl PersistentState {
@@ -384,6 +407,7 @@ impl PersistentState {
             cached_image_region_uploads: Vec::new(),
             readback_host_buf: None,
             metal_heap_sensitive: device.backend_type() == BackendType::Metal,
+            scene_growth: SceneGrowthStats::default(),
         }
     }
 
