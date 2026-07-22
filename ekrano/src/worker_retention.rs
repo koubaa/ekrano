@@ -230,6 +230,11 @@ fn sampled_texture_handle(tex: &Texture) -> ResourceHandle {
 /// The topology comparison covers both graph-structure inputs (AA, resolution, …) *and*
 /// resource-identity inputs (`scene_bucket`, `mask_atlas_width/height`) that, if changed,
 /// mean the worker's recorded dispatch nodes bind stale `ResourceHandle`s.
+///
+/// Non-empty filter effects always force a re-record: `record_filter_effects` binds
+/// per-frame scratch textures that are returned to the transient pool after submit.
+/// Those scratches are true one-shot deeds — retaining the worker would resubmit a
+/// scheme whose stamps were retired on return (`GoldyError::StaleResource`).
 pub(crate) fn worker_stale_reasons(
     persistent: &PersistentState,
     topology: &WorkerTopology,
@@ -237,6 +242,10 @@ pub(crate) fn worker_stale_reasons(
     out_image: Option<ResourceHandle>,
     output_texture: Option<goldy::TextureHandle>,
 ) -> bool {
+    // Filter scratches outrank retention: cannot keep a scheme that bound returned deeds.
+    if !filter_effects.is_empty() {
+        return true;
+    }
     let out_image_mismatch = if topology.direct_present {
         false
     } else {
@@ -263,6 +272,10 @@ pub(crate) fn predict_worker_stale(
     height: u32,
     out_format: TextureFormat,
 ) -> bool {
+    // Same rule as `worker_stale_reasons`: filter frames always re-record.
+    if !filter_effects.is_empty() {
+        return true;
+    }
     if persistent.cached_worker_topology.as_ref() != Some(topology) {
         return true;
     }
@@ -651,6 +664,47 @@ mod tests {
         assert!(worker_stale_reasons(&p, &direct_topo, &[], None, None,));
         p.cached_worker_topology = Some(direct_topo.clone());
         assert!(!worker_stale_reasons(&p, &direct_topo, &[], None, None,));
+    }
+
+    #[test]
+    fn worker_stale_when_filter_effects_non_empty() {
+        let mut p = PersistentState::new_test_only();
+        let topo = sample_topology(false);
+        p.cached_worker_topology = Some(topo.clone());
+        let effect = LayerFilterEffect {
+            primitive: FilterPrimitive::GaussianBlur {
+                std_dev: 2.0,
+                edge_mode: FilterEdgeMode::Duplicate,
+            },
+            layer_blend: 1,
+            layer_alpha: 1.0,
+            layer_index: 0,
+            is_nested: false,
+        };
+        // Cached effects match — descriptor equality alone is not enough to retain.
+        p.cached_worker_filter_effects = vec![effect.clone()];
+        assert!(
+            worker_stale_reasons(&p, &topo, &[effect], None, None),
+            "filter frames bind per-submit scratches; worker must not be retained"
+        );
+        assert!(predict_worker_stale(
+            &p,
+            &topo,
+            &[LayerFilterEffect {
+                primitive: FilterPrimitive::GaussianBlur {
+                    std_dev: 2.0,
+                    edge_mode: FilterEdgeMode::Duplicate,
+                },
+                layer_blend: 1,
+                layer_alpha: 1.0,
+                layer_index: 0,
+                is_nested: false,
+            }],
+            None,
+            64,
+            64,
+            TextureFormat::Rgba8Unorm,
+        ));
     }
 
     #[test]

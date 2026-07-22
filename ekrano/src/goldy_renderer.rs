@@ -224,15 +224,12 @@ impl PreparedFrame {
 
 /// Return filter-scratch textures to the context transient pool (epoch-gated).
 ///
-/// On Metal, mismatched/resize-prone scratches are dropped instead of parked
-/// (overflow-heap pin avoidance).
-pub(crate) fn defer_frame_gpu_resources(ctx: &Context, persistent: &PersistentState, textures: Vec<Texture>) {
-    if persistent.metal_heap_sensitive {
-        drop(textures);
-    } else {
-        for tex in textures {
-            ctx.return_transient_texture(tex);
-        }
+/// Always park in the transient pool — including on Metal. Same-size scratches are
+/// reusable across filter re-records; resize purge (`clear_transient_textures`) still
+/// drops bins so obsolete sizes cannot pin overflow heaps.
+pub(crate) fn defer_frame_gpu_resources(ctx: &Context, _persistent: &PersistentState, textures: Vec<Texture>) {
+    for tex in textures {
+        ctx.return_transient_texture(tex);
     }
 }
 
