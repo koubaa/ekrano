@@ -679,8 +679,7 @@ impl SchemeRenderer {
             params.height,
             out_image_format,
         );
-        let replace_worker_before_prepare =
-            worker_stale_predicted || (self.metal_fused_upload && upload_needs_record);
+        let replace_worker_before_prepare = worker_stale_predicted || (self.metal_fused_upload && upload_needs_record);
         let metal_fused_rerecord = self.metal_fused_upload && replace_worker_before_prepare;
 
         if replace_worker_before_prepare {
