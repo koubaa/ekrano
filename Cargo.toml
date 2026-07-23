@@ -24,7 +24,7 @@ edition = "2024"
 # and with the MSRV in the `Unreleased` section of CHANGELOG.md.
 rust-version = "1.88"
 license = "Apache-2.0 OR MIT"
-repository = "https://github.com/kob3/ekrano"
+repository = "https://github.com/koubaa/ekrano"
 
 [workspace.lints]
 # LINEBENDER LINT SET - Cargo.toml - v7
