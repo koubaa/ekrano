@@ -22,30 +22,17 @@ use ekrano_encoding::{
 
 /// Record GPU-orderable reuse epochs on `scheme` for a buffer that will be overwritten.
 fn record_buffer_reuse(scheme: &mut goldy::Scheme, buf: &Buffer) {
-    let refs = buf.last_referenced();
-    if !refs.is_empty() {
-        scheme.record_reuse_epochs(&refs);
-    }
+    scheme.record_reuse_buffer(buf);
 }
 
 /// Record GPU-orderable reuse epochs on `scheme` for a texture that will be overwritten.
 fn record_texture_reuse(scheme: &mut goldy::Scheme, tex: &Texture) {
-    let refs = tex.last_referenced();
-    if !refs.is_empty() {
-        scheme.record_reuse_epochs(&refs);
-    }
+    scheme.record_reuse_parcel(tex.whole());
 }
 
-/// Defer buffer drop until its last GPU reference retires (nonblocking path).
+/// Return a buffer to the transient pool for epoch-gated retirement (nonblocking path).
 fn defer_buffer_until_retired(ctx: &goldy::Context, buf: Buffer) {
-    let epoch = buf.last_referenced().iter().map(|(_, tv)| tv).max().unwrap_or(0);
-    if epoch == 0 {
-        drop(buf);
-        return;
-    }
-    let mut payload = goldy::DeferredPayload::new();
-    payload.push(buf);
-    ctx.defer_release(epoch, payload);
+    ctx.return_transient_buffer(buf);
 }
 
 /// Acquire a sticky (cross-frame) RGBA texture deed from the retained pool.
@@ -637,7 +624,7 @@ fn al_cached_opt(
 /// Split from [`ScratchPipelineBuffers`]: stable buffers live in the retained pool
 /// and are reused while `buffer_sizes` match; scratch buffers use the transient pool.
 ///
-/// Cross-frame reuse is ordered by [`goldy::Scheme::record_reuse_epochs`] on the worker
+/// Cross-frame reuse is ordered by [`goldy::Scheme::record_reuse_buffer`] on the worker
 /// scheme (DX12/Vulkan/Metal) or by the frame-orchestrator `begin_frame` wait (backends
 /// without `host_sidecar_on_submit_worker`). If pipeline
 /// depth is raised so the next frame may record while the prior frame's GPU work is still in
@@ -903,9 +890,6 @@ impl PipelineResources {
             packed.resize(size_of::<u32>(), u8::MAX);
         }
 
-        let gpu_progress = recorder.context().gpu_progress();
-        log::debug!("[RT-CACHE] gpu_progress={gpu_progress} at prepare entry");
-
         let mut cpu_config_owned = *config;
         if coverage_mask.is_some() {
             cpu_config_owned.gpu.mask_active = 1;
@@ -1029,7 +1013,6 @@ impl PipelineResources {
                         c.stable.lines,
                         c.stable.seg_counts,
                     ] {
-                        // RetainedPool adopts with ready_after = last_referenced.
                         pool.release_buffer(ctx, buffer);
                     }
                     let scratch_returns = [
