@@ -212,10 +212,10 @@ pub(crate) fn record_upload_bytes_owned(
             Some(element_stride),
         )
         .map_err(|e| Error::Gpu(e.to_string()))?;
-    recorder
-        .upload_scheme()
-        .write_parcel(&buf, 0, bytes)
+    let deposit = MemoryExchange::new(recorder.context())
+        .bind_deposit_buffer(recorder.upload_scheme(), &buf, bytes.len() as u64)
         .map_err(|e| Error::Shader(e.to_string()))?;
+    write_deposit(recorder, deposit, &bytes, "record_upload_bytes_owned")?;
     Ok(buf)
 }
 
