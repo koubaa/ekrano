@@ -624,7 +624,7 @@ fn al_cached_opt(
 /// Split from [`ScratchPipelineBuffers`]: stable buffers live in the retained pool
 /// and are reused while `buffer_sizes` match; scratch buffers use the transient pool.
 ///
-/// Cross-frame reuse is ordered by [`goldy::Scheme::record_reuse_epochs`] on the worker
+/// Cross-frame reuse is ordered by [`goldy::Scheme::record_reuse_buffer`] on the worker
 /// scheme (DX12/Vulkan/Metal) or by the frame-orchestrator `begin_frame` wait (backends
 /// without `host_sidecar_on_submit_worker`). If pipeline
 /// depth is raised so the next frame may record while the prior frame's GPU work is still in
