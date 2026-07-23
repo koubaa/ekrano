@@ -13,9 +13,10 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
-use goldy::types::{BufferFlags, TextureFormat};
+use goldy::types::TextureFormat;
 use goldy::{
-    BackendType, Buffer, BufferKind, ComputePipeline, Context, Device, Grant, RetainedPool, Texture, TimelineValue,
+    BackendType, Buffer, ComputePipeline, Context, DepositTransaction, Device, RetainedPool, Texture, TimelineValue,
+    WithdrawTransaction,
 };
 
 /// Ekrano uses a single-frame fire-and-forget model.
@@ -58,7 +59,7 @@ pub struct SceneGrowthStats {
     pub frames: u64,
     /// Scene buffer reallocated because live bytes crossed into a higher bucket.
     pub scene_bucket_crossings: u64,
-    /// Worker scheme replaced after [`WorkerTopology::scene_bucket`] changed.
+    /// Worker scheme replaced after worker topology `scene_bucket` changed.
     pub worker_rerecord_scene_bucket: u64,
     /// Upload scheme replaced after upload-key `scene_bucket` changed.
     pub upload_rerecord_scene_bucket: u64,
@@ -309,10 +310,10 @@ pub(crate) struct PersistentState {
     pub(crate) stable_mask_lut_msaa16: Option<Buffer>,
     /// Cached GPU `ConfigUniform` buffer + last uploaded value.
     ///
-    /// The buffer is overwritten in place each frame via the upload scheme (same
-    /// `ResourceHandle`, so a retained worker stays valid across e.g. `base_color`
-    /// changes). The cached value is not used to skip staging: Goldy requires every
-    /// `UploadBuffer` referenced by a retained upload scheme to be staged each submit.
+    /// The buffer is overwritten in place each frame via a destination-bound deposit
+    /// (same `ResourceHandle`, so a retained worker stays valid across e.g. `base_color`
+    /// changes). Every deposit referenced by a retained upload scheme must be written
+    /// each submit.
     pub(crate) cached_config_uniform: Option<(ekrano_encoding::ConfigUniform, Buffer)>,
     /// Per-slot cached `FilterUniform` buffers, indexed by filter dispatch order.
     /// Retained deeds; stable for scenes with fixed filter effects (e.g. a static drop shadow).
@@ -322,14 +323,14 @@ pub(crate) struct PersistentState {
     pub(crate) cached_scheme_indirect: Option<(ekrano_encoding::WorkgroupCountsGpu, Buffer)>,
     /// Stable scene buffer for the retained worker scheme (bucket capacity, buffer).
     pub(crate) cached_scene: Option<(u64, Buffer)>,
-    /// Logical upload buffer for scene staging (bucket capacity, declaration).
-    pub(crate) cached_scene_upload: Option<(u64, goldy::UploadBuffer)>,
-    /// Logical upload buffer for config uniform staging.
-    pub(crate) cached_config_upload: Option<goldy::UploadBuffer>,
-    /// Stable bump buffer keyed by byte size; read back via [`Self::cached_bump_grant`].
+    /// Destination-bound scene deposit (bucket capacity, transaction).
+    pub(crate) cached_scene_deposit: Option<(u64, DepositTransaction)>,
+    /// Destination-bound config uniform deposit.
+    pub(crate) cached_config_deposit: Option<DepositTransaction>,
+    /// Stable bump buffer keyed by byte size; read back via [`Self::cached_bump_withdraw`].
     pub(crate) cached_bump: Option<(u64, Buffer)>,
     /// Recorded once on the worker when `robust` is enabled.
-    pub(crate) cached_bump_grant: Option<goldy::ReadGrant<goldy::GrantBuffer>>,
+    pub(crate) cached_bump_withdraw: Option<WithdrawTransaction>,
     /// Stable gradient atlas (width, height, texture).
     pub(crate) cached_gradient: Option<(u32, u32, Texture)>,
     /// Stable image atlas (width, height, texture).
@@ -351,18 +352,19 @@ pub(crate) struct PersistentState {
     pub(crate) cached_worker_topology: Option<crate::worker_retention::WorkerTopology>,
     /// Filter effects from the last worker record (topology comparison).
     pub(crate) cached_worker_filter_effects: Vec<ekrano_encoding::LayerFilterEffect>,
-    /// Worker submission from the prior frame, consumed via [`Self::cached_bump_grant`] at drain.
+    /// Worker submission from the prior frame, consumed via [`Self::cached_bump_withdraw`] at drain.
     pub(crate) pending_bump_submission: Option<goldy::Submission>,
     /// Upload key the upload scheme was recorded against (scene bucket + all atlas dims).
     pub(crate) cached_upload_key: Option<crate::worker_retention::UploadKey>,
-    /// Logical upload buffer for gradient atlas staging (width, height, capacity, declaration).
-    pub(crate) cached_gradient_upload: Option<(u32, u32, u64, goldy::UploadBuffer)>,
-    /// Logical upload buffer for mask atlas staging (width, height, capacity, declaration).
-    pub(crate) cached_mask_upload: Option<(u32, u32, u64, goldy::UploadBuffer)>,
-    /// Logical upload buffers for image atlas region uploads.
-    pub(crate) cached_image_region_uploads: Vec<((u32, u32, u32, u32), goldy::UploadBuffer)>,
-    /// Persistent host buffer parcel for [`crate::scheme_renderer::SchemeRenderer::render_to_buffer`].
-    pub(crate) readback_host_buf: Option<(Buffer, u64)>,
+    /// Destination-bound gradient atlas deposit (width, height, capacity, transaction).
+    pub(crate) cached_gradient_deposit: Option<(u32, u32, u64, DepositTransaction)>,
+    /// Destination-bound mask atlas deposit (width, height, capacity, transaction).
+    pub(crate) cached_mask_deposit: Option<(u32, u32, u64, DepositTransaction)>,
+    /// Destination-bound deposits for image atlas region uploads.
+    pub(crate) cached_image_region_deposits: Vec<((u32, u32, u32, u32), DepositTransaction)>,
+    /// Retained headless `out_image` withdraw (`TextureHandle` + transaction) for
+    /// [`crate::scheme_renderer::SchemeRenderer::render_to_buffer`].
+    pub(crate) cached_out_image_withdraw: Option<(goldy::TextureHandle, WithdrawTransaction)>,
     /// Metal overflow texture heaps stay pinned if mismatched-size RTs are pooled across
     /// resize. When set, reclaim/purge drop and clear aggressively instead of deferred pooling.
     pub(crate) metal_heap_sensitive: bool,
@@ -386,10 +388,10 @@ impl PersistentState {
             cached_filter_uniforms: Vec::new(),
             cached_scheme_indirect: None,
             cached_scene: None,
-            cached_scene_upload: None,
-            cached_config_upload: None,
+            cached_scene_deposit: None,
+            cached_config_deposit: None,
             cached_bump: None,
-            cached_bump_grant: None,
+            cached_bump_withdraw: None,
             cached_gradient: None,
             cached_image_atlas: None,
             cached_mask_atlas: None,
@@ -402,25 +404,25 @@ impl PersistentState {
             cached_worker_filter_effects: Vec::new(),
             pending_bump_submission: None,
             cached_upload_key: None,
-            cached_gradient_upload: None,
-            cached_mask_upload: None,
-            cached_image_region_uploads: Vec::new(),
-            readback_host_buf: None,
+            cached_gradient_deposit: None,
+            cached_mask_deposit: None,
+            cached_image_region_deposits: Vec::new(),
+            cached_out_image_withdraw: None,
             metal_heap_sensitive: device.backend_type() == BackendType::Metal,
             scene_growth: SceneGrowthStats::default(),
         }
     }
 
-    /// Drop logical upload declarations that are tied to a Scheme instance.
+    /// Drop destination-bound deposit transactions that are tied to a Scheme instance.
     ///
     /// Call whenever the upload scheme (or fused worker scheme) is replaced so
-    /// stale `UploadBuffer` ids cannot be reused against a new IR.
-    pub(crate) fn clear_upload_declarations(&mut self) {
-        self.cached_scene_upload = None;
-        self.cached_config_upload = None;
-        self.cached_gradient_upload = None;
-        self.cached_mask_upload = None;
-        self.cached_image_region_uploads.clear();
+    /// stale deposit ids cannot be reused against a new IR.
+    pub(crate) fn clear_deposit_declarations(&mut self) {
+        self.cached_scene_deposit = None;
+        self.cached_config_deposit = None;
+        self.cached_gradient_deposit = None;
+        self.cached_mask_deposit = None;
+        self.cached_image_region_deposits.clear();
     }
 
     /// Release retained filter-uniform deeds beyond `keep` and truncate the cache.
@@ -434,44 +436,6 @@ impl PersistentState {
         for (_, buf) in self.cached_filter_uniforms.drain(keep..).flatten() {
             self.retained_pool.release_buffer(ctx, buf);
         }
-    }
-
-    pub(crate) fn acquire_readback_host_buf(&mut self, ctx: &Context, staging_bytes: u64) -> Result<Buffer, Error> {
-        let needs_new = self
-            .readback_host_buf
-            .as_ref()
-            .map(|(_, size)| *size != staging_bytes)
-            .unwrap_or(true);
-        if needs_new {
-            if let Some((old, _)) = self.readback_host_buf.take() {
-                self.retained_pool.release_buffer(ctx, old);
-            }
-            self.retained_pool
-                .acquire_buffer(
-                    staging_bytes,
-                    BufferKind::Scattered,
-                    None,
-                    BufferFlags::CPU_READABLE,
-                    None,
-                )
-                .map_err(|e| Error::Shader(e.to_string()))
-        } else if let Some((buf, _)) = self.readback_host_buf.take() {
-            Ok(buf)
-        } else {
-            self.retained_pool
-                .acquire_buffer(
-                    staging_bytes,
-                    BufferKind::Scattered,
-                    None,
-                    BufferFlags::CPU_READABLE,
-                    None,
-                )
-                .map_err(|e| Error::Shader(e.to_string()))
-        }
-    }
-
-    pub(crate) fn store_readback_host_buf(&mut self, buf: Buffer, staging_bytes: u64) {
-        self.readback_host_buf = Some((buf, staging_bytes));
     }
 
     pub(crate) fn take_scheme_render_targets(
@@ -644,18 +608,22 @@ impl PersistentState {
     }
 
     pub(crate) fn drain_ready_bump_readbacks(&mut self, ctx: &Context) -> Result<()> {
-        let Some(submission) = self.pending_bump_submission.take() else {
+        let Some(mut submission) = self.pending_bump_submission.take() else {
             return Ok(());
         };
-        if let Some(grant) = self.cached_bump_grant.as_ref() {
+        if let Some(withdraw) = self.cached_bump_withdraw.as_ref() {
             let tv = submission.timeline_value();
             if tv > ctx.gpu_progress() {
                 self.pending_bump_submission = Some(submission);
                 return Ok(());
             }
-            let _tz = goldy::tracy_zone!("ekrano.drain_ready_bump_readbacks.grant");
-            let loan = grant.consume(&submission).map_err(|e| Error::Shader(e.to_string()))?;
-            read_bump_bytes(self, &loan);
+            let _tz = goldy::tracy_zone!("ekrano.drain_ready_bump_readbacks.withdraw");
+            let bytes = withdraw
+                .claim(&mut submission)
+                .map_err(|e| Error::Shader(e.to_string()))?
+                .consume()
+                .map_err(|e| Error::Shader(e.to_string()))?;
+            read_bump_bytes(self, &bytes);
             return Ok(());
         }
         self.pending_bump_submission = Some(submission);
@@ -683,7 +651,8 @@ fn read_bump_bytes(persistent: &mut PersistentState, bytes: &[u8]) {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use goldy::{Adapter, BackendType, Device, DeviceDescriptor, Instance, RequestAdapterOptions};
+    use goldy::types::BufferFlags;
+    use goldy::{Adapter, BackendType, BufferKind, Device, DeviceDescriptor, Instance, RequestAdapterOptions};
     use std::ops::Deref;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 

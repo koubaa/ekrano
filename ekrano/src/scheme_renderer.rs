@@ -31,8 +31,8 @@ use std::sync::Arc;
 use goldy::Buffer;
 use goldy::types::{BackendType, ResourceAccess, TextureFlags, TextureFormat, TextureKind};
 use goldy::{
-    BudgetPolicy, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator, Scheme, ShaderModule, Signal,
-    Texture,
+    BudgetPolicy, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator, MemoryExchange, Scheme,
+    ShaderModule, Signal, Texture,
 };
 
 #[cfg(feature = "debug_layers")]
@@ -92,7 +92,7 @@ pub struct SchemeRenderer {
     worker: Scheme,
     /// Persistent upload scheme: per-frame property writes without churning worker topology.
     upload: Scheme,
-    /// Standalone scheme for headless texture readback (does not resubmit worker compute IR).
+    /// Standalone scheme for headless texture withdraw (topology-invisible to the worker).
     readback: Scheme,
     /// Cumulative worker topology records across worker replacements (tests / diagnostics).
     #[cfg(test)]
@@ -481,6 +481,7 @@ impl SchemeRenderer {
                 Some(bump) if bump.failed != 0 => {
                     log::info!("Bump overflow in render_to_buffer (0x{:x}), retrying", bump.failed);
                     self.persistent.cached_scheme_rt = None;
+                    self.persistent.cached_out_image_withdraw = None;
                 }
                 _ => break,
             }
@@ -497,48 +498,63 @@ impl SchemeRenderer {
             );
         }
 
-        let layout = {
-            let out_image = self
-                .persistent
-                .cached_scheme_rt
-                .as_ref()
-                .and_then(|(t, _, _)| t.as_ref())
-                .ok_or_else(|| Error::Shader("render_to_buffer: missing scheme out_image".into()))?;
-            out_image.copy_layout()
-        };
-        let host_buf = self
+        let out_handle = self
             .persistent
-            .acquire_readback_host_buf(&self.context, layout.staging_bytes)
-            .map_err(|e| Error::Readback(e.to_string()))?;
-        {
+            .cached_scheme_rt
+            .as_ref()
+            .and_then(|(t, _, _)| t.as_ref())
+            .map(|t| t.gpu_handle())
+            .ok_or_else(|| Error::Shader("render_to_buffer: missing scheme out_image".into()))?;
+        let needs_rebind = self
+            .persistent
+            .cached_out_image_withdraw
+            .as_ref()
+            .map(|(h, _)| *h != out_handle)
+            .unwrap_or(true);
+        if needs_rebind {
+            self.readback = Scheme::new(&self.context);
             let out_image = self
                 .persistent
                 .cached_scheme_rt
                 .as_ref()
                 .and_then(|(t, _, _)| t.as_ref())
                 .expect("render_to_buffer: missing scheme out_image");
-            self.readback
-                .copy_texture(out_image, &host_buf)
+            let withdraw = MemoryExchange::new(&self.context)
+                .bind_withdraw(&mut self.readback, out_image)
                 .map_err(|e| Error::Readback(e.to_string()))?;
+            self.persistent.cached_out_image_withdraw = Some((out_handle, withdraw));
         }
-        let submission = self.readback.submit().map_err(|e| Error::Readback(e.to_string()))?;
-        submission
-            .wait(&self.context)
+        let withdraw = self
+            .persistent
+            .cached_out_image_withdraw
+            .as_ref()
+            .map(|(_, w)| w.clone())
+            .expect("render_to_buffer: out_image withdraw must be bound");
+        let mut submission = self.readback.submit().map_err(|e| Error::Readback(e.to_string()))?;
+        let bytes = withdraw
+            .claim(&mut submission)
+            .map_err(|e| Error::Readback(e.to_string()))?
+            .consume()
             .map_err(|e| Error::Readback(e.to_string()))?;
-        let mut padded = vec![0_u8; layout.staging_bytes as usize];
-        host_buf
-            .read_to_cpu(&self.device, &mut padded)
-            .map_err(|e| Error::Readback(e.to_string()))?;
-        let row_bytes = layout.tight_row_bytes() as usize;
-        let pitch = layout.row_pitch as usize;
-        let mut output = vec![0_u8; layout.logical_bytes as usize];
-        for row in 0..layout.height as usize {
-            let src_offset = layout.footprint_offset as usize + row * pitch;
-            let dst_offset = row * row_bytes;
-            output[dst_offset..dst_offset + row_bytes].copy_from_slice(&padded[src_offset..src_offset + row_bytes]);
-        }
-        self.persistent.store_readback_host_buf(host_buf, layout.staging_bytes);
-        Ok(output)
+        // Texture withdraws expose tight-row RGBA (`logical_bytes`). If Goldy ever returns
+        // pitched footprint bytes instead, unpack here using the bind-time layout.
+        Ok(match withdraw.texture_layout() {
+            Some(layout)
+                if bytes.len() as u64 == layout.staging_bytes && layout.row_pitch != layout.tight_row_bytes() =>
+            {
+                let row_bytes = layout.tight_row_bytes() as usize;
+                let pitch = layout.row_pitch as usize;
+                let mut output = vec![0_u8; layout.logical_bytes as usize];
+                for row in 0..layout.height as usize {
+                    let src_offset = layout.footprint_offset as usize + row * pitch;
+                    let dst_offset = row * row_bytes;
+                    output[dst_offset..dst_offset + row_bytes]
+                        .copy_from_slice(&bytes[src_offset..src_offset + row_bytes]);
+                }
+                output
+            }
+            _ => bytes.into_vec(),
+        })
     }
 
     fn drain_ready_bump_readbacks(&mut self) -> Result<()> {
@@ -620,6 +636,7 @@ impl SchemeRenderer {
             out_image_format,
             direct_present,
         ) {
+            self.persistent.cached_out_image_withdraw = None;
             self.device.compact_overflow_heaps();
         }
 
@@ -680,21 +697,20 @@ impl SchemeRenderer {
         );
         let upload_key = upload_key_from(&dims);
         let upload_needs_record = crate::worker_retention::upload_stale(&self.persistent, &upload_key);
-        if upload_needs_record {
-            if let Some(old_key) = self.persistent.cached_upload_key.as_ref() {
-                if old_key.scene_bucket != upload_key.scene_bucket {
-                    note_upload_rerecord_scene_bucket(
-                        &mut self.persistent.scene_growth,
-                        old_key.scene_bucket,
-                        upload_key.scene_bucket,
-                    );
-                }
-            }
+        if upload_needs_record
+            && let Some(old_key) = self.persistent.cached_upload_key.as_ref()
+            && old_key.scene_bucket != upload_key.scene_bucket
+        {
+            note_upload_rerecord_scene_bucket(
+                &mut self.persistent.scene_growth,
+                old_key.scene_bucket,
+                upload_key.scene_bucket,
+            );
         }
         if upload_needs_record && !self.metal_fused_upload {
             self.upload = Scheme::new(&self.context);
             // Logical upload declarations live on the scheme; drop cached handles.
-            self.persistent.clear_upload_declarations();
+            self.persistent.clear_deposit_declarations();
             #[cfg(test)]
             {
                 self.upload_record_epochs += 1;
@@ -721,7 +737,7 @@ impl SchemeRenderer {
         if replace_worker_before_prepare {
             let _tz = goldy::tracy_zone!("ekrano.worker_record");
             self.worker = Scheme::new(&self.context);
-            self.persistent.cached_bump_grant = None;
+            self.persistent.cached_bump_withdraw = None;
             self.persistent.cached_present_tx = None;
             #[cfg(debug_assertions)]
             {
@@ -729,7 +745,7 @@ impl SchemeRenderer {
             }
             if self.metal_fused_upload {
                 // Upload topology lives on the worker scheme; drop cached declarations.
-                self.persistent.clear_upload_declarations();
+                self.persistent.clear_deposit_declarations();
                 #[cfg(test)]
                 {
                     self.upload_record_epochs += 1;
@@ -819,7 +835,7 @@ impl SchemeRenderer {
         if worker_stale && !replace_worker_before_prepare {
             let _tz = goldy::tracy_zone!("ekrano.worker_record");
             self.worker = Scheme::new(&self.context);
-            self.persistent.cached_bump_grant = None;
+            self.persistent.cached_bump_withdraw = None;
             self.persistent.cached_present_tx = None;
             #[cfg(debug_assertions)]
             {
@@ -827,16 +843,15 @@ impl SchemeRenderer {
             }
         }
 
-        if worker_stale {
-            if let Some(old_topo) = self.persistent.cached_worker_topology.as_ref() {
-                if old_topo.scene_bucket != topology.scene_bucket {
-                    note_worker_rerecord_scene_bucket(
-                        &mut self.persistent.scene_growth,
-                        old_topo.scene_bucket,
-                        topology.scene_bucket,
-                    );
-                }
-            }
+        if worker_stale
+            && let Some(old_topo) = self.persistent.cached_worker_topology.as_ref()
+            && old_topo.scene_bucket != topology.scene_bucket
+        {
+            note_worker_rerecord_scene_bucket(
+                &mut self.persistent.scene_growth,
+                old_topo.scene_bucket,
+                topology.scene_bucket,
+            );
         }
 
         let mut recorder = SchemeRecorder::new(
@@ -920,11 +935,10 @@ impl SchemeRenderer {
                 None
             };
 
-            let bump_grant = if params.robust {
+            let bump_withdraw = if params.robust {
                 Some(
-                    recorder
-                        .scheme()
-                        .grant_read(&pipeline.bump)
+                    MemoryExchange::new(recorder.context())
+                        .bind_withdraw(recorder.scheme(), &pipeline.bump)
                         .map_err(|e| Error::Shader(e.to_string()))?,
                 )
             } else {
@@ -939,7 +953,7 @@ impl SchemeRenderer {
             // do not mutate `persistent` while `recorder` still borrows it.
             worker_cache = Some((
                 present_tx,
-                bump_grant,
+                bump_withdraw,
                 topology,
                 layer_filter_effects.clone(),
                 out_image_handle,
@@ -982,7 +996,7 @@ impl SchemeRenderer {
 
         if let Some((present, bump, topology, filter_effects, out_image)) = worker_cache {
             self.persistent.cached_present_tx = present;
-            self.persistent.cached_bump_grant = bump;
+            self.persistent.cached_bump_withdraw = bump;
             if filter_effects.is_empty() {
                 self.persistent.cached_worker_topology = Some(topology);
                 self.persistent.cached_worker_filter_effects = filter_effects;
@@ -1014,13 +1028,13 @@ impl SchemeRenderer {
         let present_token = match (present_tx, scheme_submission) {
             (Some(tx), Some(mut submission)) => {
                 let claim = tx.claim(&mut submission).map_err(|e| Error::Shader(e.to_string()))?;
-                if params.robust && self.persistent.cached_bump_grant.is_some() {
+                if params.robust && self.persistent.cached_bump_withdraw.is_some() {
                     self.persistent.queue_bump_submission(submission);
                 }
                 Some(PresentToken { claim })
             }
             (None, Some(submission)) => {
-                if params.robust && self.persistent.cached_bump_grant.is_some() {
+                if params.robust && self.persistent.cached_bump_withdraw.is_some() {
                     self.persistent.queue_bump_submission(submission);
                 }
                 None
@@ -1048,7 +1062,7 @@ impl SchemeRenderer {
         // deeds — re-record must mint a fresh worker with new scratch identities.
         if !self.persistent.cached_worker_filter_effects.is_empty() {
             self.worker = Scheme::new(&self.context);
-            self.persistent.cached_bump_grant = None;
+            self.persistent.cached_bump_withdraw = None;
             // Keep cached_present_tx: present claim for this frame may still be in flight.
             #[cfg(debug_assertions)]
             {
@@ -1660,9 +1674,9 @@ mod tests {
 
     /// Worker scheme records once and resubmits on subsequent frames with stable topology.
     ///
-    /// `render_to_buffer` always runs a separate readback scheme that reads `out_image`,
-    /// so the worker sees a foreign reader and records twice (bootstrap + topology refresh).
-    /// The upload scheme also records twice for the same cross-scheme topology discovery:
+    /// Headless `render_to_buffer` uses a topology-invisible texture withdraw on a separate
+    /// readback scheme, so the worker is not dirtied by a foreign reader and records once.
+    /// The upload scheme may still record twice from cross-scheme topology discovery:
     /// upload registers writer edges first, then the worker registers reader edges on shared
     /// parcels and Goldy dirties the upload scheme. A second upload record on frame 2 is
     /// correct today but an optimization target in Goldy (narrower foreign-scheme
@@ -1701,12 +1715,12 @@ mod tests {
 
         let stats = renderer.worker_replay_stats();
         assert_eq!(
-            stats.records, 2,
-            "render_to_buffer: bootstrap record + one readback-induced topology refresh"
+            stats.records, 1,
+            "render_to_buffer: topology-invisible withdraw does not dirty the worker"
         );
         assert_eq!(
-            stats.topology_records, 1,
-            "foreign readback reader on out_image dirties worker topology once"
+            stats.topology_records, 0,
+            "texture withdraw must not register a topology-visible foreign reader on out_image"
         );
         let upload_stats = renderer.upload_replay_stats();
         if renderer.metal_fused_upload() {
@@ -1774,13 +1788,13 @@ mod tests {
         );
         assert_eq!(
             renderer.worker_replay_stats().records,
-            2,
-            "render_to_buffer at new resolution: bootstrap + readback-induced topology refresh"
+            1,
+            "render_to_buffer at new resolution: worker records once (withdraw is topology-invisible)"
         );
         assert_eq!(
             renderer.worker_replay_stats().topology_records,
-            1,
-            "foreign readback reader on out_image dirties worker topology once per worker IR"
+            0,
+            "texture withdraw must not dirty worker topology after resolution change"
         );
     }
 
@@ -1843,7 +1857,7 @@ mod tests {
         } else {
             assert_eq!(
                 stats.records, 1,
-                "render_to_texture has no foreign readback scheme on out_image"
+                "render_to_texture has no foreign topology-visible reader on out_image"
             );
         }
         assert_eq!(stats.topology_records, 0);
@@ -2009,8 +2023,8 @@ mod tests {
     /// dirtying `WorkerTopology`.
     ///
     /// On the Metal fused path, upload copy nodes live on the worker scheme — without
-    /// forcing a worker replacement, new region uploads would be appended while old
-    /// `UploadBuffer` ids remain referenced but unstaged, poisoning submit permanently.
+    /// forcing a worker replacement, new region deposits would be appended while old
+    /// deposit ids remain referenced but unwritten, poisoning submit permanently.
     #[test]
     fn fused_worker_rerecords_on_image_region_layout_change() {
         let _cb = goldy::test_support::CbReuseOverride::force_enabled();
