@@ -289,13 +289,13 @@ pub(crate) fn predict_worker_stale(
         return false;
     }
     match &persistent.cached_scheme_rt {
-        Some((Some(out), _, _)) if out.width() == width && out.height() == height && out.format() == out_format => {
+        Some((Some(out), _)) if out.width() == width && out.height() == height && out.format() == out_format => {
             let handle = out
                 .handle(ResourceAccess::Write)
                 .expect("cached scheme out_image must be writable");
             persistent.cached_worker_out_image != Some(handle)
         }
-        Some((None, _, _)) => false,
+        Some((None, _)) => false,
         _ => true,
     }
 }

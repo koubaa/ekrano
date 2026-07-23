@@ -239,16 +239,10 @@ impl SchemeRenderer {
     pub fn poll_and_reclaim(&mut self) {
         for signal in self.context.poll_signals_and_service() {
             match signal {
-                Signal::BoundaryCrossed { epoch } => {
-                    self.frame_pipeline.note_presented(epoch);
-                }
                 Signal::Oversubscribed { .. } => {
-                    if let Some(oldest) = self.context.peek_oldest_in_flight()
-                        && self.context.wait_until(oldest).is_err()
-                    {
+                    if self.frame_pipeline.wait_for_progress().is_err() {
                         break;
                     }
-                    self.context.flush_deferred_deletions();
                 }
                 Signal::SwapchainReturned { .. } => {}
                 Signal::SwapchainAcquired { .. } => {}
@@ -276,7 +270,7 @@ impl SchemeRenderer {
         let _tz = goldy::tracy_zone!("ekrano.render_to_swapchain");
         let prepared = self.prepare(scene, params)?;
         let (stats, token) = self.submit_to_swapchain(prepared, surface)?;
-        token.present()?;
+        self.present_to_swapchain(token)?;
         Ok(stats)
     }
 
@@ -406,7 +400,7 @@ impl SchemeRenderer {
         self.persistent
             .cached_scheme_rt
             .as_ref()
-            .is_some_and(|(out, _, _)| out.is_some())
+            .is_some_and(|(out, _)| out.is_some())
     }
 
     /// GPU device handle shared by this renderer.
@@ -502,7 +496,7 @@ impl SchemeRenderer {
             .persistent
             .cached_scheme_rt
             .as_ref()
-            .and_then(|(t, _, _)| t.as_ref())
+            .and_then(|(t, _)| t.as_ref())
             .map(|t| t.gpu_handle())
             .ok_or_else(|| Error::Shader("render_to_buffer: missing scheme out_image".into()))?;
         let needs_rebind = self
@@ -517,7 +511,7 @@ impl SchemeRenderer {
                 .persistent
                 .cached_scheme_rt
                 .as_ref()
-                .and_then(|(t, _, _)| t.as_ref())
+                .and_then(|(t, _)| t.as_ref())
                 .expect("render_to_buffer: missing scheme out_image");
             let withdraw = MemoryExchange::new(&self.context)
                 .bind_withdraw(&mut self.readback, out_image)
@@ -561,6 +555,29 @@ impl SchemeRenderer {
         self.persistent.drain_ready_bump_readbacks(&self.context)
     }
 
+    /// Present a swapchain token returned by [`Self::submit_to_swapchain`].
+    ///
+    /// On blocking backends this also stamps the frame-orchestrator ring and queues
+    /// robust bump readback when configured.
+    pub fn present_to_swapchain(&mut self, token: PresentToken) -> Result<()> {
+        self.finish_present_token(token)
+    }
+
+    fn finish_present_token(&mut self, token: PresentToken) -> Result<()> {
+        let PresentToken {
+            claim,
+            ring_note_submission,
+        } = token;
+        claim.consume().map_err(|e| Error::Shader(e.to_string()))?;
+        if let Some(submission) = ring_note_submission {
+            self.frame_pipeline.note_presented(&submission);
+            if self.persistent.cached_bump_withdraw.is_some() {
+                self.persistent.queue_bump_submission(submission);
+            }
+        }
+        Ok(())
+    }
+
     // =======================================================================
     // Frame execution (private)
     // =======================================================================
@@ -575,7 +592,7 @@ impl SchemeRenderer {
         let prepared = self.prepare(scene, params)?;
         let (stats, token) = self.run_frame_from_prepared(prepared, output_texture, surface, || Ok(()))?;
         if let Some(token) = token {
-            token.present()?;
+            self.present_to_swapchain(token)?;
         }
         Ok(stats)
     }
@@ -986,7 +1003,6 @@ impl SchemeRenderer {
         let t4 = Instant::now();
         let cache_outcome = recorder.schedule_pipeline_cleanup(pipeline);
         let FrameFinishOutcome {
-            timeline: frame_tv,
             deferred_textures,
             scheme_submission,
         } = {
@@ -1028,10 +1044,20 @@ impl SchemeRenderer {
         let present_token = match (present_tx, scheme_submission) {
             (Some(tx), Some(mut submission)) => {
                 let claim = tx.claim(&mut submission).map_err(|e| Error::Shader(e.to_string()))?;
-                if params.robust && self.persistent.cached_bump_withdraw.is_some() {
-                    self.persistent.queue_bump_submission(submission);
-                }
-                Some(PresentToken { claim })
+                let queue_bump = params.robust && self.persistent.cached_bump_withdraw.is_some();
+                let note_after_present = !self.nonblocking_reuse && surface.is_some();
+                let ring_note_submission = if note_after_present {
+                    Some(submission)
+                } else {
+                    if queue_bump {
+                        self.persistent.queue_bump_submission(submission);
+                    }
+                    None
+                };
+                Some(PresentToken {
+                    claim,
+                    ring_note_submission,
+                })
             }
             (None, Some(submission)) => {
                 if params.robust && self.persistent.cached_bump_withdraw.is_some() {
@@ -1042,19 +1068,8 @@ impl SchemeRenderer {
             _ => None,
         };
 
-        // On backends without nonblocking_reuse the ring stamps compute+copy completion
-        // so begin_frame waits. On DX12/Vulkan/Metal (nonblocking_reuse) ordering lives in
-        // submit sidecars + present easement;
-        // no retirement slot is created, so note_presented is a no-op / unused.
-        if !self.nonblocking_reuse {
-            self.frame_pipeline.note_presented(frame_tv);
-        }
-
-        if cache_outcome.scheme_rt_stored
-            && let Some(entry) = self.persistent.cached_scheme_rt.as_mut()
-        {
-            log::debug!("[RT-CACHE] stamp scheme render targets timeline={frame_tv}");
-            entry.2 = frame_tv;
+        if cache_outcome.scheme_rt_stored {
+            log::debug!("[RT-CACHE] scheme render targets stored for reuse");
         }
         defer_frame_gpu_resources(&self.context, &self.persistent, deferred_textures);
         // Filter scratches are returned above; their stamps are now dead on the worker.
@@ -1350,7 +1365,7 @@ impl<'a> SchemeRecorder<'a> {
         );
         self.persistent.cached_pipeline = Some(pipeline_cache);
         log::debug!("[PIPE-CACHE] schedule: cached");
-        self.persistent.store_scheme_render_targets(out_image, filter_layers, 0);
+        self.persistent.store_scheme_render_targets(out_image, filter_layers);
         outcome.scheme_rt_stored = true;
         log::debug!("[RT-CACHE] schedule: scheme render targets stored");
         outcome
@@ -1553,28 +1568,25 @@ impl<'a> SchemeRecorder<'a> {
                 None => self.scheme.submit().map_err(|e| Error::Shader(e.to_string()))?,
             }
         };
-        let scheme_tv = submission.timeline_value();
-        let tv = {
+        {
             let _tz = goldy::tracy_zone!("ekrano.finish.orchestrator");
             if self.nonblocking_reuse {
                 // Ordering is enforced by reuse epochs / deferred host writes / present easement.
                 self.frame_pipeline
                     .end_frame_externally_ordered(frame_handle)
                     .map_err(|e| Error::Shader(e.to_string()))?;
-                scheme_tv
             } else if deferred_present {
                 self.frame_pipeline
-                    .end_frame_for_present(frame_handle, scheme_tv)
-                    .map_err(|e| Error::Shader(e.to_string()))?
+                    .end_frame_for_present(frame_handle, &submission)
+                    .map_err(|e| Error::Shader(e.to_string()))?;
             } else {
                 self.frame_pipeline
-                    .end_frame_standalone(frame_handle, scheme_tv)
-                    .map_err(|e| Error::Shader(e.to_string()))?
+                    .end_frame_standalone(frame_handle, &submission)
+                    .map_err(|e| Error::Shader(e.to_string()))?;
             }
-        };
+        }
         self.finished = true;
         Ok(FrameFinishOutcome {
-            timeline: tv,
             deferred_textures,
             scheme_submission: Some(submission),
         })

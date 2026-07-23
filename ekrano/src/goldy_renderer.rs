@@ -15,7 +15,7 @@ use std::sync::atomic::AtomicU64;
 
 use goldy::types::TextureFormat;
 use goldy::{
-    BackendType, Buffer, ComputePipeline, Context, DepositTransaction, Device, RetainedPool, Texture, TimelineValue,
+    BackendType, Buffer, ComputePipeline, Context, DepositTransaction, Device, RetainedPool, Texture,
     WithdrawTransaction,
 };
 
@@ -174,15 +174,13 @@ pub(crate) fn maybe_log_gpu_memory(device: &Device) {
 #[derive(Debug, Default)]
 pub(crate) struct CacheScheduleOutcome {
     /// Set when the scheme path stored its single persistent `out_image` into
-    /// [`PersistentState::cached_scheme_rt`]; the post-submit step then stamps the
-    /// frame timeline as a cache/reclamation marker (not a `begin_frame` GPU wait).
+    /// [`PersistentState::cached_scheme_rt`].
     pub(crate) scheme_rt_stored: bool,
 }
 
 /// Outcome of [`crate::scheme_renderer::SchemeRecorder::finish`]: orchestrator submit
 /// result plus filter-scratch textures returned to the transient pool after submit.
 pub(crate) struct FrameFinishOutcome {
-    pub(crate) timeline: TimelineValue,
     pub(crate) deferred_textures: Vec<Texture>,
     /// Submission returned by [`goldy::Scheme::submit`].
     ///
@@ -197,6 +195,8 @@ pub(crate) struct FrameFinishOutcome {
 /// scanout, or call [`Self::present`] synchronously (e.g. [`crate::scheme_renderer::SchemeRenderer::render_to_swapchain`]).
 pub struct PresentToken {
     pub(crate) claim: goldy::Claim,
+    /// Blocking present path: stamp the frame ring after [`Self::present`].
+    pub(crate) ring_note_submission: Option<goldy::Submission>,
 }
 
 impl PresentToken {
@@ -293,7 +293,7 @@ pub(crate) struct PersistentState {
     pub(crate) nearest_clamp_sampler: Option<goldy::Sampler>,
     /// Scheme-path render-target reuse: optional persistent `out_image` + filter layers
     /// (retained deeds; take/store across frames).
-    pub(crate) cached_scheme_rt: Option<(Option<Texture>, [Texture; 4], TimelineValue)>,
+    pub(crate) cached_scheme_rt: Option<(Option<Texture>, [Texture; 4])>,
     /// Cached pipeline buffers from the previous frame. At depth=1 only one
     /// entry exists at a time: take-then-install within a single `run_frame`.
     pub(crate) cached_pipeline: Option<crate::scheme_gpu_resources::CachedPipeline>,
@@ -446,47 +446,40 @@ impl PersistentState {
         out_format: TextureFormat,
         direct_present: bool,
     ) -> Option<(Option<Texture>, [Texture; 4])> {
-        let (out, layers, tv) = self.cached_scheme_rt.take()?;
+        let (out, layers) = self.cached_scheme_rt.take()?;
         if scheme_render_targets_compatible(&out, &layers, width, height, out_format, direct_present) {
-            let _ = tv;
             return Some((out, layers));
         }
         log::warn!(
-            "[RT-CACHE] scheme MISS (resize/mode) timeline={tv} direct_present={direct_present} \
+            "[RT-CACHE] scheme MISS (resize/mode) direct_present={direct_present} \
              cached_out={} vs {width}x{height} fmt={out_format:?}",
             out.as_ref()
                 .map(|t| format!("{}x{}", t.width(), t.height()))
                 .unwrap_or_else(|| "none".into()),
         );
-        self.reclaim_scheme_render_targets(ctx, out, layers, tv);
+        self.reclaim_scheme_render_targets(ctx, out, layers);
         None
     }
 
     /// Retire scheme render targets that no longer match the requested size.
     ///
-    /// On Metal, waits for `tv` if still in flight, then **drops** the textures —
+    /// On Metal, waits for occupied slots to settle, then **drops** the textures —
     /// releasing them into the transient pool would keep mismatched-size heap
     /// allocations alive across resize churn and exhaust overflow texture heaps.
     ///
     /// On DX12/Vulkan, releases deeds into the retained → transient path (epoch-gated).
-    fn reclaim_scheme_render_targets(
-        &mut self,
-        ctx: &Context,
-        out: Option<Texture>,
-        layers: [Texture; 4],
-        tv: TimelineValue,
-    ) {
+    fn reclaim_scheme_render_targets(&mut self, ctx: &Context, out: Option<Texture>, layers: [Texture; 4]) {
         if self.metal_heap_sensitive {
-            if tv != 0
-                && ctx.gpu_progress() < tv
-                && let Err(e) = ctx.wait_until(tv)
-            {
-                log::warn!("[RT-CACHE] wait_until({tv}) failed before Metal scheme RT drop: {e}");
-            }
             if let Some(out) = out {
+                if let Err(e) = out.wait_until_settled() {
+                    log::warn!("[RT-CACHE] wait_until_settled failed before Metal scheme RT drop: {e}");
+                }
                 drop(out);
             }
             for l in layers {
+                if let Err(e) = l.wait_until_settled() {
+                    log::warn!("[RT-CACHE] wait_until_settled failed before Metal scheme RT drop: {e}");
+                }
                 drop(l);
             }
             return;
@@ -500,13 +493,8 @@ impl PersistentState {
         }
     }
 
-    pub(crate) fn store_scheme_render_targets(
-        &mut self,
-        out: Option<Texture>,
-        layers: [Texture; 4],
-        timeline: TimelineValue,
-    ) {
-        self.cached_scheme_rt = Some((out, layers, timeline));
+    pub(crate) fn store_scheme_render_targets(&mut self, out: Option<Texture>, layers: [Texture; 4]) {
+        self.cached_scheme_rt = Some((out, layers));
     }
 }
 
@@ -521,8 +509,9 @@ impl PersistentState {
 
 impl PersistentState {
     /// Drop all cached render targets when any occupied slot no longer matches the
-    /// requested dimensions / present mode. Waits for the oldest slot timeline so
-    /// heap-backed textures are retired before new allocations during resize.
+    /// requested dimensions / present mode. On Metal, waits for occupied slots to
+    /// settle before drop so heap-backed textures are retired before new allocations
+    /// during resize.
     ///
     /// On Metal, also clears [`Self::cached_scheme_rt`] and the context transient
     /// texture bins so obsolete sizes cannot pin overflow heaps across continuous
@@ -535,37 +524,34 @@ impl PersistentState {
         out_format: TextureFormat,
         direct_present: bool,
     ) -> bool {
-        let scheme_mismatch = self.cached_scheme_rt.as_ref().is_some_and(|(out, layers, _)| {
+        let scheme_mismatch = self.cached_scheme_rt.as_ref().is_some_and(|(out, layers)| {
             !scheme_render_targets_compatible(out, layers, width, height, out_format, direct_present)
         });
         if !scheme_mismatch {
             return false;
         }
 
-        let progress = ctx.gpu_progress();
-        if ctx.peek_oldest_in_flight().is_some()
-            && self.metal_heap_sensitive
-            && let Some((_, _, tv)) = &self.cached_scheme_rt
-            && progress < *tv
-            && let Err(e) = ctx.wait_until(*tv)
-        {
-            log::warn!("[RT-CACHE] wait_until({tv}) failed during resize purge: {e}");
-        }
-
-        if let Some((out, layers, tv)) = self.cached_scheme_rt.take() {
+        if let Some((out, layers)) = self.cached_scheme_rt.take() {
             if self.metal_heap_sensitive {
-                drop(out);
+                if let Some(out) = out {
+                    if let Err(e) = out.wait_until_settled() {
+                        log::warn!("[RT-CACHE] wait_until_settled failed during resize purge: {e}");
+                    }
+                    drop(out);
+                }
                 for l in layers {
+                    if let Err(e) = l.wait_until_settled() {
+                        log::warn!("[RT-CACHE] wait_until_settled failed during resize purge: {e}");
+                    }
                     drop(l);
                 }
             } else {
-                self.reclaim_scheme_render_targets(ctx, out, layers, tv);
+                self.reclaim_scheme_render_targets(ctx, out, layers);
             }
         }
 
         if self.metal_heap_sensitive {
             ctx.clear_transient_textures();
-            ctx.flush_deferred_deletions();
         }
 
         true
@@ -607,13 +593,12 @@ impl PersistentState {
         self.pending_bump_submission = Some(submission);
     }
 
-    pub(crate) fn drain_ready_bump_readbacks(&mut self, ctx: &Context) -> Result<()> {
+    pub(crate) fn drain_ready_bump_readbacks(&mut self, _ctx: &Context) -> Result<()> {
         let Some(mut submission) = self.pending_bump_submission.take() else {
             return Ok(());
         };
         if let Some(withdraw) = self.cached_bump_withdraw.as_ref() {
-            let tv = submission.timeline_value();
-            if tv > ctx.gpu_progress() {
+            if !submission.is_settled() {
                 self.pending_bump_submission = Some(submission);
                 return Ok(());
             }
@@ -633,7 +618,7 @@ impl PersistentState {
     /// Claim cached pipeline buffers for this frame.
     ///
     /// Pipeline buffers are fully GPU-overwritten each frame. At depth=1, [`goldy::FrameOrchestrator`]
-    /// retirement in `begin_frame` provides cross-frame ordering — no `gpu_progress` gate here.
+    /// retirement in `begin_frame` provides cross-frame ordering — no settlement gate here.
     pub(crate) fn take_cached_pipeline(&mut self) -> Option<crate::scheme_gpu_resources::CachedPipeline> {
         if let Some(c) = self.cached_pipeline.take() {
             log::debug!("[PIPE-CACHE] HIT");
@@ -737,7 +722,7 @@ pub(crate) mod tests {
         let device = goldy::test_support::mock_device();
         let mut p = PersistentState::new(&device);
         let layers = acquire_test_layers(&mut p, 8, 8);
-        p.store_scheme_render_targets(None, layers, 1);
+        p.store_scheme_render_targets(None, layers);
         let ctx = device.create_context().expect("ctx");
         let hit = p.take_scheme_render_targets(&ctx, 8, 8, TextureFormat::Rgba8Unorm, true);
         assert!(hit.is_some());
@@ -811,7 +796,7 @@ pub(crate) mod tests {
         let mut p = PersistentState::new(&device);
         let layers = acquire_test_layers(&mut p, 8, 8);
         // Cached as direct-present (no out_image).
-        p.store_scheme_render_targets(None, layers, 1);
+        p.store_scheme_render_targets(None, layers);
         let ctx = device.create_context().expect("ctx");
         // Copy-path request must purge (mode mismatch via shared predicate).
         assert!(p.purge_render_target_cache_if_mismatch(&ctx, 8, 8, TextureFormat::Rgba8Unorm, false));
@@ -823,7 +808,7 @@ pub(crate) mod tests {
         let device = goldy::test_support::mock_device();
         let mut p = PersistentState::new(&device);
         let layers = acquire_test_layers(&mut p, 8, 8);
-        p.store_scheme_render_targets(None, layers, 1);
+        p.store_scheme_render_targets(None, layers);
         let ctx = device.create_context().expect("ctx");
         assert!(!p.purge_render_target_cache_if_mismatch(&ctx, 8, 8, TextureFormat::Rgba8Unorm, true));
         assert!(p.cached_scheme_rt.is_some());

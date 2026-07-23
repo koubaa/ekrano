@@ -90,7 +90,6 @@ pub use peniko;
 /// 2D geometry, with a focus on curves.
 pub use peniko::kurbo;
 
-pub use goldy::TimelineValue;
 pub use goldy_renderer::{
     AllocatorStats, FrameStats, PreparedFrame, PresentToken, ResourcePoolStats, SceneGrowthStats,
 };
