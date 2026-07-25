@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
-# Copyright 2025 the Ekrano Authors
+# Copyright 2026 the Ekrano Authors
 # SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # Shared Ubuntu setup for CI and local Docker reproduction.
-# Installs Mesa/lavapipe (software Vulkan), Vulkan tooling, and build
-# dependencies, then locates the lavapipe ICD JSON and exports it.
+# Installs Mesa/lavapipe (software Vulkan), Vulkan tooling, and the loader,
+# then locates the lavapipe ICD JSON and exports it.
+#
+# Headless CI only needs the lavapipe ICD + loader + vulkaninfo. Do not install
+# X11/XCB -dev packages (leftover from windowed examples) and do not run a full
+# `apt-get upgrade` — that upgrades unrelated runner packages (Chrome, PHP,
+# Firefox snap, …) and dominates CI wall time.
 #
 # Usage:
 #   In GitHub Actions:  bash ci/setup-ubuntu.sh
 #   In Dockerfile:      RUN bash /tmp/setup-ubuntu.sh
 
 set -euo pipefail
+
+export DEBIAN_FRONTEND=noninteractive
 
 # --- Install packages ---------------------------------------------------
 
@@ -20,14 +27,14 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 $SUDO apt-get update
-# Upgrade Mesa to 25.0+ for Vulkan 1.4 support in lavapipe.
-$SUDO apt-get upgrade -y mesa-vulkan-drivers libgl1-mesa-dri
-$SUDO apt-get install -y \
+# `apt-get install` upgrades already-installed packages to the newest candidate
+# from the configured archives (noble-updates ships Mesa 25.x / Vulkan 1.4).
+# Avoid `apt-get upgrade [pkgs]` — on Ubuntu runners that still performs a
+# full system upgrade of every upgradable package.
+$SUDO apt-get install -y --no-install-recommends \
     libvulkan1 \
-    libvulkan-dev \
     vulkan-tools \
-    mesa-vulkan-drivers \
-    libxcb-xfixes0-dev
+    mesa-vulkan-drivers
 
 # --- Locate lavapipe ICD ------------------------------------------------
 

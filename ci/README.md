@@ -33,6 +33,10 @@ environment.  It is called by both:
 When you need to change Mesa packages, Vulkan dependencies, or the lavapipe
 ICD detection logic, edit `setup-ubuntu.sh` and both consumers stay in sync.
 
+The script installs only what headless lavapipe CI needs (`mesa-vulkan-drivers`,
+`libvulkan1`, `vulkan-tools`). It deliberately avoids X11/XCB `-dev` packages
+and a full `apt-get upgrade` of the GitHub runner image.
+
 ## Updating the Rust version
 
 The Dockerfile accepts a build arg:
