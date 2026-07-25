@@ -35,7 +35,9 @@ ICD detection logic, edit `setup-ubuntu.sh` and both consumers stay in sync.
 
 The script installs only what headless lavapipe CI needs (`mesa-vulkan-drivers`,
 `libvulkan1`, `vulkan-tools`). It deliberately avoids X11/XCB `-dev` packages
-and a full `apt-get upgrade` of the GitHub runner image.
+and a full `apt-get upgrade` of the GitHub runner image. Under GitHub Actions it
+also skips the in-script `vulkaninfo` smoke test (first lavapipe init is slow);
+`ci.yml` has a dedicated verify step instead.
 
 ## Updating the Rust version
 

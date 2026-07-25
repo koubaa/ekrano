@@ -71,5 +71,10 @@ EOF
 fi
 
 # --- Smoke-test Vulkan ---------------------------------------------------
+# Skip under GitHub Actions: first lavapipe `vulkaninfo` is slow (~minutes of
+# LLVM init), and ci.yml has a dedicated "Verify lavapipe" step. Keep the
+# smoke test for Docker / local reproduction.
 
-VK_ICD_FILENAMES="$LAVAPIPE_ICD" vulkaninfo --summary || echo "vulkaninfo failed, continuing anyway"
+if [ -z "${GITHUB_ENV:-}" ]; then
+    VK_ICD_FILENAMES="$LAVAPIPE_ICD" vulkaninfo --summary || echo "vulkaninfo failed, continuing anyway"
+fi
