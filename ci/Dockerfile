@@ -19,8 +19,9 @@ COPY setup-ubuntu.sh /tmp/setup-ubuntu.sh
 ENV ENV_FILE=/etc/profile.d/ekrano-ci.sh
 RUN bash /tmp/setup-ubuntu.sh && rm /tmp/setup-ubuntu.sh
 
-# Build tooling
-RUN apt-get install -y git git-lfs curl ca-certificates build-essential pkg-config unzip && \
+# Build tooling (no X11/windowing libs — CI is headless lavapipe only)
+RUN apt-get install -y --no-install-recommends \
+        git git-lfs curl ca-certificates build-essential pkg-config unzip && \
     rm -rf /var/lib/apt/lists/*
 
 # Rust (version kept in sync with RUST_STABLE_VER in .github/workflows/ci.yml)
