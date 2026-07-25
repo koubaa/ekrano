@@ -6,11 +6,16 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+default = ["goldy-default"]
+goldy-default = ["ekrano/goldy-default"]
+goldy-dx12-only = ["ekrano/goldy-dx12-only"]
+
 [lints]
 workspace = true
 
 [dependencies]
-ekrano = { workspace = true }
+ekrano = { path = "../../ekrano", default-features = false }
 skrifa = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true, features = ["derive"] }

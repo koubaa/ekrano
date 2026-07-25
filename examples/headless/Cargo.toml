@@ -6,13 +6,25 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+default = ["goldy-default"]
+goldy-default = [
+    "ekrano/goldy-default",
+    "scenes/goldy-default",
+    "goldy/vulkan",
+    "goldy/dx12",
+    "goldy/metal",
+    "goldy/instrumentation",
+]
+goldy-dx12-only = ["ekrano/goldy-dx12-only", "scenes/goldy-dx12-only", "goldy/dx12"]
+
 [lints]
 workspace = true
 
 [dependencies]
-ekrano = { path = "../../ekrano" }
-goldy = { path = "../../../goldy" }
-scenes = { workspace = true }
+ekrano = { path = "../../ekrano", default-features = false }
+goldy = { path = "../../../goldy", default-features = false }
+scenes = { path = "../scenes", default-features = false }
 
 anyhow = { workspace = true }
 clap = { workspace = true, features = ["derive"] }

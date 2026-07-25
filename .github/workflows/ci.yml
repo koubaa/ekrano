@@ -175,8 +175,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # TODO: re-enable windows-latest when Windows CI is green again
-        os: [macos-latest, ubuntu-24.04]
         include:
           # Linux: lavapipe (software Vulkan) on free ubuntu-24.04 runners.
           # Requires Mesa 25.0+ via ci/setup-ubuntu.sh for Vulkan 1.4.
@@ -185,6 +183,9 @@ jobs:
             gpu: 'yes'
           - os: macos-latest
             runner: macos-latest
+            gpu: 'yes'
+          - os: windows-latest
+            runner: windows-latest
             gpu: 'yes'
     steps:
       - uses: actions/checkout@v4
@@ -302,6 +303,7 @@ jobs:
       - name: cargo test
         # TODO: Maybe use --release; the CPU shaders are extremely slow when unoptimised
         # One process per test binary enables process-lifetime shared Device + WARP mutex.
+        if: matrix.os != 'windows-latest'
         run: cargo test --workspace --locked --all-features --no-fail-fast
         env:
           EKRANO_CI_GPU_SUPPORT: ${{ matrix.gpu }}
@@ -315,6 +317,19 @@ jobs:
           # However, if we do, the tests are designed to be robust against that, if this environment variable is set.
           # If we do run out of bandwidth, uncomment the following line.
           # EKRANO_SKIP_LFS_SNAPSHOTS: all
+
+      - name: cargo test (Windows / DX12-only Goldy)
+        if: matrix.os == 'windows-latest'
+        run: >-
+          cargo test --workspace --locked
+          --no-default-features
+          -F goldy-dx12-only -F bump_estimate -F tracy
+          --no-fail-fast
+        env:
+          EKRANO_CI_GPU_SUPPORT: ${{ matrix.gpu }}
+          EKRANO_CI_SKIP_SLOW: 'yes'
+          GOLDY_BACKEND: dx12
+          VK_LAYER_PATH: ""
       
       - name: Upload test results due to failure
         uses: actions/upload-artifact@v4
@@ -325,7 +340,16 @@ jobs:
             ekrano_tests/current
 
       - name: cargo test --doc
+        if: matrix.os != 'windows-latest'
         run: cargo test --doc --workspace --locked --all-features --no-fail-fast
+
+      - name: cargo test --doc (Windows / DX12-only Goldy)
+        if: matrix.os == 'windows-latest'
+        run: >-
+          cargo test --doc --workspace --locked
+          --no-default-features
+          -F goldy-dx12-only -F bump_estimate -F tracy
+          --no-fail-fast
 
   check-msrv:
     name: cargo check (msrv)

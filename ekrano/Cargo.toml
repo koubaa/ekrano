@@ -16,7 +16,10 @@ default-target = "x86_64-unknown-linux-gnu"
 targets = []
 
 [features]
-default = []
+default = ["goldy-default"]
+# Mirrors `goldy` default backends for local dev; CI can pass `--no-default-features -F goldy-dx12-only`.
+goldy-default = ["goldy/vulkan", "goldy/dx12", "goldy/metal", "goldy/instrumentation"]
+goldy-dx12-only = ["goldy/dx12"]
 # Enables GPU memory usage estimation. This performs additional computations
 # in order to estimate the minimum required allocations for buffers backing
 # bump-allocated GPU memory.
@@ -46,4 +49,4 @@ static_assertions = { workspace = true }
 thiserror = { workspace = true }
 # TODO: Add feature for built-in bitmap emoji support?
 png = { workspace = true }
-goldy = { path = "../../goldy" }
+goldy = { path = "../../goldy", default-features = false }
