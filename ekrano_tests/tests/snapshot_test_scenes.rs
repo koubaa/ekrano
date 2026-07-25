@@ -133,9 +133,7 @@ fn image_luminance_mask() {
     let scene = encode_test_scene(test_scene, &mut params);
     // Lavapipe FLIP mean is ~0.0101 vs Metal references under the shared 0.0095
     // budget used by other scenes; keep a slightly looser gate for this mask.
-    snapshot_test_sync(scene, &params)
-        .unwrap()
-        .assert_mean_less_than(0.011);
+    snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.011);
 }
 
 fn main() {
