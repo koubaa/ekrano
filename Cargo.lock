@@ -767,6 +767,7 @@ dependencies = [
  "dirs",
  "foreign-types",
  "goldy_derive",
+ "goldy_shader_ir",
  "gpu-allocator",
  "libc",
  "libloading 0.9.0",
@@ -789,10 +790,15 @@ dependencies = [
 name = "goldy_derive"
 version = "0.2.0"
 dependencies = [
+ "goldy_shader_ir",
  "proc-macro2",
  "quote",
  "syn",
 ]
+
+[[package]]
+name = "goldy_shader_ir"
+version = "0.2.0"
 
 [[package]]
 name = "gpu-allocator"

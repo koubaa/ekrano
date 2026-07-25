@@ -159,8 +159,10 @@ pub(crate) fn alloc_or_reuse_scheme_indirect(
             record_buffer_reuse(recorder.scheme(), &buf);
             return Ok(buf);
         }
-        // WorkgroupCountsGpu changed: defer drop until prior GPU use retires.
-        defer_buffer_until_retired(recorder.context(), buf);
+        // Partitioned acquire_record buffer: not binneable via return_transient_buffer.
+        // Release through the retained pool (epoch-gated drop); same as other stable buffers.
+        let ctx = recorder.context();
+        recorder.persistent.retained_pool.release_buffer(ctx, buf);
     }
     let fields: Vec<_> = (0..N_INDIRECT_STAGES as usize)
         .map(|i| {
