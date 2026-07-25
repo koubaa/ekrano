@@ -95,6 +95,12 @@ fn snapshot_longpathdash_butt() {
     snapshot_test_scene(test_scene, params);
 }
 
+fn snapshot_dashed_curves() {
+    let test_scene = test_scenes::dashed_curves();
+    let params = TestParams::new("dashed_curves", 480, 240);
+    snapshot_test_scene(test_scene, params);
+}
+
 fn snapshot_image_sampling() {
     let test_scene = test_scenes::image_sampling();
     let params = TestParams::new("image_sampling", 400, 400);
@@ -216,6 +222,13 @@ fn main() {
     trials.push(
         libtest_mimic::Trial::test("snapshot_longpathdash_butt", || {
             snapshot_longpathdash_butt();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("snapshot_dashed_curves", || {
+            snapshot_dashed_curves();
             Ok(())
         })
         .with_ignored_flag(false),

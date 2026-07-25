@@ -176,7 +176,6 @@ public static const uint STYLE_FLAGS_JOIN_MASK = 0x30000000;
 public static const uint STYLE_FLAGS_JOIN_BEVEL = 0;
 public static const uint STYLE_FLAGS_JOIN_MITER = 0x10000000;
 public static const uint STYLE_FLAGS_JOIN_ROUND = 0x20000000;
-public static const uint STYLE_FLAGS_DASHED = 0x00800000;
 
 // === Drawtag ===
 public struct DrawMonoid {

@@ -117,7 +117,7 @@ pub(crate) fn goldy_full_shaders_scheme(
     )?;
     let pathtag_scan_large = renderer.add_compute_shader(
         "pathtag_scan_large",
-        ekrano_shaders::slang::PATHTAG_SCAN_SMALL,
+        ekrano_shaders::slang::PATHTAG_SCAN_LARGE,
         &[BufReadOnly, BufReadOnly, BufReadOnly, Buffer],
         &search_paths,
         &[],

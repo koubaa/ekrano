@@ -106,11 +106,8 @@ pub struct CapturedBuffers {
     pub sizes: ekrano_encoding::BufferSizes,
 }
 
-/// Max flatten workgroups per queue submit. Large single dispatches can exceed the
-/// Windows ~2s GPU timeout (TDR) on stressed dashed paths.
-const MAX_FLATTEN_WG_PER_SUBMIT: u32 = 8;
-/// Must match `FLATTEN_WG` in `ekrano_encoding` (threads per flatten workgroup).
-const FLATTEN_THREADS_PER_GROUP: u32 = 256;
+/// Flatten uses a single dispatch (`ConfigUniform::flatten_thread_base` stays 0).
+/// Chunking via push-constant `thread_base` under-counted work on DX12.
 
 fn dispatch_stage(
     recorder: &mut SchemeRecorder<'_>,
@@ -174,6 +171,14 @@ impl Render {
             .as_ref()
             .expect("alloc_or_reuse_scheme_indirect must produce indirect buffer");
 
+        if wg_counts.use_large_path_scan {
+            // First-level reduce only fills `path_tag_wgs` slots; `reduced` is aligned up
+            // to a multiple of 256 for reduce2. Zero padding so unused slots are identity.
+            recorder
+                .scheme()
+                .clear_parcel(&pipeline.scratch.reduced, 0, 0)
+                .expect("clear path_reduced before large pathtag scan");
+        }
         dispatch_stage(
             recorder,
             indirect_buf,
@@ -185,51 +190,54 @@ impl Render {
                 pipeline.scratch.reduced.as_binding(),
             ],
         );
-        dispatch_stage(
-            recorder,
-            indirect_buf,
-            shaders.pathtag_reduce2,
-            STAGE_PATHTAG_REDUCE2,
-            &[
-                pipeline.scratch.reduced.as_binding(),
-                pipeline.scratch.reduced2.as_binding(),
-            ],
-        );
-        dispatch_stage(
-            recorder,
-            indirect_buf,
-            shaders.pathtag_scan1,
-            STAGE_PATHTAG_SCAN1,
-            &[
-                pipeline.scratch.reduced.as_binding(),
-                pipeline.scratch.reduced2.as_binding(),
-                pipeline.scratch.reduced_scan.as_binding(),
-            ],
-        );
-        dispatch_stage(
-            recorder,
-            indirect_buf,
-            shaders.pathtag_scan,
-            STAGE_PATHTAG_SCAN,
-            &[
-                pipeline.config.as_binding(),
-                pipeline.scene.as_binding(),
-                pipeline.scratch.reduced.as_binding(),
-                pipeline.scratch.tagmonoid.as_binding(),
-            ],
-        );
-        dispatch_stage(
-            recorder,
-            indirect_buf,
-            shaders.pathtag_scan_large,
-            STAGE_PATHTAG_SCAN_LARGE,
-            &[
-                pipeline.config.as_binding(),
-                pipeline.scene.as_binding(),
-                pipeline.scratch.reduced_scan.as_binding(),
-                pipeline.scratch.tagmonoid.as_binding(),
-            ],
-        );
+        if wg_counts.use_large_path_scan {
+            dispatch_stage(
+                recorder,
+                indirect_buf,
+                shaders.pathtag_reduce2,
+                STAGE_PATHTAG_REDUCE2,
+                &[
+                    pipeline.scratch.reduced.as_binding(),
+                    pipeline.scratch.reduced2.as_binding(),
+                ],
+            );
+            dispatch_stage(
+                recorder,
+                indirect_buf,
+                shaders.pathtag_scan1,
+                STAGE_PATHTAG_SCAN1,
+                &[
+                    pipeline.scratch.reduced.as_binding(),
+                    pipeline.scratch.reduced2.as_binding(),
+                    pipeline.scratch.reduced_scan.as_binding(),
+                ],
+            );
+            dispatch_stage(
+                recorder,
+                indirect_buf,
+                shaders.pathtag_scan_large,
+                STAGE_PATHTAG_SCAN_LARGE,
+                &[
+                    pipeline.config.as_binding(),
+                    pipeline.scene.as_binding(),
+                    pipeline.scratch.reduced_scan.as_binding(),
+                    pipeline.scratch.tagmonoid.as_binding(),
+                ],
+            );
+        } else {
+            dispatch_stage(
+                recorder,
+                indirect_buf,
+                shaders.pathtag_scan,
+                STAGE_PATHTAG_SCAN,
+                &[
+                    pipeline.config.as_binding(),
+                    pipeline.scene.as_binding(),
+                    pipeline.scratch.reduced.as_binding(),
+                    pipeline.scratch.tagmonoid.as_binding(),
+                ],
+            );
+        }
 
         dispatch_stage(
             recorder,
@@ -247,24 +255,13 @@ impl Render {
             pipeline.bump.as_binding(),
             pipeline.stable.lines.as_binding(),
         ];
-        let flat_wg_x = wg_counts.flatten.0;
-        if flat_wg_x > MAX_FLATTEN_WG_PER_SUBMIT {
-            let mut base_wg = 0_u32;
-            while base_wg < flat_wg_x {
-                let chunk = (flat_wg_x - base_wg).min(MAX_FLATTEN_WG_PER_SUBMIT);
-                let thread_base = base_wg * FLATTEN_THREADS_PER_GROUP;
-                recorder.dispatch_with_push_tail(shaders.flatten, (chunk, 1, 1), &flatten_bindings, &[thread_base]);
-                base_wg += chunk;
-            }
-        } else {
-            dispatch_stage(
-                recorder,
-                indirect_buf,
-                shaders.flatten,
-                STAGE_FLATTEN,
-                &flatten_bindings,
-            );
-        }
+        dispatch_stage(
+            recorder,
+            indirect_buf,
+            shaders.flatten,
+            STAGE_FLATTEN,
+            &flatten_bindings,
+        );
 
         dispatch_stage(
             recorder,

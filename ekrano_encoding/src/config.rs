@@ -313,7 +313,10 @@ impl WorkgroupCounts {
         Self {
             use_large_path_scan,
             path_reduce: (path_tag_wgs, 1, 1),
-            path_reduce2: (PATH_REDUCE_WG, 1, 1),
+            // One reduce2 workgroup per 256 first-level reductions. Vello dispatches a
+            // fixed PATH_REDUCE_WG here; that OOB-reads the reduced buffer on backends
+            // without robust buffer access (DX12), corrupting the large-scan ladder.
+            path_reduce2: (reduced_size / PATH_REDUCE_WG, 1, 1),
             path_scan1: (reduced_size / PATH_REDUCE_WG, 1, 1),
             path_scan: (path_tag_wgs, 1, 1),
             bbox_clear: (draw_object_wgs, 1, 1),

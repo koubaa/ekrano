@@ -468,7 +468,10 @@ impl SchemeRenderer {
             self.frame_pipeline
                 .drain_all()
                 .map_err(|e| Error::Shader(e.to_string()))?;
-            self.drain_ready_bump_readbacks()?;
+            // Must wait: with host-sidecar / nonblocking reuse the orchestrator ring
+            // does not fence the scheme submission, so a poll-only drain skips bump
+            // feedback and leaves overflowed frames unrecovered.
+            self.persistent.wait_and_drain_bump_readbacks(&self.context)?;
             self.context.flush_deferred_deletions();
 
             match self.persistent.last_drained_bump() {
@@ -1385,6 +1388,7 @@ impl<'a> SchemeRecorder<'a> {
         Self::record_dispatch(self.scheme, self.shaders, shader, wg_size, bindings, &[]);
     }
 
+    #[allow(dead_code, reason = "kept for reintroducing config-based flatten chunking")]
     pub fn dispatch_with_push_tail(
         &mut self,
         shader: ShaderId,

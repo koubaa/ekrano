@@ -725,124 +725,11 @@ void draw_join(FlattenCtx ctx, uint path_ix, uint style_flags, float2 p0, float2
     }
 }
 
-// ---- GPU-side dashing helpers ----
-
-// Compute cumulative arc length from the start of the current subpath to
-// the beginning of segment at index `ix`. Uses a backward walk to find the
-// subpath start, then a forward walk to sum chord lengths.
-float compute_subpath_arc(FlattenCtx ctx, uint ix, uint my_path_ix) {
-    // Walk backward to find subpath start. Stop at:
-    //  - PATH_TAG_PATH markers (draw object boundary)
-    //  - Tags with SUBPATH_END set (end of previous subpath)
-    uint start_ix = ix;
-    const uint MAX_WALK = 512;
-    for (uint i = 1; i <= MAX_WALK && ix >= i; i++) {
-        uint prev_ix = ix - i;
-        uint tw = ctx.scene[ctx.config.pathtag_base + (prev_ix >> 2)];
-        uint sh = (prev_ix & 3) * 8;
-        uint tb = (tw >> sh) & 0xFF;
-        if ((tb & PATH_TAG_PATH) != 0) break;
-        if ((tb & PATH_TAG_SUBPATH_END) != 0) break;
-        start_ix = prev_ix;
-    }
-
-    // Forward walk: accumulate chord lengths of real (non-cap) segments before ix.
-    float arc = 0.0;
-    for (uint j = start_ix; j < ix; j++) {
-        PathTagData ptag = compute_tag_monoid(ctx, j);
-        uint seg = ptag.tag_byte & PATH_TAG_SEG_TYPE;
-        if (seg == 0) continue;
-        if ((ptag.tag_byte & PATH_TAG_SUBPATH_END) != 0) continue;
-        CubicPoints p = read_path_segment(ctx, ptag, true);
-        arc += distance(p.p0, p.p3);
-    }
-    return arc;
-}
-
-// Emit a single stroke dash sub-segment using the same flatten_euler path
-// as normal strokes, ensuring identical rendering across backends.
-void emit_dash_stroke(
-    FlattenCtx ctx,
-    uint path_ix,
-    uint style_flags,
-    float2 sp0,
-    float2 sp3,
-    float offset,
-    Transform transform,
-    inout float4 bbox
-) {
-    float2 tangent = sp3 - sp0;
-    float tang_len = length(tangent);
-    if (tang_len < 1e-12) return;
-    float2 tn = tangent / tang_len;
-    float2 offset_tangent = offset * tn;
-    float2 n = offset_tangent.yx * float2(-1.0, 1.0);
-
-    uint start_cap = (style_flags & STYLE_FLAGS_START_CAP_MASK) >> 2;
-    uint end_cap = (style_flags & STYLE_FLAGS_END_CAP_MASK);
-    draw_cap(ctx, path_ix, start_cap, sp0, sp0 - n, sp0 + n, -offset_tangent, transform, bbox);
-    draw_cap(ctx, path_ix, end_cap, sp3, sp3 + n, sp3 - n, offset_tangent, transform, bbox);
-
-    output_line_with_transform(ctx, path_ix, sp0 + n, sp3 + n, transform, bbox);
-    output_line_with_transform(ctx, path_ix, sp3 - n, sp0 - n, transform, bbox);
-}
-
-// Process one segment of a dashed stroke: find visible intervals and emit them.
-void process_dashed_segment(
-    FlattenCtx ctx,
-    uint path_ix,
-    uint style_flags,
-    CubicPoints pts,
-    float offset,
-    Transform transform,
-    float cum_arc,
-    float dash_offset_val,
-    float dash_on,
-    float dash_off,
-    inout float4 bbox
-) {
-    float period = dash_on + dash_off;
-    if (period < 1e-9) return;
-    float seg_len = distance(pts.p0, pts.p3);
-    if (seg_len < 1e-12) return;
-
-    float seg_start = cum_arc;
-    float seg_end = seg_start + seg_len;
-    float pos = seg_start;
-
-    const uint MAX_INTERVALS = 32;
-    float snap_eps = period * 1e-5;
-    for (uint di = 0; di < MAX_INTERVALS && pos < seg_end - 1e-6; di++) {
-        float adjusted = pos + dash_offset_val;
-        float in_period = fmod(adjusted, period);
-        if (in_period < 0.0) in_period += period;
-        if (in_period < snap_eps || period - in_period < snap_eps) in_period = 0.0;
-        if (abs(in_period - dash_on) < snap_eps) in_period = dash_on;
-        bool visible = in_period < dash_on;
-        float to_next = visible ? (dash_on - in_period) : (period - in_period);
-        to_next = max(to_next, 1e-6);
-        float interval_end = min(pos + to_next, seg_end);
-
-        if (visible) {
-            float t0 = (pos - seg_start) / seg_len;
-            float t1 = (interval_end - seg_start) / seg_len;
-            t0 = clamp(t0, 0.0, 1.0);
-            t1 = clamp(t1, 0.0, 1.0);
-            float2 sp0 = lerp(pts.p0, pts.p3, t0);
-            float2 sp3 = lerp(pts.p0, pts.p3, t1);
-            emit_dash_stroke(ctx, path_ix, style_flags, sp0, sp3, offset, transform, bbox);
-        }
-
-        pos = interval_end;
-    }
-}
-
 [goldy_compute]
 [numthreads(256, 1, 1)]
 void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
              BufRO<TagMonoid> tag_monoids, ByteAddress path_bboxes,
              Scattered<BumpAllocators> bump, Scattered<LineSoup> lines,
-             uint thread_base,
              ThreadId global_id) {
     Config config = config_buf[0];
 
@@ -855,7 +742,7 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
     ctx.lines = lines;
     ctx.pathdata_base = config.pathdata_base;
 
-    uint ix = global_id.x + thread_base;
+    uint ix = global_id.x + config.flatten_thread_base;
     float4 bbox = Bbox2D.empty().v;
 
     PathTagData tag = compute_tag_monoid(ctx, ix);
@@ -882,30 +769,13 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
             float offset = 0.5 * linewidth;
             bool is_open = (tag.tag_byte & PATH_TAG_SEG_TYPE) != PATH_TAG_LINETO;
             bool is_stroke_cap_marker = (tag.tag_byte & PATH_TAG_SUBPATH_END) != 0;
-            bool is_dashed = (style_flags & STYLE_FLAGS_DASHED) != 0;
 
-            if (is_dashed && !is_stroke_cap_marker) {
-                float dash_offset_val = asfloat(scene[config.style_base + style_ix + 2]);
-                uint packed_dash = scene[config.style_base + style_ix + 3];
-                float dash_on = f16tof32(packed_dash & 0xFFFF);
-                float dash_off = f16tof32(packed_dash >> 16);
-
-                float cum_arc = compute_subpath_arc(ctx, ix, path_ix);
-                process_dashed_segment(
-                    ctx, path_ix, style_flags, pts, offset, transform,
-                    cum_arc, dash_offset_val, dash_on, dash_off, bbox
-                );
-            } else if (is_stroke_cap_marker) {
+            if (is_stroke_cap_marker) {
                 if (is_open) {
-                    if (is_dashed) {
-                        // Dashed strokes: each dash already has its own caps
-                        // from emit_dash_stroke, so no subpath-level cap needed.
-                    } else {
-                        float2 tangent = pts.p3 - pts.p0;
-                        float2 offset_tangent = offset * normalize(tangent);
-                        float2 n = offset_tangent.yx * float2(-1.0, 1.0);
-                        draw_cap(ctx, path_ix, (style_flags & STYLE_FLAGS_START_CAP_MASK) >> 2, pts.p0, pts.p0 - n, pts.p0 + n, -offset_tangent, transform, bbox);
-                    }
+                    float2 tangent = pts.p3 - pts.p0;
+                    float2 offset_tangent = offset * normalize(tangent);
+                    float2 n = offset_tangent.yx * float2(-1.0, 1.0);
+                    draw_cap(ctx, path_ix, (style_flags & STYLE_FLAGS_START_CAP_MASK) >> 2, pts.p0, pts.p0 - n, pts.p0 + n, -offset_tangent, transform, bbox);
                 }
             } else {
                 NeighboringSegment neighbor = read_neighboring_segment(ctx, ix + 1);
