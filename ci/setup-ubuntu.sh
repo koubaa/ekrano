@@ -26,28 +26,35 @@ if [ "$(id -u)" -ne 0 ]; then
     SUDO="sudo"
 fi
 
+echo "ci/setup-ubuntu.sh: apt-get update"
 $SUDO apt-get update
 # `apt-get install` upgrades already-installed packages to the newest candidate
 # from the configured archives (noble-updates ships Mesa 25.x / Vulkan 1.4).
 # Avoid `apt-get upgrade [pkgs]` — on Ubuntu runners that still performs a
 # full system upgrade of every upgradable package.
+echo "ci/setup-ubuntu.sh: apt-get install mesa/vulkan packages"
 $SUDO apt-get install -y --no-install-recommends \
     libvulkan1 \
     vulkan-tools \
     mesa-vulkan-drivers
 
 # --- Locate lavapipe ICD ------------------------------------------------
+# Prefer the well-known ICD path; avoid `find /usr` (slow on large runners).
 
-LAVAPIPE_ICD=$(find /usr -name "lvp_icd*.json" 2>/dev/null | head -1)
+echo "ci/setup-ubuntu.sh: locate lavapipe ICD"
+LAVAPIPE_ICD=""
+for path in /usr/share/vulkan/icd.d/lvp_icd.x86_64.json \
+            /usr/share/vulkan/icd.d/lvp_icd.json; do
+    if [ -f "$path" ]; then LAVAPIPE_ICD="$path"; break; fi
+done
 if [ -z "$LAVAPIPE_ICD" ]; then
-    for path in /usr/share/vulkan/icd.d/lvp_icd.x86_64.json \
-                /usr/share/vulkan/icd.d/lvp_icd.json; do
-        if [ -f "$path" ]; then LAVAPIPE_ICD="$path"; break; fi
-    done
+    LAVAPIPE_ICD=$(find /usr/share/vulkan -name "lvp_icd*.json" 2>/dev/null | head -1 || true)
 fi
 
 if [ -z "$LAVAPIPE_ICD" ]; then
     echo "WARNING: Could not locate lavapipe ICD JSON" >&2
+else
+    echo "ci/setup-ubuntu.sh: lavapipe ICD at $LAVAPIPE_ICD"
 fi
 
 # --- Export environment --------------------------------------------------
