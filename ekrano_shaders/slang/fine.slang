@@ -932,21 +932,21 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
         } else if (tag == CMD_IMAGE) {
             CmdImage image = read_image_cmd(ptcl, info, cmd_ix);
             float2 atlas_max = image.atlas_offset + image.extents - 1.0;
-            // Clamp bounds for hardware bilinear: keep sampling 0.5px inside each edge so the
-            // hardware bilinear footprint never bleeds into adjacent atlas images.
-            float2 norm_min = (image.atlas_offset + 0.5) * inv_atlas;
-            float2 norm_max = (image.atlas_offset + image.extents - 0.5) * inv_atlas;
+            // Atlas texels are CPU-premultiplied before upload. Sample with explicit
+            // texel Loads (not hardware bilinear): Metal vs lavapipe linear filtering
+            // differs by ±1–2 in 8-bit, and luminance-mask scenes amplify that past
+            // the FLIP budget against Vello-era references that used this 4-tap path.
             if (image.quality == IMAGE_QUALITY_LOW) {
-                // Nearest-neighbor via hardware sampler (atlas stores premultiplied RGBA).
+                // Nearest neighbor (matches original Vello fine shader IMAGE_QUALITY_LOW)
                 for (uint i = 0; i < 4; i++) {
                     if (area[i] != 0.0) {
                         float2 my_xy = float2(xy.x + float(i), xy.y);
                         float2 atlas_uv = image.xform * my_xy;
                         atlas_uv.x = extend_mode(atlas_uv.x, image.x_extend_mode, image.extents.x);
                         atlas_uv.y = extend_mode(atlas_uv.y, image.y_extend_mode, image.extents.y);
-                        atlas_uv = floor(atlas_uv) + image.atlas_offset;
-                        float2 norm_uv = clamp((atlas_uv + 0.5) * inv_atlas, norm_min, norm_max);
-                        float4 fg_rgba = image_atlas.SampleLevel(nearest_clamp, norm_uv, 0);
+                        atlas_uv += image.atlas_offset;
+                        float2 atlas_uv_clamped = clamp(atlas_uv, image.atlas_offset, atlas_max);
+                        float4 fg_rgba = image_atlas.Load(int3(int2(atlas_uv_clamped), 0));
                         float4 fg_i = pixel_format(fg_rgba * area[i] * mask_w[i] * image.alpha, image.format);
                         uint BLEND_DEFAULT_IL = (MIX_NORMAL << 8) | COMPOSE_SRC_OVER;
                         rgba[i] = ((draw_blend & 0x7FFFu) == BLEND_DEFAULT_IL)
@@ -955,19 +955,23 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
                     }
                 }
             } else {
-                // Bilinear via hardware sampler (atlas stores premultiplied RGBA; 4× fewer
-                // texture ops vs the manual 4-tap path this replaced).
+                // Bilinear (matches original Vello fine shader IMAGE_QUALITY_MEDIUM)
                 for (uint i = 0; i < 4; i++) {
                     if (area[i] != 0.0) {
                         float2 my_xy = float2(xy.x + float(i), xy.y);
                         float2 atlas_uv = image.xform * my_xy;
                         atlas_uv.x = extend_mode(atlas_uv.x, image.x_extend_mode, image.extents.x);
                         atlas_uv.y = extend_mode(atlas_uv.y, image.y_extend_mode, image.extents.y);
-                        // +atlas_offset - 0.5: shift to atlas pixel space; -0.5 aligns with
-                        // hardware bilinear convention (sample at sub-texel position).
                         atlas_uv += image.atlas_offset - 0.5;
-                        float2 norm_uv = clamp((atlas_uv + 0.5) * inv_atlas, norm_min, norm_max);
-                        float4 fg_rgba = image_atlas.SampleLevel(linear_clamp, norm_uv, 0);
+                        float2 atlas_uv_clamped = clamp(atlas_uv, image.atlas_offset, atlas_max);
+                        int2 uv00 = int2(floor(atlas_uv_clamped));
+                        int2 uv11 = int2(ceil(atlas_uv_clamped));
+                        float2 uv_frac = frac(atlas_uv);
+                        float4 a = image_atlas.Load(int3(uv00, 0));
+                        float4 b = image_atlas.Load(int3(uv00.x, uv11.y, 0));
+                        float4 c = image_atlas.Load(int3(uv11.x, uv00.y, 0));
+                        float4 d = image_atlas.Load(int3(uv11, 0));
+                        float4 fg_rgba = lerp(lerp(a, b, uv_frac.y), lerp(c, d, uv_frac.y), uv_frac.x);
                         float4 fg_i = pixel_format(fg_rgba * area[i] * mask_w[i] * image.alpha, image.format);
                         uint BLEND_DEFAULT_IM = (MIX_NORMAL << 8) | COMPOSE_SRC_OVER;
                         rgba[i] = ((draw_blend & 0x7FFFu) == BLEND_DEFAULT_IM)
