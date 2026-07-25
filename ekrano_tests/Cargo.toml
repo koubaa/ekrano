@@ -8,12 +8,24 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+default = ["goldy-default"]
+goldy-default = [
+    "ekrano/goldy-default",
+    "scenes/goldy-default",
+    "goldy/vulkan",
+    "goldy/dx12",
+    "goldy/metal",
+    "goldy/instrumentation",
+]
+goldy-dx12-only = ["ekrano/goldy-dx12-only", "scenes/goldy-dx12-only", "goldy/dx12"]
+
 [lints]
 workspace = true
 
 [dependencies]
-ekrano = { path = "../ekrano" }
-goldy = { path = "../../goldy" }
+ekrano = { path = "../ekrano", default-features = false }
+goldy = { path = "../../goldy", default-features = false }
 anyhow = { workspace = true }
 
 pollster = { workspace = true }
@@ -21,7 +33,7 @@ png = { workspace = true }
 nv-flip = "0.1.2"
 image = { workspace = true, features = ["png"] }
 
-scenes = { workspace = true }
+scenes = { path = "../examples/scenes", default-features = false }
 oxipng = { workspace = true, features = ["freestanding", "parallel"] }
 env_logger = { workspace = true }
 log = { workspace = true }

@@ -106,6 +106,7 @@ export_scenes!(
     fn clip_test(clip_test: animated)
     fn longpathdash_butt(impls::longpathdash(Cap::Butt), "longpathdash (butt caps)", false)
     fn longpathdash_round(impls::longpathdash(Cap::Round), "longpathdash (round caps)", false)
+    fn dashed_curves(dashed_curves)
     fn mmark(crate::mmark::MMark::new(80_000), "mmark", false)
     fn many_draw_objects(many_draw_objects)
     fn blurred_rounded_rect(blurred_rounded_rect)
@@ -661,6 +662,38 @@ mod impls {
                 &path,
             );
         }
+    }
+
+    /// Curved dashed strokes — guards against treating Béziers as chords when dashing.
+    ///
+    /// A GPU chord-dash path turns these circles/ellipses into rotated polygons.
+    pub(super) fn dashed_curves(scene: &mut Scene, _params: &mut SceneParams<'_>) {
+        let dash = Stroke::new(6.0)
+            .with_caps(Cap::Butt)
+            .with_join(Join::Miter)
+            .with_dashes(0.0, [14.0, 10.0]);
+        scene.stroke(
+            &dash,
+            Affine::IDENTITY,
+            palette::css::WHITE,
+            None,
+            &Circle::new((120.0, 120.0), 80.0),
+        );
+        scene.stroke(
+            &dash,
+            Affine::IDENTITY,
+            palette::css::DEEP_SKY_BLUE,
+            None,
+            &Ellipse::new((340.0, 120.0), (110.0, 60.0), 0.35),
+        );
+        // Nested smaller circle — different dash phase / radius.
+        scene.stroke(
+            &Stroke::new(3.0).with_caps(Cap::Round).with_dashes(4.0, [8.0, 6.0]),
+            Affine::IDENTITY,
+            palette::css::ORANGE,
+            None,
+            &Circle::new((120.0, 120.0), 40.0),
+        );
     }
 
     pub(super) fn animated_text(scene: &mut Scene, params: &mut SceneParams<'_>) {

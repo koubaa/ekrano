@@ -24,18 +24,18 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene, BufRO<float4> draw_bbo
              ThreadId global_id, GroupThreadId local_id) {
     Config config = config_buf[0];
 
+    // Do not early-return before workgroup barriers: divergent returns deadlock
+    // the hillis-steele scan on lavapipe (same issue as backdrop_dyn).
     if (local_id.x == 0) {
         uint failed_val = bump[0].failed & (STAGE_BINNING | STAGE_FLATTEN);
         sh_previous_failed = (failed_val != 0) ? 1u : 0u;
     }
     GroupMemoryBarrierWithGroupSync();
     uint failed = sh_previous_failed;
-    if (failed != 0)
-        return;
 
     uint drawobj_ix = global_id.x;
     uint drawtag = DRAWTAG_NOP;
-    if (drawobj_ix < config.n_drawobj) {
+    if (failed == 0 && drawobj_ix < config.n_drawobj) {
         drawtag = scene[config.drawtag_base + drawobj_ix];
     }
     int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
@@ -55,7 +55,7 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene, BufRO<float4> draw_bbo
     // Morton layout: allocate a power-of-two square so that
     // morton_encode_2d(x, y) is always a valid index within the allocation.
     // Trade-off: up to 4× memory for highly non-square bboxes.
-    uint mdim = morton_tile_dim(ux1 - ux0, uy1 - uy0);
+    uint mdim = (failed == 0) ? morton_tile_dim(ux1 - ux0, uy1 - uy0) : 0u;
     uint tile_count = mdim * mdim;
     sh_tile_count[local_id.x] = tile_count;
     for (uint i = 0; i < LG_WG_SIZE; i++) {
@@ -66,6 +66,9 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene, BufRO<float4> draw_bbo
         }
         GroupMemoryBarrierWithGroupSync();
         sh_tile_count[local_id.x] = tile_count;
+    }
+    if (failed != 0) {
+        return;
     }
     uint total_tile_count = tile_count;
     if (local_id.x == WG_SIZE - 1) {

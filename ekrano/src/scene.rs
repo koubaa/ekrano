@@ -477,11 +477,14 @@ impl Scene {
         let encoded_stroke = self.encoding.encode_stroke_style(style);
         debug_assert!(encoded_stroke, "Stroke width is non-zero");
 
-        // 2-element dash patterns are handled on the GPU (encoded in the Style).
-        // Longer patterns still fall back to CPU dashing.
-        let use_cpu_dash = !style.dash_pattern.is_empty() && style.dash_pattern.len() != 2;
-
-        if use_cpu_dash {
+        // Match Vello's established behavior: dashes are expanded into path segments before the
+        // GPU stroke stage.
+        if style.dash_pattern.is_empty() {
+            #[cfg(feature = "bump_estimate")]
+            self.estimator
+                .count_path(shape.path_elements(SHAPE_TOLERANCE), &t, Some(style));
+            self.encoding.encode_shape(shape, false)
+        } else {
             let dashed = peniko::kurbo::dash(
                 shape.path_elements(SHAPE_TOLERANCE),
                 style.dash_offset,
@@ -491,11 +494,6 @@ impl Scene {
             #[cfg(feature = "bump_estimate")]
             self.estimator.count_path(dashed.iter().copied(), &t, Some(style));
             self.encoding.encode_path_elements(dashed.into_iter(), false)
-        } else {
-            #[cfg(feature = "bump_estimate")]
-            self.estimator
-                .count_path(shape.path_elements(SHAPE_TOLERANCE), &t, Some(style));
-            self.encoding.encode_shape(shape, false)
         }
     }
 

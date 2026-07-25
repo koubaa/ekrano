@@ -594,11 +594,30 @@ impl PersistentState {
     }
 
     pub(crate) fn drain_ready_bump_readbacks(&mut self, _ctx: &Context) -> Result<()> {
+        self.drain_bump_readbacks(false)
+    }
+
+    /// Wait for the pending bump submission (if any), then claim the readback.
+    ///
+    /// Required on headless/`render_to_buffer` paths when
+    /// `host_sidecar_on_submit_worker` makes the frame orchestrator close with
+    /// `end_frame_externally_ordered` — `drain_all` then does not wait for the
+    /// scheme submission, so a non-blocking drain would skip bump feedback and
+    /// never retry after overflow.
+    pub(crate) fn wait_and_drain_bump_readbacks(&mut self, _ctx: &Context) -> Result<()> {
+        self.drain_bump_readbacks(true)
+    }
+
+    fn drain_bump_readbacks(&mut self, wait: bool) -> Result<()> {
         let Some(mut submission) = self.pending_bump_submission.take() else {
             return Ok(());
         };
         if let Some(withdraw) = self.cached_bump_withdraw.as_ref() {
-            if !submission.is_settled() {
+            if wait {
+                submission
+                    .wait_until_settled()
+                    .map_err(|e| Error::Shader(e.to_string()))?;
+            } else if !submission.is_settled() {
                 self.pending_bump_submission = Some(submission);
                 return Ok(());
             }
@@ -611,7 +630,13 @@ impl PersistentState {
             read_bump_bytes(self, &bytes);
             return Ok(());
         }
-        self.pending_bump_submission = Some(submission);
+        if wait {
+            submission
+                .wait_until_settled()
+                .map_err(|e| Error::Shader(e.to_string()))?;
+        } else {
+            self.pending_bump_submission = Some(submission);
+        }
         Ok(())
     }
 

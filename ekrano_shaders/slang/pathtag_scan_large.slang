@@ -1,8 +1,12 @@
-// Copyright 2023 the Vello Authors
+// Copyright 2022 the Vello Authors
 // Copyright 2026 the Ekrano Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT OR Unlicense
 //
-// Pathtag scan - large (two-level) variant.
+// Pathtag scan - large (two-level) final stage.
+//
+// `reduced` is the exclusive prefix per first-level workgroup produced by
+// pathtag_scan1. Unlike the small scan, this must not fold `reduced[0..wg_id]`
+// in shared memory (that only works for wg_id < 256).
 
 import goldy_exp;
 import ekrano_shared;
@@ -10,43 +14,32 @@ import ekrano_shared;
 static const uint LG_WG_SIZE = 8;
 static const uint WG_SIZE = 256;
 
-// Slots: 0 = reduced, 1 = reduced2, 2 = tag_monoids
-groupshared TagMonoid sh_parent[256];
+// Slots: 0 = config, 1 = scene, 2 = reduced (from scan1), 3 = tag_monoids
 groupshared TagMonoid sh_monoid[256];
 
 [goldy_compute]
 [numthreads(256, 1, 1)]
-void cs_main(BufRO<TagMonoid> reduced, BufRO<TagMonoid> reduced2, Scattered<TagMonoid> tag_monoids,
+void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
+             BufRO<TagMonoid> reduced, Scattered<TagMonoid> tag_monoids,
              ThreadId global_id, GroupThreadId local_id, GroupId wg_id) {
-
-    TagMonoid agg = TagMonoid.identity();
-    if (local_id.x < wg_id.x) {
-        agg = reduced2[local_id.x];
-    }
-    sh_parent[local_id.x] = agg;
-    for (uint i = 0; i < LG_WG_SIZE; i++) {
-        GroupMemoryBarrierWithGroupSync();
-        if (local_id.x + (1u << i) < WG_SIZE)
-            agg = agg.combine(sh_parent[local_id.x + (1u << i)]);
-        GroupMemoryBarrierWithGroupSync();
-        sh_parent[local_id.x] = agg;
-    }
+    Config config = config_buf[0];
 
     uint ix = global_id.x;
-    agg = reduced[ix];
-    sh_monoid[local_id.x] = agg;
+    uint tag_word = scene[config.pathtag_base + ix];
+    TagMonoid agg_part = reduce_tag(tag_word);
+    sh_monoid[local_id.x] = agg_part;
     for (uint i = 0; i < LG_WG_SIZE; i++) {
         GroupMemoryBarrierWithGroupSync();
         if (local_id.x >= (1u << i)) {
             TagMonoid other = sh_monoid[local_id.x - (1u << i)];
-            agg = other.combine(agg);
+            agg_part = other.combine(agg_part);
         }
         GroupMemoryBarrierWithGroupSync();
-        sh_monoid[local_id.x] = agg;
+        sh_monoid[local_id.x] = agg_part;
     }
     GroupMemoryBarrierWithGroupSync();
 
-    TagMonoid tm = sh_parent[0];
+    TagMonoid tm = reduced[wg_id.x];
     if (local_id.x > 0) {
         tm = tm + sh_monoid[local_id.x - 1];
     }

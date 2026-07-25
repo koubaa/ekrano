@@ -175,11 +175,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # TODO: re-enable windows-latest when Windows CI is green again
-        os: [macos-latest, ubuntu-24.04]
+        # TODO: re-enable windows-latest when Windows CI is green again.
+        # When enabling, add a windows-latest row below and use the DX12-only Goldy test steps.
         include:
+          # Linux: lavapipe (software Vulkan) on free ubuntu-24.04 runners.
+          # Requires Mesa 25.0+ via ci/setup-ubuntu.sh for Vulkan 1.4.
           - os: ubuntu-24.04
-            runner: linux-gpu
+            runner: ubuntu-24.04
             gpu: 'yes'
           - os: macos-latest
             runner: macos-latest
@@ -225,22 +227,17 @@ jobs:
         if: matrix.os == 'ubuntu-24.04'
         run: bash ci/setup-ubuntu.sh
 
-      - name: Print Vulkan GPU information
+      - name: Verify lavapipe
         if: matrix.os == 'ubuntu-24.04'
         run: |
-          nvidia-smi
-          vulkaninfo --summary
-
-          NVIDIA_VK_ICD="$(find /usr /etc -path '*/vulkan/icd.d/nvidia_icd*.json' -print -quit 2>/dev/null)"
-          if [ -z "$NVIDIA_VK_ICD" ]; then
-            echo "ERROR: NVIDIA Vulkan ICD not found" >&2
+          if [ -z "${LAVAPIPE_ICD:-}" ]; then
+            echo "ERROR: LAVAPIPE_ICD not set by ci/setup-ubuntu.sh" >&2
             exit 1
           fi
+          echo "Using lavapipe ICD: $LAVAPIPE_ICD"
+          VK_ICD_FILENAMES="$LAVAPIPE_ICD" vulkaninfo --summary
+          VK_ICD_FILENAMES="$LAVAPIPE_ICD" vulkaninfo --summary | grep -Ei 'deviceName.*(llvmpipe|lavapipe)'
 
-          echo "NVIDIA_VK_ICD=$NVIDIA_VK_ICD" >> "$GITHUB_ENV"
-          echo "Using NVIDIA Vulkan ICD: $NVIDIA_VK_ICD"
-          VK_ICD_FILENAMES="$NVIDIA_VK_ICD" vulkaninfo --summary
-      
       - name: restore cache
         uses: Swatinem/rust-cache@v2
         with:
@@ -311,14 +308,27 @@ jobs:
           # Skip tests that are too slow on software-emulated GPUs (lavapipe, WARP).
           # These still run locally on real hardware.
           EKRANO_CI_SKIP_SLOW: 'yes'
-          # Linux GPU runner: force the NVIDIA Vulkan ICD so tests do not fall back to lavapipe.
-          # Other platforms leave this empty, which is harmless for the current test matrix.
-          VK_ICD_FILENAMES: ${{ env.NVIDIA_VK_ICD }}
+          # Linux: force lavapipe ICD (set by ci/setup-ubuntu.sh). Empty on macOS/Windows.
+          VK_ICD_FILENAMES: ${{ env.LAVAPIPE_ICD }}
           VK_LAYER_PATH: ""
           # We are experimenting with git lfs, and we don't expect to run out of bandwidth.
           # However, if we do, the tests are designed to be robust against that, if this environment variable is set.
           # If we do run out of bandwidth, uncomment the following line.
           # EKRANO_SKIP_LFS_SNAPSHOTS: all
+
+      # Ready when windows-latest is re-added to the matrix above.
+      - name: cargo test (Windows / DX12-only Goldy)
+        if: matrix.os == 'windows-latest'
+        run: >-
+          cargo test --workspace --locked
+          --no-default-features
+          -F goldy-dx12-only -F bump_estimate -F tracy
+          --no-fail-fast
+        env:
+          EKRANO_CI_GPU_SUPPORT: ${{ matrix.gpu }}
+          EKRANO_CI_SKIP_SLOW: 'yes'
+          GOLDY_BACKEND: dx12
+          VK_LAYER_PATH: ""
       
       - name: Upload test results due to failure
         uses: actions/upload-artifact@v4
@@ -330,6 +340,15 @@ jobs:
 
       - name: cargo test --doc
         run: cargo test --doc --workspace --locked --all-features --no-fail-fast
+
+      # Ready when windows-latest is re-added to the matrix above.
+      - name: cargo test --doc (Windows / DX12-only Goldy)
+        if: matrix.os == 'windows-latest'
+        run: >-
+          cargo test --doc --workspace --locked
+          --no-default-features
+          -F goldy-dx12-only -F bump_estimate -F tracy
+          --no-fail-fast
 
   check-msrv:
     name: cargo check (msrv)

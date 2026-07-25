@@ -48,6 +48,8 @@ fi
 if [ -n "${GITHUB_ENV:-}" ]; then
     # Running inside GitHub Actions
     echo "LAVAPIPE_ICD=$LAVAPIPE_ICD" >> "$GITHUB_ENV"
+    echo "VK_ICD_FILENAMES=$LAVAPIPE_ICD" >> "$GITHUB_ENV"
+    echo "VK_LAYER_PATH=" >> "$GITHUB_ENV"
     echo "GOLDY_BACKEND=vulkan" >> "$GITHUB_ENV"
 else
     # Running in Docker or locally -- write to a sourceable env file
