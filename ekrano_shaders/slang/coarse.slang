@@ -153,16 +153,17 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
     }
     GroupMemoryBarrierWithGroupSync();
     uint failed = sh_part_count[0];
+    // Do not early-return before later workgroup barriers (lavapipe deadlock).
     if (failed != 0) {
         if (wg_id.x == 0 && local_id.x == 0)
             InterlockedOr(bump[0].failed, failed);
-        return;
     }
 
     uint width_in_bins = (config.width_in_tiles + N_TILE_X - 1) / N_TILE_X;
     uint bin_ix = width_in_bins * wg_id.y + wg_id.x;
     // Skip when bin_ix exceeds bin_headers capacity (binning_wgs * 256). See vello #680.
-    if (bin_ix >= 256)
+    // `bin_ix` is uniform across the workgroup, so this return is WG-uniform.
+    if (failed != 0 || bin_ix >= 256)
         return;
     uint n_partitions = (config.n_drawobj + N_TILE - 1) / N_TILE;
 

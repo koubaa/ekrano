@@ -13,6 +13,7 @@ static const uint LG_WG_SIZE = 8;
 groupshared uint sh_row_width[256];
 groupshared uint sh_row_count[256];
 groupshared uint sh_offset[256];
+groupshared uint sh_failed;
 
 // Slots: 0=config, 1=bump, 2=paths, 3=tiles
 
@@ -23,17 +24,19 @@ void cs_main(BufRO<Config> config_buf, Scattered<BumpAllocators> bump,
              ThreadId global_id, GroupThreadId local_id) {
     Config config = config_buf[0];
 
+    // Broadcast bump.failed without an early `return`. Returning from only some
+    // threads before GroupMemoryBarrierWithGroupSync deadlocks the workgroup on
+    // lavapipe (observed: hillis-steele scan never completes; interior tiles keep
+    // raw path_count backdrops and coarse skips solid fills).
     if (local_id.x == 0) {
-        sh_row_count[0] = bump[0].failed;
+        sh_failed = bump[0].failed;
     }
     GroupMemoryBarrierWithGroupSync();
-    uint failed = sh_row_count[0];
-    if (failed != 0)
-        return;
+    uint failed = sh_failed;
 
     uint drawobj_ix = global_id.x;
     uint row_count = 0;
-    if (drawobj_ix < config.n_drawobj) {
+    if (failed == 0 && drawobj_ix < config.n_drawobj) {
         Path path = paths[drawobj_ix];
         sh_row_width[local_id.x] = path.bbox.z - path.bbox.x;
         row_count = path.bbox.w - path.bbox.y;
@@ -52,6 +55,10 @@ void cs_main(BufRO<Config> config_buf, Scattered<BumpAllocators> bump,
         sh_row_count[local_id.x] = row_count;
     }
     GroupMemoryBarrierWithGroupSync();
+
+    if (failed != 0) {
+        return;
+    }
 
     uint total_rows = sh_row_count[WG_SIZE - 1];
     for (uint row = local_id.x; row < total_rows; row += WG_SIZE) {

@@ -39,25 +39,23 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
     }
     GroupMemoryBarrierWithGroupSync();
     uint failed = sh_previous_failed;
-    if (failed != 0) {
-        if (global_id.x == 0) {
-            // Diagnostic: on STAGE_FLATTEN overflow, stash the GPU-observed
-            // lines/lines_size into the unused binning/ptcl counters so the
-            // CPU retry path can compare against its own values. If the CPU
-            // thinks `config.lines_size` was 2M but the GPU reports 0, the
-            // buffer write never reached the GPU (was a bindless-slot
-            // aliasing bug). Uncomment to re-enable next time the flatten
-            // retry cascade reappears.
-            //   bump[0].binning = bump[0].lines;
-            //   bump[0].ptcl = config.lines_size;
-            InterlockedOr(bump[0].failed, STAGE_FLATTEN);
-        }
-        return;
+    // Do not early-return before later workgroup barriers (lavapipe deadlock).
+    if (failed != 0 && global_id.x == 0) {
+        // Diagnostic: on STAGE_FLATTEN overflow, stash the GPU-observed
+        // lines/lines_size into the unused binning/ptcl counters so the
+        // CPU retry path can compare against its own values. If the CPU
+        // thinks `config.lines_size` was 2M but the GPU reports 0, the
+        // buffer write never reached the GPU (was a bindless-slot
+        // aliasing bug). Uncomment to re-enable next time the flatten
+        // retry cascade reappears.
+        //   bump[0].binning = bump[0].lines;
+        //   bump[0].ptcl = config.lines_size;
+        InterlockedOr(bump[0].failed, STAGE_FLATTEN);
     }
 
     uint element_ix = global_id.x;
     int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
-    if (element_ix < config.n_drawobj) {
+    if (failed == 0 && element_ix < config.n_drawobj) {
         DrawMonoid draw_monoid = draw_monoids[element_ix];
         uint draw_tag = scene[config.drawtag_base + element_ix];
         float4 clip_bbox = Bbox2D.infinite().v;
