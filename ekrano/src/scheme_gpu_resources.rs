@@ -223,10 +223,10 @@ pub(crate) fn write_image_region(
     }
     let raw_bytes = image_data.data.data();
 
-    // The atlas is always sampled with hardware bilinear, which requires premultiplied-alpha
-    // texels to avoid fringing on transparent edges. Straight-alpha images (ImageAlphaType::Alpha)
-    // are converted to premultiplied on the CPU before upload; premultiplied sources are used
-    // as-is.  Callers' ImageData is never mutated.
+    // Fine samples the atlas with an explicit 4-tap bilinear (or nearest Load), which still
+    // requires premultiplied-alpha texels to avoid fringing on transparent edges.
+    // Straight-alpha images (ImageAlphaType::Alpha) are converted to premultiplied on the CPU
+    // before upload; premultiplied sources are used as-is. Callers' ImageData is never mutated.
     let premul_storage;
     let bytes: &[u8] = if image_data.alpha_type == peniko::ImageAlphaType::Alpha {
         premul_storage = premultiply_rgba8(raw_bytes);
