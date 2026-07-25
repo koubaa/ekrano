@@ -108,7 +108,6 @@ pub struct CapturedBuffers {
 
 /// Flatten uses a single dispatch (`ConfigUniform::flatten_thread_base` stays 0).
 /// Chunking via push-constant `thread_base` under-counted work on DX12.
-
 fn dispatch_stage(
     recorder: &mut SchemeRecorder<'_>,
     indirect: &Buffer,
