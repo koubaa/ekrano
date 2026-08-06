@@ -19,6 +19,13 @@ goldy-default = [
     "goldy/instrumentation",
 ]
 goldy-dx12-only = ["ekrano/goldy-dx12-only", "scenes/goldy-dx12-only", "goldy/dx12"]
+goldy-cuda = [
+    "ekrano/goldy-cuda",
+    "scenes/goldy-cuda",
+    "goldy/cuda",
+    "goldy/dx12",
+    "goldy/instrumentation",
+]
 
 [lints]
 workspace = true

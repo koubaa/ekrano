@@ -20,6 +20,8 @@ default = ["goldy-default"]
 # Mirrors `goldy` default backends for local dev; CI can pass `--no-default-features -F goldy-dx12-only`.
 goldy-default = ["goldy/vulkan", "goldy/dx12", "goldy/metal", "goldy/instrumentation"]
 goldy-dx12-only = ["goldy/dx12"]
+# Windows + NVIDIA: GOLDY_BACKEND=cuda cargo run --no-default-features -F goldy-cuda -- ...
+goldy-cuda = ["goldy/cuda", "goldy/dx12", "goldy/instrumentation"]
 # Enables GPU memory usage estimation. This performs additional computations
 # in order to estimate the minimum required allocations for buffers backing
 # bump-allocated GPU memory.
