@@ -403,6 +403,15 @@ impl SchemeRenderer {
             .is_some_and(|(out, _)| out.is_some())
     }
 
+    #[cfg(test)]
+    fn cached_scheme_out_image_format(&self) -> Option<TextureFormat> {
+        self.persistent
+            .cached_scheme_rt
+            .as_ref()
+            .and_then(|(out, _)| out.as_ref())
+            .map(|t| t.format())
+    }
+
     /// GPU device handle shared by this renderer.
     pub fn device(&self) -> &Device {
         &self.device
@@ -1649,6 +1658,10 @@ mod tests {
     /// channel-swap regression (velato tiger turning blue) can occur if
     /// `copy_texture_to_present` copies an RGBA `out_image` into a BGRA
     /// present lease.
+    ///
+    /// Formats unsupported by the active backend (e.g. `Bgra8Unorm` on CUDA) are
+    /// skipped — the regression is about honouring the request, not inventing
+    /// backend texture formats.
     #[test]
     fn prepare_out_image_format_matches_requested() {
         let Some((gpu, mut persistent)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
@@ -1666,7 +1679,17 @@ mod tests {
             robust: false,
         };
 
-        for &expected_format in &[TextureFormat::Bgra8Unorm, TextureFormat::Rgba8Unorm] {
+        let caps = gpu.capabilities();
+        let formats: Vec<TextureFormat> = [TextureFormat::Bgra8Unorm, TextureFormat::Rgba8Unorm]
+            .into_iter()
+            .filter(|f| caps.supported_render_target_formats.contains(f))
+            .collect();
+        assert!(
+            !formats.is_empty(),
+            "backend must support Bgra8Unorm and/or Rgba8Unorm to exercise out_image format selection"
+        );
+
+        for &expected_format in &formats {
             let mut resolver = Resolver::new();
             let mut packed = Vec::new();
             let (layout, ramps, images) = resolver.resolve(encoding, &mut packed);
@@ -2269,6 +2292,15 @@ mod tests {
             renderer.cached_scheme_has_out_image(),
             "headless readback path must retain out_image"
         );
+        // CUDA stores DirectSpatial<float4> without UNORM conversion, so the
+        // headless path keeps an Rgba32Float out_image (converted to RGBA8 on withdraw).
+        if gpu.backend_type() == BackendType::Cuda {
+            assert_eq!(
+                renderer.cached_scheme_out_image_format(),
+                Some(TextureFormat::Rgba32Float),
+                "CUDA headless out_image must be Rgba32Float for DirectSpatial<float4> writes"
+            );
+        }
     }
 
     /// Filter frames re-record each submit (scratches are one-shot). Removing filters
