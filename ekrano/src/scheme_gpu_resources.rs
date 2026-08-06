@@ -58,7 +58,15 @@ fn acquire_retained_texture_rgba(
     access: TextureKind,
     flags: TextureFlags,
 ) -> Result<Texture, Error> {
-    acquire_retained_texture(recorder, width, height, TextureFormat::Rgba8Unorm, access, flags)
+    // CUDA: DirectSpatial<float4> stores require size-matched Rgba32Float (no UNORM
+    // conversion on CUsurfObject writes). Other backends use typed UAV conversion to
+    // Rgba8Unorm.
+    let format = if recorder.device().backend_type() == goldy::types::BackendType::Cuda {
+        TextureFormat::Rgba32Float
+    } else {
+        TextureFormat::Rgba8Unorm
+    };
+    acquire_retained_texture(recorder, width, height, format, access, flags)
 }
 
 /// Relinquish a sticky texture deed into the context transient pool (epoch-gated).

@@ -535,23 +535,45 @@ impl SchemeRenderer {
             .map_err(|e| Error::Readback(e.to_string()))?;
         // Texture withdraws expose tight-row RGBA (`logical_bytes`). If Goldy ever returns
         // pitched footprint bytes instead, unpack here using the bind-time layout.
-        Ok(match withdraw.texture_layout() {
+        let bytes = match withdraw.texture_layout() {
             Some(layout)
                 if bytes.len() as u64 == layout.staging_bytes && layout.row_pitch != layout.tight_row_bytes() =>
             {
                 let row_bytes = layout.tight_row_bytes() as usize;
                 let pitch = layout.row_pitch as usize;
-                let mut output = vec![0_u8; layout.logical_bytes as usize];
-                for row in 0..layout.height as usize {
-                    let src_offset = layout.footprint_offset as usize + row * pitch;
-                    let dst_offset = row * row_bytes;
-                    output[dst_offset..dst_offset + row_bytes]
-                        .copy_from_slice(&bytes[src_offset..src_offset + row_bytes]);
+                let height = layout.height as usize;
+                let mut tight = Vec::with_capacity(row_bytes * height);
+                for y in 0..height {
+                    let start = y * pitch;
+                    tight.extend_from_slice(&bytes[start..start + row_bytes]);
                 }
-                output
+                tight
             }
             _ => bytes.into_vec(),
-        })
+        };
+        // CUDA headless path renders to Rgba32Float; convert to RGBA8 for the public API.
+        let out_format = self
+            .persistent
+            .cached_scheme_rt
+            .as_ref()
+            .and_then(|(t, _)| t.as_ref())
+            .map(|t| t.format());
+        if out_format == Some(TextureFormat::Rgba32Float) {
+            let pixel_count = bytes.len() / 16;
+            let mut rgba8 = Vec::with_capacity(pixel_count * 4);
+            for chunk in bytes.chunks_exact(16) {
+                let r = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                let g = f32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
+                let b = f32::from_le_bytes([chunk[8], chunk[9], chunk[10], chunk[11]]);
+                let a = f32::from_le_bytes([chunk[12], chunk[13], chunk[14], chunk[15]]);
+                rgba8.push((r.clamp(0.0, 1.0) * 255.0).round() as u8);
+                rgba8.push((g.clamp(0.0, 1.0) * 255.0).round() as u8);
+                rgba8.push((b.clamp(0.0, 1.0) * 255.0).round() as u8);
+                rgba8.push((a.clamp(0.0, 1.0) * 255.0).round() as u8);
+            }
+            return Ok(rgba8);
+        }
+        Ok(bytes)
     }
 
     fn drain_ready_bump_readbacks(&mut self) -> Result<()> {
@@ -644,7 +666,16 @@ impl SchemeRenderer {
         let mut stats = FrameStats::default();
         let t_resolve = frame_start.elapsed();
 
-        let out_image_format = surface.map(|s| s.format()).unwrap_or(TextureFormat::Rgba8Unorm);
+        // Headless default: Rgba8Unorm (matches render_to_buffer RGBA8 bytes). CUDA surface
+        // writes are raw typed stores with no DX12-style UAV format conversion, so
+        // DirectSpatial<float4> requires Rgba32Float; convert to u8 on withdraw.
+        let out_image_format = surface.map(|s| s.format()).unwrap_or_else(|| {
+            if self.device.backend_type() == BackendType::Cuda {
+                TextureFormat::Rgba32Float
+            } else {
+                TextureFormat::Rgba8Unorm
+            }
+        });
         // Metal: write fine/filter output straight into the drawable. Other backends keep
         // the intermediate `out_image` + copy blit (DX12 flip-model cannot UAV the backbuffer).
         let direct_present =
