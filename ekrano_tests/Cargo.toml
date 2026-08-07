@@ -89,6 +89,10 @@ name = "regression"
 harness = false
 
 [[test]]
+name = "render_target_formats"
+harness = false
+
+[[test]]
 name = "smoke_snapshots"
 harness = false
 
