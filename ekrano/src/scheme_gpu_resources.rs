@@ -342,7 +342,11 @@ fn alloc_or_reuse_config_deposit(
 
 /// Write scene bytes into a destination-bound deposit (copy topology recorded at bind).
 pub(crate) fn stage_scene_bytes(recorder: &mut SchemeRecorder<'_>, scene: &Buffer, bytes: &[u8]) -> Result<(), Error> {
-    let deposit = alloc_or_reuse_scene_deposit(recorder, scene, bytes.len())?;
+    let deposit = {
+        let _tz = goldy::tracy_zone!("ekrano.prepare.scene_upload.deposit");
+        alloc_or_reuse_scene_deposit(recorder, scene, bytes.len())?
+    };
+    let _tz = goldy::tracy_zone!("ekrano.prepare.scene_upload.write");
     write_deposit(recorder, deposit, bytes, "scene")
 }
 
@@ -352,7 +356,11 @@ pub(crate) fn stage_config_bytes(
     config: &Buffer,
     bytes: &[u8],
 ) -> Result<(), Error> {
-    let deposit = alloc_or_reuse_config_deposit(recorder, config)?;
+    let deposit = {
+        let _tz = goldy::tracy_zone!("ekrano.prepare.config_upload.deposit");
+        alloc_or_reuse_config_deposit(recorder, config)?
+    };
+    let _tz = goldy::tracy_zone!("ekrano.prepare.config_upload.write");
     write_deposit(recorder, deposit, bytes, "config")
 }
 
@@ -936,17 +944,26 @@ impl PipelineResources {
         let mask_atlas = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.mask_atlas");
             let (mw, mh) = crate::worker_retention::normalize_mask_atlas(coverage_mask.map(|m| (m.width, m.height)));
-            let tex = acquire_or_reuse_retained_atlas(recorder, AtlasCache::Mask, mw, mh, TextureFlags::COPY_DST)?;
+            let tex = {
+                let _tz = goldy::tracy_zone!("ekrano.prepare.mask_atlas.acquire");
+                acquire_or_reuse_retained_atlas(recorder, AtlasCache::Mask, mw, mh, TextureFlags::COPY_DST)?
+            };
             let mut deposit_slot = std::mem::take(&mut recorder.persistent.cached_mask_deposit);
             match coverage_mask {
                 Some(m) => {
-                    let mut rgba = Vec::with_capacity(m.data.len() * 4);
-                    for &b in m.data.iter() {
-                        rgba.extend_from_slice(&[b, b, b, 255]);
-                    }
+                    let rgba = {
+                        let _tz = goldy::tracy_zone!("ekrano.prepare.mask_atlas.expand");
+                        let mut rgba = Vec::with_capacity(m.data.len() * 4);
+                        for &b in m.data.iter() {
+                            rgba.extend_from_slice(&[b, b, b, 255]);
+                        }
+                        rgba
+                    };
+                    let _tz = goldy::tracy_zone!("ekrano.prepare.mask_atlas.upload");
                     upload_texture_full(recorder, &mut deposit_slot, &tex, &rgba)?;
                 }
                 None => {
+                    let _tz = goldy::tracy_zone!("ekrano.prepare.mask_atlas.upload");
                     upload_texture_full(recorder, &mut deposit_slot, &tex, &[255, 255, 255, 255])?;
                 }
             }
@@ -956,7 +973,10 @@ impl PipelineResources {
 
         let scene = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.scene_upload");
-            let scene_buf = alloc_or_reuse_scene(recorder, packed.len())?;
+            let scene_buf = {
+                let _tz = goldy::tracy_zone!("ekrano.prepare.scene_upload.alloc");
+                alloc_or_reuse_scene(recorder, packed.len())?
+            };
             stage_scene_bytes(recorder, &scene_buf, &packed)?;
             scene_buf
         };
@@ -965,21 +985,24 @@ impl PipelineResources {
 
         let config = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.config_upload");
-            let config_buf = if let Some((_, buf)) = recorder.persistent.cached_config_uniform.take() {
-                record_buffer_reuse(recorder.upload_scheme(), &buf);
-                buf
-            } else {
-                recorder
-                    .persistent
-                    .retained_pool
-                    .acquire_buffer(
-                        size_of::<ekrano_encoding::ConfigUniform>() as u64,
-                        BufferKind::Scattered,
-                        Some(size_of::<ekrano_encoding::ConfigUniform>() as u32),
-                        BufferFlags::empty(),
-                        None,
-                    )
-                    .map_err(|e| Error::Gpu(e.to_string()))?
+            let config_buf = {
+                let _tz = goldy::tracy_zone!("ekrano.prepare.config_upload.acquire");
+                if let Some((_, buf)) = recorder.persistent.cached_config_uniform.take() {
+                    record_buffer_reuse(recorder.upload_scheme(), &buf);
+                    buf
+                } else {
+                    recorder
+                        .persistent
+                        .retained_pool
+                        .acquire_buffer(
+                            size_of::<ekrano_encoding::ConfigUniform>() as u64,
+                            BufferKind::Scattered,
+                            Some(size_of::<ekrano_encoding::ConfigUniform>() as u32),
+                            BufferFlags::empty(),
+                            None,
+                        )
+                        .map_err(|e| Error::Gpu(e.to_string()))?
+                }
             };
             // Always write: the retained upload scheme keeps a config deposit copy node, and
             // Goldy requires every referenced deposit to be written each submit. Content-keyed
