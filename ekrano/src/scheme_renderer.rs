@@ -656,7 +656,8 @@ impl SchemeRenderer {
         // Headless default: Rgba8Unorm (matches render_to_buffer RGBA8 bytes).
         let out_image_format = surface.map(|s| s.format()).unwrap_or(TextureFormat::Rgba8Unorm);
         // Metal: write fine/filter output straight into the drawable. Other backends keep
-        // the intermediate `out_image` + copy blit (DX12 flip-model cannot UAV the backbuffer).
+        // the intermediate `out_image` + copy blit (DX12/CUDA: flip-model / imported
+        // scratch cannot be the fine UAV; copy from a local staging texture instead).
         let direct_present =
             surface.is_some() && output_texture.is_none() && self.device.backend_type() == BackendType::Metal;
         if self.persistent.purge_render_target_cache_if_mismatch(
