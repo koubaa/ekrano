@@ -202,7 +202,7 @@ pub struct PresentToken {
 impl PresentToken {
     /// Perform scanout via [`goldy::Claim::consume`].
     pub fn present(self) -> Result<()> {
-        self.claim.consume().map_err(|e| Error::Shader(e.to_string()))
+        self.claim.consume().map_err(Error::from)
     }
 }
 
@@ -616,7 +616,7 @@ impl PersistentState {
             if wait {
                 submission
                     .wait_until_settled()
-                    .map_err(|e| Error::Shader(e.to_string()))?;
+                    .map_err(Error::from)?;
             } else if !submission.is_settled() {
                 self.pending_bump_submission = Some(submission);
                 return Ok(());
@@ -624,16 +624,16 @@ impl PersistentState {
             let _tz = goldy::tracy_zone!("ekrano.drain_ready_bump_readbacks.withdraw");
             let bytes = withdraw
                 .claim(&mut submission)
-                .map_err(|e| Error::Shader(e.to_string()))?
+                .map_err(Error::from)?
                 .consume()
-                .map_err(|e| Error::Shader(e.to_string()))?;
+                .map_err(Error::from)?;
             read_bump_bytes(self, &bytes);
             return Ok(());
         }
         if wait {
             submission
                 .wait_until_settled()
-                .map_err(|e| Error::Shader(e.to_string()))?;
+                .map_err(Error::from)?;
         } else {
             self.pending_bump_submission = Some(submission);
         }

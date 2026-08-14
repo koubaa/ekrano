@@ -209,6 +209,22 @@ pub enum Error {
     Readback(String),
 }
 
+impl Error {
+    /// Full error text suitable for stderr logging (includes backend context chains).
+    pub fn detail(&self) -> String {
+        match self {
+            Self::Shader(s) | Self::Gpu(s) | Self::Readback(s) => s.clone(),
+            Self::InvalidImage { id, reason } => format!("Invalid empty image (id: {id}): {reason}"),
+        }
+    }
+}
+
+impl From<goldy::GoldyError> for Error {
+    fn from(e: goldy::GoldyError) -> Self {
+        Self::Shader(e.detail())
+    }
+}
+
 pub(crate) type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// Parameters used in a single render that are configurable by the client.

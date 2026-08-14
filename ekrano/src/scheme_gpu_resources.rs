@@ -48,7 +48,7 @@ fn acquire_retained_texture(
         .persistent
         .retained_pool
         .acquire_texture(width, height, format, access, flags, None)
-        .map_err(|e| Error::Shader(e.to_string()))
+        .map_err(|e| Error::Gpu(format!("{e:#}")))
 }
 
 fn acquire_retained_texture_rgba(
@@ -203,7 +203,7 @@ pub(crate) fn record_upload_bytes_owned(
         .map_err(|e| Error::Gpu(e.to_string()))?;
     let deposit = MemoryExchange::new(recorder.context())
         .bind_deposit_buffer(recorder.upload_scheme(), &buf, bytes.len() as u64)
-        .map_err(|e| Error::Shader(e.to_string()))?;
+        .map_err(Error::from)?;
     write_deposit(recorder, deposit, &bytes, "record_upload_bytes_owned")?;
     Ok(buf)
 }
@@ -264,7 +264,7 @@ pub(crate) fn acquire_texture_rgba(
     recorder
         .context()
         .acquire_transient_texture(width, height, TextureFormat::Rgba8Unorm, access, flags)
-        .map_err(|e| Error::Shader(e.to_string()))
+        .map_err(|e| Error::Gpu(format!("{e:#}")))
 }
 
 pub(crate) fn clear_gpu_buf(
@@ -280,7 +280,7 @@ pub(crate) fn clear_gpu_buf(
     recorder
         .upload_scheme()
         .clear_parcel(buf, off, sz)
-        .map_err(|e| Error::Shader(e.to_string()))?;
+        .map_err(Error::from)?;
     Ok(())
 }
 

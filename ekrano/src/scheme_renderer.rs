@@ -476,7 +476,7 @@ impl SchemeRenderer {
             self.run_frame(scene, params, None, None)?;
             self.frame_pipeline
                 .drain_all()
-                .map_err(|e| Error::Shader(e.to_string()))?;
+                .map_err(Error::from)?;
             // Must wait: with host-sidecar / nonblocking reuse the orchestrator ring
             // does not fence the scheme submission, so a poll-only drain skips bump
             // feedback and leaves overflowed frames unrecovered.
@@ -580,7 +580,7 @@ impl SchemeRenderer {
             claim,
             ring_note_submission,
         } = token;
-        claim.consume().map_err(|e| Error::Shader(e.to_string()))?;
+        claim.consume().map_err(Error::from)?;
         if let Some(submission) = ring_note_submission {
             self.frame_pipeline.note_presented(&submission);
             if self.persistent.cached_bump_withdraw.is_some() {
@@ -676,7 +676,7 @@ impl SchemeRenderer {
         let frame_handle = self
             .frame_pipeline
             .begin_frame()
-            .map_err(|e| Error::Shader(e.to_string()))?;
+            .map_err(Error::from)?;
         self.drain_ready_bump_readbacks()?;
         self.cleanup_frame_counter = self.cleanup_frame_counter.wrapping_add(1);
         if self.cleanup_frame_counter.is_multiple_of(64) {
@@ -908,7 +908,7 @@ impl SchemeRenderer {
                 let surface = surface.expect("direct present requires surface");
                 let (lease, tx) = surface
                     .bind_destination(recorder.scheme())
-                    .map_err(|e| Error::Shader(e.to_string()))?;
+                    .map_err(Error::from)?;
                 present_bound_lease = Some(lease);
                 early_present_tx = Some(tx);
             }
@@ -969,7 +969,7 @@ impl SchemeRenderer {
                 Some(
                     MemoryExchange::new(recorder.context())
                         .bind_withdraw(recorder.scheme(), &pipeline.bump)
-                        .map_err(|e| Error::Shader(e.to_string()))?,
+                        .map_err(Error::from)?,
                 )
             } else {
                 None
@@ -1056,7 +1056,7 @@ impl SchemeRenderer {
 
         let present_token = match (present_tx, scheme_submission) {
             (Some(tx), Some(mut submission)) => {
-                let claim = tx.claim(&mut submission).map_err(|e| Error::Shader(e.to_string()))?;
+                let claim = tx.claim(&mut submission).map_err(Error::from)?;
                 let queue_bump = params.robust && self.persistent.cached_bump_withdraw.is_some();
                 let note_after_present = !self.nonblocking_reuse && surface.is_some();
                 let ring_note_submission = if note_after_present {
@@ -1250,7 +1250,7 @@ impl<'a> SchemeRecorder<'a> {
     ) -> Result<goldy::Transaction> {
         surface
             .bind(self.scheme, source)
-            .map_err(|e| Error::Shader(e.to_string()))
+            .map_err(Error::from)
     }
 
     pub(crate) fn new(
@@ -1561,7 +1561,7 @@ impl<'a> SchemeRecorder<'a> {
 
         if !self.metal_fused_upload {
             let _tz = goldy::tracy_zone!("ekrano.finish.upload_submit");
-            self.upload.submit().map_err(|e| Error::Shader(e.to_string()))?;
+            self.upload.submit().map_err(Error::from)?;
         }
 
         // On the fused Metal path the upload blits share the worker scheme's single
@@ -1578,8 +1578,8 @@ impl<'a> SchemeRecorder<'a> {
                 Some(claim) => self
                     .scheme
                     .submit_with_acquired_presents(vec![claim])
-                    .map_err(|e| Error::Shader(e.to_string()))?,
-                None => self.scheme.submit().map_err(|e| Error::Shader(e.to_string()))?,
+                    .map_err(Error::from)?,
+                None => self.scheme.submit().map_err(Error::from)?,
             }
         };
         {
@@ -1588,15 +1588,15 @@ impl<'a> SchemeRecorder<'a> {
                 // Ordering is enforced by reuse epochs / deferred host writes / present easement.
                 self.frame_pipeline
                     .end_frame_externally_ordered(frame_handle)
-                    .map_err(|e| Error::Shader(e.to_string()))?;
+                    .map_err(Error::from)?;
             } else if deferred_present {
                 self.frame_pipeline
                     .end_frame_for_present(frame_handle, &submission)
-                    .map_err(|e| Error::Shader(e.to_string()))?;
+                    .map_err(Error::from)?;
             } else {
                 self.frame_pipeline
                     .end_frame_standalone(frame_handle, &submission)
-                    .map_err(|e| Error::Shader(e.to_string()))?;
+                    .map_err(Error::from)?;
             }
         }
         self.finished = true;
