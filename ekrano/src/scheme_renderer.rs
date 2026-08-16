@@ -474,9 +474,7 @@ impl SchemeRenderer {
         for _attempt in 0..=MAX_BUMP_RETRIES {
             self.poll_and_reclaim();
             self.run_frame(scene, params, None, None)?;
-            self.frame_pipeline
-                .drain_all()
-                .map_err(Error::from)?;
+            self.frame_pipeline.drain_all().map_err(Error::from)?;
             // Must wait: with host-sidecar / nonblocking reuse the orchestrator ring
             // does not fence the scheme submission, so a poll-only drain skips bump
             // feedback and leaves overflowed frames unrecovered.
@@ -674,10 +672,7 @@ impl SchemeRenderer {
         let t_drain_start = Instant::now();
 
         let _tz_begin = goldy::tracy_zone!("ekrano.begin_frame");
-        let frame_handle = self
-            .frame_pipeline
-            .begin_frame()
-            .map_err(Error::from)?;
+        let frame_handle = self.frame_pipeline.begin_frame().map_err(Error::from)?;
         self.drain_ready_bump_readbacks()?;
         self.cleanup_frame_counter = self.cleanup_frame_counter.wrapping_add(1);
         if self.cleanup_frame_counter.is_multiple_of(64) {
@@ -907,9 +902,7 @@ impl SchemeRenderer {
             let mut early_present_tx = None;
             if direct_present {
                 let surface = surface.expect("direct present requires surface");
-                let (lease, tx) = surface
-                    .bind_destination(recorder.scheme())
-                    .map_err(Error::from)?;
+                let (lease, tx) = surface.bind_destination(recorder.scheme()).map_err(Error::from)?;
                 present_bound_lease = Some(lease);
                 early_present_tx = Some(tx);
             }
@@ -1249,9 +1242,7 @@ impl<'a> SchemeRecorder<'a> {
         surface: &goldy::SurfaceExchange,
         source: &Texture,
     ) -> Result<goldy::Transaction> {
-        surface
-            .bind(self.scheme, source)
-            .map_err(Error::from)
+        surface.bind(self.scheme, source).map_err(Error::from)
     }
 
     pub(crate) fn new(

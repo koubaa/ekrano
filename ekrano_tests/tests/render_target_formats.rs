@@ -55,7 +55,12 @@ fn blurred_circle_scene(width: f64, height: f64) -> Scene {
         std_dev: 2.0,
         edge_mode: FilterEdgeMode::Duplicate,
     });
-    scene.push_filter_layer(blur, Fill::NonZero, Affine::IDENTITY, &Rect::new(0.0, 0.0, width, height));
+    scene.push_filter_layer(
+        blur,
+        Fill::NonZero,
+        Affine::IDENTITY,
+        &Rect::new(0.0, 0.0, width, height),
+    );
     scene.fill(
         Fill::NonZero,
         Affine::IDENTITY,
@@ -85,8 +90,8 @@ fn render_to_rgba32float_with_filters() {
     }
 
     let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer");
-    let width = 64u32;
-    let height = 64u32;
+    let width = 64_u32;
+    let height = 64_u32;
     let texture = test_alloc_texture(
         renderer.device(),
         width,
@@ -120,17 +125,18 @@ fn render_to_rgba32float_with_filters() {
         .expect("withdraw float RT");
     let mut frame = scheme.submit().expect("submit readback");
     let loan = grant.claim(&mut frame).expect("claim").consume().expect("read");
-    assert_eq!(loan.len(), (width * height * 4 * 4) as usize);
+    assert_eq!(
+        loan.len(),
+        (width * height * 4 * 4) as usize,
+        "Rgba32Float readback byte count"
+    );
 
     // Blurred orange circle over black: some texels must be non-zero.
     let nonzero = loan.chunks_exact(4).any(|b| {
         let v = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
         v > 1e-3
     });
-    assert!(
-        nonzero,
-        "Rgba32Float filter render produced an all-zero image"
-    );
+    assert!(nonzero, "Rgba32Float filter render produced an all-zero image");
 }
 
 /// Plain (no filter) float target still works — identity specialization path.
@@ -148,8 +154,8 @@ fn render_to_rgba32float_plain() {
     }
 
     let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer");
-    let width = 32u32;
-    let height = 32u32;
+    let width = 32_u32;
+    let height = 32_u32;
     let texture = test_alloc_texture(
         renderer.device(),
         width,

@@ -614,9 +614,7 @@ impl PersistentState {
         };
         if let Some(withdraw) = self.cached_bump_withdraw.as_ref() {
             if wait {
-                submission
-                    .wait_until_settled()
-                    .map_err(Error::from)?;
+                submission.wait_until_settled().map_err(Error::from)?;
             } else if !submission.is_settled() {
                 self.pending_bump_submission = Some(submission);
                 return Ok(());
@@ -631,9 +629,7 @@ impl PersistentState {
             return Ok(());
         }
         if wait {
-            submission
-                .wait_until_settled()
-                .map_err(Error::from)?;
+            submission.wait_until_settled().map_err(Error::from)?;
         } else {
             self.pending_bump_submission = Some(submission);
         }
