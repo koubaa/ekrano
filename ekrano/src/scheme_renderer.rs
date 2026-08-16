@@ -403,6 +403,15 @@ impl SchemeRenderer {
             .is_some_and(|(out, _)| out.is_some())
     }
 
+    #[cfg(test)]
+    fn cached_scheme_out_image_format(&self) -> Option<TextureFormat> {
+        self.persistent
+            .cached_scheme_rt
+            .as_ref()
+            .and_then(|(out, _)| out.as_ref())
+            .map(|t| t.format())
+    }
+
     /// GPU device handle shared by this renderer.
     pub fn device(&self) -> &Device {
         &self.device
@@ -465,9 +474,7 @@ impl SchemeRenderer {
         for _attempt in 0..=MAX_BUMP_RETRIES {
             self.poll_and_reclaim();
             self.run_frame(scene, params, None, None)?;
-            self.frame_pipeline
-                .drain_all()
-                .map_err(|e| Error::Shader(e.to_string()))?;
+            self.frame_pipeline.drain_all().map_err(Error::from)?;
             // Must wait: with host-sidecar / nonblocking reuse the orchestrator ring
             // does not fence the scheme submission, so a poll-only drain skips bump
             // feedback and leaves overflowed frames unrecovered.
@@ -571,7 +578,7 @@ impl SchemeRenderer {
             claim,
             ring_note_submission,
         } = token;
-        claim.consume().map_err(|e| Error::Shader(e.to_string()))?;
+        claim.consume().map_err(Error::from)?;
         if let Some(submission) = ring_note_submission {
             self.frame_pipeline.note_presented(&submission);
             if self.persistent.cached_bump_withdraw.is_some() {
@@ -644,9 +651,11 @@ impl SchemeRenderer {
         let mut stats = FrameStats::default();
         let t_resolve = frame_start.elapsed();
 
+        // Headless default: Rgba8Unorm (matches render_to_buffer RGBA8 bytes).
         let out_image_format = surface.map(|s| s.format()).unwrap_or(TextureFormat::Rgba8Unorm);
         // Metal: write fine/filter output straight into the drawable. Other backends keep
-        // the intermediate `out_image` + copy blit (DX12 flip-model cannot UAV the backbuffer).
+        // the intermediate `out_image` + copy blit (DX12/CUDA: flip-model / imported
+        // scratch cannot be the fine UAV; copy from a local staging texture instead).
         let direct_present =
             surface.is_some() && output_texture.is_none() && self.device.backend_type() == BackendType::Metal;
         if self.persistent.purge_render_target_cache_if_mismatch(
@@ -663,10 +672,7 @@ impl SchemeRenderer {
         let t_drain_start = Instant::now();
 
         let _tz_begin = goldy::tracy_zone!("ekrano.begin_frame");
-        let frame_handle = self
-            .frame_pipeline
-            .begin_frame()
-            .map_err(|e| Error::Shader(e.to_string()))?;
+        let frame_handle = self.frame_pipeline.begin_frame().map_err(Error::from)?;
         self.drain_ready_bump_readbacks()?;
         self.cleanup_frame_counter = self.cleanup_frame_counter.wrapping_add(1);
         if self.cleanup_frame_counter.is_multiple_of(64) {
@@ -896,9 +902,7 @@ impl SchemeRenderer {
             let mut early_present_tx = None;
             if direct_present {
                 let surface = surface.expect("direct present requires surface");
-                let (lease, tx) = surface
-                    .bind_destination(recorder.scheme())
-                    .map_err(|e| Error::Shader(e.to_string()))?;
+                let (lease, tx) = surface.bind_destination(recorder.scheme()).map_err(Error::from)?;
                 present_bound_lease = Some(lease);
                 early_present_tx = Some(tx);
             }
@@ -959,7 +963,7 @@ impl SchemeRenderer {
                 Some(
                     MemoryExchange::new(recorder.context())
                         .bind_withdraw(recorder.scheme(), &pipeline.bump)
-                        .map_err(|e| Error::Shader(e.to_string()))?,
+                        .map_err(Error::from)?,
                 )
             } else {
                 None
@@ -1046,7 +1050,7 @@ impl SchemeRenderer {
 
         let present_token = match (present_tx, scheme_submission) {
             (Some(tx), Some(mut submission)) => {
-                let claim = tx.claim(&mut submission).map_err(|e| Error::Shader(e.to_string()))?;
+                let claim = tx.claim(&mut submission).map_err(Error::from)?;
                 let queue_bump = params.robust && self.persistent.cached_bump_withdraw.is_some();
                 let note_after_present = !self.nonblocking_reuse && surface.is_some();
                 let ring_note_submission = if note_after_present {
@@ -1238,9 +1242,7 @@ impl<'a> SchemeRecorder<'a> {
         surface: &goldy::SurfaceExchange,
         source: &Texture,
     ) -> Result<goldy::Transaction> {
-        surface
-            .bind(self.scheme, source)
-            .map_err(|e| Error::Shader(e.to_string()))
+        surface.bind(self.scheme, source).map_err(Error::from)
     }
 
     pub(crate) fn new(
@@ -1551,7 +1553,7 @@ impl<'a> SchemeRecorder<'a> {
 
         if !self.metal_fused_upload {
             let _tz = goldy::tracy_zone!("ekrano.finish.upload_submit");
-            self.upload.submit().map_err(|e| Error::Shader(e.to_string()))?;
+            self.upload.submit().map_err(Error::from)?;
         }
 
         // On the fused Metal path the upload blits share the worker scheme's single
@@ -1568,8 +1570,8 @@ impl<'a> SchemeRecorder<'a> {
                 Some(claim) => self
                     .scheme
                     .submit_with_acquired_presents(vec![claim])
-                    .map_err(|e| Error::Shader(e.to_string()))?,
-                None => self.scheme.submit().map_err(|e| Error::Shader(e.to_string()))?,
+                    .map_err(Error::from)?,
+                None => self.scheme.submit().map_err(Error::from)?,
             }
         };
         {
@@ -1578,15 +1580,15 @@ impl<'a> SchemeRecorder<'a> {
                 // Ordering is enforced by reuse epochs / deferred host writes / present easement.
                 self.frame_pipeline
                     .end_frame_externally_ordered(frame_handle)
-                    .map_err(|e| Error::Shader(e.to_string()))?;
+                    .map_err(Error::from)?;
             } else if deferred_present {
                 self.frame_pipeline
                     .end_frame_for_present(frame_handle, &submission)
-                    .map_err(|e| Error::Shader(e.to_string()))?;
+                    .map_err(Error::from)?;
             } else {
                 self.frame_pipeline
                     .end_frame_standalone(frame_handle, &submission)
-                    .map_err(|e| Error::Shader(e.to_string()))?;
+                    .map_err(Error::from)?;
             }
         }
         self.finished = true;
@@ -1618,6 +1620,10 @@ mod tests {
     /// channel-swap regression (velato tiger turning blue) can occur if
     /// `copy_texture_to_present` copies an RGBA `out_image` into a BGRA
     /// present lease.
+    ///
+    /// Formats unsupported by the active backend (e.g. `Bgra8Unorm` on CUDA) are
+    /// skipped — the regression is about honouring the request, not inventing
+    /// backend texture formats.
     #[test]
     fn prepare_out_image_format_matches_requested() {
         let Some((gpu, mut persistent)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
@@ -1635,7 +1641,17 @@ mod tests {
             robust: false,
         };
 
-        for &expected_format in &[TextureFormat::Bgra8Unorm, TextureFormat::Rgba8Unorm] {
+        let caps = gpu.capabilities();
+        let formats: Vec<TextureFormat> = [TextureFormat::Bgra8Unorm, TextureFormat::Rgba8Unorm]
+            .into_iter()
+            .filter(|f| caps.supported_render_target_formats.contains(f))
+            .collect();
+        assert!(
+            !formats.is_empty(),
+            "backend must support Bgra8Unorm and/or Rgba8Unorm to exercise out_image format selection"
+        );
+
+        for &expected_format in &formats {
             let mut resolver = Resolver::new();
             let mut packed = Vec::new();
             let (layout, ramps, images) = resolver.resolve(encoding, &mut packed);
@@ -2237,6 +2253,11 @@ mod tests {
         assert!(
             renderer.cached_scheme_has_out_image(),
             "headless readback path must retain out_image"
+        );
+        assert_eq!(
+            renderer.cached_scheme_out_image_format(),
+            Some(TextureFormat::Rgba8Unorm),
+            "headless out_image is Rgba8Unorm (including CUDA typed-UAV pack path)"
         );
     }
 

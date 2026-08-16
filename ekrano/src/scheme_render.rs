@@ -547,19 +547,24 @@ impl Render {
         for fl in &pipeline.filter_layers {
             fine_resources.push(GpuBinding::Tex(fl));
         }
-        // Hardware samplers for gradient ramps and image atlas (slots 13–14 / 14–15).
-        fine_resources.push(GpuBinding::Sampler(
+        // Hardware samplers for gradient ramps (slots 13–14 / 14–15).
+        // fine.slang only SampleLevel()s with nearest_clamp; image/mask use Load.
+        // CUDA bakes Filter state into each CUtexObject and allows only one distinct
+        // configuration per dispatch, so both slots bind nearest on that backend.
+        let nearest = persistent
+            .nearest_clamp_sampler
+            .as_ref()
+            .expect("nearest_clamp_sampler must be initialised before fine pass");
+        let linear = if recorder.device().backend_type() == goldy::types::BackendType::Cuda {
+            nearest
+        } else {
             persistent
                 .linear_clamp_sampler
                 .as_ref()
-                .expect("linear_clamp_sampler must be initialised before fine pass"),
-        ));
-        fine_resources.push(GpuBinding::Sampler(
-            persistent
-                .nearest_clamp_sampler
-                .as_ref()
-                .expect("nearest_clamp_sampler must be initialised before fine pass"),
-        ));
+                .expect("linear_clamp_sampler must be initialised before fine pass")
+        };
+        fine_resources.push(GpuBinding::Sampler(linear));
+        fine_resources.push(GpuBinding::Sampler(nearest));
 
         SchemeRecorder::record_dispatch(
             recorder.scheme,

@@ -10,6 +10,7 @@ publish = false
 default = ["goldy-default"]
 goldy-default = ["ekrano/goldy-default"]
 goldy-dx12-only = ["ekrano/goldy-dx12-only"]
+goldy-cuda = ["ekrano/goldy-cuda"]
 
 [lints]
 workspace = true
