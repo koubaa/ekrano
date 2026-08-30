@@ -16,7 +16,7 @@ void cs_main(BufRO<Config> config_buf, Scattered<BumpAllocators> bump, BufRO<Lin
              ThreadId global_id) {
     Config config = config_buf[0];
 
-    uint n_lines = bump[0].lines;
+    uint n_lines = InterlockedLoad(bump[0].lines);
 
     // No line-level diagnostics
 
@@ -115,7 +115,7 @@ void cs_main(BufRO<Config> config_buf, Scattered<BumpAllocators> bump, BufRO<Lin
     }
 
     float last_z = floor(a * (float(imin) - 1.0) + b);
-    uint seg_base; InterlockedAdd(bump[0].seg_counts, imax - imin, seg_base);
+    uint seg_base = InterlockedAdd(bump[0].seg_counts, imax - imin);
 
     for (uint i = imin; i < imax; i++) {
         uint subix = i;
@@ -130,7 +130,7 @@ void cs_main(BufRO<Config> config_buf, Scattered<BumpAllocators> bump, BufRO<Lin
             int x_bump = max(x + 1, bbox.x);
             InterlockedAdd(tile[int(tile_base) + int(morton_encode_2d(uint(x_bump - bbox.x), py))].backdrop, delta);
         }
-        uint seg_within_slice; InterlockedAdd(tile[int(tile_base) + int(morton_encode_2d(px, py))].segment_count_or_ix, 1, seg_within_slice);
+        uint seg_within_slice = InterlockedAdd(tile[int(tile_base) + int(morton_encode_2d(px, py))].segment_count_or_ix, 1);
         // (no inner-loop diagnostic)
         uint counts = (seg_within_slice << 16) | subix;
         uint seg_ix = seg_base + i - imin;

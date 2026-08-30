@@ -19,8 +19,8 @@ groupshared uint sh_failed;
 
 [goldy_compute]
 [numthreads(256, 1, 1)]
-void cs_main(BufRO<Config> config_buf, Scattered<BumpAllocators> bump,
-             BufRO<Path> paths, Scattered<Tile> tiles,
+void cs_main(BufRO<Config> config_buf, BufRO<BumpRead> bump,
+             BufRO<Path> paths, Scattered<TileRead> tiles,
              ThreadId global_id, GroupThreadId local_id) {
     Config config = config_buf[0];
 
@@ -72,9 +72,7 @@ void cs_main(BufRO<Config> config_buf, Scattered<BumpAllocators> bump,
             for (uint x = 1; x < width; x++) {
                 uint tile_ix = path_base + morton_encode_2d(x, row_y);
                 sum += tiles[tile_ix].backdrop;
-                Tile t = tiles[tile_ix];
-                t.backdrop = sum;
-                tiles[tile_ix] = t;
+                tiles[tile_ix].backdrop = sum;
             }
         }
     }

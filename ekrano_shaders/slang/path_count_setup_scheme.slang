@@ -17,7 +17,7 @@ static const uint WG_SIZE = 256;
 
 [goldy_compute]
 [numthreads(1, 1, 1)]
-void cs_main(Scattered<BumpAllocators> bump, Scattered<DispatchShape> shape) {
+void cs_main(BufRO<BumpRead> bump, Scattered<DispatchShape> shape) {
     if (bump[0].failed != 0) {
         shape[0].x = 0;
     } else {

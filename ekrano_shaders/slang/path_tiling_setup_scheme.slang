@@ -17,7 +17,7 @@ static const uint WG_SIZE = 256;
 
 [goldy_compute]
 [numthreads(1, 1, 1)]
-void cs_main(Scattered<BumpAllocators> bump, Scattered<DispatchShape> shape, Scattered<uint> ptcl) {
+void cs_main(BufRO<BumpRead> bump, Scattered<DispatchShape> shape, Scattered<uint> ptcl) {
     if (bump[0].failed != 0) {
         shape[0].x = 0;
         ptcl[0] = 0xFFFFFFFF;  // signal fine rasterizer that failure happened

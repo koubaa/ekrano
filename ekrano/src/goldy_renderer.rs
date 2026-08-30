@@ -697,7 +697,8 @@ pub(crate) mod tests {
 
         // Lock before `request_device` when the selected adapter is WARP — adapter
         // selection is cheap/non-racy; device open is what must be serialized.
-        let _warp_guard = if is_dx12_warp_adapter(&instance, &adapter) {
+        let _warp_guard = if is_dx12_warp_adapter(&instance, &adapter) || instance.backend_type() == BackendType::WebGpu
+        {
             Some(warp_lib_test_serial().lock().unwrap_or_else(|e| e.into_inner()))
         } else {
             None

@@ -57,6 +57,8 @@ cargo run -p headless -- -x 800 -y 600 -s 0  # render offscreen via GPU
 EKRANO_CI_GPU_SUPPORT=yes cargo test -p ekrano_tests  # force GPU snapshot tests
 EKRANO_TEST_UPDATE=all cargo test -p ekrano_tests     # update snapshot references
 EKRANO_TEST_CREATE=all cargo test -p ekrano_tests     # create new snapshots
+# Goldy WebGPU (wgpu): exclusive feature + runtime backend
+GOLDY_BACKEND=webgpu cargo test -p ekrano_tests --no-default-features -F goldy-webgpu --test smoke_snapshots
 ```
 ## Linting (do at the end of each agent interaction after code changes)
 

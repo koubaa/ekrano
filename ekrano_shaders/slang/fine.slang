@@ -31,10 +31,10 @@ static const uint SAMPLE_WORDS_PER_PIXEL = 4;
 static const uint WG_SIZE = 64;
 
 groupshared uint sh_count[64];
-groupshared uint sh_winding_y[4];
-groupshared uint sh_winding_y_prefix[4];
-groupshared uint sh_winding[64];
-groupshared uint sh_samples[1024]; // Max of msaa8 (512) and msaa16 (1024)
+groupshared Interlocked<uint> sh_winding_y[4];
+groupshared Interlocked<uint> sh_winding_y_prefix[4];
+groupshared Interlocked<uint> sh_winding[64];
+groupshared Interlocked<uint> sh_samples[1024]; // Max of msaa8 (512) and msaa16 (1024)
 
 void fill_path_ms_impl(
     CmdFill fill,
@@ -213,10 +213,10 @@ void fill_path_ms_impl(
     }
 
     uint major = (th_ix * PIXELS_PER_THREAD) >> 2;
-    uint packed_w = sh_winding[major];
+    uint packed_w = InterlockedLoad(sh_winding[major]);
     packed_w += (packed_w - 0x808080) << 8;
     packed_w += (packed_w - 0x8080) << 16;
-    uint packed_y = sh_winding_y[local_id.y >> 2];
+    uint packed_y = InterlockedLoad(sh_winding_y[local_id.y >> 2]);
     packed_y += (packed_y - 0x808080) << 8;
     packed_y += (packed_y - 0x8080) << 16;
     uint wind_y = (packed_y >> ((local_id.y & 3) << 3)) - 0x80;
@@ -226,9 +226,9 @@ void fill_path_ms_impl(
     InterlockedExchange(sh_winding[major], prefix_x, _);
     GroupMemoryBarrierWithGroupSync();
     for (uint i = (major & ~3u); i < major; i++)
-        packed_w += sh_winding[i];
+        packed_w += InterlockedLoad(sh_winding[i]);
     for (uint i = 0; i < (local_id.y >> 2); i++)
-        wind_y += sh_winding_y_prefix[i];
+        wind_y += InterlockedLoad(sh_winding_y_prefix[i]);
 
     for (uint i = 0; i < PIXELS_PER_THREAD; i++) {
         uint pix_ix = th_ix * PIXELS_PER_THREAD + i;
@@ -238,8 +238,8 @@ void fill_path_ms_impl(
             area[i] = 1.0;
         } else {
 #ifdef msaa8
-            uint samples0 = sh_samples[pix_ix * 2];
-            uint samples1 = sh_samples[pix_ix * 2 + 1];
+            uint samples0 = InterlockedLoad(sh_samples[pix_ix * 2]);
+            uint samples1 = InterlockedLoad(sh_samples[pix_ix * 2 + 1]);
             uint xored0 = (expected_zero * 0x1010101) ^ samples0;
             uint xored0_2 = xored0 | (xored0 * 2);
             uint xored1 = (expected_zero * 0x1010101) ^ samples1;
@@ -250,10 +250,10 @@ void fill_path_ms_impl(
             area[i] = float(countbits(xored8 & 0xC0C0C0C0)) * 0.125;
 #endif
 #ifdef msaa16
-            uint samples0 = sh_samples[pix_ix * 4];
-            uint samples1 = sh_samples[pix_ix * 4 + 1];
-            uint samples2 = sh_samples[pix_ix * 4 + 2];
-            uint samples3 = sh_samples[pix_ix * 4 + 3];
+            uint samples0 = InterlockedLoad(sh_samples[pix_ix * 4]);
+            uint samples1 = InterlockedLoad(sh_samples[pix_ix * 4 + 1]);
+            uint samples2 = InterlockedLoad(sh_samples[pix_ix * 4 + 2]);
+            uint samples3 = InterlockedLoad(sh_samples[pix_ix * 4 + 3]);
             uint xored0 = (expected_zero * 0x1010101) ^ samples0;
             uint xored0_2 = xored0 | (xored0 * 2);
             uint xored1 = (expected_zero * 0x1010101) ^ samples1;
@@ -412,12 +412,12 @@ void fill_path_ms_evenodd_impl(
         GroupMemoryBarrierWithGroupSync();
     }
 
-    uint scan_x = sh_winding[local_id.y];
+    uint scan_x = InterlockedLoad(sh_winding[local_id.y]);
     scan_x ^= scan_x << 1;
     scan_x ^= scan_x << 2;
     scan_x ^= scan_x << 4;
     scan_x ^= scan_x << 8;
-    uint scan_y = sh_winding_y[0];
+    uint scan_y = InterlockedLoad(sh_winding_y[0]);
     scan_y ^= scan_y << 1;
     scan_y ^= scan_y << 2;
     scan_y ^= scan_y << 4;
@@ -426,7 +426,7 @@ void fill_path_ms_evenodd_impl(
 
     for (uint i = 0; i < PIXELS_PER_THREAD; i++) {
         uint pix_ix = th_ix * PIXELS_PER_THREAD + i;
-        uint samples = sh_samples[pix_ix];
+        uint samples = InterlockedLoad(sh_samples[pix_ix]);
         uint pix_parity = row_parity ^ (scan_x >> (pix_ix % TILE_WIDTH));
         uint pix_mask = uint(-int(pix_parity & 1));
 #ifdef msaa8

@@ -13,7 +13,7 @@ static const uint LG_WG_SIZE = 8;
 static const uint LG_N_TILE = 8;
 static const uint BLEND_CLIP = (128 << 8) | 3;
 
-groupshared uint sh_bitmaps[N_SLICE][N_TILE];
+groupshared Interlocked<uint> sh_bitmaps[N_SLICE][N_TILE];
 groupshared uint sh_part_count[N_TILE];   // BinHeader.element_count inclusive prefix sum (partition phase)
 groupshared uint sh_part_offsets[N_TILE]; // BinHeader.chunk_offset (partition phase)
 groupshared uint sh_drawobj_ix[N_TILE];
@@ -30,7 +30,7 @@ void alloc_cmd(inout uint cmd_offset, inout uint cmd_limit,
     // alloc_cmd runs under divergent control flow inside the bitmap-driven PTCL writer — inactive wave lanes break the assumptions for Wave intrinsics, so we keep one atomic per overflow event on each lane that reaches here.
     if (cmd_offset + size >= cmd_limit) {
         uint ptcl_dyn_start = config.width_in_tiles * config.height_in_tiles * PTCL_INITIAL_ALLOC;
-        uint new_cmd; InterlockedAdd(bump[0].ptcl, PTCL_INCREMENT, new_cmd); new_cmd += ptcl_dyn_start;
+        uint new_cmd = InterlockedAdd(bump[0].ptcl, PTCL_INCREMENT); new_cmd += ptcl_dyn_start;
         if (new_cmd + PTCL_INCREMENT > config.ptcl_size) {
             new_cmd = 0;
             InterlockedOr(bump[0].failed, STAGE_COARSE);
@@ -42,20 +42,20 @@ void alloc_cmd(inout uint cmd_offset, inout uint cmd_limit,
     }
 }
 
-void write_path(Tile tile, uint tile_ix, uint draw_flags,
+void write_path(uint tile_ix, uint draw_flags,
     inout uint cmd_offset, inout uint cmd_limit,
     StorageBuffer<uint> ptcl, StorageBuffer<BumpAllocators> bump,
-    StorageBuffer<Tile> tiles, Config config) {
-    uint n_segs = tile.segment_count_or_ix;
+    StorageBuffer<TileRead> tiles, Config config) {
+    uint n_segs = tiles[tile_ix].segment_count_or_ix;
     if (n_segs != 0) {
-        uint seg_ix; InterlockedAdd(bump[0].segments, n_segs, seg_ix);
+        uint seg_ix = InterlockedAdd(bump[0].segments, n_segs);
         tiles[tile_ix].segment_count_or_ix = ~seg_ix;
         alloc_cmd(cmd_offset, cmd_limit, ptcl, bump, config, 4);
         ptcl[cmd_offset] = CMD_FILL;
         uint even_odd = (draw_flags & DRAW_INFO_FLAGS_FILL_RULE_BIT) != 0 ? 1u : 0u;
         ptcl[cmd_offset + 1] = (n_segs << 1) | even_odd;
         ptcl[cmd_offset + 2] = seg_ix;
-        ptcl[cmd_offset + 3] = uint(tile.backdrop);
+        ptcl[cmd_offset + 3] = uint(tiles[tile_ix].backdrop);
         cmd_offset += 4;
     } else {
         alloc_cmd(cmd_offset, cmd_limit, ptcl, bump, config, 1);
@@ -141,13 +141,13 @@ void write_set_blend_mode(uint blend_packed, inout uint cmd_offset, inout uint c
 void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
              BufRO<DrawMonoid> draw_monoids, BufRO<BinHeader> bin_headers,
              BufRO<uint> info_bin_data, BufRO<Path> paths,
-             Scattered<Tile> tiles, Scattered<BumpAllocators> bump, Scattered<uint> ptcl,
+             Scattered<TileRead> tiles, Scattered<BumpAllocators> bump, Scattered<uint> ptcl,
              GroupThreadId local_id, GroupId wg_id) {
     Config config = config_buf[0];
 
     if (local_id.x == 0) {
-        uint failed = bump[0].failed & (STAGE_BINNING | STAGE_TILE_ALLOC | STAGE_FLATTEN);
-        if (bump[0].seg_counts > config.seg_counts_size)
+        uint failed = InterlockedLoad(bump[0].failed) & (STAGE_BINNING | STAGE_TILE_ALLOC | STAGE_FLATTEN);
+        if (InterlockedLoad(bump[0].seg_counts) > config.seg_counts_size)
             failed |= STAGE_PATH_COUNT;
         sh_part_count[0] = failed;
     }
@@ -192,7 +192,7 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
     // Issue #46: bitmaps zero once before first iteration; thereafter cleared at loop bottom
     // (after bitmap reads) so we skip one barrier per iteration vs clearing at the top.
     for (uint i = 0; i < N_SLICE; i++)
-        sh_bitmaps[i][local_id.x] = 0;
+        InterlockedStore(sh_bitmaps[i][local_id.x], 0);
     GroupMemoryBarrierWithGroupSync();
 
     while (true) {
@@ -287,7 +287,6 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
             uint x_path = uint(int(bin_tile_x) + int(x) - int(bbox_xy & 0xffffu));
             uint y_path = uint(int(bin_tile_y) + int(y) - int(bbox_xy >> 16u));
             uint tile_ix = sh_tile_base[el_ix] + morton_encode_2d(x_path, y_path);
-            Tile tile = tiles[tile_ix];
             bool is_clip = (tag & 1) != 0;
             bool is_blend = false;
             if (is_clip) {
@@ -299,8 +298,9 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
             uint di = draw_monoids[drawobj_ix].info_offset;
             uint draw_flags = info_bin_data[di];
             bool even_odd = (draw_flags & DRAW_INFO_FLAGS_FILL_RULE_BIT) != 0;
-            uint n_segs = tile.segment_count_or_ix;
-            int backdrop_val = even_odd ? (abs(tile.backdrop) & 1) : tile.backdrop;
+            uint n_segs = tiles[tile_ix].segment_count_or_ix;
+            int tile_backdrop = tiles[tile_ix].backdrop;
+            int backdrop_val = even_odd ? (abs(tile_backdrop) & 1) : tile_backdrop;
             bool backdrop_clear = (backdrop_val == 0);
             bool include_tile = (tag == DRAWTAG_SET_BLEND_MODE) || (n_segs != 0) ||
                 (backdrop_clear == is_clip) || is_blend;
@@ -316,13 +316,13 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
         GroupMemoryBarrierWithGroupSync();
 
         uint slice_ix = 0;
-        uint bitmap = sh_bitmaps[0][local_id.x];
+        uint bitmap = InterlockedLoad(sh_bitmaps[0][local_id.x]);
         while (true) {
             if (bitmap == 0) {
                 slice_ix++;
                 if (slice_ix == N_SLICE)
                     break;
-                bitmap = sh_bitmaps[slice_ix][local_id.x];
+                bitmap = InterlockedLoad(sh_bitmaps[slice_ix][local_id.x]);
                 if (bitmap == 0)
                     continue;
             }
@@ -342,30 +342,30 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
                 uint px = uint(int(bin_tile_x) + int(tile_x) - int(bbox_xy & 0xffffu));
                 uint py = uint(int(bin_tile_y) + int(tile_y) - int(bbox_xy >> 16u));
                 uint tile_ix = sh_tile_base[el_ix] + morton_encode_2d(px, py);
-                Tile tile = tiles[tile_ix];
                 if (drawtag == DRAWTAG_FILL_COLOR) {
-                    write_path(tile, tile_ix, draw_flags, cmd_offset, cmd_limit, ptcl, bump, tiles, config);
+                    write_path(tile_ix, draw_flags, cmd_offset, cmd_limit, ptcl, bump, tiles, config);
                     write_color(scene[dd], cmd_offset, cmd_limit, ptcl, bump, config);
                 } else if (drawtag == DRAWTAG_BLURRED_ROUNDED_RECT) {
-                    write_path(tile, tile_ix, draw_flags, cmd_offset, cmd_limit, ptcl, bump, tiles, config);
+                    write_path(tile_ix, draw_flags, cmd_offset, cmd_limit, ptcl, bump, tiles, config);
                     write_blurred_rounded_rect(scene[dd], di + 1, cmd_offset, cmd_limit, ptcl, bump, config);
                 } else if (drawtag == DRAWTAG_FILL_LIN_GRADIENT) {
-                    write_path(tile, tile_ix, draw_flags, cmd_offset, cmd_limit, ptcl, bump, tiles, config);
+                    write_path(tile_ix, draw_flags, cmd_offset, cmd_limit, ptcl, bump, tiles, config);
                     write_grad(CMD_LIN_GRAD, scene[dd], di + 1, cmd_offset, cmd_limit, ptcl, bump, config);
                 } else if (drawtag == DRAWTAG_FILL_RAD_GRADIENT) {
-                    write_path(tile, tile_ix, draw_flags, cmd_offset, cmd_limit, ptcl, bump, tiles, config);
+                    write_path(tile_ix, draw_flags, cmd_offset, cmd_limit, ptcl, bump, tiles, config);
                     write_grad(CMD_RAD_GRAD, scene[dd], di + 1, cmd_offset, cmd_limit, ptcl, bump, config);
                 } else if (drawtag == DRAWTAG_FILL_SWEEP_GRADIENT) {
-                    write_path(tile, tile_ix, draw_flags, cmd_offset, cmd_limit, ptcl, bump, tiles, config);
+                    write_path(tile_ix, draw_flags, cmd_offset, cmd_limit, ptcl, bump, tiles, config);
                     write_grad(CMD_SWEEP_GRAD, scene[dd], di + 1, cmd_offset, cmd_limit, ptcl, bump, config);
                 } else if (drawtag == DRAWTAG_FILL_IMAGE) {
-                    write_path(tile, tile_ix, draw_flags, cmd_offset, cmd_limit, ptcl, bump, tiles, config);
+                    write_path(tile_ix, draw_flags, cmd_offset, cmd_limit, ptcl, bump, tiles, config);
                     write_image(di + 1, cmd_offset, cmd_limit, ptcl, bump, config);
                 } else if (drawtag == DRAWTAG_BEGIN_CLIP) {
                     bool even_odd = (draw_flags & DRAW_INFO_FLAGS_FILL_RULE_BIT) != 0;
-                    int backdrop_val = even_odd ? (abs(tile.backdrop) & 1) : tile.backdrop;
+                    int tile_backdrop = tiles[tile_ix].backdrop;
+                    int backdrop_val = even_odd ? (abs(tile_backdrop) & 1) : tile_backdrop;
                     bool backdrop_clear = (backdrop_val == 0);
-                    if (tile.segment_count_or_ix == 0 && backdrop_clear)
+                    if (tiles[tile_ix].segment_count_or_ix == 0 && backdrop_clear)
                         clip_zero_depth = clip_depth + 1;
                     else {
                         write_begin_clip(cmd_offset, cmd_limit, ptcl, bump, config);
@@ -375,7 +375,7 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
                     clip_depth++;
                 } else if (drawtag == DRAWTAG_END_CLIP) {
                     clip_depth--;
-                    write_path(tile, tile_ix, draw_flags, cmd_offset, cmd_limit, ptcl, bump, tiles, config);
+                    write_path(tile_ix, draw_flags, cmd_offset, cmd_limit, ptcl, bump, tiles, config);
                     CmdEndClip end_clip;
                     end_clip.blend = scene[dd];
                     end_clip.alpha = asfloat(scene[dd + 1]);
@@ -383,7 +383,7 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
                     render_blend_depth--;
                 } else if (drawtag == DRAWTAG_END_CLIP_FILTER) {
                     clip_depth--;
-                    write_path(tile, tile_ix, draw_flags, cmd_offset, cmd_limit, ptcl, bump, tiles, config);
+                    write_path(tile_ix, draw_flags, cmd_offset, cmd_limit, ptcl, bump, tiles, config);
                     CmdEndClip end_clip;
                     end_clip.blend = scene[dd];
                     end_clip.alpha = asfloat(scene[dd + 1]);
@@ -421,7 +421,7 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
             break;
         GroupMemoryBarrierWithGroupSync();
         for (uint i = 0; i < N_SLICE; i++)
-            sh_bitmaps[i][local_id.x] = 0;
+            InterlockedStore(sh_bitmaps[i][local_id.x], 0);
     }
 
     if (bin_tile_x + tile_x < config.width_in_tiles && bin_tile_y + tile_y < config.height_in_tiles) {
@@ -429,7 +429,7 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
         uint blend_ix = 0;
         if (max_blend_depth > BLEND_STACK_SPLIT) {
             uint scratch_size = (max_blend_depth - BLEND_STACK_SPLIT) * TILE_WIDTH * TILE_HEIGHT;
-            InterlockedAdd(bump[0].blend, scratch_size, blend_ix);
+            blend_ix = InterlockedAdd(bump[0].blend, scratch_size);
             if (blend_ix + scratch_size > config.blend_size)
                 InterlockedOr(bump[0].failed, STAGE_COARSE);
         }

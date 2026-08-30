@@ -84,13 +84,21 @@ fn is_dx12_warp(device: &Device) -> bool {
     device.backend_type() == BackendType::Dx12 && device.adapter_id() == u32::MAX
 }
 
+fn needs_serial_gpu(device: &Device) -> bool {
+    // DX12 WARP is not parallel-safe. WebGPU currently exposes a single
+    // submission context (`host_sidecar_on_submit_worker` is false), so
+    // concurrent libtest_mimic trials on one shared device contend on the
+    // same wgpu queue/poll path.
+    is_dx12_warp(device) || device.backend_type() == BackendType::WebGpu
+}
+
 /// GPU device handle for one integration-test body.
 ///
 /// - **Metal**: owned, freshly created device (isolation under parallel
 ///   `libtest_mimic` trials — shared-device concurrent submits trip the macOS GPU
 ///   watchdog).
-/// - **DX12 WARP / Vulkan / DX12 hardware**: clone of the process-shared device.
-///   WARP also holds a serial mutex for the guard's lifetime.
+/// - **DX12 WARP / WebGPU / Vulkan / DX12 hardware**: clone of the process-shared
+///   device. WARP and WebGPU also hold a serial mutex for the guard's lifetime.
 ///
 /// Hold this guard for the full test body. Device create/destroy lifetime tests must
 /// construct their own [`Device`] and must not use this helper.
@@ -144,7 +152,7 @@ pub fn test_device() -> SharedTestDevice {
         };
     }
 
-    let _warp_guard = if is_dx12_warp(shared) {
+    let _warp_guard = if needs_serial_gpu(shared) {
         Some(
             WARP_TEST_SERIAL
                 .get_or_init(|| Mutex::new(()))
@@ -175,7 +183,7 @@ pub(crate) fn rgba_straight_composite_to_rgb(width: u32, height: u32, rgba: &[u8
     }
     let [bg_r, bg_g, bg_b] = [bg[0] as u32, bg[1] as u32, bg[2] as u32];
     let mut rgb_buf = Vec::with_capacity(width as usize * height as usize * 3);
-    for chunk in rgba.chunks_exact(4) {
+    for chunk in rgba.as_chunks::<4>().0 {
         let a = chunk[3] as u32;
         let inv_a = 255 - a;
         let r = ((chunk[0] as u32 * a + bg_r * inv_a) / 255).min(255) as u8;

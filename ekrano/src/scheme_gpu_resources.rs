@@ -245,7 +245,7 @@ pub(crate) fn write_image_region(
 /// Uses integer arithmetic to match the GPU's 8-bit rounding behaviour precisely.
 fn premultiply_rgba8(bytes: &[u8]) -> Vec<u8> {
     let mut out = bytes.to_vec();
-    for chunk in out.chunks_exact_mut(4) {
+    for chunk in out.as_chunks_mut::<4>().0 {
         let a = chunk[3] as u32;
         chunk[0] = ((chunk[0] as u32 * a + 127) / 255) as u8;
         chunk[1] = ((chunk[1] as u32 * a + 127) / 255) as u8;

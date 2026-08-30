@@ -13,7 +13,7 @@ static const uint WG_SIZE = 256;
 
 [goldy_compute]
 [numthreads(1, 1, 1)]
-void cs_main(Scattered<BumpAllocators> bump, Scattered<IndirectCount> indirect) {
+void cs_main(BufRO<BumpRead> bump, Scattered<IndirectCount> indirect) {
     if (bump[0].failed != 0) {
         indirect[INDIRECT_STAGE_PATH_COUNT].count_x = 0;
     } else {

@@ -18,8 +18,8 @@ groupshared int sh_backdrop[512];
 
 [goldy_compute]
 [numthreads(512, 1, 1)]
-void cs_main(BufRO<Config> config_buf, Scattered<BumpAllocators> bump, BufRO<Path> paths,
-             Scattered<Tile> tiles,
+void cs_main(BufRO<Config> config_buf, BufRO<BumpRead> bump, BufRO<Path> paths,
+             Scattered<TileRead> tiles,
              GroupThreadId local_id, GroupId wg_id) {
     Config config = config_buf[0];
 
