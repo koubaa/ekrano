@@ -29,7 +29,7 @@ void cs_main(BufRO<Config> config_buf, Scattered<BumpAllocators> bump,
     // lavapipe (observed: hillis-steele scan never completes; interior tiles keep
     // raw path_count backdrops and coarse skips solid fills).
     if (local_id.x == 0) {
-        sh_failed = bump[0].failed;
+        sh_failed = InterlockedLoad(bump[0].failed);
     }
     GroupMemoryBarrierWithGroupSync();
     uint failed = sh_failed;
@@ -68,13 +68,11 @@ void cs_main(BufRO<Config> config_buf, Scattered<BumpAllocators> bump,
             uint seq_ix = row - (el_ix > 0 ? sh_row_count[el_ix - 1] : 0);
             uint path_base = sh_offset[el_ix];
             uint row_y = seq_ix;  // row index within this path's bbox
-            int sum = tiles[path_base + morton_encode_2d(0u, row_y)].backdrop;
+            int sum = InterlockedLoad(tiles[path_base + morton_encode_2d(0u, row_y)].backdrop);
             for (uint x = 1; x < width; x++) {
                 uint tile_ix = path_base + morton_encode_2d(x, row_y);
-                sum += tiles[tile_ix].backdrop;
-                Tile t = tiles[tile_ix];
-                t.backdrop = sum;
-                tiles[tile_ix] = t;
+                sum += InterlockedLoad(tiles[tile_ix].backdrop);
+                InterlockedStore(tiles[tile_ix].backdrop, sum);
             }
         }
     }

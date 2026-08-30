@@ -14,11 +14,11 @@ static const uint WG_SIZE = 256;
 [goldy_compute]
 [numthreads(1, 1, 1)]
 void cs_main(Scattered<BumpAllocators> bump, Scattered<IndirectCount> indirect, Scattered<uint> ptcl) {
-    if (bump[0].failed != 0) {
+    if (InterlockedLoad(bump[0].failed) != 0) {
         indirect[INDIRECT_STAGE_PATH_TILING].count_x = 0;
         ptcl[0] = 0xFFFFFFFF;  // signal fine rasterizer that failure happened
     } else {
-        uint segments = bump[0].seg_counts;
+        uint segments = InterlockedLoad(bump[0].seg_counts);
         indirect[INDIRECT_STAGE_PATH_TILING].count_x = (segments + (WG_SIZE - 1)) / WG_SIZE;
     }
     indirect[INDIRECT_STAGE_PATH_TILING].count_y = 1;

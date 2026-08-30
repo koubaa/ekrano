@@ -18,10 +18,10 @@ static const uint WG_SIZE = 256;
 [goldy_compute]
 [numthreads(1, 1, 1)]
 void cs_main(Scattered<BumpAllocators> bump, Scattered<DispatchShape> shape) {
-    if (bump[0].failed != 0) {
+    if (InterlockedLoad(bump[0].failed) != 0) {
         shape[0].x = 0;
     } else {
-        uint lines = bump[0].lines;
+        uint lines = InterlockedLoad(bump[0].lines);
         shape[0].x = (lines + (WG_SIZE - 1)) / WG_SIZE;
     }
     shape[0].y = 1;

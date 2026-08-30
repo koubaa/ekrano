@@ -24,6 +24,12 @@ goldy-cuda = [
     "goldy/dx12",
     "goldy/instrumentation",
 ]
+goldy-webgpu = [
+    "ekrano/goldy-webgpu",
+    "scenes/goldy-webgpu",
+    "goldy/webgpu",
+    "goldy/instrumentation",
+]
 
 [lints]
 workspace = true

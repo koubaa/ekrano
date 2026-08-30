@@ -14,10 +14,10 @@ static const float EPSILON = 1e-6;
 [goldy_compute]
 [numthreads(256, 1, 1)]
 void cs_main(Scattered<BumpAllocators> bump, BufRO<SegmentCount> seg_counts, BufRO<LineSoup> lines,
-             BufRO<Path> paths, BufRO<Tile> tiles, Scattered<Segment> segments,
+             BufRO<Path> paths, BufRO<TileRead> tiles, Scattered<Segment> segments,
              ThreadId global_id) {
 
-    uint n_segments = bump[0].seg_counts;
+    uint n_segments = InterlockedLoad(bump[0].seg_counts);
     if (global_id.x >= n_segments)
         return;
 
@@ -48,8 +48,7 @@ void cs_main(Scattered<BumpAllocators> bump, BufRO<SegmentCount> seg_counts, Buf
     Path path = paths[line.path_ix];
     int4 bbox = int4(asint(path.bbox.x), asint(path.bbox.y), asint(path.bbox.z), asint(path.bbox.w));
     int tile_ix = int(path.tiles) + int(morton_encode_2d(uint(x - bbox.x), uint(y - bbox.y)));
-    Tile tile = tiles[tile_ix];
-    uint seg_start = ~tile.segment_count_or_ix;
+    uint seg_start = ~tiles[tile_ix].segment_count_or_ix;
     if (int(seg_start) < 0)
         return;
 

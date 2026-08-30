@@ -27,7 +27,7 @@ void cs_main(BufRO<Config> config_buf, Scattered<BumpAllocators> bump, BufRO<Pat
     uint ix = wg_id.x * width_in_tiles + local_id.x;
     int backdrop = 0;
     if (local_id.x < width_in_tiles) {
-        backdrop = tiles[ix].backdrop;
+        backdrop = InterlockedLoad(tiles[ix].backdrop);
     }
     sh_backdrop[local_id.x] = backdrop;
     for (uint i = 0; i < LG_WG_SIZE; i++) {
@@ -39,6 +39,6 @@ void cs_main(BufRO<Config> config_buf, Scattered<BumpAllocators> bump, BufRO<Pat
         sh_backdrop[local_id.x] = backdrop;
     }
     if (local_id.x < width_in_tiles) {
-        tiles[ix].backdrop = backdrop;
+        InterlockedStore(tiles[ix].backdrop, backdrop);
     }
 }

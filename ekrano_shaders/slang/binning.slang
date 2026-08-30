@@ -13,7 +13,7 @@ static const uint N_SUBSLICE = 4;
 static const float SX = 1.0 / float(N_TILE_X * TILE_WIDTH);
 static const float SY = 1.0 / float(N_TILE_Y * TILE_HEIGHT);
 
-groupshared uint sh_bitmaps[N_SLICE][N_TILE];
+groupshared Interlocked<uint> sh_bitmaps[N_SLICE][N_TILE];
 groupshared uint sh_count[N_SUBSLICE][N_TILE];
 groupshared uint sh_chunk_offset[N_TILE];
 groupshared uint sh_previous_failed;
@@ -31,10 +31,10 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
     Config config = config_buf[0];
 
     for (uint i = 0; i < N_SLICE; i++) {
-        sh_bitmaps[i][local_id.x] = 0;
+        InterlockedStore(sh_bitmaps[i][local_id.x], 0);
     }
     if (local_id.x == 0) {
-        uint lines_val = bump[0].lines;
+        uint lines_val = InterlockedLoad(bump[0].lines);
         sh_previous_failed = (lines_val > config.lines_size) ? 1u : 0u;
     }
     GroupMemoryBarrierWithGroupSync();
@@ -109,13 +109,13 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
 
     uint element_count = 0;
     for (uint i = 0; i < N_SUBSLICE; i++) {
-        element_count += countbits(sh_bitmaps[i * 2][local_id.x]);
+        element_count += countbits(InterlockedLoad(sh_bitmaps[i * 2][local_id.x]));
         uint element_count_lo = element_count;
-        element_count += countbits(sh_bitmaps[i * 2 + 1][local_id.x]);
+        element_count += countbits(InterlockedLoad(sh_bitmaps[i * 2 + 1][local_id.x]));
         uint element_count_hi = element_count;
         sh_count[i][local_id.x] = element_count_lo | (element_count_hi << 16);
     }
-    uint chunk_offset; InterlockedAdd(bump[0].binning, element_count, chunk_offset);
+    uint chunk_offset = InterlockedAdd(bump[0].binning, element_count);
     if (chunk_offset + element_count > config.binning_size) {
         chunk_offset = 0;
         InterlockedOr(bump[0].failed, STAGE_BINNING);
@@ -130,7 +130,7 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
     while (y < y1) {
         int bin_ix = y * width_in_bins + x;
         if (bin_ix < int(N_TILE)) {
-            uint out_mask = sh_bitmaps[my_slice][bin_ix];
+            uint out_mask = InterlockedLoad(sh_bitmaps[my_slice][bin_ix]);
             if ((out_mask & my_mask) != 0) {
                 uint idx = countbits(out_mask & (my_mask - 1));
                 if (my_slice > 0) {

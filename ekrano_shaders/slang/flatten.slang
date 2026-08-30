@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT OR Unlicense
 //
 // Flatten curves to lines. Ported from original Vello flatten shader.
-// Uses ByteAddress for path_bboxes (InterlockedMin/Max require RWByteAddressBuffer).
 
 import goldy_exp;
 import ekrano_shared;
@@ -82,7 +81,6 @@ static const float QUAD_V2 = 1.0 / QUAD_A2;
 static const float QUAD_U2 = QUAD_W2 * QUAD_W2 - QUAD_C2 / QUAD_A2;
 static const float FRAC_PI_4 = 0.7853981633974483;
 static const float CBRT_9_8 = 1.040041911525952;
-static const uint PATH_BBOX_STRIDE = 6;  // x0,y0,x1,y1,draw_flags,trans_ix per path
 static const uint FLATTEN_ARC_MAX_LINES = 512;
 
 // Context passed to helpers (buffers + pathdata_base)
@@ -90,7 +88,7 @@ struct FlattenCtx {
     Config config;
     ReadOnlyBuffer<uint> scene;
     ReadOnlyBuffer<TagMonoid> tag_monoids;
-    ByteAddressView path_bboxes;
+    StorageBuffer<AtomicPathBbox> path_bboxes;
     StorageBuffer<BumpAllocators> bump;
     StorageBuffer<LineSoup> lines;
     uint pathdata_base;
@@ -407,7 +405,7 @@ uint output_line(FlattenCtx ctx, uint path_ix, float2 p0, float2 p1, inout float
     if (!line_coords_finite(p0, p1))
         return 0;
     uint line_ix = 0;
-    InterlockedAdd(ctx.bump[0].lines, 1, line_ix);
+    line_ix = InterlockedAdd(ctx.bump[0].lines, 1);
     write_line(ctx, line_ix, path_ix, p0, p1, bbox);
     return line_ix;
 }
@@ -421,7 +419,7 @@ void output_line_with_transform(FlattenCtx ctx, uint path_ix, float2 p0, float2 
         return;
     }
     uint line_ix = 0;
-    InterlockedAdd(ctx.bump[0].lines, 1, line_ix);
+    line_ix = InterlockedAdd(ctx.bump[0].lines, 1);
     write_line(ctx, line_ix, path_ix, tp0, tp1, bbox);
 }
 
@@ -433,7 +431,7 @@ void output_two_lines_with_transform(FlattenCtx ctx, uint path_ix, float2 p00, f
     if (!line_coords_finite(t00, t01) || !line_coords_finite(t10, t11))
         return;
     uint line_ix = 0;
-    InterlockedAdd(ctx.bump[0].lines, 2, line_ix);
+    line_ix = InterlockedAdd(ctx.bump[0].lines, 2);
     write_line(ctx, line_ix, path_ix, t00, t01, bbox);
     write_line(ctx, line_ix + 1, path_ix, t10, t11, bbox);
 }
@@ -611,7 +609,7 @@ void flatten_arc(FlattenCtx ctx, uint path_ix, float2 begin, float2 end, float2 
         return;
 
     uint line_ix = 0;
-    InterlockedAdd(ctx.bump[0].lines, n_lines, line_ix);
+    line_ix = InterlockedAdd(ctx.bump[0].lines, n_lines);
 
     for (uint i = 0; i < n_lines - 1; i++) {
         r = r_next;
@@ -646,7 +644,7 @@ void draw_cap(FlattenCtx ctx, uint path_ix, uint cap_style, float2 point, float2
         if (!line_coords_finite(ts0, ts1) || !line_coords_finite(te0, te1) || !line_coords_finite(tm0, tm1))
             return;
         uint line_ix = 0;
-        InterlockedAdd(ctx.bump[0].lines, 3u, line_ix);
+        line_ix = InterlockedAdd(ctx.bump[0].lines, 3u);
         write_line(ctx, line_ix + 1, path_ix, ts0, ts1, bbox);
         write_line(ctx, line_ix + 2, path_ix, te0, te1, bbox);
         write_line(ctx, line_ix, path_ix, tm0, tm1, bbox);
@@ -694,7 +692,7 @@ void draw_join(FlattenCtx ctx, uint path_ix, uint style_flags, float2 p0, float2
             float2 tb1 = transform * b1;
             if (line_coords_finite(tp0, tp1) && line_coords_finite(tf0, tf1) && line_coords_finite(tb0, tb1)) {
                 uint tmp = 0;
-                InterlockedAdd(ctx.bump[0].lines, 3, tmp);
+                tmp = InterlockedAdd(ctx.bump[0].lines, 3);
                 write_line(ctx, tmp, path_ix, tp0, tp1, bbox);
                 write_line(ctx, tmp + 1, path_ix, tf0, tf1, bbox);
                 write_line(ctx, tmp + 2, path_ix, tb0, tb1, bbox);
@@ -709,7 +707,7 @@ void draw_join(FlattenCtx ctx, uint path_ix, uint style_flags, float2 p0, float2
             if (!line_coords_finite(tf0, tf1) || !line_coords_finite(tb0, tb1))
                 return;
             uint line_ix = 0;
-            InterlockedAdd(ctx.bump[0].lines, 2, line_ix);
+            line_ix = InterlockedAdd(ctx.bump[0].lines, 2);
             write_line(ctx, line_ix, path_ix, tf0, tf1, bbox);
             write_line(ctx, line_ix + 1, path_ix, tb0, tb1, bbox);
         }
@@ -728,7 +726,7 @@ void draw_join(FlattenCtx ctx, uint path_ix, uint style_flags, float2 p0, float2
 [goldy_compute]
 [numthreads(256, 1, 1)]
 void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
-             BufRO<TagMonoid> tag_monoids, ByteAddress path_bboxes,
+             BufRO<TagMonoid> tag_monoids, Scattered<AtomicPathBbox> path_bboxes,
              Scattered<BumpAllocators> bump, Scattered<LineSoup> lines,
              ThreadId global_id) {
     Config config = config_buf[0];
@@ -753,9 +751,8 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
     uint style_flags = scene[config.style_base + style_ix];
     uint draw_flags = ((style_flags & STYLE_FLAGS_FILL) == 0) ? 0u : DRAW_INFO_FLAGS_FILL_RULE_BIT;
     if ((tag.tag_byte & PATH_TAG_PATH) != 0) {
-        uint base = path_ix * PATH_BBOX_STRIDE * 4;
-        path_bboxes.Store(base + 16, draw_flags);
-        path_bboxes.Store(base + 20, trans_ix);
+        path_bboxes[path_ix].draw_flags = draw_flags;
+        path_bboxes[path_ix].trans_ix = trans_ix;
     }
 
     uint seg_type = tag.tag_byte & PATH_TAG_SEG_TYPE;
@@ -804,11 +801,10 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
         }
 
         if (bbox.z > bbox.x || bbox.w > bbox.y) {
-            uint base = path_ix * PATH_BBOX_STRIDE * 4;
-            signed_atomic_min(path_bboxes, base + 0, round_down(bbox.x));
-            signed_atomic_min(path_bboxes, base + 4, round_down(bbox.y));
-            signed_atomic_max(path_bboxes, base + 8, round_up(bbox.z));
-            signed_atomic_max(path_bboxes, base + 12, round_up(bbox.w));
+            InterlockedMin(path_bboxes[path_ix].x0, round_down(bbox.x));
+            InterlockedMin(path_bboxes[path_ix].y0, round_down(bbox.y));
+            InterlockedMax(path_bboxes[path_ix].x1, round_up(bbox.z));
+            InterlockedMax(path_bboxes[path_ix].y1, round_up(bbox.w));
         }
     }
 }

@@ -27,7 +27,7 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene, BufRO<float4> draw_bbo
     // Do not early-return before workgroup barriers: divergent returns deadlock
     // the hillis-steele scan on lavapipe (same issue as backdrop_dyn).
     if (local_id.x == 0) {
-        uint failed_val = bump[0].failed & (STAGE_BINNING | STAGE_FLATTEN);
+        uint failed_val = InterlockedLoad(bump[0].failed) & (STAGE_BINNING | STAGE_FLATTEN);
         sh_previous_failed = (failed_val != 0) ? 1u : 0u;
     }
     GroupMemoryBarrierWithGroupSync();
@@ -73,7 +73,7 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene, BufRO<float4> draw_bbo
     uint total_tile_count = tile_count;
     if (local_id.x == WG_SIZE - 1) {
         uint count = sh_tile_count[WG_SIZE - 1];
-        uint offset; InterlockedAdd(bump[0].tile, count, offset);
+        uint offset = InterlockedAdd(bump[0].tile, count);
         if (offset + count > config.tiles_size) {
             offset = 0;
             InterlockedOr(bump[0].failed, STAGE_TILE_ALLOC);
@@ -97,9 +97,7 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene, BufRO<float4> draw_bbo
 
     uint total_count = sh_tile_count[WG_SIZE - 1];
     for (uint i = local_id.x; i < total_count; i += WG_SIZE) {
-        Tile t;
-        t.backdrop = 0;
-        t.segment_count_or_ix = 0;
-        tiles[tile_offset + i] = t;
+        InterlockedStore(tiles[tile_offset + i].backdrop, 0);
+        InterlockedStore(tiles[tile_offset + i].segment_count_or_ix, 0);
     }
 }

@@ -277,29 +277,30 @@ public struct Path {
 };
 
 public struct Tile {
+    public Interlocked<int> backdrop;
+
+    public Interlocked<uint> segment_count_or_ix;
+
+};
+
+// Same 8-byte layout as Tile, with plain fields. Use this in BufRO when a later
+// stage only needs a snapshot (WGSL forbids Atomic<T> in read-only storage).
+public struct TileRead {
     public int backdrop;
 
     public uint segment_count_or_ix;
 
 };
 
-// Same layout as Tile, used with InterlockedAdd in path_count
-public struct AtomicTile {
-    public int backdrop;
-
-    public uint segment_count_or_ix;
-
-};
-
-// For flatten stage - path bbox with atomic fields for InterlockedMin/Max
+// For flatten stage - path bbox with atomic fields for InterlockedMin/Max / Atomic.min
 public struct AtomicPathBbox {
-    public int x0;
+    public Interlocked<int> x0;
 
-    public int y0;
+    public Interlocked<int> y0;
 
-    public int x1;
+    public Interlocked<int> x1;
 
-    public int y1;
+    public Interlocked<int> y1;
 
     public uint draw_flags;
 
@@ -406,21 +407,21 @@ public static const uint STAGE_COARSE = 0x10;
 
 // Layout must match config.rs BumpAllocators. Fields are written atomically by other stages.
 public struct BumpAllocators {
-    public uint failed;
+    public Interlocked<uint> failed;
 
-    public uint binning;
+    public Interlocked<uint> binning;
 
-    public uint ptcl;
+    public Interlocked<uint> ptcl;
 
-    public uint tile;
+    public Interlocked<uint> tile;
 
-    public uint seg_counts;
+    public Interlocked<uint> seg_counts;
 
-    public uint segments;
+    public Interlocked<uint> segments;
 
-    public uint blend;
+    public Interlocked<uint> blend;
 
-    public uint lines;
+    public Interlocked<uint> lines;
 
 };
 
@@ -1008,26 +1009,6 @@ public float erf7(float x) {
     float yy = y * y;
     float z = y + (0.24295 + (0.03395 + 0.0104 * yy) * yy) * (y * yy);
     return z / sqrt(1.0 + z * z);
-}
-
-public void signed_atomic_min(ByteAddressView buf, uint addr, int new_val) {
-    uint orig;
-    buf.InterlockedCompareExchange(addr, 0, 0, orig);
-    while (new_val < int(orig)) {
-        uint expected = orig;
-        buf.InterlockedCompareExchange(addr, expected, uint(new_val), orig);
-        if (orig == expected) break;
-    }
-}
-
-public void signed_atomic_max(ByteAddressView buf, uint addr, int new_val) {
-    uint orig;
-    buf.InterlockedCompareExchange(addr, 0, 0, orig);
-    while (new_val > int(orig)) {
-        uint expected = orig;
-        buf.InterlockedCompareExchange(addr, expected, uint(new_val), orig);
-        if (orig == expected) break;
-    }
 }
 
 public Transform read_transform(ReadOnlyBuffer<uint> scene, uint transform_base, uint ix) {
