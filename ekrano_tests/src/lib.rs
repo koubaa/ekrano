@@ -183,7 +183,7 @@ pub(crate) fn rgba_straight_composite_to_rgb(width: u32, height: u32, rgba: &[u8
     }
     let [bg_r, bg_g, bg_b] = [bg[0] as u32, bg[1] as u32, bg[2] as u32];
     let mut rgb_buf = Vec::with_capacity(width as usize * height as usize * 3);
-    for chunk in rgba.chunks_exact(4) {
+    for chunk in rgba.as_chunks::<4>().0 {
         let a = chunk[3] as u32;
         let inv_a = 255 - a;
         let r = ((chunk[0] as u32 * a + bg_r * inv_a) / 255).min(255) as u8;

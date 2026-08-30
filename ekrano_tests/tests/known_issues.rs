@@ -93,8 +93,8 @@ fn many_bins_test() {
     let width: u32 = 256 * 17;
     let mut non_red_in_valid: Vec<(u32, u32)> = Vec::new();
 
-    for (i, pixel) in image.data.data().chunks_exact(4).enumerate() {
-        let &[r, g, b, a] = pixel else { unreachable!() };
+    for (i, pixel) in image.data.data().as_chunks::<4>().0.iter().enumerate() {
+        let &[r, g, b, a] = pixel;
         let is_red = r == 255 && g == 0 && b == 0 && a == 255;
         let is_black = r == 0 && g == 0 && b == 0 && a == 255;
         if !is_red && !is_black {
@@ -303,8 +303,8 @@ fn single_bin_red_fill() {
 
     let total = 256_u32 * 256;
     let mut red_count = 0_u32;
-    for pixel in image.data.data().chunks_exact(4) {
-        let &[r, g, b, a] = pixel else { unreachable!() };
+    for pixel in image.data.data().as_chunks::<4>().0 {
+        let &[r, g, b, a] = pixel;
         if r == 255 && g == 0 && b == 0 && a == 255 {
             red_count += 1;
         }
@@ -347,8 +347,8 @@ fn four_bin_colored_quadrants() {
     assert_eq!(image.format, ImageFormat::Rgba8);
 
     let mut non_black_count = 0_u32;
-    for pixel in image.data.data().chunks_exact(4) {
-        let &[r, g, b, a] = pixel else { unreachable!() };
+    for pixel in image.data.data().as_chunks::<4>().0 {
+        let &[r, g, b, a] = pixel;
         if a == 255 && (r > 0 || g > 0 || b > 0) {
             non_black_count += 1;
         }
@@ -382,8 +382,8 @@ fn medium_bins_red_fill() {
 
     let total = 1024_u32 * 1024;
     let mut red_count = 0_u32;
-    for pixel in image.data.data().chunks_exact(4) {
-        let &[r, g, b, a] = pixel else { unreachable!() };
+    for pixel in image.data.data().as_chunks::<4>().0 {
+        let &[r, g, b, a] = pixel;
         if r == 255 && g == 0 && b == 0 && a == 255 {
             red_count += 1;
         }
@@ -418,8 +418,8 @@ fn repeated_many_bins() {
         let image = ekrano_tests::render_then_debug_sync(&scene, &params).unwrap();
 
         let mut red_count = 0_u32;
-        for pixel in image.data.data().chunks_exact(4) {
-            let &[r, g, b, _a] = pixel else { unreachable!() };
+        for pixel in image.data.data().as_chunks::<4>().0 {
+            let &[r, g, b, _a] = pixel;
             if r == 255 && g == 0 && b == 0 {
                 red_count += 1;
             }

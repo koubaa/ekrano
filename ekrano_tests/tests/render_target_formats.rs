@@ -132,8 +132,8 @@ fn render_to_rgba32float_with_filters() {
     );
 
     // Blurred orange circle over black: some texels must be non-zero.
-    let nonzero = loan.chunks_exact(4).any(|b| {
-        let v = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+    let nonzero = loan.as_chunks::<4>().0.iter().any(|b| {
+        let v = f32::from_le_bytes(*b);
         v > 1e-3
     });
     assert!(nonzero, "Rgba32Float filter render produced an all-zero image");
