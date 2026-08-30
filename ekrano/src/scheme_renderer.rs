@@ -76,8 +76,8 @@ pub struct SchemeRenderer {
     persistent: PersistentState,
     /// Pipelined frame scheduling: depth enforcement and timeline tracking.
     frame_pipeline: FrameOrchestrator,
-    /// When true (DX12/Vulkan/Metal), reuse ordering is enforced via scheme submit sidecars and
-    /// frames close with [`FrameOrchestrator::end_frame_externally_ordered`] — no
+    /// When true (DX12/Vulkan/Metal/WebGPU), reuse ordering is enforced via scheme submit
+    /// sidecars and frames close with [`FrameOrchestrator::end_frame_externally_ordered`] — no
     /// coarse `begin_frame` GPU wait. Backends without `host_sidecar_on_submit_worker`
     /// keep the blocking ring path.
     nonblocking_reuse: bool,

@@ -85,10 +85,9 @@ fn is_dx12_warp(device: &Device) -> bool {
 }
 
 fn needs_serial_gpu(device: &Device) -> bool {
-    // DX12 WARP is not parallel-safe. WebGPU currently exposes a single
-    // submission context (`host_sidecar_on_submit_worker` is false), so
-    // concurrent libtest_mimic trials on one shared device contend on the
-    // same wgpu queue/poll path.
+    // DX12 WARP is not parallel-safe. WebGPU serializes on the global backend
+    // mutex and a single wgpu queue/poll path, so concurrent libtest_mimic
+    // trials on one shared device contend.
     is_dx12_warp(device) || device.backend_type() == BackendType::WebGpu
 }
 
