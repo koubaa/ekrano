@@ -13,11 +13,11 @@ static const float EPSILON = 1e-6;
 
 [goldy_compute]
 [numthreads(256, 1, 1)]
-void cs_main(Scattered<BumpAllocators> bump, BufRO<SegmentCount> seg_counts, BufRO<LineSoup> lines,
+void cs_main(BufRO<BumpRead> bump, BufRO<SegmentCount> seg_counts, BufRO<LineSoup> lines,
              BufRO<Path> paths, BufRO<TileRead> tiles, Scattered<Segment> segments,
              ThreadId global_id) {
 
-    uint n_segments = InterlockedLoad(bump[0].seg_counts);
+    uint n_segments = bump[0].seg_counts;
     if (global_id.x >= n_segments)
         return;
 

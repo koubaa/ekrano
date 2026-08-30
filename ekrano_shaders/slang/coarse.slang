@@ -45,17 +45,17 @@ void alloc_cmd(inout uint cmd_offset, inout uint cmd_limit,
 void write_path(uint tile_ix, uint draw_flags,
     inout uint cmd_offset, inout uint cmd_limit,
     StorageBuffer<uint> ptcl, StorageBuffer<BumpAllocators> bump,
-    StorageBuffer<Tile> tiles, Config config) {
-    uint n_segs = InterlockedLoad(tiles[tile_ix].segment_count_or_ix);
+    StorageBuffer<TileRead> tiles, Config config) {
+    uint n_segs = tiles[tile_ix].segment_count_or_ix;
     if (n_segs != 0) {
         uint seg_ix = InterlockedAdd(bump[0].segments, n_segs);
-        InterlockedStore(tiles[tile_ix].segment_count_or_ix, ~seg_ix);
+        tiles[tile_ix].segment_count_or_ix = ~seg_ix;
         alloc_cmd(cmd_offset, cmd_limit, ptcl, bump, config, 4);
         ptcl[cmd_offset] = CMD_FILL;
         uint even_odd = (draw_flags & DRAW_INFO_FLAGS_FILL_RULE_BIT) != 0 ? 1u : 0u;
         ptcl[cmd_offset + 1] = (n_segs << 1) | even_odd;
         ptcl[cmd_offset + 2] = seg_ix;
-        ptcl[cmd_offset + 3] = uint(InterlockedLoad(tiles[tile_ix].backdrop));
+        ptcl[cmd_offset + 3] = uint(tiles[tile_ix].backdrop);
         cmd_offset += 4;
     } else {
         alloc_cmd(cmd_offset, cmd_limit, ptcl, bump, config, 1);
@@ -141,7 +141,7 @@ void write_set_blend_mode(uint blend_packed, inout uint cmd_offset, inout uint c
 void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
              BufRO<DrawMonoid> draw_monoids, BufRO<BinHeader> bin_headers,
              BufRO<uint> info_bin_data, BufRO<Path> paths,
-             Scattered<Tile> tiles, Scattered<BumpAllocators> bump, Scattered<uint> ptcl,
+             Scattered<TileRead> tiles, Scattered<BumpAllocators> bump, Scattered<uint> ptcl,
              GroupThreadId local_id, GroupId wg_id) {
     Config config = config_buf[0];
 
@@ -298,8 +298,8 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
             uint di = draw_monoids[drawobj_ix].info_offset;
             uint draw_flags = info_bin_data[di];
             bool even_odd = (draw_flags & DRAW_INFO_FLAGS_FILL_RULE_BIT) != 0;
-            uint n_segs = InterlockedLoad(tiles[tile_ix].segment_count_or_ix);
-            int tile_backdrop = InterlockedLoad(tiles[tile_ix].backdrop);
+            uint n_segs = tiles[tile_ix].segment_count_or_ix;
+            int tile_backdrop = tiles[tile_ix].backdrop;
             int backdrop_val = even_odd ? (abs(tile_backdrop) & 1) : tile_backdrop;
             bool backdrop_clear = (backdrop_val == 0);
             bool include_tile = (tag == DRAWTAG_SET_BLEND_MODE) || (n_segs != 0) ||
@@ -362,10 +362,10 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
                     write_image(di + 1, cmd_offset, cmd_limit, ptcl, bump, config);
                 } else if (drawtag == DRAWTAG_BEGIN_CLIP) {
                     bool even_odd = (draw_flags & DRAW_INFO_FLAGS_FILL_RULE_BIT) != 0;
-                    int tile_backdrop = InterlockedLoad(tiles[tile_ix].backdrop);
+                    int tile_backdrop = tiles[tile_ix].backdrop;
                     int backdrop_val = even_odd ? (abs(tile_backdrop) & 1) : tile_backdrop;
                     bool backdrop_clear = (backdrop_val == 0);
-                    if (InterlockedLoad(tiles[tile_ix].segment_count_or_ix) == 0 && backdrop_clear)
+                    if (tiles[tile_ix].segment_count_or_ix == 0 && backdrop_clear)
                         clip_zero_depth = clip_depth + 1;
                     else {
                         write_begin_clip(cmd_offset, cmd_limit, ptcl, bump, config);

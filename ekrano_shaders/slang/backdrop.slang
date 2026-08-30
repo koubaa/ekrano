@@ -18,8 +18,8 @@ groupshared int sh_backdrop[512];
 
 [goldy_compute]
 [numthreads(512, 1, 1)]
-void cs_main(BufRO<Config> config_buf, Scattered<BumpAllocators> bump, BufRO<Path> paths,
-             Scattered<Tile> tiles,
+void cs_main(BufRO<Config> config_buf, BufRO<BumpRead> bump, BufRO<Path> paths,
+             Scattered<TileRead> tiles,
              GroupThreadId local_id, GroupId wg_id) {
     Config config = config_buf[0];
 
@@ -27,7 +27,7 @@ void cs_main(BufRO<Config> config_buf, Scattered<BumpAllocators> bump, BufRO<Pat
     uint ix = wg_id.x * width_in_tiles + local_id.x;
     int backdrop = 0;
     if (local_id.x < width_in_tiles) {
-        backdrop = InterlockedLoad(tiles[ix].backdrop);
+        backdrop = tiles[ix].backdrop;
     }
     sh_backdrop[local_id.x] = backdrop;
     for (uint i = 0; i < LG_WG_SIZE; i++) {
@@ -39,6 +39,6 @@ void cs_main(BufRO<Config> config_buf, Scattered<BumpAllocators> bump, BufRO<Pat
         sh_backdrop[local_id.x] = backdrop;
     }
     if (local_id.x < width_in_tiles) {
-        InterlockedStore(tiles[ix].backdrop, backdrop);
+        tiles[ix].backdrop = backdrop;
     }
 }

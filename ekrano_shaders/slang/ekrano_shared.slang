@@ -425,6 +425,26 @@ public struct BumpAllocators {
 
 };
 
+// Same layout as BumpAllocators, plain fields. BufRO snapshot after atomic producers finish.
+public struct BumpRead {
+    public uint failed;
+
+    public uint binning;
+
+    public uint ptcl;
+
+    public uint tile;
+
+    public uint seg_counts;
+
+    public uint segments;
+
+    public uint blend;
+
+    public uint lines;
+
+};
+
 // Must match Rust IndirectCount (count_x, count_y, count_z, pad0) = 16 bytes stride
 public struct IndirectCount {
     public uint count_x;

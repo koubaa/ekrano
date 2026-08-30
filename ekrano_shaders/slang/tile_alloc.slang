@@ -20,7 +20,7 @@ groupshared uint sh_previous_failed;
 [goldy_compute]
 [numthreads(256, 1, 1)]
 void cs_main(BufRO<Config> config_buf, BufRO<uint> scene, BufRO<float4> draw_bboxes,
-             Scattered<BumpAllocators> bump, Scattered<Path> paths, Scattered<Tile> tiles,
+             Scattered<BumpAllocators> bump, Scattered<Path> paths, Scattered<TileRead> tiles,
              ThreadId global_id, GroupThreadId local_id) {
     Config config = config_buf[0];
 
@@ -97,7 +97,7 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene, BufRO<float4> draw_bbo
 
     uint total_count = sh_tile_count[WG_SIZE - 1];
     for (uint i = local_id.x; i < total_count; i += WG_SIZE) {
-        InterlockedStore(tiles[tile_offset + i].backdrop, 0);
-        InterlockedStore(tiles[tile_offset + i].segment_count_or_ix, 0);
+        tiles[tile_offset + i].backdrop = 0;
+        tiles[tile_offset + i].segment_count_or_ix = 0;
     }
 }

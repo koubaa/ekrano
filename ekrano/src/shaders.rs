@@ -207,7 +207,7 @@ pub(crate) fn goldy_full_shaders_scheme(
     let path_count_setup = renderer.add_compute_shader(
         "path_count_setup_scheme",
         ekrano_shaders::slang::PATH_COUNT_SETUP_SCHEME,
-        &[Buffer, Buffer],
+        &[BufReadOnly, Buffer],
         &search_paths,
         &[],
     )?;
@@ -221,7 +221,7 @@ pub(crate) fn goldy_full_shaders_scheme(
     let backdrop = renderer.add_compute_shader(
         "backdrop_dyn",
         ekrano_shaders::slang::BACKDROP_DYN,
-        &[BufReadOnly, Buffer, BufReadOnly, Buffer],
+        &[BufReadOnly, BufReadOnly, BufReadOnly, Buffer],
         &search_paths,
         &[],
     )?;
@@ -246,14 +246,14 @@ pub(crate) fn goldy_full_shaders_scheme(
     let path_tiling_setup = renderer.add_compute_shader(
         "path_tiling_setup_scheme",
         ekrano_shaders::slang::PATH_TILING_SETUP_SCHEME,
-        &[Buffer, Buffer, Buffer],
+        &[BufReadOnly, Buffer, Buffer],
         &search_paths,
         &[],
     )?;
     let path_tiling = renderer.add_compute_shader(
         "path_tiling",
         ekrano_shaders::slang::PATH_TILING,
-        &[Buffer, BufReadOnly, BufReadOnly, BufReadOnly, BufReadOnly, Buffer],
+        &[BufReadOnly, BufReadOnly, BufReadOnly, BufReadOnly, BufReadOnly, Buffer],
         &search_paths,
         &[],
     )?;
