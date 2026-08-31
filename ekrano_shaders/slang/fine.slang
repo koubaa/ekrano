@@ -594,6 +594,62 @@ CmdEndClip read_end_clip(ReadOnlyBuffer<uint> ptcl, uint cmd_ix) {
     return e;
 }
 
+// Mitchell–Netravali cubic (B=1/3, C=1/3), adapted from classic Vello #1557.
+// Atlas texels are CPU-premultiplied before upload, so taps are used as-is.
+float cubic_single_weight(float t, float a, float b, float c, float d) {
+    return t * (t * (t * d + c) + b) + a;
+}
+
+float4 cubic_weights(float fract) {
+    // MF rows: cubic polynomial coefficients for the four neighboring taps.
+    return float4(
+        cubic_single_weight(fract, (1.0 / 6.0) / 3.0, -(3.0 / 6.0) / 3.0 - 1.0 / 3.0, (3.0 / 6.0) / 3.0 + 2.0 * 1.0 / 3.0, -(1.0 / 6.0) / 3.0 - 1.0 / 3.0),
+        cubic_single_weight(fract, 1.0 - (2.0 / 6.0) / 3.0, 0.0, -3.0 + (12.0 / 6.0) / 3.0 + 1.0 / 3.0, 2.0 - (9.0 / 6.0) / 3.0 - 1.0 / 3.0),
+        cubic_single_weight(fract, (1.0 / 6.0) / 3.0, (3.0 / 6.0) / 3.0 + 1.0 / 3.0, 3.0 - (15.0 / 6.0) / 3.0 - 2.0 * 1.0 / 3.0, -2.0 + (9.0 / 6.0) / 3.0 + 1.0 / 3.0),
+        cubic_single_weight(fract, 0.0, 0.0, -1.0 / 3.0, (1.0 / 6.0) / 3.0 + 1.0 / 3.0)
+    );
+}
+
+float4 bicubic_atlas_tap(Interpolated<float4> atlas, float2 coords, float2 atlas_offset, float2 atlas_max) {
+    float2 p = clamp(coords, atlas_offset, atlas_max);
+    return atlas.Load(int3(int2(p), 0));
+}
+
+float4 bicubic_sample(Interpolated<float4> atlas, float2 coords, float2 atlas_offset, float2 atlas_max) {
+    float2 frac_coords = frac(coords + 0.5);
+    float4 cx = cubic_weights(frac_coords.x);
+    float4 cy = cubic_weights(frac_coords.y);
+
+    float4 s00 = bicubic_atlas_tap(atlas, coords + float2(-1.5, -1.5), atlas_offset, atlas_max);
+    float4 s10 = bicubic_atlas_tap(atlas, coords + float2(-0.5, -1.5), atlas_offset, atlas_max);
+    float4 s20 = bicubic_atlas_tap(atlas, coords + float2(0.5, -1.5), atlas_offset, atlas_max);
+    float4 s30 = bicubic_atlas_tap(atlas, coords + float2(1.5, -1.5), atlas_offset, atlas_max);
+
+    float4 s01 = bicubic_atlas_tap(atlas, coords + float2(-1.5, -0.5), atlas_offset, atlas_max);
+    float4 s11 = bicubic_atlas_tap(atlas, coords + float2(-0.5, -0.5), atlas_offset, atlas_max);
+    float4 s21 = bicubic_atlas_tap(atlas, coords + float2(0.5, -0.5), atlas_offset, atlas_max);
+    float4 s31 = bicubic_atlas_tap(atlas, coords + float2(1.5, -0.5), atlas_offset, atlas_max);
+
+    float4 s02 = bicubic_atlas_tap(atlas, coords + float2(-1.5, 0.5), atlas_offset, atlas_max);
+    float4 s12 = bicubic_atlas_tap(atlas, coords + float2(-0.5, 0.5), atlas_offset, atlas_max);
+    float4 s22 = bicubic_atlas_tap(atlas, coords + float2(0.5, 0.5), atlas_offset, atlas_max);
+    float4 s32 = bicubic_atlas_tap(atlas, coords + float2(1.5, 0.5), atlas_offset, atlas_max);
+
+    float4 s03 = bicubic_atlas_tap(atlas, coords + float2(-1.5, 1.5), atlas_offset, atlas_max);
+    float4 s13 = bicubic_atlas_tap(atlas, coords + float2(-0.5, 1.5), atlas_offset, atlas_max);
+    float4 s23 = bicubic_atlas_tap(atlas, coords + float2(0.5, 1.5), atlas_offset, atlas_max);
+    float4 s33 = bicubic_atlas_tap(atlas, coords + float2(1.5, 1.5), atlas_offset, atlas_max);
+
+    float4 row0 = cx.x * s00 + cx.y * s10 + cx.z * s20 + cx.w * s30;
+    float4 row1 = cx.x * s01 + cx.y * s11 + cx.z * s21 + cx.w * s31;
+    float4 row2 = cx.x * s02 + cx.y * s12 + cx.z * s22 + cx.w * s32;
+    float4 row3 = cx.x * s03 + cx.y * s13 + cx.z * s23 + cx.w * s33;
+    float4 result = cy.x * row0 + cy.y * row1 + cy.z * row2 + cy.w * row3;
+
+    float a = clamp(result.a, 0.0, 1.0);
+    return float4(clamp(result.rgb, float3(0.0, 0.0, 0.0), float3(a, a, a)), a);
+}
+
 float hypot_fine(float a, float b) {
     return sqrt(a * a + b * b);
 }
@@ -940,7 +996,8 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
                 // Nearest neighbor (matches original Vello fine shader IMAGE_QUALITY_LOW)
                 for (uint i = 0; i < 4; i++) {
                     if (area[i] != 0.0) {
-                        float2 my_xy = float2(xy.x + float(i), xy.y);
+                        // Pixel centers, not corners (#1606).
+                        float2 my_xy = float2(xy.x + float(i) + 0.5, xy.y + 0.5);
                         float2 atlas_uv = image.xform * my_xy;
                         atlas_uv.x = extend_mode(atlas_uv.x, image.x_extend_mode, image.extents.x);
                         atlas_uv.y = extend_mode(atlas_uv.y, image.y_extend_mode, image.extents.y);
@@ -954,11 +1011,31 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
                             : blend_mix_compose(rgba[i], fg_i, draw_blend);
                     }
                 }
+            } else if (image.quality == IMAGE_QUALITY_HIGH) {
+                // Bicubic Mitchell–Netravali (classic Vello #1557). Pixel-center
+                // sample from #1606; atlas offset has no −0.5 (kernel uses fract(+0.5)).
+                for (uint i = 0; i < 4; i++) {
+                    if (area[i] != 0.0) {
+                        float2 my_xy = float2(xy.x + float(i) + 0.5, xy.y + 0.5);
+                        float2 atlas_uv = image.xform * my_xy;
+                        atlas_uv.x = extend_mode(atlas_uv.x, image.x_extend_mode, image.extents.x);
+                        atlas_uv.y = extend_mode(atlas_uv.y, image.y_extend_mode, image.extents.y);
+                        atlas_uv += image.atlas_offset;
+                        float4 fg_rgba = bicubic_sample(image_atlas, atlas_uv, image.atlas_offset, atlas_max);
+                        float4 fg_i = pixel_format(fg_rgba * area[i] * mask_w[i] * image.alpha, image.format);
+                        uint BLEND_DEFAULT_IH = (MIX_NORMAL << 8) | COMPOSE_SRC_OVER;
+                        rgba[i] = ((draw_blend & 0x7FFFu) == BLEND_DEFAULT_IH)
+                            ? premul_over(rgba[i], fg_i)
+                            : blend_mix_compose(rgba[i], fg_i, draw_blend);
+                    }
+                }
             } else {
                 // Bilinear (matches original Vello fine shader IMAGE_QUALITY_MEDIUM)
                 for (uint i = 0; i < 4; i++) {
                     if (area[i] != 0.0) {
-                        float2 my_xy = float2(xy.x + float(i), xy.y);
+                        // Pixel centers, not corners (#1606). Atlas −0.5 keeps
+                        // the bilinear kernel on texel centers.
+                        float2 my_xy = float2(xy.x + float(i) + 0.5, xy.y + 0.5);
                         float2 atlas_uv = image.xform * my_xy;
                         atlas_uv.x = extend_mode(atlas_uv.x, image.x_extend_mode, image.extents.x);
                         atlas_uv.y = extend_mode(atlas_uv.y, image.y_extend_mode, image.extents.y);
