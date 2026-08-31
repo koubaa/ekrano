@@ -401,6 +401,11 @@ fn medium_bins_red_fill() {
 /// Catches flakiness that only manifests occasionally due to GPU timing
 /// variations. Uses the same viewport size as `many_bins_test` but renders
 /// repeatedly to amplify the failure probability.
+///
+/// Ignored when `EKRANO_CI_SKIP_SLOW` is set. On lavapipe this trial has
+/// stalled CI for hours after `many_bins_test` already passed: no per-iteration
+/// output, Goldy Vulkan `wait_for_fences` uses an infinite timeout, and the
+/// `known_issues` process stays alive until the job is cancelled.
 fn repeated_many_bins() {
     const ITERATIONS: u32 = 10;
     let mut failures = Vec::new();
@@ -441,6 +446,7 @@ fn repeated_many_bins() {
 
 fn main() {
     let mut trials = Vec::new();
+    let ignore_slow = cfg!(skip_slow_tests);
     trials.push(
         libtest_mimic::Trial::test("many_bins_test", || {
             many_bins_test();
@@ -509,7 +515,7 @@ fn main() {
             repeated_many_bins();
             Ok(())
         })
-        .with_ignored_flag(false),
+        .with_ignored_flag(ignore_slow),
     );
 
     let mut args = libtest_mimic::Arguments::from_args();

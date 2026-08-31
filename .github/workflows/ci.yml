@@ -171,6 +171,8 @@ jobs:
   test-stable:
     name: cargo test
     needs: prime-lfs-cache
+    # Passing ubuntu cargo test jobs (n=80): mean 6.4m, σ 2.1m, μ+2σ 10.6m, max 18.8m.
+    timeout-minutes: 11
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
