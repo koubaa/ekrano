@@ -1,6 +1,7 @@
 // Copyright 2022 the Vello Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+use std::io::Cursor;
 use std::sync::Arc;
 
 #[cfg(feature = "bump_estimate")]
@@ -763,7 +764,7 @@ impl<'a> DrawGlyphs<'a> {
                             }
                         }
                         bitmap::BitmapData::Png(data) => {
-                            let mut decoder = png::Decoder::new(data);
+                            let mut decoder = png::Decoder::new(Cursor::new(data));
                             decoder.set_transformations(Transformations::ALPHA | Transformations::STRIP_16);
                             let Ok(mut reader) = decoder.read_info() else {
                                 log::error!("Invalid PNG in font");
@@ -774,7 +775,7 @@ impl<'a> DrawGlyphs<'a> {
                                 log::error!("Unsupported `output_color_type`");
                                 continue;
                             }
-                            let mut buf = vec![0; reader.output_buffer_size()].into_boxed_slice();
+                            let mut buf = vec![0; reader.output_buffer_size().unwrap_or_default()].into_boxed_slice();
 
                             let info = reader.next_frame(&mut buf).unwrap();
                             if info.width != bitmap.width || info.height != bitmap.height {
