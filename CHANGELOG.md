@@ -18,6 +18,7 @@ This release has an [MSRV][] of 1.92.
 ### Added
 
 - Image tinting with alpha-mask and component-wise multiply modes.
+- Gradient interpolation in unpremultiplied alpha space (`InterpolationAlphaSpace::Unpremultiplied`). Premultiplied remains the default.
 
 ### Removed
 
@@ -65,7 +66,6 @@ This release has an [MSRV][] of 1.92.
 - Breaking change: Updated Peniko to [v0.5.0](https://github.com/linebender/peniko/releases/tag/v0.5.0). ([#1224][] by [@DJMcNab][])  
   This brings several important changes which allow Vello to be used in more use cases:
   - Breaking change: Gradients must have their alpha interpolation space specified. For this, you should use `InterpolationAlphaSpace::Premultiplied`, unless you are implementing a specification which indicates otherwise.
-    Currently, only `InterpolationAlphaSpace::Premultiplied` is supported.
   - Breaking change: `Gradient` kinds now have a corresponding struct. For example, `GradientKind::Linear {...}` is now `LinearGradientPosition {...}.into()`.
     This makes it possible to pass individual gradient kinds between functions.
   - `GradientKind::Sweep`'s defined semantics now match those which Vello previously implemented.

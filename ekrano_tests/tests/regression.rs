@@ -9,7 +9,7 @@ mod submission;
 use ekrano::{
     AaConfig, Scene,
     kurbo::{Affine, Rect, RoundedRect, Stroke},
-    peniko::{Extend, ImageQuality, color::palette},
+    peniko::{Color, ColorStop, Extend, Gradient, ImageQuality, InterpolationAlphaSpace, color::palette},
 };
 use ekrano_tests::{TestParams, shared_test_device, smoke_snapshot_test_sync, snapshot_test_sync};
 use scenes::ImageCache;
@@ -40,6 +40,66 @@ fn test_data_image_roundtrip_extend_pad() {
     scene.draw_image(&image, Affine::IDENTITY);
     let mut params = TestParams::new("data_image_roundtrip", image.image.width, image.image.height);
     params.anti_aliasing = AaConfig::Area;
+    smoke_snapshot_test_sync(scene, &params)
+        .unwrap()
+        .assert_mean_less_than(0.001);
+}
+
+/// <https://github.com/web-platform-tests/wpt/blob/18c64a74b1/html/canvas/element/fill-and-stroke-styles/2d.gradient.interpolate.coloralpha.html>
+/// See <https://github.com/linebender/vello/issues/1056>.
+fn test_gradient_color_alpha_premultiplied() {
+    let mut scene = Scene::new();
+    let viewport = Rect::new(0., 0., 100., 50.);
+    scene.fill(
+        ekrano::peniko::Fill::NonZero,
+        Affine::IDENTITY,
+        &Gradient::new_linear((0., 0.), (100., 0.))
+            .with_stops([
+                ColorStop {
+                    offset: 0.,
+                    color: Color::from_rgba8(255, 255, 0, 0).into(),
+                },
+                ColorStop {
+                    offset: 1.,
+                    color: Color::from_rgba8(0, 0, 255, 255).into(),
+                },
+            ])
+            .with_interpolation_alpha_space(InterpolationAlphaSpace::Premultiplied),
+        None,
+        &viewport,
+    );
+    let mut params = TestParams::new("gradient_color_alpha_premultiplied", 100, 50);
+    params.base_color = Some(palette::css::WHITE);
+    smoke_snapshot_test_sync(scene, &params)
+        .unwrap()
+        .assert_mean_less_than(0.001);
+}
+
+/// <https://github.com/web-platform-tests/wpt/blob/18c64a74b1/html/canvas/element/fill-and-stroke-styles/2d.gradient.interpolate.coloralpha.html>
+/// See <https://github.com/linebender/vello/issues/1056>.
+fn test_gradient_color_alpha_unpremultiplied() {
+    let mut scene = Scene::new();
+    let viewport = Rect::new(0., 0., 100., 50.);
+    scene.fill(
+        ekrano::peniko::Fill::NonZero,
+        Affine::IDENTITY,
+        &Gradient::new_linear((0., 0.), (100., 0.))
+            .with_stops([
+                ColorStop {
+                    offset: 0.,
+                    color: Color::from_rgba8(255, 255, 0, 0).into(),
+                },
+                ColorStop {
+                    offset: 1.,
+                    color: Color::from_rgba8(0, 0, 255, 255).into(),
+                },
+            ])
+            .with_interpolation_alpha_space(InterpolationAlphaSpace::Unpremultiplied),
+        None,
+        &viewport,
+    );
+    let mut params = TestParams::new("gradient_color_alpha_unpremultiplied", 100, 50);
+    params.base_color = Some(palette::css::WHITE);
     smoke_snapshot_test_sync(scene, &params)
         .unwrap()
         .assert_mean_less_than(0.001);
@@ -92,6 +152,20 @@ fn main() {
     trials.push(
         libtest_mimic::Trial::test("test_data_image_roundtrip_extend_pad", || {
             test_data_image_roundtrip_extend_pad();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("test_gradient_color_alpha_premultiplied", || {
+            test_gradient_color_alpha_premultiplied();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("test_gradient_color_alpha_unpremultiplied", || {
+            test_gradient_color_alpha_unpremultiplied();
             Ok(())
         })
         .with_ignored_flag(false),

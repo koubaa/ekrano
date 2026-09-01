@@ -417,9 +417,7 @@ fn filter_drop_shadow_only_simple() {
     scene.pop_layer();
     let mut params = TestParams::new("filter_drop_shadow_only_simple", 100, 100);
     params.base_color = Some(WHITE);
-    snapshot_test_sync(scene, &params)
-        .unwrap()
-        .assert_mean_less_than(0.02);
+    snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.02);
 }
 
 fn filter_drop_shadow_only_simple_with_opacity() {
@@ -442,9 +440,7 @@ fn filter_drop_shadow_only_simple_with_opacity() {
     scene.pop_layer();
     let mut params = TestParams::new("filter_drop_shadow_only_simple_with_opacity", 100, 100);
     params.base_color = Some(WHITE);
-    snapshot_test_sync(scene, &params)
-        .unwrap()
-        .assert_mean_less_than(0.02);
+    snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.02);
 }
 
 fn filter_drop_shadow_only_four_directions() {
@@ -471,9 +467,7 @@ fn filter_drop_shadow_only_four_directions() {
     }
     let mut params = TestParams::new("filter_drop_shadow_only_four_directions", 100, 100);
     params.base_color = Some(WHITE);
-    snapshot_test_sync(scene, &params)
-        .unwrap()
-        .assert_mean_less_than(0.02);
+    snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.02);
 }
 
 // ─── Offset filter ────────────────────────────────────────────────────────────
@@ -642,10 +636,7 @@ fn main() {
         filter_drop_shadow_fractional_offset()
     );
     case!("filter_drop_shadow_zero_offset", filter_drop_shadow_zero_offset());
-    case!(
-        "filter_drop_shadow_only_simple",
-        filter_drop_shadow_only_simple()
-    );
+    case!("filter_drop_shadow_only_simple", filter_drop_shadow_only_simple());
     case!(
         "filter_drop_shadow_only_simple_with_opacity",
         filter_drop_shadow_only_simple_with_opacity()
