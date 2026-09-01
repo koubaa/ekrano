@@ -127,11 +127,19 @@ void cs_main(BufRO<Config> config_buf, BufRO<ClipInp> clip_inp,
 
     bic.a = 0;
     bic.b = 0;
-    int link = search_link(bic, local_id.x);
+    int link = -1;
+    if (global_id.x < config.n_clip) {
+        link = search_link(bic, local_id.x);
+    }
     sh_link[local_id.x] = link;
     GroupMemoryBarrierWithGroupSync();
 
-    int grandparent = (link >= 0) ? sh_link[link] : (link - 1);
+    // Explicit control flow rather than ?: — some backends still materialize
+    // the indexed operand on inactive lanes (vello #1637).
+    int grandparent = link - 1;
+    if (link >= 0) {
+        grandparent = sh_link[link];
+    }
     int parent;
     if (link >= 0) {
         parent = int(wg_id.x * WG_SIZE) + link;
