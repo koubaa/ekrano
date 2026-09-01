@@ -27,7 +27,7 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
              BufRO<DrawMonoid> draw_monoids, BufRO<PathBbox> path_bbox_buf,
              BufRO<float4> clip_bbox_buf, Scattered<float4> intersected_bbox,
              Scattered<BumpAllocators> bump, Scattered<uint> bin_data, Scattered<BinHeader> bin_header,
-             ThreadId global_id, GroupThreadId local_id) {
+             ThreadId global_id, GroupThreadId local_id, GroupId wg_id) {
     Config config = config_buf[0];
 
     for (uint i = 0; i < N_SLICE; i++) {
@@ -83,6 +83,8 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
     }
     int width_in_bins = int((config.width_in_tiles + N_TILE_X - 1) / N_TILE_X);
     int height_in_bins = int((config.height_in_tiles + N_TILE_Y - 1) / N_TILE_Y);
+    uint n_bins = uint(width_in_bins * height_in_bins);
+    uint aligned_n_bins = (n_bins + N_TILE - 1) & ~(N_TILE - 1);
     x0 = clamp(x0, 0, width_in_bins);
     y0 = clamp(y0, 0, height_in_bins);
     x1 = clamp(x1, 0, width_in_bins);
@@ -90,62 +92,71 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
     if (x0 == x1)
         y1 = y0;
 
-    int x = x0, y = y0;
+    uint y0_width = uint(y0 * width_in_bins);
+    uint y1_width = uint(y1 * width_in_bins);
     uint my_slice = local_id.x / 32;
     uint my_mask = 1 << (local_id.x & 31);
-    while (y < y1) {
-        int bin_ix = y * width_in_bins + x;
-        if (bin_ix < int(N_TILE)) {
-            InterlockedOr(sh_bitmaps[my_slice][bin_ix], my_mask);
-        }
-        x++;
-        if (x == x1) {
-            x = x0;
-            y++;
-        }
-    }
 
-    GroupMemoryBarrierWithGroupSync();
-
-    uint element_count = 0;
-    for (uint i = 0; i < N_SUBSLICE; i++) {
-        element_count += countbits(InterlockedLoad(sh_bitmaps[i * 2][local_id.x]));
-        uint element_count_lo = element_count;
-        element_count += countbits(InterlockedLoad(sh_bitmaps[i * 2 + 1][local_id.x]));
-        uint element_count_hi = element_count;
-        sh_count[i][local_id.x] = element_count_lo | (element_count_hi << 16);
-    }
-    uint chunk_offset = InterlockedAdd(bump[0].binning, element_count);
-    if (chunk_offset + element_count > config.binning_size) {
-        chunk_offset = 0;
-        InterlockedOr(bump[0].failed, STAGE_BINNING);
-    }
-    sh_chunk_offset[local_id.x] = chunk_offset;
-    bin_header[global_id.x].element_count = element_count;
-    bin_header[global_id.x].chunk_offset = chunk_offset;
-    GroupMemoryBarrierWithGroupSync();
-
-    x = x0;
-    y = y0;
-    while (y < y1) {
-        int bin_ix = y * width_in_bins + x;
-        if (bin_ix < int(N_TILE)) {
-            uint out_mask = InterlockedLoad(sh_bitmaps[my_slice][bin_ix]);
-            if ((out_mask & my_mask) != 0) {
-                uint idx = countbits(out_mask & (my_mask - 1));
-                if (my_slice > 0) {
-                    uint count_ix = my_slice - 1;
-                    uint count_packed = sh_count[count_ix / 2][bin_ix];
-                    idx += (count_packed >> (16 * (count_ix & 1))) & 0xffff;
-                }
-                uint offset = config.bin_data_start + sh_chunk_offset[bin_ix];
-                bin_data[offset + idx] = element_ix;
+    // Loop over bins in chunks of N_TILE (256). See vello #1700.
+    uint next_block = N_TILE;
+    for (uint block_start = 0; block_start < n_bins; ) {
+        for (uint y_offset = y0_width; y_offset < y1_width; y_offset += uint(width_in_bins)) {
+            uint start_bin = max(y_offset + uint(x0), block_start);
+            uint end_bin = min(y_offset + uint(x1), next_block);
+            for (uint bin_ix = start_bin; bin_ix < end_bin; bin_ix++) {
+                uint sh_bin_ix = bin_ix - block_start;
+                InterlockedOr(sh_bitmaps[my_slice][sh_bin_ix], my_mask);
             }
         }
-        x++;
-        if (x == x1) {
-            x = x0;
-            y++;
+        GroupMemoryBarrierWithGroupSync();
+
+        uint cur_bin_ix = block_start + local_id.x;
+        uint element_count = 0;
+        for (uint i = 0; i < N_SUBSLICE; i++) {
+            element_count += countbits(InterlockedLoad(sh_bitmaps[i * 2][local_id.x]));
+            uint element_count_lo = element_count;
+            element_count += countbits(InterlockedLoad(sh_bitmaps[i * 2 + 1][local_id.x]));
+            uint element_count_hi = element_count;
+            sh_count[i][local_id.x] = element_count_lo | (element_count_hi << 16);
+        }
+        uint chunk_offset = InterlockedAdd(bump[0].binning, element_count);
+        if (chunk_offset + element_count > config.binning_size) {
+            chunk_offset = 0;
+            InterlockedOr(bump[0].failed, STAGE_BINNING);
+        }
+        sh_chunk_offset[local_id.x] = chunk_offset;
+
+        uint header_ix = wg_id.x * aligned_n_bins + cur_bin_ix;
+        bin_header[header_ix].element_count = element_count;
+        bin_header[header_ix].chunk_offset = chunk_offset;
+        GroupMemoryBarrierWithGroupSync();
+
+        for (uint y_offset = y0_width; y_offset < y1_width; y_offset += uint(width_in_bins)) {
+            uint start_bin = max(y_offset + uint(x0), block_start);
+            uint end_bin = min(y_offset + uint(x1), next_block);
+            for (uint bin_ix = start_bin; bin_ix < end_bin; bin_ix++) {
+                uint sh_bin_ix = bin_ix - block_start;
+                uint out_mask = InterlockedLoad(sh_bitmaps[my_slice][sh_bin_ix]);
+                if ((out_mask & my_mask) != 0) {
+                    uint idx = countbits(out_mask & (my_mask - 1));
+                    if (my_slice > 0) {
+                        uint count_ix = my_slice - 1;
+                        uint count_packed = sh_count[count_ix / 2][sh_bin_ix];
+                        idx += (count_packed >> (16 * (count_ix & 1))) & 0xffff;
+                    }
+                    uint offset = config.bin_data_start + sh_chunk_offset[sh_bin_ix];
+                    bin_data[offset + idx] = element_ix;
+                }
+            }
+        }
+
+        block_start = next_block;
+        if (next_block < aligned_n_bins) {
+            GroupMemoryBarrierWithGroupSync();
+            for (uint i = 0; i < N_SLICE; i++)
+                InterlockedStore(sh_bitmaps[i][local_id.x], 0);
+            GroupMemoryBarrierWithGroupSync();
+            next_block += N_TILE;
         }
     }
 }
