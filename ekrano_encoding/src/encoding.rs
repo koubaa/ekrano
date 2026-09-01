@@ -799,11 +799,11 @@ mod tests {
         let mut encoding = Encoding::new();
         encoding.encode_blurred_rounded_rect(palette::css::BLACK, 10.0, 20.0, 3.0, 1.5, false);
         assert!(encoding.draw_tags == [DrawTag::BLUR_RECT]);
-        assert_eq!(*encoding.draw_data.last().unwrap(), 1.5f32.to_bits());
+        assert_eq!(*encoding.draw_data.last().unwrap(), 1.5_f32.to_bits());
 
         encoding.reset();
         encoding.encode_blurred_rounded_rect(palette::css::BLACK, 10.0, 20.0, 3.0, 1.5, true);
-        assert_eq!(*encoding.draw_data.last().unwrap(), (-1.5f32).to_bits());
+        assert_eq!(*encoding.draw_data.last().unwrap(), (-1.5_f32).to_bits());
 
         encoding.reset();
         encoding.encode_blurred_rounded_rect(palette::css::BLACK, 10.0, 20.0, 3.0, 0.0, true);

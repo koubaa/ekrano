@@ -110,7 +110,7 @@ impl ImageCache {
     }
 
     /// Number of images currently packed in the atlas.
-    #[allow(dead_code)] // used by renderer / future eviction diagnostics
+    #[allow(dead_code, reason = "used by renderer / future eviction diagnostics")]
     pub(crate) fn resident_count(&self) -> usize {
         self.map.len()
     }
@@ -135,16 +135,13 @@ impl ImageCache {
                 if resident.last_used_generation != self.generation {
                     resident.last_used_generation = self.generation;
                     if resident.dirty {
-                        self.images
-                            .push((resident.image.clone(), resident.x, resident.y));
+                        self.images.push((resident.image.clone(), resident.x, resident.y));
                     }
                 }
                 Some(xy)
             }
             Entry::Vacant(vacant) => {
-                let alloc = self
-                    .atlas
-                    .allocate(size2(image.width as _, image.height as _))?;
+                let alloc = self.atlas.allocate(size2(image.width as _, image.height as _))?;
                 let x = alloc.rectangle.min.x as u32;
                 let y = alloc.rectangle.min.y as u32;
                 let resident = ResidentImage {
@@ -179,8 +176,7 @@ impl ImageCache {
     }
 
     pub(crate) fn can_fit_image(&self, image: &ImageData) -> bool {
-        image.width <= self.atlas.size().width as u32
-            && image.height <= self.atlas.size().height as u32
+        image.width <= self.atlas.size().width as u32 && image.height <= self.atlas.size().height as u32
     }
 
     pub(crate) fn evict_stale_entries(&mut self) -> bool {
@@ -206,9 +202,7 @@ impl ImageCache {
         entries.sort_by_key(|(id, _)| *id);
         let mut map = HashMap::with_capacity(self.map.len());
         for (id, resident) in entries {
-            let Some(alloc) =
-                atlas.allocate(size2(resident.image.width as _, resident.image.height as _))
-            else {
+            let Some(alloc) = atlas.allocate(size2(resident.image.width as _, resident.image.height as _)) else {
                 return false;
             };
             let mut resident = resident.clone();

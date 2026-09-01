@@ -104,15 +104,15 @@ pub struct SchemeRenderer {
     live_atlas: Option<Texture>,
     /// Stable dummy sampled when no live textures are active for the frame.
     dummy_live_atlas: Option<Texture>,
-    /// Stable packed-atlas placements: blob_id -> (x, y, width, height).
+    /// Stable packed-atlas placements: `blob_id` -> (x, y, width, height).
     live_atlas_placements: HashMap<u64, (u32, u32, u32, u32)>,
     /// Last sequence copied into the packed live atlas per blob.
     live_atlas_committed_seq: HashMap<u64, u64>,
     /// Horizontal strip cursor for new live-atlas allocations.
     live_atlas_next_x: u32,
-    /// Pending sample->packed-atlas GPU copies for this frame (recorded onto atlas_update).
+    /// Pending sample->packed-atlas GPU copies for this frame (recorded onto `atlas_update`).
     pending_live_atlas_copies: Vec<(LiveTextureId, u64, u32, u32, u32, u32)>,
-    /// `(blob_id, front_seq)` to commit after atlas_update submits successfully.
+    /// `(blob_id, front_seq)` to commit after `atlas_update` submits successfully.
     pending_live_atlas_commits: Vec<(u64, u64)>,
     /// Cumulative worker topology records across worker replacements (tests / diagnostics).
     #[cfg(test)]
@@ -127,6 +127,15 @@ pub struct SchemeRenderer {
     #[cfg(test)]
     atlas_update_submissions_total: u64,
 }
+
+/// Live-atlas bind plan: optional single texture, optional packed CPU bytes, size, placements.
+type LiveAtlasPrepare = (
+    Option<LiveTextureId>,
+    Option<Vec<u8>>,
+    u32,
+    u32,
+    HashMap<u64, (u32, u32)>,
+);
 
 impl SchemeRenderer {
     /// Create a new Scheme renderer for the given device.
@@ -288,7 +297,7 @@ impl SchemeRenderer {
                 TextureKind::DirectInterpolated,
                 TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
             )?;
-            #[allow(deprecated)]
+            #[allow(deprecated, reason = "write is the current Goldy CPU upload path")]
             tex.write(&[0, 0, 0, 0]).map_err(|e| Error::Gpu(e.to_string()))?;
             self.dummy_live_atlas = Some(tex);
         }
@@ -318,15 +327,7 @@ impl SchemeRenderer {
         Ok(self.live_atlas.as_ref().expect("live atlas must exist").borrow())
     }
 
-    fn prepare_live_atlas(
-        &mut self,
-    ) -> Result<(
-        Option<LiveTextureId>,
-        Option<Vec<u8>>,
-        u32,
-        u32,
-        HashMap<u64, (u32, u32)>,
-    )> {
+    fn prepare_live_atlas(&mut self) -> Result<LiveAtlasPrepare> {
         self.live_textures.poll_settlement();
         self.pending_live_atlas_copies.clear();
         self.pending_live_atlas_commits.clear();
@@ -363,22 +364,11 @@ impl SchemeRenderer {
         migrate.submit().map_err(|e| Error::Gpu(e.to_string()))?;
         self.live_atlas_placements = new_placements;
         self.live_atlas_next_x = x;
-        self.persistent
-            .retained_pool
-            .release_texture(&self.context, old_tex);
+        self.persistent.retained_pool.release_texture(&self.context, old_tex);
         Ok(())
     }
 
-    fn prepare_packed_live_atlas(
-        &mut self,
-        fronts: &[(LiveTextureId, u64, u32, u32)],
-    ) -> Result<(
-        Option<LiveTextureId>,
-        Option<Vec<u8>>,
-        u32,
-        u32,
-        HashMap<u64, (u32, u32)>,
-    )> {
+    fn prepare_packed_live_atlas(&mut self, fronts: &[(LiveTextureId, u64, u32, u32)]) -> Result<LiveAtlasPrepare> {
         let needed_w: u32 = fronts.iter().map(|(_, _, w, _)| *w).sum::<u32>().max(1);
         let needed_h: u32 = fronts.iter().map(|(_, _, _, h)| *h).max().unwrap_or(1).max(1);
 
@@ -411,16 +401,14 @@ impl SchemeRenderer {
                     (px, py)
                 } else {
                     let x = self.live_atlas_next_x;
-                    self.live_atlas_placements
-                        .insert(*blob_id, (x, 0, *width, *height));
+                    self.live_atlas_placements.insert(*blob_id, (x, 0, *width, *height));
                     self.live_atlas_next_x += *width;
                     self.live_atlas_committed_seq.remove(blob_id);
                     (x, 0)
                 }
             } else {
                 let x = self.live_atlas_next_x;
-                self.live_atlas_placements
-                    .insert(*blob_id, (x, 0, *width, *height));
+                self.live_atlas_placements.insert(*blob_id, (x, 0, *width, *height));
                 self.live_atlas_next_x += *width;
                 (x, 0)
             };
@@ -453,13 +441,12 @@ impl SchemeRenderer {
                 .map(Texture::borrow)
                 .ok_or_else(|| Error::Gpu(format!("missing sample mirror for live texture {id:?}")));
         }
-        if let Some(atlas) = self.live_atlas.as_ref() {
-            if live_atlas_data.is_none()
-                && atlas.width() == live_atlas_width
-                && atlas.height() == live_atlas_height
-            {
-                return Ok(atlas.borrow());
-            }
+        if let Some(atlas) = self.live_atlas.as_ref()
+            && live_atlas_data.is_none()
+            && atlas.width() == live_atlas_width
+            && atlas.height() == live_atlas_height
+        {
+            return Ok(atlas.borrow());
         }
         if live_atlas_data.is_some() {
             return self.ensure_packed_live_atlas(live_atlas_width.max(1), live_atlas_height.max(1));
@@ -1593,9 +1580,9 @@ pub(crate) struct SchemeRecorder<'a> {
     metal_fused_upload: bool,
     /// When true, the upload scheme IR is empty and copy/upload nodes must be recorded this frame.
     pub(crate) upload_needs_record: bool,
-    /// When true, atlas_update IR must be (re)recorded this frame.
+    /// When true, `atlas_update` IR must be (re)recorded this frame.
     pub(crate) atlas_update_needs_record: bool,
-    /// Set when this frame wrote deposits or copies onto atlas_update (submit it).
+    /// Set when this frame wrote deposits or copies onto `atlas_update` (submit it).
     pub(crate) atlas_update_has_work: bool,
     /// Nonblocking head-chases-tail path: deferred host writes + reuse epochs; no ring wait.
     pub(crate) nonblocking_reuse: bool,
@@ -2547,7 +2534,10 @@ mod tests {
         let upload_epochs = renderer.upload_record_epochs();
         let atlas_subs = renderer.atlas_update_submissions_total();
         assert_eq!(worker_epochs, 1);
-        assert_eq!(upload_epochs, 1, "upload records once; region deposits are on atlas_update");
+        assert_eq!(
+            upload_epochs, 1,
+            "upload records once; region deposits are on atlas_update"
+        );
 
         // New dirty region topology: atlas_update submits; upload/worker stay put.
         renderer
@@ -2591,7 +2581,6 @@ mod tests {
             "worker must not re-record on repeated frames with stable region layout"
         );
     }
-
 
     #[test]
     fn static_image_retains_atlas_without_redeposit() {
@@ -2698,7 +2687,6 @@ mod tests {
         );
         assert_eq!(renderer.atlas_update_submissions_total(), atlas_subs + 1);
     }
-
 
     #[test]
     fn non_metal_swapchain_uses_out_image_copy_path() {

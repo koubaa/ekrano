@@ -217,12 +217,11 @@ impl LiveTextureExchange {
     }
 
     pub fn cancel_publish(&mut self, id: LiveTextureId, slot: usize) {
-        if let Some(entry) = self.entries.get_mut(&id) {
-            if let Some(s) = entry.slots.get_mut(slot) {
-                if s.pending.is_none() {
-                    s.reserved = false;
-                }
-            }
+        if let Some(entry) = self.entries.get_mut(&id)
+            && let Some(s) = entry.slots.get_mut(slot)
+            && s.pending.is_none()
+        {
+            s.reserved = false;
         }
     }
 
@@ -313,7 +312,7 @@ impl LiveTextureExchange {
         Ok(())
     }
 
-    /// Copy `src` into a reserved back slot and publish (classic override_image).
+    /// Copy `src` into a reserved back slot and publish (classic `override_image`).
     pub fn blit_into(&mut self, id: LiveTextureId, src: &Texture) -> Result<bool, Error> {
         let Some(slot) = self.begin_publish(id)? else {
             return Ok(false);

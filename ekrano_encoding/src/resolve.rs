@@ -552,9 +552,7 @@ impl Resolver {
                     if let Some(xy) = self.image_cache.get_or_insert(&pending_image.image) {
                         break Some(xy);
                     }
-                    if self.image_cache.can_fit_image(&pending_image.image)
-                        && self.image_cache.evict_stale_entries()
-                    {
+                    if self.image_cache.can_fit_image(&pending_image.image) && self.image_cache.evict_stale_entries() {
                         continue;
                     }
                     // We failed to allocate. Try to bump the atlas size.

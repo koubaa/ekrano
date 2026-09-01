@@ -179,7 +179,7 @@ pub(crate) fn worker_topology(
 ///
 /// Image-atlas region deposits live on the dedicated `atlas_update` scheme, not here.
 /// Dirty→clean region-list changes must not invalidate the per-frame upload scheme.
-/// Topology of the retained atlas_update scheme (region deposits + live GPU copies).
+/// Topology of the retained `atlas_update` scheme (region deposits + live GPU copies).
 ///
 /// Image-atlas identity is keyed by dimensions: handle only changes when dims change
 /// (`acquire_or_reuse_retained_atlas`), so it is not stored here.
@@ -798,9 +798,18 @@ mod tests {
             layer_index: 0,
             is_nested: false,
         };
-        assert!(!layer_filter_effects_eq(&[shadow.clone()], &[only.clone()]));
-        assert!(layer_filter_effects_eq(&[only.clone()], &[only]));
-        assert!(layer_filter_effects_eq(&[shadow.clone()], &[shadow]));
+        assert!(!layer_filter_effects_eq(
+            std::slice::from_ref(&shadow),
+            std::slice::from_ref(&only)
+        ));
+        assert!(layer_filter_effects_eq(
+            std::slice::from_ref(&only),
+            std::slice::from_ref(&only)
+        ));
+        assert!(layer_filter_effects_eq(
+            std::slice::from_ref(&shadow),
+            std::slice::from_ref(&shadow)
+        ));
     }
 
     fn sample_topology(direct_present: bool) -> WorkerTopology {

@@ -45,7 +45,7 @@ fn publish_live_texture(renderer: &mut GoldyRenderer, id: ekrano::LiveTextureId,
         .expect("begin_publish")
         .expect("available live slot");
     let texture = exchange.slot_texture(id, slot).expect("slot texture").borrow();
-    #[allow(deprecated)]
+    #[allow(deprecated, reason = "write is the current Goldy CPU upload path")]
     texture.write(rgba).expect("write live texture bytes");
     exchange
         .complete_publish_ready(id, slot)
@@ -88,7 +88,11 @@ fn live_texture_matches_cpu_image() {
     params.base_color = Some(TRANSPARENT);
     let expected = render_then_debug_sync(&cpu_scene, &params).expect("render expected CPU image");
 
-    assert_eq!(live_pixels, expected.data.data());
+    assert_eq!(
+        live_pixels,
+        expected.data.data(),
+        "live texture pixels should match CPU image"
+    );
 }
 
 fn multiple_live_textures_pack_linearly() {
@@ -118,7 +122,11 @@ fn multiple_live_textures_pack_linearly() {
     params.base_color = Some(TRANSPARENT);
     let expected = render_then_debug_sync(&cpu_scene, &params).expect("render expected CPU scene");
 
-    assert_eq!(live_pixels, expected.data.data());
+    assert_eq!(
+        live_pixels,
+        expected.data.data(),
+        "packed live textures should match CPU images"
+    );
 }
 
 fn empty_unregistered_live_blob_errors() {

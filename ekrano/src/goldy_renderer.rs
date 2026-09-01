@@ -377,9 +377,9 @@ pub(crate) struct PersistentState {
     pub(crate) cached_mask_deposit: Option<(u32, u32, u64, DepositTransaction)>,
     /// Destination-bound live atlas deposit (width, height, capacity, transaction).
     pub(crate) cached_live_atlas_deposit: Option<(u32, u32, u64, DepositTransaction)>,
-    /// Destination-bound deposits for image atlas region uploads (atlas_update scheme).
+    /// Destination-bound deposits for image atlas region uploads (`atlas_update` scheme).
     pub(crate) cached_image_region_deposits: Vec<((u32, u32, u32, u32), DepositTransaction)>,
-    /// Topology key for the retained atlas_update scheme (regions + atlas identity).
+    /// Topology key for the retained `atlas_update` scheme (regions + atlas identity).
     pub(crate) cached_atlas_update_key: Option<crate::worker_retention::AtlasUpdateKey>,
     /// Retained headless `out_image` withdraw (`TextureHandle` + transaction) for
     /// [`crate::scheme_renderer::SchemeRenderer::render_to_buffer`].
@@ -447,7 +447,7 @@ impl PersistentState {
         self.cached_live_atlas_deposit = None;
     }
 
-    /// Drop atlas_update scheme deposit declarations (call when replacing atlas_update).
+    /// Drop `atlas_update` scheme deposit declarations (call when replacing `atlas_update`).
     pub(crate) fn clear_atlas_deposit_declarations(&mut self) {
         self.cached_image_region_deposits.clear();
         self.cached_atlas_update_key = None;

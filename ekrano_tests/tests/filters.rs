@@ -390,7 +390,7 @@ fn filter_drop_shadow_zero_offset() {
         .assert_mean_less_than(0.0095);
 }
 
-/// Shadow without compositing the source (Vello #1763 / Skia DropShadowOnly).
+/// Shadow without compositing the source (Vello #1763 / Skia `DropShadowOnly`).
 ///
 /// Honesty gate: Linebender `main` sparse LFS PNGs (not self-rendered).
 /// `std_dev = 3` uses Ekrano's one-shot 2D Gaussian (`pass_kind` 8);

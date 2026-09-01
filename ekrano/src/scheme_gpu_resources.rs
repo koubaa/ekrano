@@ -607,16 +607,8 @@ fn stage_texture_region(
         &pitched
     };
     let staging_bytes = layout.staging_bytes.max(staged.len() as u64);
-    let deposit = alloc_or_reuse_region_texture_deposit(
-        recorder,
-        texture,
-        x,
-        y,
-        width,
-        height,
-        staging_bytes,
-        layout.row_pitch,
-    )?;
+    let deposit =
+        alloc_or_reuse_region_texture_deposit(recorder, texture, x, y, width, height, staging_bytes, layout.row_pitch)?;
     write_atlas_deposit(recorder, deposit, staged, "texture_region")
 }
 
@@ -956,18 +948,9 @@ impl PipelineResources {
         let (image_atlas, _) = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.image_atlas");
             // Image region CPU deposits are recorded on the dedicated atlas_update scheme.
-            let (aw, ah) = crate::worker_retention::normalize_image_atlas(
-                images.has_residents,
-                images.width,
-                images.height,
-            );
-            let t = acquire_or_reuse_retained_atlas(
-                recorder,
-                AtlasCache::Image,
-                aw,
-                ah,
-                TextureFlags::COPY_DST,
-            )?;
+            let (aw, ah) =
+                crate::worker_retention::normalize_image_atlas(images.has_residents, images.width, images.height);
+            let t = acquire_or_reuse_retained_atlas(recorder, AtlasCache::Image, aw, ah, TextureFlags::COPY_DST)?;
             for image in images.images {
                 write_image_region(recorder, &t, image.1, image.2, &image.0)?;
             }
