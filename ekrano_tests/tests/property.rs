@@ -11,11 +11,11 @@
 #[path = "common/submission.rs"]
 mod submission;
 
-use ekrano::Scene;
 use ekrano::kurbo::{Affine, Rect};
 use ekrano::peniko::color::palette::css::TRANSPARENT;
 use ekrano::peniko::{Brush, Color, ImageFormat, color::palette};
 use ekrano::peniko::{ImageAlphaType, ImageData, ImageSampler};
+use ekrano::{Scene, Tint, TintMode};
 use ekrano_tests::{TestParams, shared_test_device};
 
 fn simple_square_test() {
@@ -279,6 +279,81 @@ fn fully_opaque_straight_alpha_unchanged() {
     }
 }
 
+fn image_tint_modes() {
+    use ekrano::peniko::{ImageBrush, ImageQuality};
+
+    let source = Color::from_rgba8(200, 100, 50, 128);
+    let alpha_mask_tint = Color::from_rgba8(80, 160, 240, 192);
+    let multiply_tint = Color::from_rgba8(128, 255, 64, 192);
+    let [r, g, b, a] = source.to_rgba8().to_u8_array();
+    let image = ImageBrush {
+        image: ImageData {
+            data: vec![b, g, r, a].into(),
+            format: ImageFormat::Bgra8,
+            width: 1,
+            height: 1,
+            alpha_type: ImageAlphaType::Alpha,
+        },
+        sampler: ImageSampler {
+            quality: ImageQuality::Low,
+            ..Default::default()
+        },
+    };
+
+    let mut scene = Scene::new();
+    for (row, quality) in [ImageQuality::Low, ImageQuality::Medium, ImageQuality::High]
+        .into_iter()
+        .enumerate()
+    {
+        let mut image = image.clone();
+        image.sampler.quality = quality;
+        let y = row as f64;
+        scene.set_tint(Some(Tint {
+            color: alpha_mask_tint,
+            mode: TintMode::AlphaMask,
+        }));
+        scene.draw_image(&image, Affine::translate((0.0, y)));
+        scene.set_tint(Some(Tint {
+            color: multiply_tint,
+            mode: TintMode::Multiply,
+        }));
+        scene.draw_image(&image, Affine::translate((1.0, y)));
+        scene.set_tint(Some(Tint {
+            color: TRANSPARENT,
+            mode: TintMode::Multiply,
+        }));
+        scene.draw_image(&image, Affine::translate((2.0, y)));
+        scene.reset_tint();
+        scene.draw_image(&image, Affine::translate((3.0, y)));
+    }
+
+    let mut params = TestParams::new("image_tint_modes", 4, 3);
+    params.base_color = Some(TRANSPARENT);
+    let result = ekrano_tests::render_then_debug_sync(&scene, &params).unwrap();
+    let pixels = result.data.data().as_chunks::<4>().0;
+
+    let source_premul = source.premultiply().components;
+    let alpha_mask_premul = alpha_mask_tint.premultiply().components;
+    let multiply_premul = multiply_tint.premultiply().components;
+    let expected = [
+        alpha_mask_premul.map(|component| component * source_premul[3]),
+        core::array::from_fn(|i| source_premul[i] * multiply_premul[i]),
+        [0.0; 4],
+        source_premul,
+    ];
+    for (index, pixel) in pixels.iter().enumerate() {
+        let expected = expected[index % expected.len()];
+        let [r, g, b, a] = *pixel;
+        let actual = Color::from_rgba8(r, g, b, a).premultiply().components;
+        for channel in 0..4 {
+            assert!(
+                (actual[channel] - expected[channel]).abs() < 0.02,
+                "pixel {index}, channel {channel}: got {actual:?}, expected {expected:?}"
+            );
+        }
+    }
+}
+
 fn main() {
     let mut trials = Vec::new();
     trials.push(
@@ -326,6 +401,13 @@ fn main() {
     trials.push(
         libtest_mimic::Trial::test("fully_opaque_straight_alpha_unchanged", || {
             fully_opaque_straight_alpha_unchanged();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("image_tint_modes", || {
+            image_tint_modes();
             Ok(())
         })
         .with_ignored_flag(false),

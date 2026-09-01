@@ -42,6 +42,11 @@ pub(crate) struct WorkerTopology {
     /// Normalized mask atlas dims (1×1 when no coverage mask).
     pub mask_atlas_width: u32,
     pub mask_atlas_height: u32,
+    /// Live atlas dims (1×1 dummy when no live textures are active).
+    pub live_atlas_width: u32,
+    pub live_atlas_height: u32,
+    /// Actual bound live-atlas texture handle; distinguishes single-live bindings.
+    pub live_atlas_handle: goldy::TextureHandle,
 }
 
 /// Normalized atlas / scene dimensions shared by retention keys and prepare.
@@ -56,6 +61,9 @@ pub(crate) struct ResourceDims {
     pub image_atlas_height: u32,
     pub mask_atlas_width: u32,
     pub mask_atlas_height: u32,
+    pub live_atlas_width: u32,
+    pub live_atlas_height: u32,
+    pub has_live_atlas_upload: bool,
     pub image_count: usize,
     /// Sorted unique `(x, y, width, height)` region copy keys for the image atlas.
     pub image_regions: Vec<(u32, u32, u32, u32)>,
@@ -71,9 +79,12 @@ pub(crate) fn normalize_gradient_atlas(width: u32, height: u32) -> (u32, u32) {
     if height == 0 { (1, 1) } else { (width, height) }
 }
 
-/// `image_count == 0` → 1×1 image atlas (prepare sentinel).
-pub(crate) fn normalize_image_atlas(image_count: usize, width: u32, height: u32) -> (u32, u32) {
-    if image_count == 0 { (1, 1) } else { (width, height) }
+/// No residents → 1×1 image atlas (prepare sentinel).
+///
+/// Atlas existence follows residency, not the dirty upload list. Clean frames keep
+/// residents with an empty dirty list and must retain real atlas dimensions.
+pub(crate) fn normalize_image_atlas(has_residents: bool, width: u32, height: u32) -> (u32, u32) {
+    if !has_residents { (1, 1) } else { (width, height) }
 }
 
 /// `None` coverage mask → 1×1 mask atlas (prepare sentinel).
@@ -86,14 +97,20 @@ pub(crate) fn resource_dims(
     scene_bucket: u64,
     ramps_width: u32,
     ramps_height: u32,
-    image_count: usize,
+    has_image_residents: bool,
     images_width: u32,
     images_height: u32,
     coverage_mask_dims: Option<(u32, u32)>,
     image_regions: &[(u32, u32, u32, u32)],
+    live_atlas_width: u32,
+    live_atlas_height: u32,
+    has_live_atlas_upload: bool,
 ) -> ResourceDims {
     let (gradient_width, gradient_height) = normalize_gradient_atlas(ramps_width, ramps_height);
-    let (image_atlas_width, image_atlas_height) = normalize_image_atlas(image_count, images_width, images_height);
+    let (image_atlas_width, image_atlas_height) =
+        normalize_image_atlas(has_image_residents, images_width, images_height);
+    // Topology / retention treat residency as presence — not dirty-list length.
+    let image_count = usize::from(has_image_residents);
     let (mask_atlas_width, mask_atlas_height) = normalize_mask_atlas(coverage_mask_dims);
     let mut image_regions = image_regions.to_vec();
     image_regions.sort_unstable();
@@ -106,6 +123,9 @@ pub(crate) fn resource_dims(
         image_atlas_height,
         mask_atlas_width,
         mask_atlas_height,
+        live_atlas_width,
+        live_atlas_height,
+        has_live_atlas_upload,
         image_count,
         image_regions,
         ramps_width,
@@ -123,6 +143,7 @@ pub(crate) fn worker_topology(
     dims: &ResourceDims,
     swapchain_present: bool,
     direct_present: bool,
+    live_atlas_handle: goldy::TextureHandle,
 ) -> WorkerTopology {
     WorkerTopology {
         aa: params.antialiasing_method,
@@ -142,6 +163,9 @@ pub(crate) fn worker_topology(
         scene_bucket: dims.scene_bucket,
         mask_atlas_width: dims.mask_atlas_width,
         mask_atlas_height: dims.mask_atlas_height,
+        live_atlas_width: dims.live_atlas_width,
+        live_atlas_height: dims.live_atlas_height,
+        live_atlas_handle,
     }
 }
 
@@ -153,9 +177,23 @@ pub(crate) fn worker_topology(
 /// `prepare_pipeline_resources` (e.g. 1×1 for an empty atlas) so that the key matches
 /// what is stored in `PersistentState::cached_gradient` etc.
 ///
-/// `image_regions` captures every region copy shape so retained upload topology cannot
-/// silently mismatch when atlas dims stay fixed but region layout changes.
-#[derive(Clone, PartialEq, Eq)]
+/// Image-atlas region deposits live on the dedicated `atlas_update` scheme, not here.
+/// Dirty→clean region-list changes must not invalidate the per-frame upload scheme.
+/// Topology of the retained `atlas_update` scheme (region deposits + live GPU copies).
+///
+/// Image-atlas identity is keyed by dimensions: handle only changes when dims change
+/// (`acquire_or_reuse_retained_atlas`), so it is not stored here.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct AtlasUpdateKey {
+    pub image_atlas_width: u32,
+    pub image_atlas_height: u32,
+    /// Sorted unique `(x, y, width, height)` CPU deposit regions.
+    pub deposit_regions: Vec<(u32, u32, u32, u32)>,
+    /// Sorted unique GPU copy descriptors `(src handle, sx,sy,dx,dy,w,h)`.
+    pub copy_regions: Vec<(goldy::TextureHandle, u32, u32, u32, u32, u32, u32)>,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct UploadKey {
     pub scene_bucket: u64,
     pub gradient_width: u32,
@@ -164,8 +202,9 @@ pub(crate) struct UploadKey {
     pub image_atlas_height: u32,
     pub mask_atlas_width: u32,
     pub mask_atlas_height: u32,
-    /// Sorted unique `(x, y, width, height)` region copy keys for the image atlas.
-    pub image_regions: Vec<(u32, u32, u32, u32)>,
+    pub live_atlas_width: u32,
+    pub live_atlas_height: u32,
+    pub has_live_atlas_upload: bool,
 }
 
 /// Build an [`UploadKey`] from normalized [`ResourceDims`].
@@ -178,7 +217,9 @@ pub(crate) fn upload_key_from(dims: &ResourceDims) -> UploadKey {
         image_atlas_height: dims.image_atlas_height,
         mask_atlas_width: dims.mask_atlas_width,
         mask_atlas_height: dims.mask_atlas_height,
-        image_regions: dims.image_regions.clone(),
+        live_atlas_width: dims.live_atlas_width,
+        live_atlas_height: dims.live_atlas_height,
+        has_live_atlas_upload: dims.has_live_atlas_upload,
     }
 }
 
@@ -191,6 +232,7 @@ pub(crate) struct WorkerResourceHandles {
     pub gradient: ResourceHandle,
     pub image_atlas: ResourceHandle,
     pub mask_atlas: ResourceHandle,
+    pub live_atlas: ResourceHandle,
     pub out_image: Option<ResourceHandle>,
 }
 
@@ -201,6 +243,7 @@ pub(crate) fn worker_resource_handles(
     gradient: &Texture,
     image_atlas: &Texture,
     mask_atlas: &Texture,
+    live_atlas: &Texture,
     out_image: Option<&Texture>,
 ) -> WorkerResourceHandles {
     WorkerResourceHandles {
@@ -209,6 +252,7 @@ pub(crate) fn worker_resource_handles(
         gradient: sampled_texture_handle(gradient),
         image_atlas: sampled_texture_handle(image_atlas),
         mask_atlas: sampled_texture_handle(mask_atlas),
+        live_atlas: sampled_texture_handle(live_atlas),
         out_image: out_image.and_then(|tex| tex.handle(ResourceAccess::Write)),
     }
 }
@@ -327,6 +371,10 @@ pub(crate) fn debug_assert_retained_worker_resources(
         "retained worker mask atlas handle changed without worker invalidation"
     );
     debug_assert_eq!(
+        recorded.live_atlas, current.live_atlas,
+        "retained worker live atlas handle changed without worker invalidation"
+    );
+    debug_assert_eq!(
         recorded.out_image, current.out_image,
         "retained worker out_image handle changed without worker invalidation"
     );
@@ -374,6 +422,22 @@ fn filter_primitive_eq(a: &FilterPrimitive, b: &FilterPrimitive) -> bool {
                 edge_mode: edge_a,
             },
             DropShadow {
+                dx: dx_b,
+                dy: dy_b,
+                std_dev: std_b,
+                color: color_b,
+                edge_mode: edge_b,
+            },
+        )
+        | (
+            DropShadowOnly {
+                dx: dx_a,
+                dy: dy_a,
+                std_dev: std_a,
+                color: color_a,
+                edge_mode: edge_a,
+            },
+            DropShadowOnly {
                 dx: dx_b,
                 dy: dy_b,
                 std_dev: std_b,
@@ -481,7 +545,7 @@ mod tests {
         scene_bucket: u64,
         ramps_width: u32,
         ramps_height: u32,
-        image_count: usize,
+        has_image_residents: bool,
         images_width: u32,
         images_height: u32,
         coverage_mask_dims: Option<(u32, u32)>,
@@ -491,16 +555,19 @@ mod tests {
             scene_bucket,
             ramps_width,
             ramps_height,
-            image_count,
+            has_image_residents,
             images_width,
             images_height,
             coverage_mask_dims,
             image_regions,
+            1,
+            1,
+            false,
         ))
     }
 
     fn base_upload_key() -> UploadKey {
-        upload_key(256, 8, 4, 0, 0, 0, None, &[])
+        upload_key(256, 8, 4, false, 0, 0, None, &[])
     }
 
     // -----------------------------------------------------------------------
@@ -509,37 +576,56 @@ mod tests {
 
     #[test]
     fn upload_key_empty_gradient_normalises_to_1x1() {
-        let k = upload_key(64, 32, 0, 0, 0, 0, None, &[]);
+        let k = upload_key(64, 32, 0, false, 0, 0, None, &[]);
         assert_eq!((k.gradient_width, k.gradient_height), (1, 1));
     }
 
     #[test]
     fn upload_key_nonempty_gradient_uses_raw_dims() {
-        let k = upload_key(64, 32, 4, 0, 0, 0, None, &[]);
+        let k = upload_key(64, 32, 4, false, 0, 0, None, &[]);
         assert_eq!((k.gradient_width, k.gradient_height), (32, 4));
     }
 
     #[test]
     fn upload_key_empty_image_atlas_normalises_to_1x1() {
-        let k = upload_key(64, 8, 4, 0, 512, 512, None, &[]);
+        let k = upload_key(64, 8, 4, false, 512, 512, None, &[]);
         assert_eq!((k.image_atlas_width, k.image_atlas_height), (1, 1));
     }
 
     #[test]
     fn upload_key_nonempty_image_atlas_uses_raw_dims() {
-        let k = upload_key(64, 8, 4, 3, 512, 256, None, &[]);
+        let k = upload_key(64, 8, 4, true, 512, 256, None, &[]);
         assert_eq!((k.image_atlas_width, k.image_atlas_height), (512, 256));
     }
 
     #[test]
+    fn upload_key_residents_without_dirty_keeps_atlas_dims() {
+        let k = upload_key(64, 8, 4, true, 1024, 1024, None, &[]);
+        assert_eq!((k.image_atlas_width, k.image_atlas_height), (1024, 1024));
+        // image_regions are not part of UploadKey (atlas_update owns them).
+    }
+
+    #[test]
+    fn upload_stale_false_when_dirty_regions_clear_at_fixed_atlas() {
+        // Image region deposits live on atlas_update, not UploadKey — dirty→clean must not
+        // re-record the per-frame upload scheme.
+        let mut p = PersistentState::new_test_only();
+        let dirty = upload_key(256, 8, 4, true, 1024, 1024, None, &[(0, 0, 8, 8)]);
+        let clean = upload_key(256, 8, 4, true, 1024, 1024, None, &[]);
+        assert_eq!(dirty, clean);
+        p.cached_upload_key = Some(dirty);
+        assert!(!upload_stale(&p, &clean));
+    }
+
+    #[test]
     fn upload_key_no_coverage_mask_normalises_to_1x1() {
-        let k = upload_key(64, 8, 4, 0, 0, 0, None, &[]);
+        let k = upload_key(64, 8, 4, false, 0, 0, None, &[]);
         assert_eq!((k.mask_atlas_width, k.mask_atlas_height), (1, 1));
     }
 
     #[test]
     fn upload_key_coverage_mask_uses_mask_dims() {
-        let k = upload_key(64, 8, 4, 0, 0, 0, Some((128, 64)), &[]);
+        let k = upload_key(64, 8, 4, false, 0, 0, Some((128, 64)), &[]);
         assert_eq!((k.mask_atlas_width, k.mask_atlas_height), (128, 64));
     }
 
@@ -565,8 +651,8 @@ mod tests {
     #[test]
     fn upload_stale_true_on_scene_bucket_growth() {
         let mut p = PersistentState::new_test_only();
-        let k1 = upload_key(256, 8, 4, 0, 0, 0, None, &[]);
-        let k2 = upload_key(512, 8, 4, 0, 0, 0, None, &[]);
+        let k1 = upload_key(256, 8, 4, false, 0, 0, None, &[]);
+        let k2 = upload_key(512, 8, 4, false, 0, 0, None, &[]);
         p.cached_upload_key = Some(k1);
         assert!(upload_stale(&p, &k2));
     }
@@ -574,8 +660,8 @@ mod tests {
     #[test]
     fn upload_stale_true_on_gradient_dim_change() {
         let mut p = PersistentState::new_test_only();
-        let k1 = upload_key(256, 8, 4, 0, 0, 0, None, &[]);
-        let k2 = upload_key(256, 8, 16, 0, 0, 0, None, &[]);
+        let k1 = upload_key(256, 8, 4, false, 0, 0, None, &[]);
+        let k2 = upload_key(256, 8, 16, false, 0, 0, None, &[]);
         p.cached_upload_key = Some(k1);
         assert!(upload_stale(&p, &k2));
     }
@@ -583,8 +669,8 @@ mod tests {
     #[test]
     fn upload_stale_true_when_gradient_appears() {
         let mut p = PersistentState::new_test_only();
-        let k1 = upload_key(256, 0, 0, 0, 0, 0, None, &[]);
-        let k2 = upload_key(256, 8, 4, 0, 0, 0, None, &[]);
+        let k1 = upload_key(256, 0, 0, false, 0, 0, None, &[]);
+        let k2 = upload_key(256, 8, 4, false, 0, 0, None, &[]);
         p.cached_upload_key = Some(k1);
         assert!(upload_stale(&p, &k2));
     }
@@ -592,8 +678,8 @@ mod tests {
     #[test]
     fn upload_stale_true_on_image_atlas_dim_change() {
         let mut p = PersistentState::new_test_only();
-        let k1 = upload_key(256, 8, 4, 3, 512, 256, None, &[]);
-        let k2 = upload_key(256, 8, 4, 3, 512, 512, None, &[]);
+        let k1 = upload_key(256, 8, 4, true, 512, 256, None, &[]);
+        let k2 = upload_key(256, 8, 4, true, 512, 512, None, &[]);
         p.cached_upload_key = Some(k1);
         assert!(upload_stale(&p, &k2));
     }
@@ -601,8 +687,8 @@ mod tests {
     #[test]
     fn upload_stale_true_when_image_atlas_appears() {
         let mut p = PersistentState::new_test_only();
-        let k1 = upload_key(256, 8, 4, 0, 0, 0, None, &[]);
-        let k2 = upload_key(256, 8, 4, 2, 256, 256, None, &[]);
+        let k1 = upload_key(256, 8, 4, false, 0, 0, None, &[]);
+        let k2 = upload_key(256, 8, 4, true, 256, 256, None, &[]);
         p.cached_upload_key = Some(k1);
         assert!(upload_stale(&p, &k2));
     }
@@ -610,8 +696,8 @@ mod tests {
     #[test]
     fn upload_stale_true_on_mask_atlas_dim_change() {
         let mut p = PersistentState::new_test_only();
-        let k1 = upload_key(256, 8, 4, 0, 0, 0, Some((64, 64)), &[]);
-        let k2 = upload_key(256, 8, 4, 0, 0, 0, Some((128, 64)), &[]);
+        let k1 = upload_key(256, 8, 4, false, 0, 0, Some((64, 64)), &[]);
+        let k2 = upload_key(256, 8, 4, false, 0, 0, Some((128, 64)), &[]);
         p.cached_upload_key = Some(k1);
         assert!(upload_stale(&p, &k2));
     }
@@ -619,17 +705,28 @@ mod tests {
     #[test]
     fn upload_stale_true_when_mask_appears() {
         let mut p = PersistentState::new_test_only();
-        let k1 = upload_key(256, 8, 4, 0, 0, 0, None, &[]);
-        let k2 = upload_key(256, 8, 4, 0, 0, 0, Some((64, 64)), &[]);
+        let k1 = upload_key(256, 8, 4, false, 0, 0, None, &[]);
+        let k2 = upload_key(256, 8, 4, false, 0, 0, Some((64, 64)), &[]);
         p.cached_upload_key = Some(k1);
         assert!(upload_stale(&p, &k2));
     }
 
     #[test]
-    fn upload_stale_true_on_image_region_layout_change() {
+    fn upload_stale_false_on_image_region_layout_change() {
+        // Region topology is atlas_update concern; upload key ignores image_regions.
         let mut p = PersistentState::new_test_only();
-        let k1 = upload_key(256, 8, 4, 2, 256, 256, None, &[(0, 0, 32, 32)]);
-        let k2 = upload_key(256, 8, 4, 2, 256, 256, None, &[(0, 0, 32, 32), (40, 0, 16, 16)]);
+        let k1 = upload_key(256, 8, 4, true, 256, 256, None, &[(0, 0, 32, 32)]);
+        let k2 = upload_key(256, 8, 4, true, 256, 256, None, &[(0, 0, 32, 32), (40, 0, 16, 16)]);
+        assert_eq!(k1, k2);
+        p.cached_upload_key = Some(k1);
+        assert!(!upload_stale(&p, &k2));
+    }
+
+    #[test]
+    fn upload_stale_true_when_live_atlas_upload_changes() {
+        let mut p = PersistentState::new_test_only();
+        let k1 = upload_key_from(&resource_dims(256, 8, 4, false, 0, 0, None, &[], 1, 1, false));
+        let k2 = upload_key_from(&resource_dims(256, 8, 4, false, 0, 0, None, &[], 16, 8, true));
         p.cached_upload_key = Some(k1);
         assert!(upload_stale(&p, &k2));
     }
@@ -673,6 +770,48 @@ mod tests {
         assert!(!layer_filter_effects_eq(&[a], &[b]));
     }
 
+    #[test]
+    fn filter_effects_eq_distinguishes_drop_shadow_only() {
+        let shadow = LayerFilterEffect {
+            primitive: FilterPrimitive::DropShadow {
+                dx: 4.0,
+                dy: 4.0,
+                std_dev: 2.0,
+                color: premul_srgb(css::BLACK),
+                edge_mode: FilterEdgeMode::None,
+            },
+            layer_blend: 1,
+            layer_alpha: 1.0,
+            layer_index: 0,
+            is_nested: false,
+        };
+        let only = LayerFilterEffect {
+            primitive: FilterPrimitive::DropShadowOnly {
+                dx: 4.0,
+                dy: 4.0,
+                std_dev: 2.0,
+                color: premul_srgb(css::BLACK),
+                edge_mode: FilterEdgeMode::None,
+            },
+            layer_blend: 1,
+            layer_alpha: 1.0,
+            layer_index: 0,
+            is_nested: false,
+        };
+        assert!(!layer_filter_effects_eq(
+            std::slice::from_ref(&shadow),
+            std::slice::from_ref(&only)
+        ));
+        assert!(layer_filter_effects_eq(
+            std::slice::from_ref(&only),
+            std::slice::from_ref(&only)
+        ));
+        assert!(layer_filter_effects_eq(
+            std::slice::from_ref(&shadow),
+            std::slice::from_ref(&shadow)
+        ));
+    }
+
     fn sample_topology(direct_present: bool) -> WorkerTopology {
         WorkerTopology {
             aa: AaConfig::Area,
@@ -692,6 +831,9 @@ mod tests {
             scene_bucket: 256,
             mask_atlas_width: 1,
             mask_atlas_height: 1,
+            live_atlas_width: 1,
+            live_atlas_height: 1,
+            live_atlas_handle: 1,
         }
     }
 
@@ -745,6 +887,18 @@ mod tests {
             64,
             TextureFormat::Rgba8Unorm,
         ));
+    }
+
+    #[test]
+    fn worker_stale_when_live_atlas_handle_changes() {
+        let mut p = PersistentState::new_test_only();
+        let topo = sample_topology(false);
+        p.cached_worker_topology = Some(topo.clone());
+        assert!(!worker_stale_reasons(&p, &topo, &[], None, None));
+
+        let mut changed = topo.clone();
+        changed.live_atlas_handle += 1;
+        assert!(worker_stale_reasons(&p, &changed, &[], None, None));
     }
 
     #[test]

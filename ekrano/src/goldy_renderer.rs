@@ -25,7 +25,7 @@ use goldy::{
 /// depth stays at 1 (see [`StablePipelineBuffers`](crate::scheme_gpu_resources::StablePipelineBuffers)).
 pub(crate) const FRAME_PIPELINE_DEPTH: usize = 1;
 
-use crate::{Error, RenderParams, Result, resource_proxy::BindType};
+use crate::{Error, LiveTextureId, RenderParams, Result, resource_proxy::BindType};
 use ekrano_encoding::{BumpAllocators, Layout, RenderConfig, Resolver};
 
 pub(crate) const MAX_BUMP_RETRIES: usize = 2;
@@ -41,6 +41,12 @@ pub struct FrameStats {
     /// Number of times the bump allocator overflowed and the frame was retried.
     /// Zero on a clean frame.
     pub bump_retries: u32,
+    /// Image-atlas region deposits performed this frame (dirty uploads only).
+    pub deposited_image_regions: u32,
+    /// Bytes written into image-atlas region deposits this frame.
+    pub deposited_image_bytes: u64,
+    /// Atlas-update submissions this frame (non-empty dirty batch ⇒ 1).
+    pub atlas_update_submissions: u32,
 }
 
 /// Snapshot of frame-scheduling state, useful for tests and diagnostics.
@@ -221,10 +227,19 @@ pub struct PreparedFrame {
     pub(crate) ramps_height: u32,
     pub(crate) images_width: u32,
     pub(crate) images_height: u32,
+    /// True when the image atlas has resident entries (independent of dirty uploads).
+    pub(crate) images_have_residents: bool,
     pub(crate) image_entries: Vec<(peniko::ImageData, u32, u32)>,
     pub(crate) config: RenderConfig,
     pub(crate) params: RenderParams,
     pub(crate) resolver: Resolver,
+    /// Single live image: bind this sample mirror directly as the live atlas.
+    pub(crate) live_single_id: Option<LiveTextureId>,
+    /// Multi-live path: CPU-packed RGBA atlas uploaded before fine.
+    pub(crate) live_atlas_data: Option<Vec<u8>>,
+    /// Logical live-atlas dimensions. `1x1` means the dummy texture.
+    pub(crate) live_atlas_width: u32,
+    pub(crate) live_atlas_height: u32,
     /// Owned copy of `Encoding::coverage_mask` — used by `PipelineResources::prepare`.
     pub(crate) coverage_mask: Option<ekrano_encoding::CoverageMask>,
     /// Owned copy of `Encoding::layer_filter_effects` — used by `record_fine` and
@@ -360,8 +375,12 @@ pub(crate) struct PersistentState {
     pub(crate) cached_gradient_deposit: Option<(u32, u32, u64, DepositTransaction)>,
     /// Destination-bound mask atlas deposit (width, height, capacity, transaction).
     pub(crate) cached_mask_deposit: Option<(u32, u32, u64, DepositTransaction)>,
-    /// Destination-bound deposits for image atlas region uploads.
+    /// Destination-bound live atlas deposit (width, height, capacity, transaction).
+    pub(crate) cached_live_atlas_deposit: Option<(u32, u32, u64, DepositTransaction)>,
+    /// Destination-bound deposits for image atlas region uploads (`atlas_update` scheme).
     pub(crate) cached_image_region_deposits: Vec<((u32, u32, u32, u32), DepositTransaction)>,
+    /// Topology key for the retained `atlas_update` scheme (regions + atlas identity).
+    pub(crate) cached_atlas_update_key: Option<crate::worker_retention::AtlasUpdateKey>,
     /// Retained headless `out_image` withdraw (`TextureHandle` + transaction) for
     /// [`crate::scheme_renderer::SchemeRenderer::render_to_buffer`].
     pub(crate) cached_out_image_withdraw: Option<(goldy::TextureHandle, WithdrawTransaction)>,
@@ -406,7 +425,9 @@ impl PersistentState {
             cached_upload_key: None,
             cached_gradient_deposit: None,
             cached_mask_deposit: None,
+            cached_live_atlas_deposit: None,
             cached_image_region_deposits: Vec::new(),
+            cached_atlas_update_key: None,
             cached_out_image_withdraw: None,
             metal_heap_sensitive: device.backend_type() == BackendType::Metal,
             scene_growth: SceneGrowthStats::default(),
@@ -418,11 +439,18 @@ impl PersistentState {
     /// Call whenever the upload scheme (or fused worker scheme) is replaced so
     /// stale deposit ids cannot be reused against a new IR.
     pub(crate) fn clear_deposit_declarations(&mut self) {
+        // Frame upload deposits only. Image-atlas region deposits live on atlas_update.
         self.cached_scene_deposit = None;
         self.cached_config_deposit = None;
         self.cached_gradient_deposit = None;
         self.cached_mask_deposit = None;
+        self.cached_live_atlas_deposit = None;
+    }
+
+    /// Drop `atlas_update` scheme deposit declarations (call when replacing `atlas_update`).
+    pub(crate) fn clear_atlas_deposit_declarations(&mut self) {
         self.cached_image_region_deposits.clear();
+        self.cached_atlas_update_key = None;
     }
 
     /// Release retained filter-uniform deeds beyond `keep` and truncate the cache.

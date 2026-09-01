@@ -86,6 +86,23 @@ fn write_deposit(
     })
 }
 
+fn write_atlas_deposit(
+    recorder: &mut SchemeRecorder<'_>,
+    deposit: DepositTransaction,
+    bytes: &[u8],
+    what: &'static str,
+) -> Result<(), Error> {
+    recorder.atlas_update_has_work = true;
+    deposit.write(recorder.atlas_update_scheme(), 0, bytes).map_err(|e| {
+        Error::Gpu(format!(
+            "{e} (what={what}, deposit_id={}, bytes={}, atlas_needs_record={})",
+            deposit.id(),
+            bytes.len(),
+            recorder.atlas_update_needs_record,
+        ))
+    })
+}
+
 /// Pack tightly-packed RGBA rows into a footprint-pitched staging layout.
 fn pack_rgba_to_pitch(src: &[u8], width: u32, height: u32, row_pitch: u32) -> Vec<u8> {
     let tight = (width as usize).saturating_mul(4);
@@ -463,7 +480,7 @@ fn take_region_texture_deposit(
     recorder: &mut SchemeRecorder<'_>,
     key: (u32, u32, u32, u32),
 ) -> Option<DepositTransaction> {
-    if recorder.upload_needs_record {
+    if recorder.atlas_update_needs_record {
         return None;
     }
     recorder
@@ -491,7 +508,7 @@ fn alloc_or_reuse_region_texture_deposit(
     let need = staging_bytes.max(4);
     let deposit = MemoryExchange::new(recorder.context())
         .bind_deposit_texture(
-            recorder.upload_scheme(),
+            recorder.atlas_update_scheme(),
             texture,
             x,
             y,
@@ -576,19 +593,23 @@ fn stage_texture_region(
     height: u32,
     bytes: &[u8],
 ) -> Result<(), Error> {
-    stage_texture_bytes(
-        recorder,
-        texture,
-        x,
-        y,
-        width,
-        height,
-        bytes,
-        "texture_region",
-        |recorder, staging_bytes, src_row_pitch| {
-            alloc_or_reuse_region_texture_deposit(recorder, texture, x, y, width, height, staging_bytes, src_row_pitch)
-        },
-    )
+    // Image-atlas region deposits belong on atlas_update (not the per-frame upload scheme).
+    record_texture_reuse(recorder.atlas_update_scheme(), texture);
+    let layout = recorder
+        .device()
+        .texture_copy_footprint(width, height, texture.format())
+        .map_err(|e| Error::Gpu(e.to_string()))?;
+    let pitched;
+    let staged: &[u8] = if layout.row_pitch == layout.tight_row_bytes() {
+        bytes
+    } else {
+        pitched = pack_rgba_to_pitch(bytes, width, height, layout.row_pitch);
+        &pitched
+    };
+    let staging_bytes = layout.staging_bytes.max(staged.len() as u64);
+    let deposit =
+        alloc_or_reuse_region_texture_deposit(recorder, texture, x, y, width, height, staging_bytes, layout.row_pitch)?;
+    write_atlas_deposit(recorder, deposit, staged, "texture_region")
 }
 
 fn upload_texture_full(
@@ -864,6 +885,7 @@ pub(crate) struct PipelineResources {
     pub gradient: Texture,
     pub image_atlas: Texture,
     pub mask_atlas: Texture,
+    pub live_atlas: Texture,
     pub scene: Buffer,
     pub config: Buffer,
     /// Composite indirect buffer (one ordinal `DispatchShape` parcel per stage).
@@ -891,6 +913,8 @@ impl PipelineResources {
         mut packed: Vec<u8>,
         ramps: Ramps<'_>,
         images: Images<'_>,
+        live_atlas: &Texture,
+        live_atlas_data: Option<&[u8]>,
         params: &RenderParams,
         config: &RenderConfig,
         out_image_format: TextureFormat,
@@ -923,18 +947,10 @@ impl PipelineResources {
 
         let (image_atlas, _) = {
             let _tz = goldy::tracy_zone!("ekrano.prepare.image_atlas");
-            if recorder.upload_needs_record {
-                recorder.persistent.cached_image_region_deposits.clear();
-            }
+            // Image region CPU deposits are recorded on the dedicated atlas_update scheme.
             let (aw, ah) =
-                crate::worker_retention::normalize_image_atlas(images.images.len(), images.width, images.height);
-            let t = acquire_or_reuse_retained_atlas(
-                recorder,
-                AtlasCache::Image,
-                aw,
-                ah,
-                TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
-            )?;
+                crate::worker_retention::normalize_image_atlas(images.has_residents, images.width, images.height);
+            let t = acquire_or_reuse_retained_atlas(recorder, AtlasCache::Image, aw, ah, TextureFlags::COPY_DST)?;
             for image in images.images {
                 write_image_region(recorder, &t, image.1, image.2, &image.0)?;
             }
@@ -968,6 +984,17 @@ impl PipelineResources {
                 }
             }
             recorder.persistent.cached_mask_deposit = deposit_slot;
+            tex
+        };
+
+        let live_atlas = {
+            let tex = live_atlas.borrow();
+            if let Some(bytes) = live_atlas_data {
+                let _tz = goldy::tracy_zone!("ekrano.prepare.live_atlas.upload");
+                let mut deposit_slot = std::mem::take(&mut recorder.persistent.cached_live_atlas_deposit);
+                upload_texture_full(recorder, &mut deposit_slot, &tex, bytes)?;
+                recorder.persistent.cached_live_atlas_deposit = deposit_slot;
+            }
             tex
         };
 
@@ -1144,6 +1171,7 @@ impl PipelineResources {
             gradient,
             image_atlas,
             mask_atlas,
+            live_atlas,
             scene,
             config,
             indirect: None,

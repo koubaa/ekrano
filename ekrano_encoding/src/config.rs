@@ -309,7 +309,6 @@ impl WorkgroupCounts {
         let path_wgs = n_paths.div_ceil(PATH_BBOX_WG);
         let width_in_bins = width_in_tiles.div_ceil(16);
         let height_in_bins = height_in_tiles.div_ceil(16);
-        // coarse is capped to 256 in coarse.slang when bin_headers has only 256 slots (vello #680)
         Self {
             use_large_path_scan,
             path_reduce: (path_tag_wgs, 1, 1),
@@ -495,7 +494,11 @@ impl BufferSizes {
         let draw_bboxes = BufferSize::new(n_paths);
         let bump_alloc = BufferSize::new(1);
         let indirect_count = BufferSize::new(N_INDIRECT_STAGES);
-        let bin_headers = BufferSize::new(binning_wgs * 256);
+        let width_in_bins = workgroups.coarse.0;
+        let height_in_bins = workgroups.coarse.1;
+        let n_bins = width_in_bins * height_in_bins;
+        let aligned_n_bins = align_up(n_bins, 256);
+        let bin_headers = BufferSize::new(binning_wgs * aligned_n_bins);
         let n_paths_aligned = align_up(n_paths, 256);
         let paths = BufferSize::new(n_paths_aligned);
 

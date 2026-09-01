@@ -57,12 +57,12 @@ pub use config::{
 };
 pub use coverage_mask::CoverageMask;
 pub use draw::{
-    DRAW_INFO_FLAGS_FILL_RULE_BIT, DrawBbox, DrawBeginClip, DrawBlurRoundedRect, DrawColor, DrawImage,
-    DrawLinearGradient, DrawMonoid, DrawRadialGradient, DrawSweepGradient, DrawTag,
+    DRAW_INFO_FLAGS_FILL_RULE_BIT, DrawBbox, DrawBeginClip, DrawBlurRoundedRect, DrawColor, DrawImage, DrawImageTinted,
+    DrawLinearGradient, DrawMonoid, DrawRadialGradient, DrawSweepGradient, DrawTag, Tint, TintMode,
 };
 pub use encoding::{Encoding, Resources, StreamOffsets};
 pub use filter::{Filter, FilterEdgeMode, FilterPrimitive, FilterUniform, LayerFilterEffect};
-pub use glyph::{Glyph, GlyphRun};
+pub use glyph::{FontEmbolden, Glyph, GlyphRun};
 pub use image_cache::Images;
 pub use mask::{make_mask_lut, make_mask_lut_16};
 pub use math::Transform;
@@ -72,7 +72,7 @@ pub use path::{
     Style, Tile,
 };
 pub use ramp_cache::Ramps;
-pub use resolve::{Layout, Patch, Resolver, resolve_solid_paths_only};
+pub use resolve::{LIVE_IMAGE_BIT, Layout, Patch, Resolver, resolve_solid_paths_only};
 
 #[cfg(feature = "bump_estimate")]
 pub use estimate::BumpEstimator;

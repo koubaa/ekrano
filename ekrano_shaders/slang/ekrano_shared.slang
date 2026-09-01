@@ -195,6 +195,7 @@ public static const uint DRAWTAG_FILL_LIN_GRADIENT = 0x114;
 public static const uint DRAWTAG_FILL_RAD_GRADIENT = 0x29c;
 public static const uint DRAWTAG_FILL_SWEEP_GRADIENT = 0x254;
 public static const uint DRAWTAG_FILL_IMAGE = 0x28C;
+public static const uint DRAWTAG_FILL_IMAGE_TINTED = 0x2D0;
 public static const uint DRAWTAG_BLURRED_ROUNDED_RECT = 0x2d4;
 public static const uint DRAWTAG_BEGIN_CLIP = 0x4D;
 public static const uint DRAWTAG_END_CLIP = 0x09;
@@ -501,6 +502,7 @@ public static const uint CMD_END_CLIP = 11;
 public static const uint CMD_JUMP = 12;
 public static const uint CMD_BLUR_RECT = 13;
 public static const uint CMD_SET_BLEND_MODE = 14;
+public static const uint CMD_IMAGE_TINTED = 16;
 /// Like [`CMD_END_CLIP`] but writes isolated layer to filter textures; 4 words in ptcl.
 public static const uint CMD_END_CLIP_FILTER = 15;
 
@@ -775,6 +777,9 @@ public struct CmdBlurRect {
 
     public float std_dev;
 
+    /// 1 if invert (`1 - alpha`) coverage is packed in the `std_dev` sign bit.
+    public uint invert;
+
 };
 
 public struct CmdLinGrad {
@@ -838,6 +843,10 @@ public struct CmdImage {
     public float alpha;
 
     public uint alpha_type;
+
+    public uint tint_mode;
+
+    public uint is_live;
 
 };
 
@@ -957,6 +966,8 @@ public static const uint IMAGE_QUALITY_MEDIUM = 1;
 public static const uint IMAGE_QUALITY_HIGH = 2;
 public static const uint PIXEL_FORMAT_RGBA = 0;
 public static const uint PIXEL_FORMAT_BGRA = 1;
+public static const uint TINT_MODE_ALPHA_MASK = 1;
+public static const uint TINT_MODE_MULTIPLY = 2;
 public static const uint EXTEND_PAD = 0;
 public static const uint EXTEND_REPEAT = 1;
 public static const uint EXTEND_REFLECT = 2;

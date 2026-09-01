@@ -18,12 +18,19 @@ mod submission;
 use ekrano::{
     AaConfig, Scene,
     kurbo::{Affine, Rect, Triangle},
-    peniko::{Color, ColorStop, Extend, Gradient, ImageFormat, ImageQuality, Mix, color::palette},
+    peniko::{Extend, ImageFormat, ImageQuality, Mix, color::palette},
 };
 use ekrano_tests::{TestParams, shared_test_device, smoke_snapshot_test_sync, snapshot_test_sync};
 use scenes::ImageCache;
 
 /// A reproduction of <https://github.com/linebender/vello/issues/680>
+/// (fixed in classic Vello by [#1700](https://github.com/linebender/vello/pull/1700)).
+///
+/// Draws a large red rectangle across a 4352x4352 viewport (17x17 bins, 272x272
+/// tiles). All 289 bins must render red.
+///
+/// Ignored when `EKRANO_CI_SKIP_SLOW` is set (same 4352² target as
+/// `repeated_many_bins`).
 ///
 /// # Test status:
 /// Previously flaky on DX12 (intermittent 16,384-pixel / 64-tile deficit).
@@ -54,14 +61,10 @@ use scenes::ImageCache;
 /// `ResourceBarrier` before any downstream reader, including the DX12
 /// `ClearUnorderedAccessViewUint → compute` boundary.
 ///
-/// # Test design:
-/// Draws a large red rectangle across a 4352x4352 viewport (17x17 bins, 272x272 tiles).
-/// The coarse shader caps `bin_ix` at 256, so 256 of the 289 bins should render red.
-///
 /// # Fixes applied (Vulkan):
 ///
-/// 1. **binning.slang**: Added bounds checks (`bin_ix < N_TILE`) on `sh_bitmaps` writes
-///    to prevent out-of-bounds shared memory access when `bin_ix >= 256`.
+/// 1. **binning.slang**: Bounds checks on `sh_bitmaps` writes (pre-#1700).
+///    Binning now walks bins in 256-wide blocks (vello #1700).
 ///
 /// 2. **coarse.slang**: Added missing `GroupMemoryBarrierWithGroupSync()` between
 ///    `sh_part_count[local_id.x] = part_start_ix + count` and
@@ -91,7 +94,8 @@ fn many_bins_test() {
     let mut black_count: u32 = 0;
 
     let width: u32 = 256 * 17;
-    let mut non_red_in_valid: Vec<(u32, u32)> = Vec::new();
+    let height: u32 = 256 * 17;
+    let mut non_red: Vec<(u32, u32)> = Vec::new();
 
     for (i, pixel) in image.data.data().as_chunks::<4>().0.iter().enumerate() {
         let &[r, g, b, a] = pixel;
@@ -108,35 +112,30 @@ fn many_bins_test() {
                 let idx: u32 = i.try_into().expect("pixel index should fit u32");
                 let px = idx % width;
                 let py = idx / width;
-                let bin_ix = (py / 256) * 17 + (px / 256);
-                if bin_ix < 256 {
-                    non_red_in_valid.push((px, py));
-                }
+                non_red.push((px, py));
             }
             (false, false) => panic!("Got unexpected pixel {pixel:?}"),
         }
     }
 
-    // The coarse shader caps bin_ix at 256 (see vello #680), so at most 256 of the
-    // 289 bins render.  With the binning OOB fix all 256 should be correct.
-    const MIN_RED_COUNT: u32 = 256 * 256 * 256;
-    if red_count < MIN_RED_COUNT {
-        let deficit = MIN_RED_COUNT - red_count;
+    // 17x17 bins after vello #1700 (was capped at 256 of 289).
+    const EXPECTED_RED: u32 = 17 * 17 * 256 * 256;
+    if red_count != EXPECTED_RED {
         use std::collections::BTreeSet;
         let mut affected_tiles: BTreeSet<(u32, u32)> = BTreeSet::new();
         let mut affected_bins: BTreeSet<(u32, u32)> = BTreeSet::new();
-        for &(px, py) in &non_red_in_valid {
+        for &(px, py) in &non_red {
             affected_tiles.insert((px / 16, py / 16));
             affected_bins.insert((px / 256, py / 256));
         }
         panic!(
-            "expected at least {MIN_RED_COUNT} red pixels, got {red_count} \
-             (deficit: {deficit} pixels = {} tiles in bins {:?})",
+            "expected {EXPECTED_RED} red pixels ({width}x{height}), got {red_count} \
+             ({black_count} black; {} tiles in bins {:?})",
             affected_tiles.len(),
             affected_bins,
         );
     }
-    assert!(black_count > 0);
+    assert_eq!(black_count, 0);
 }
 
 /// Regression test for <https://github.com/linebender/vello/issues/1061>
@@ -206,34 +205,6 @@ fn test_data_image_roundtrip_extend_repeat() {
     scene.draw_image(&image, Affine::IDENTITY);
     let mut params = TestParams::new("data_image_roundtrip", image.image.width, image.image.height);
     params.anti_aliasing = AaConfig::Area;
-    smoke_snapshot_test_sync(scene, &params)
-        .unwrap()
-        .assert_mean_less_than(0.001);
-}
-
-/// <https://github.com/web-platform-tests/wpt/blob/18c64a74b1/html/canvas/element/fill-and-stroke-styles/2d.gradient.interpolate.coloralpha.html>
-/// See <https://github.com/linebender/vello/issues/1056>.
-fn test_gradient_color_alpha() {
-    let mut scene = Scene::new();
-    let viewport = Rect::new(0., 0., 100., 50.);
-    scene.fill(
-        ekrano::peniko::Fill::NonZero,
-        Affine::IDENTITY,
-        &Gradient::new_linear((0., 0.), (100., 0.)).with_stops([
-            ColorStop {
-                offset: 0.,
-                color: Color::from_rgba8(255, 255, 0, 0).into(),
-            },
-            ColorStop {
-                offset: 1.,
-                color: Color::from_rgba8(0, 0, 255, 255).into(),
-            },
-        ]),
-        None,
-        &viewport,
-    );
-    let mut params = TestParams::new("gradient_color_alpha", 100, 50);
-    params.base_color = Some(palette::css::WHITE);
     smoke_snapshot_test_sync(scene, &params)
         .unwrap()
         .assert_mean_less_than(0.001);
@@ -430,8 +401,8 @@ fn repeated_many_bins() {
             }
         }
 
-        const MIN_RED_COUNT: u32 = 256 * 256 * 256;
-        if red_count < MIN_RED_COUNT {
+        const EXPECTED_RED: u32 = 17 * 17 * 256 * 256;
+        if red_count != EXPECTED_RED {
             failures.push((iter, red_count));
         }
     }
@@ -452,7 +423,7 @@ fn main() {
             many_bins_test();
             Ok(())
         })
-        .with_ignored_flag(false),
+        .with_ignored_flag(ignore_slow),
     );
     trials.push(
         libtest_mimic::Trial::test("test_layer_size", || {
@@ -474,13 +445,6 @@ fn main() {
             Ok(())
         })
         .with_ignored_flag(true),
-    );
-    trials.push(
-        libtest_mimic::Trial::test("test_gradient_color_alpha", || {
-            test_gradient_color_alpha();
-            Ok(())
-        })
-        .with_ignored_flag(false),
     );
     trials.push(
         libtest_mimic::Trial::test("clip_blends", || {

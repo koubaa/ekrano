@@ -36,7 +36,7 @@ When you **create a new file**, use only the Ekrano header:
 ekrano/                   # Git root (forked from Vello)
 ├── ekrano/               # Main crate (renderer, Scene, Renderer API)
 ├── ekrano_encoding/      # Scene encoding into GPU-friendly streams
-├── ekrano_shaders/       # Slang compute shaders + optional CPU fallbacks
+├── ekrano_shaders/       # Slang compute shaders
 ├── ekrano_tests/         # Snapshot / regression test suite
 ├── xtask/                # Kompari: diff snapshots/ vs current/
 ├── examples/

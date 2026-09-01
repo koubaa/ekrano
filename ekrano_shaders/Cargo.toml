@@ -1,7 +1,7 @@
 [package]
 name = "ekrano_shaders"
 version.workspace = true # We mimic Vello's version
-description = "Ekrano shader sources (Slang) and optional CPU fallbacks."
+description = "Ekrano Slang shader sources for the Goldy backend."
 categories = ["rendering", "graphics"]
 keywords = ["2d", "vector-graphics"]
 edition.workspace = true
@@ -15,15 +15,5 @@ all-features = true
 default-target = "x86_64-unknown-linux-gnu"
 targets = []
 
-[features]
-default = ["cpu"]
-
-# Enable the CPU versions of the shaders
-cpu = ["dep:bytemuck", "dep:ekrano_encoding"]
-
 [lints]
 workspace = true
-
-[dependencies]
-bytemuck = { workspace = true, optional = true }
-ekrano_encoding = { workspace = true, optional = true }

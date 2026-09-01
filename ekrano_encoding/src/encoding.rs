@@ -4,15 +4,15 @@
 use crate::{DrawBeginClip, FilterPrimitive, LayerFilterEffect};
 
 use super::{
-    CoverageMask, DrawBlurRoundedRect, DrawColor, DrawImage, DrawLinearGradient, DrawRadialGradient, DrawSweepGradient,
-    DrawTag, Glyph, GlyphRun, NormalizedCoord, Patch, PathEncoder, PathTag, Style, Transform,
+    CoverageMask, DrawBlurRoundedRect, DrawColor, DrawImage, DrawImageTinted, DrawLinearGradient, DrawRadialGradient,
+    DrawSweepGradient, DrawTag, Glyph, GlyphRun, NormalizedCoord, Patch, PathEncoder, PathTag, Style, Tint, Transform,
 };
 
 use peniko::color::{DynamicColor, palette};
 use peniko::kurbo::{Shape, Stroke};
 use peniko::{
-    BlendMode, BrushRef, ColorStop, Extend, Fill, GradientKind, ImageBrushRef, ImageSampler, LinearGradientPosition,
-    RadialGradientPosition, SweepGradientPosition,
+    BlendMode, BrushRef, ColorStop, Extend, Fill, GradientKind, ImageBrushRef, ImageSampler, InterpolationAlphaSpace,
+    LinearGradientPosition, RadialGradientPosition, SweepGradientPosition,
 };
 
 /// Encoded data streams for a scene.
@@ -146,12 +146,14 @@ impl Encoding {
                         draw_data_offset: offset,
                         stops,
                         extend,
+                        interpolation_alpha_space,
                     } => {
                         let stops = stops.start + stops_base..stops.end + stops_base;
                         Patch::Ramp {
                             draw_data_offset: offset + offsets.draw_data,
                             stops,
                             extend: *extend,
+                            interpolation_alpha_space: *interpolation_alpha_space,
                         }
                     }
                     Patch::GlyphRun { index } => Patch::GlyphRun {
@@ -292,6 +294,11 @@ impl Encoding {
 
     /// Encodes a brush with an optional alpha modifier.
     pub fn encode_brush<'b>(&mut self, brush: impl Into<BrushRef<'b>>, alpha: f32) {
+        self.encode_brush_with_tint(brush, alpha, None);
+    }
+
+    /// Encodes a brush, applying `tint` when the brush is an image.
+    pub fn encode_brush_with_tint<'b>(&mut self, brush: impl Into<BrushRef<'b>>, alpha: f32, tint: Option<Tint>) {
         use super::math::point_to_f32;
         match brush.into() {
             BrushRef::Solid(color) => {
@@ -313,6 +320,7 @@ impl Encoding {
                         gradient.stops.iter().copied(),
                         alpha,
                         gradient.extend,
+                        gradient.interpolation_alpha_space,
                     );
                 }
                 GradientKind::Radial(RadialGradientPosition {
@@ -332,6 +340,7 @@ impl Encoding {
                         gradient.stops.iter().copied(),
                         alpha,
                         gradient.extend,
+                        gradient.interpolation_alpha_space,
                     );
                 }
                 GradientKind::Sweep(SweepGradientPosition {
@@ -350,11 +359,12 @@ impl Encoding {
                         gradient.stops.iter().copied(),
                         alpha,
                         gradient.extend,
+                        gradient.interpolation_alpha_space,
                     );
                 }
             },
             BrushRef::Image(image) => {
-                self.encode_image(image, alpha);
+                self.encode_image_with_tint(image, alpha, tint);
             }
         }
     }
@@ -390,8 +400,9 @@ impl Encoding {
         color_stops: impl Iterator<Item = ColorStop>,
         alpha: f32,
         extend: Extend,
+        interpolation_alpha_space: InterpolationAlphaSpace,
     ) {
-        match self.add_ramp(color_stops, alpha, extend) {
+        match self.add_ramp(color_stops, alpha, extend, interpolation_alpha_space) {
             RampStops::Empty => self.encode_color(palette::css::TRANSPARENT),
             RampStops::One(color) => {
                 self.encode_color(color);
@@ -411,6 +422,7 @@ impl Encoding {
         color_stops: impl Iterator<Item = ColorStop>,
         alpha: f32,
         extend: Extend,
+        interpolation_alpha_space: InterpolationAlphaSpace,
     ) {
         // Match Skia's epsilon for radii comparison
         const SKIA_EPSILON: f32 = 1.0 / (1 << 12) as f32;
@@ -418,7 +430,7 @@ impl Encoding {
             self.encode_color(palette::css::TRANSPARENT);
             return;
         }
-        match self.add_ramp(color_stops, alpha, extend) {
+        match self.add_ramp(color_stops, alpha, extend, interpolation_alpha_space) {
             RampStops::Empty => self.encode_color(palette::css::TRANSPARENT),
             RampStops::One(color) => self.encode_color(color),
             RampStops::Many => {
@@ -436,13 +448,14 @@ impl Encoding {
         color_stops: impl Iterator<Item = ColorStop>,
         alpha: f32,
         extend: Extend,
+        interpolation_alpha_space: InterpolationAlphaSpace,
     ) {
         const SKIA_DEGENERATE_THRESHOLD: f32 = 1.0 / (1 << 15) as f32;
         if (gradient.t0 - gradient.t1).abs() < SKIA_DEGENERATE_THRESHOLD {
             self.encode_color(palette::css::TRANSPARENT);
             return;
         }
-        match self.add_ramp(color_stops, alpha, extend) {
+        match self.add_ramp(color_stops, alpha, extend, interpolation_alpha_space) {
             RampStops::Empty => self.encode_color(palette::css::TRANSPARENT),
             RampStops::One(color) => self.encode_color(color),
             RampStops::Many => {
@@ -455,6 +468,11 @@ impl Encoding {
 
     /// Encodes an image brush.
     pub fn encode_image<'b>(&mut self, brush: impl Into<ImageBrushRef<'b>>, alpha: f32) {
+        self.encode_image_with_tint(brush, alpha, None);
+    }
+
+    /// Encodes an image brush with an optional tint.
+    pub fn encode_image_with_tint<'b>(&mut self, brush: impl Into<ImageBrushRef<'b>>, alpha: f32, tint: Option<Tint>) {
         let brush: ImageBrushRef<'b> = brush.into();
         let ImageSampler {
             x_extend,
@@ -470,21 +488,38 @@ impl Encoding {
             image: brush.image.clone(),
             draw_data_offset: self.draw_data.len(),
         });
-        self.draw_tags.push(DrawTag::IMAGE);
-        self.draw_data
-            .extend_from_slice(bytemuck::cast_slice(bytemuck::bytes_of(&DrawImage {
-                xy: 0,
-                width_height: (brush.image.width << 16) | (brush.image.height & 0xFFFF),
-                sample_alpha: ((brush.image.format as u32) << 15
-                    | (brush.image.alpha_type as u32) << 14
-                    | (quality as u32) << 12
-                    | ((x_extend as u32) << 10)
-                    | ((y_extend as u32) << 8)
-                    | alpha as u32),
-            })));
+        let width_height = (brush.image.width << 16) | (brush.image.height & 0xFFFF);
+        let sample_alpha = (brush.image.format as u32) << 15
+            | (brush.image.alpha_type as u32) << 14
+            | (quality as u32) << 12
+            | (x_extend as u32) << 10
+            | (y_extend as u32) << 8
+            | alpha as u32;
+        if let Some(tint) = tint {
+            self.draw_tags.push(DrawTag::IMAGE_TINTED);
+            self.draw_data
+                .extend_from_slice(bytemuck::cast_slice(bytemuck::bytes_of(&DrawImageTinted {
+                    xy: 0,
+                    width_height,
+                    sample_alpha: sample_alpha | ((tint.mode as u32) << 16),
+                    tint_rgba: DrawColor::from(tint.color).rgba,
+                })));
+        } else {
+            self.draw_tags.push(DrawTag::IMAGE);
+            self.draw_data
+                .extend_from_slice(bytemuck::cast_slice(bytemuck::bytes_of(&DrawImage {
+                    xy: 0,
+                    width_height,
+                    sample_alpha,
+                })));
+        }
     }
 
-    // Encodes a blurred rounded rectangle brush.
+    /// Encodes a blurred rounded rectangle brush.
+    ///
+    /// When `invert` is `true`, the inverse (`1 - alpha`) of the blur coverage is painted.
+    /// The flag is packed into the sign bit of `std_dev`, which is otherwise always non-negative
+    /// (including `-0.0` for invert with zero blur).
     pub fn encode_blurred_rounded_rect(
         &mut self,
         color: impl Into<DrawColor>,
@@ -492,7 +527,9 @@ impl Encoding {
         height: f32,
         radius: f32,
         std_dev: f32,
+        invert: bool,
     ) {
+        let std_dev = if invert { -std_dev.max(0.0) } else { std_dev.max(0.0) };
         self.draw_tags.push(DrawTag::BLUR_RECT);
         self.draw_data
             .extend_from_slice(bytemuck::cast_slice(bytemuck::bytes_of(&DrawBlurRoundedRect {
@@ -594,7 +631,13 @@ impl Encoding {
         self.path_tags.swap(len - 1, len - 2);
     }
 
-    fn add_ramp(&mut self, color_stops: impl Iterator<Item = ColorStop>, alpha: f32, extend: Extend) -> RampStops {
+    fn add_ramp(
+        &mut self,
+        color_stops: impl Iterator<Item = ColorStop>,
+        alpha: f32,
+        extend: Extend,
+        interpolation_alpha_space: InterpolationAlphaSpace,
+    ) -> RampStops {
         let offset = self.draw_data.len();
         let stops_start = self.resources.color_stops.len();
         if alpha != 1.0 {
@@ -613,6 +656,7 @@ impl Encoding {
                     draw_data_offset: offset,
                     stops: stops_start..stops_end,
                     extend,
+                    interpolation_alpha_space,
                 });
                 RampStops::Many
             }
@@ -688,7 +732,12 @@ impl StreamOffsets {
 
 #[cfg(test)]
 mod tests {
-    use peniko::{Extend, ImageQuality};
+    use peniko::{
+        Extend, ImageAlphaType, ImageBrush, ImageData, ImageFormat, ImageQuality, ImageSampler, color::palette,
+    };
+
+    use super::Encoding;
+    use crate::{DrawTag, Tint, TintMode};
 
     #[test]
     fn ensure_image_quality_values() {
@@ -710,5 +759,56 @@ mod tests {
         match Extend::Pad {
             Extend::Pad | Extend::Repeat | Extend::Reflect => {}
         }
+    }
+
+    #[test]
+    fn image_tint_uses_distinct_payload_and_explicit_mode() {
+        let image = ImageBrush {
+            image: ImageData {
+                data: vec![255, 255, 255, 255].into(),
+                format: ImageFormat::Rgba8,
+                width: 1,
+                height: 1,
+                alpha_type: ImageAlphaType::Alpha,
+            },
+            sampler: ImageSampler::default(),
+        };
+
+        let mut plain = Encoding::new();
+        plain.encode_image(&image, 1.0);
+        assert!(plain.draw_tags == [DrawTag::IMAGE]);
+        assert_eq!(plain.draw_data.len(), 3);
+
+        let mut tinted = Encoding::new();
+        tinted.encode_image_with_tint(
+            &image,
+            1.0,
+            Some(Tint {
+                color: palette::css::TRANSPARENT,
+                mode: TintMode::Multiply,
+            }),
+        );
+        assert!(tinted.draw_tags == [DrawTag::IMAGE_TINTED]);
+        assert_eq!(tinted.draw_data.len(), 4);
+        assert_eq!((tinted.draw_data[2] >> 16) & 0x3, TintMode::Multiply as u32);
+        assert_eq!(tinted.draw_data[3], 0);
+    }
+
+    #[test]
+    fn blur_rect_packs_invert_in_std_dev_sign_bit() {
+        let mut encoding = Encoding::new();
+        encoding.encode_blurred_rounded_rect(palette::css::BLACK, 10.0, 20.0, 3.0, 1.5, false);
+        assert!(encoding.draw_tags == [DrawTag::BLUR_RECT]);
+        assert_eq!(*encoding.draw_data.last().unwrap(), 1.5_f32.to_bits());
+
+        encoding.reset();
+        encoding.encode_blurred_rounded_rect(palette::css::BLACK, 10.0, 20.0, 3.0, 1.5, true);
+        assert_eq!(*encoding.draw_data.last().unwrap(), (-1.5_f32).to_bits());
+
+        encoding.reset();
+        encoding.encode_blurred_rounded_rect(palette::css::BLACK, 10.0, 20.0, 3.0, 0.0, true);
+        let bits = *encoding.draw_data.last().unwrap();
+        assert_eq!(bits >> 31, 1);
+        assert_eq!(f32::from_bits(bits).abs(), 0.0);
     }
 }

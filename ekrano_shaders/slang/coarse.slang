@@ -82,10 +82,10 @@ void write_grad(uint ty, uint index, uint info_offset,
     cmd_offset += 3;
 }
 
-void write_image(uint info_offset, inout uint cmd_offset, inout uint cmd_limit,
+void write_image(uint cmd, uint info_offset, inout uint cmd_offset, inout uint cmd_limit,
     StorageBuffer<uint> ptcl, StorageBuffer<BumpAllocators> bump, Config config) {
     alloc_cmd(cmd_offset, cmd_limit, ptcl, bump, config, 2);
-    ptcl[cmd_offset] = CMD_IMAGE;
+    ptcl[cmd_offset] = cmd;
     ptcl[cmd_offset + 1] = info_offset;
     cmd_offset += 2;
 }
@@ -160,10 +160,12 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
     }
 
     uint width_in_bins = (config.width_in_tiles + N_TILE_X - 1) / N_TILE_X;
+    uint height_in_bins = (config.height_in_tiles + N_TILE_Y - 1) / N_TILE_Y;
+    uint n_bins = width_in_bins * height_in_bins;
+    uint aligned_n_bins = (n_bins + N_TILE - 1) & ~(N_TILE - 1);
     uint bin_ix = width_in_bins * wg_id.y + wg_id.x;
-    // Skip when bin_ix exceeds bin_headers capacity (binning_wgs * 256). See vello #680.
-    // `bin_ix` is uniform across the workgroup, so this return is WG-uniform.
-    if (failed != 0 || bin_ix >= 256)
+    // `failed` is uniform across the workgroup, so this return is WG-uniform.
+    if (failed != 0)
         return;
     uint n_partitions = (config.n_drawobj + N_TILE - 1) / N_TILE;
 
@@ -201,7 +203,7 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
                 part_start_ix = ready_ix;
                 uint count = 0;
                 if (partition_ix + local_id.x < n_partitions) {
-                    uint in_ix = (partition_ix + local_id.x) * N_TILE + bin_ix;
+                    uint in_ix = (partition_ix + local_id.x) * aligned_n_bins + bin_ix;
                     BinHeader bh = bin_headers[in_ix];
                     count = bh.element_count;
                 sh_part_offsets[local_id.x] = bh.chunk_offset;
@@ -357,9 +359,10 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
                 } else if (drawtag == DRAWTAG_FILL_SWEEP_GRADIENT) {
                     write_path(tile_ix, draw_flags, cmd_offset, cmd_limit, ptcl, bump, tiles, config);
                     write_grad(CMD_SWEEP_GRAD, scene[dd], di + 1, cmd_offset, cmd_limit, ptcl, bump, config);
-                } else if (drawtag == DRAWTAG_FILL_IMAGE) {
+                } else if (drawtag == DRAWTAG_FILL_IMAGE || drawtag == DRAWTAG_FILL_IMAGE_TINTED) {
                     write_path(tile_ix, draw_flags, cmd_offset, cmd_limit, ptcl, bump, tiles, config);
-                    write_image(di + 1, cmd_offset, cmd_limit, ptcl, bump, config);
+                    uint cmd = drawtag == DRAWTAG_FILL_IMAGE_TINTED ? CMD_IMAGE_TINTED : CMD_IMAGE;
+                    write_image(cmd, di + 1, cmd_offset, cmd_limit, ptcl, bump, config);
                 } else if (drawtag == DRAWTAG_BEGIN_CLIP) {
                     bool even_odd = (draw_flags & DRAW_INFO_FLAGS_FILL_RULE_BIT) != 0;
                     int tile_backdrop = tiles[tile_ix].backdrop;

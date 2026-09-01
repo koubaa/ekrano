@@ -2,12 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use std::io::Cursor;
+use std::ops::RangeInclusive;
 use std::sync::Arc;
 
 #[cfg(feature = "bump_estimate")]
 use ekrano_encoding::BumpAllocatorMemory;
 use ekrano_encoding::{
-    CoverageMask, DrawBeginClip, Encoding, Filter, Glyph, GlyphRun, NormalizedCoord, Patch, Transform,
+    CoverageMask, DrawBeginClip, Encoding, Filter, FontEmbolden, Glyph, GlyphRun, NormalizedCoord, Patch, Tint,
+    Transform,
 };
 use peniko::{
     BlendMode, Blob, Brush, BrushRef, Color, ColorStop, ColorStops, ColorStopsSource, Compose, Extend, Fill, FontData,
@@ -44,6 +46,7 @@ use skrifa::{
 #[derive(Clone, Default)]
 pub struct Scene {
     encoding: Encoding,
+    image_tint: Option<Tint>,
     #[cfg(feature = "bump_estimate")]
     estimator: ekrano_encoding::BumpEstimator,
 }
@@ -58,6 +61,7 @@ impl Scene {
     /// Removes all content from the scene.
     pub fn reset(&mut self) {
         self.encoding.reset();
+        self.image_tint = None;
         #[cfg(feature = "bump_estimate")]
         self.estimator.reset();
     }
@@ -193,6 +197,16 @@ impl Scene {
     pub fn reset_draw_blend_mode(&mut self) {
         self.encoding
             .encode_set_blend_mode(BlendMode::new(Mix::Normal, Compose::SrcOver));
+    }
+
+    /// Sets the tint applied to subsequent image paint operations.
+    pub fn set_tint(&mut self, tint: Option<Tint>) {
+        self.image_tint = tint;
+    }
+
+    /// Clears the tint applied to subsequent image paint operations.
+    pub fn reset_tint(&mut self) {
+        self.image_tint = None;
     }
 
     /// Sets a full-frame coverage mask (`width` × `height` bytes, row-major).
@@ -346,7 +360,7 @@ impl Scene {
         let kernel_size = 2.5 * std_dev;
 
         let shape: Rect = rect.inflate(kernel_size, kernel_size);
-        self.draw_blurred_rounded_rect_in(&shape, transform, rect, brush, radius, std_dev);
+        self.draw_blurred_rounded_rect_in(&shape, transform, rect, brush, radius, std_dev, false);
     }
 
     /// Draw a rounded rectangle blurred with a gaussian filter in `shape`.
@@ -359,6 +373,11 @@ impl Scene {
     /// If just the blurred rounded rectangle is desired without clipping,
     /// use the simpler [`Self::draw_blurred_rounded_rect`].
     /// For many users, that method will be easier to use.
+    ///
+    /// When `invert` is `true`, the inverse (`1 - alpha`) of the blur coverage is painted: the
+    /// brush is fully opaque outside the blurred rounded rectangle and fades to transparent inside
+    /// it. This can be used to implement inset box shadows. Invert is only on this method because
+    /// inverted paint is opaque at infinity; the non-`_in` helper's `2.5σ` clip is the wrong region.
     pub fn draw_blurred_rounded_rect_in(
         &mut self,
         shape: &impl Shape,
@@ -367,6 +386,7 @@ impl Scene {
         brush: Color,
         radius: f64,
         std_dev: f64,
+        invert: bool,
     ) {
         let t = Transform::from_kurbo(&transform);
         self.encoding.encode_transform(t);
@@ -383,6 +403,7 @@ impl Scene {
                 rect.height() as _,
                 radius as _,
                 std_dev as _,
+                invert,
             );
         }
     }
@@ -393,6 +414,18 @@ impl Scene {
         style: Fill,
         transform: Affine,
         brush: impl Into<BrushRef<'b>>,
+        brush_transform: Option<Affine>,
+        shape: &impl Shape,
+    ) {
+        self.fill_with_alpha(style, transform, brush, 1.0, brush_transform, shape);
+    }
+
+    fn fill_with_alpha<'b>(
+        &mut self,
+        style: Fill,
+        transform: Affine,
+        brush: impl Into<BrushRef<'b>>,
+        brush_alpha: f32,
         brush_transform: Option<Affine>,
         shape: &impl Shape,
     ) {
@@ -407,7 +440,8 @@ impl Scene {
             {
                 self.encoding.swap_last_path_tags();
             }
-            self.encoding.encode_brush(brush, 1.0);
+            self.encoding
+                .encode_brush_with_tint(brush, brush_alpha, self.image_tint);
             #[cfg(feature = "bump_estimate")]
             self.estimator.count_path(shape.path_elements(0.1), &t, None);
         }
@@ -450,7 +484,7 @@ impl Scene {
                 {
                     self.encoding.swap_last_path_tags();
                 }
-                self.encoding.encode_brush(brush, 1.0);
+                self.encoding.encode_brush_with_tint(brush, 1.0, self.image_tint);
             }
         } else {
             let stroked = peniko::kurbo::stroke(
@@ -529,6 +563,7 @@ impl From<Encoding> for Scene {
         // removed at some point - see https://github.com/linebender/vello/issues/541
         Self {
             encoding,
+            image_tint: None,
             #[cfg(feature = "bump_estimate")]
             estimator: ekrano_encoding::BumpEstimator::default(),
         }
@@ -558,7 +593,9 @@ impl<'a> DrawGlyphs<'a> {
                 font: font.clone(),
                 transform: Transform::IDENTITY,
                 glyph_transform: None,
+                brush_transform: None,
                 font_size: 16.0,
+                font_embolden: FontEmbolden::default(),
                 hint: false,
                 normalized_coords: coords_start..coords_start,
                 style: Fill::NonZero.into(),
@@ -591,12 +628,32 @@ impl<'a> DrawGlyphs<'a> {
         self
     }
 
+    /// Sets the transform applied to the brush contents.
+    ///
+    /// This is applied after the global run [transform](Self::transform) and is
+    /// encoded as the glyph run's paint transform. It affects transformed
+    /// brushes such as gradients and images; solid colors ignore it.
+    ///
+    /// The default value is `None`.
+    #[must_use]
+    pub fn brush_transform(mut self, transform: Option<Affine>) -> Self {
+        self.run.brush_transform = transform.map(|xform| Transform::from_kurbo(&xform));
+        self
+    }
+
     /// Sets the font size in pixels per em units.
     ///
     /// The default value is 16.0.
     #[must_use]
     pub fn font_size(mut self, size: f32) -> Self {
         self.run.font_size = size;
+        self
+    }
+
+    /// Sets synthetic embolden settings.
+    #[must_use]
+    pub fn font_embolden(mut self, embolden: FontEmbolden) -> Self {
+        self.run.font_embolden = embolden;
         self
     }
 
@@ -644,6 +701,55 @@ impl<'a> DrawGlyphs<'a> {
         self
     }
 
+    /// Render a decoration (underline, strikethrough) with skip-ink around glyph outlines.
+    ///
+    /// This is the classic analog of Glifo / Vello #1592 `render_decoration`.
+    /// COLR and bitmap glyphs are skipped for ink exclusion (same as Glifo).
+    ///
+    /// `offset` is positive above the baseline (Y-up font space). `size` is thickness.
+    /// `buffer` is extra horizontal padding around each descender gap.
+    pub fn render_decoration(
+        self,
+        glyphs: impl Iterator<Item = Glyph> + Clone,
+        x_range: RangeInclusive<f32>,
+        baseline_y: f32,
+        offset: f32,
+        size: f32,
+        buffer: f32,
+    ) {
+        let coords_start = self.run.normalized_coords.start;
+        let coords: Vec<NormalizedCoord> =
+            self.scene.encoding.resources.normalized_coords[self.run.normalized_coords.clone()].to_vec();
+        let glyph_transform = self.run.glyph_transform.map(|t| t.to_kurbo());
+        let rects = crate::decoration::decoration_rects(
+            &self.run.font,
+            self.run.font_size,
+            self.run.font_embolden,
+            glyph_transform,
+            self.run.hint,
+            self.run.transform,
+            &coords,
+            glyphs,
+            x_range,
+            baseline_y,
+            offset,
+            size,
+            buffer,
+        );
+        let transform = self.run.transform.to_kurbo();
+        let brush_transform = self.run.brush_transform.map(|t| t.to_kurbo());
+        let DrawGlyphs {
+            scene,
+            brush,
+            brush_alpha,
+            ..
+        } = self;
+        for rect in rects {
+            scene.fill_with_alpha(Fill::NonZero, transform, brush, brush_alpha, brush_transform, &rect);
+        }
+        scene.encoding.resources.normalized_coords.truncate(coords_start);
+    }
+
     /// Encodes a fill or stroke for the given sequence of glyphs and consumes the builder.
     ///
     /// The `style` parameter accepts either `Fill` or `Stroke` types.
@@ -683,7 +789,9 @@ impl<'a> DrawGlyphs<'a> {
         let index = resources.glyph_runs.len();
         resources.glyph_runs.push(self.run.clone());
         resources.patches.push(Patch::GlyphRun { index });
-        self.scene.encoding.encode_brush(self.brush, self.brush_alpha);
+        self.scene
+            .encoding
+            .encode_brush_with_tint(self.brush, self.brush_alpha, self.scene.image_tint);
         // Glyph run resolve step affects transform and style state in a way
         // that is opaque to the current encoding.
         // See <https://github.com/linebender/vello/issues/424>

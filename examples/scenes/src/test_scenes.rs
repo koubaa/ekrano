@@ -111,6 +111,7 @@ export_scenes!(
     fn many_draw_objects(many_draw_objects)
     fn blurred_rounded_rect(blurred_rounded_rect)
     fn image_sampling(image_sampling)
+    fn image_sampling_bicubic(impls::image_sampling_bicubic(), "image_sampling_bicubic", false)
     fn image_extend_modes_bilinear(impls::image_extend_modes(ImageQuality::Medium), "image_extend_modes (bilinear)", false)
     fn image_extend_modes_nearest_neighbor(impls::image_extend_modes(ImageQuality::Low), "image_extend_modes (nearest neighbor)", false)
     fn luminance_mask(luminance_mask)
@@ -729,6 +730,7 @@ mod impls {
             Affine::translate((110.0, 700.0)),
             // Add a skew to simulate an oblique font.
             Some(Affine::skew(20_f64.to_radians().tan(), 0.0)),
+            None,
             &Stroke::new(1.0),
             s,
         );
@@ -744,9 +746,11 @@ mod impls {
             Affine::translate((110.0, 800.0)),
             // Add a skew to simulate an oblique font.
             None,
+            None,
             Fill::NonZero,
             "And some Vello\ntext with a newline",
             false, /* hint */
+            FontEmbolden::default(),
         );
         let th = params.time;
         let center = Point::new(500.0, 500.0);
@@ -1795,6 +1799,7 @@ mod impls {
             palette::css::BLACK,
             radius,
             std_dev,
+            false,
         );
     }
 
@@ -1842,6 +1847,66 @@ mod impls {
                 .then_scale(200.0)
                 .then_translate((600.0, 600.0).into()),
         );
+    }
+
+    fn sample_bicubic_image_data() -> ImageData {
+        let mut blob: Vec<u8> = Vec::with_capacity(16 * 16 * 4);
+        for y in 0..16 {
+            for x in 0..16 {
+                let is_checker = ((x / 2) + (y / 2)) % 2 == 0;
+                let mut color = if is_checker {
+                    palette::css::BLACK
+                } else {
+                    palette::css::WHITE
+                };
+                if x == 8 || y == 8 {
+                    color = palette::css::RED;
+                }
+                if x == y || x + y == 15 {
+                    color = palette::css::BLUE;
+                }
+                if (x == 2 && y == 13) || (x == 13 && y == 2) {
+                    color = palette::css::LIME;
+                }
+                blob.extend(color.to_rgba8().to_u8_array());
+            }
+        }
+        ImageData {
+            data: Blob::new(Arc::new(blob)),
+            format: ImageFormat::Rgba8,
+            width: 16,
+            height: 16,
+            alpha_type: ImageAlphaType::Alpha,
+        }
+    }
+
+    pub(super) fn image_sampling_bicubic() -> impl FnMut(&mut Scene, &mut SceneParams<'_>) {
+        let image = sample_bicubic_image_data();
+        let image_low = ImageBrush::new(image.clone()).with_quality(ImageQuality::Low);
+        let image_medium = ImageBrush::new(image.clone()).with_quality(ImageQuality::Medium);
+        let image_high = ImageBrush::new(image).with_quality(ImageQuality::High);
+
+        move |scene, params| {
+            params.resolution = Some(Vec2::new(1400., 900.));
+            params.base_color = Some(palette::css::WHITE);
+
+            let transforms = [
+                Affine::translate((-8.0, -8.0))
+                    .then_rotate(PI / 5.0)
+                    .then_scale_non_uniform(18.0, 14.0)
+                    .then_translate((250.0, 270.0).into()),
+                Affine::translate((250.0, 670.0))
+                    * Affine::scale_non_uniform(20.0, 10.0)
+                    * Affine::skew(0.35, -0.15)
+                    * Affine::translate((-8.0, -8.0)),
+            ];
+
+            for transform in transforms {
+                scene.draw_image(&image_low, transform);
+                scene.draw_image(&image_medium, transform.then_translate((420.0, 0.0).into()));
+                scene.draw_image(&image_high, transform.then_translate((840.0, 0.0).into()));
+            }
+        }
     }
 
     pub(super) fn image_extend_modes(quality: ImageQuality) -> impl FnMut(&mut Scene, &mut SceneParams<'_>) {

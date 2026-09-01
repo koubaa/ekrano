@@ -7,9 +7,9 @@
 mod submission;
 
 use ekrano::{
-    AaConfig, Scene,
-    kurbo::{Affine, Rect, RoundedRect, Stroke},
-    peniko::{Extend, ImageQuality, color::palette},
+    AaConfig, FontEmbolden, Scene,
+    kurbo::{Affine, Diagonal2, Rect, RoundedRect, Stroke},
+    peniko::{Color, ColorStop, Extend, Gradient, ImageQuality, InterpolationAlphaSpace, color::palette},
 };
 use ekrano_tests::{TestParams, shared_test_device, smoke_snapshot_test_sync, snapshot_test_sync};
 use scenes::ImageCache;
@@ -45,6 +45,66 @@ fn test_data_image_roundtrip_extend_pad() {
         .assert_mean_less_than(0.001);
 }
 
+/// <https://github.com/web-platform-tests/wpt/blob/18c64a74b1/html/canvas/element/fill-and-stroke-styles/2d.gradient.interpolate.coloralpha.html>
+/// See <https://github.com/linebender/vello/issues/1056>.
+fn test_gradient_color_alpha_premultiplied() {
+    let mut scene = Scene::new();
+    let viewport = Rect::new(0., 0., 100., 50.);
+    scene.fill(
+        ekrano::peniko::Fill::NonZero,
+        Affine::IDENTITY,
+        &Gradient::new_linear((0., 0.), (100., 0.))
+            .with_stops([
+                ColorStop {
+                    offset: 0.,
+                    color: Color::from_rgba8(255, 255, 0, 0).into(),
+                },
+                ColorStop {
+                    offset: 1.,
+                    color: Color::from_rgba8(0, 0, 255, 255).into(),
+                },
+            ])
+            .with_interpolation_alpha_space(InterpolationAlphaSpace::Premultiplied),
+        None,
+        &viewport,
+    );
+    let mut params = TestParams::new("gradient_color_alpha_premultiplied", 100, 50);
+    params.base_color = Some(palette::css::WHITE);
+    smoke_snapshot_test_sync(scene, &params)
+        .unwrap()
+        .assert_mean_less_than(0.001);
+}
+
+/// <https://github.com/web-platform-tests/wpt/blob/18c64a74b1/html/canvas/element/fill-and-stroke-styles/2d.gradient.interpolate.coloralpha.html>
+/// See <https://github.com/linebender/vello/issues/1056>.
+fn test_gradient_color_alpha_unpremultiplied() {
+    let mut scene = Scene::new();
+    let viewport = Rect::new(0., 0., 100., 50.);
+    scene.fill(
+        ekrano::peniko::Fill::NonZero,
+        Affine::IDENTITY,
+        &Gradient::new_linear((0., 0.), (100., 0.))
+            .with_stops([
+                ColorStop {
+                    offset: 0.,
+                    color: Color::from_rgba8(255, 255, 0, 0).into(),
+                },
+                ColorStop {
+                    offset: 1.,
+                    color: Color::from_rgba8(0, 0, 255, 255).into(),
+                },
+            ])
+            .with_interpolation_alpha_space(InterpolationAlphaSpace::Unpremultiplied),
+        None,
+        &viewport,
+    );
+    let mut params = TestParams::new("gradient_color_alpha_unpremultiplied", 100, 50);
+    params.base_color = Some(palette::css::WHITE);
+    smoke_snapshot_test_sync(scene, &params)
+        .unwrap()
+        .assert_mean_less_than(0.001);
+}
+
 /// Test created from <https://github.com/linebender/vello/issues/662>
 fn stroke_width_zero() {
     let mut scene = Scene::new();
@@ -69,6 +129,7 @@ fn text_stroke_width_zero() {
         palette::css::WHITE,
         Affine::translate((0., f64::from(font_size))),
         None,
+        None,
         &Stroke::new(0.),
         "Testing text",
     );
@@ -78,6 +139,48 @@ fn text_stroke_width_zero() {
         (font_size * 1.25).ceil() as _,
     );
     snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.001);
+}
+
+/// Honesty gate: Linebender `main` sparse LFS `glyphs_emboldened.png` (Vello #1628).
+fn glyphs_emboldened() {
+    let font_size = 44_f32;
+    let text = "this is regular and emboldened text";
+    let mut scene = Scene::new();
+    let mut simple_text = SimpleText::new();
+    let paint = palette::css::REBECCA_PURPLE.with_alpha(0.5);
+    simple_text.add_var_run(
+        &mut scene,
+        None,
+        font_size,
+        &[],
+        paint,
+        Affine::translate((0., f64::from(font_size))),
+        None,
+        None,
+        ekrano::peniko::Fill::NonZero,
+        text,
+        true,
+        FontEmbolden::default(),
+    );
+    simple_text.add_var_run(
+        &mut scene,
+        None,
+        font_size,
+        &[],
+        paint,
+        Affine::translate((0., f64::from(font_size) + 58.0)),
+        None,
+        None,
+        ekrano::peniko::Fill::NonZero,
+        text,
+        true,
+        FontEmbolden::new(Diagonal2::new(1.0, 1.0)),
+    );
+    let mut params = TestParams::new("glyphs_emboldened", 760, 140);
+    params.base_color = Some(palette::css::WHITE);
+    snapshot_test_sync(scene, &params)
+        .unwrap()
+        .assert_mean_less_than(0.0095);
 }
 
 fn main() {
@@ -97,6 +200,20 @@ fn main() {
         .with_ignored_flag(false),
     );
     trials.push(
+        libtest_mimic::Trial::test("test_gradient_color_alpha_premultiplied", || {
+            test_gradient_color_alpha_premultiplied();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("test_gradient_color_alpha_unpremultiplied", || {
+            test_gradient_color_alpha_unpremultiplied();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
         libtest_mimic::Trial::test("stroke_width_zero", || {
             stroke_width_zero();
             Ok(())
@@ -106,6 +223,13 @@ fn main() {
     trials.push(
         libtest_mimic::Trial::test("text_stroke_width_zero", || {
             text_stroke_width_zero();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("glyphs_emboldened", || {
+            glyphs_emboldened();
             Ok(())
         })
         .with_ignored_flag(false),

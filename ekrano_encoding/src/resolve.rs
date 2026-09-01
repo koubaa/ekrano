@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use bytemuck::{Pod, Zeroable};
-use peniko::{Extend, ImageData};
+use peniko::{Extend, ImageData, InterpolationAlphaSpace};
+use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -166,12 +167,42 @@ pub struct Resolver {
     image_cache: ImageCache,
     pending_images: Vec<PendingImage>,
     patches: Vec<ResolvedPatch>,
+    /// Blob id → atlas origin for live GPU textures (skip CPU intern).
+    live_placements: HashMap<u64, (u32, u32)>,
+    /// Packed-buffer byte offsets of `sample_alpha` words that need the live bit.
+    live_sample_alpha_bytes: Vec<usize>,
 }
+
+/// Bit 31 of [`crate::DrawImage::sample_alpha`]: sample from the live atlas.
+pub const LIVE_IMAGE_BIT: u32 = 1 << 31;
 
 impl Resolver {
     /// Creates a new resource cache.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Register live-texture atlas placements for the next [`Self::resolve`].
+    ///
+    /// Images whose blob id appears here are not uploaded into the CPU image atlas.
+    /// `sample_alpha` bit 31 ([`LIVE_IMAGE_BIT`]) is set so fine samples `live_atlas`.
+    pub fn set_live_image_placements(&mut self, placements: HashMap<u64, (u32, u32)>) {
+        self.live_placements = placements;
+    }
+
+    /// Marks the atlas entry for `image` as dirty.
+    ///
+    /// If `image` is already resident in the atlas and appears in a later resolve pass,
+    /// that pass will include it in the returned image uploads.
+    pub fn mark_image_dirty(&mut self, image: &ImageData) {
+        self.image_cache.mark_dirty(image);
+    }
+
+    /// Clear atlas dirty bits after this resolve's image deposits have submitted.
+    ///
+    /// Skipped on GPU failure so the next resolve re-uploads the same residents.
+    pub fn acknowledge_image_uploads(&mut self) {
+        self.image_cache.finish_resolve();
     }
 
     /// Resolves late bound resources and packs an encoding. Returns the packed
@@ -213,6 +244,7 @@ impl Resolver {
                         data.extend_from_slice(bytemuck::bytes_of(&PathTag::TRANSFORM));
                         data.extend_from_slice(bytemuck::cast_slice(&glyph.path_tags));
                     }
+                    data.extend_from_slice(bytemuck::bytes_of(&PathTag::TRANSFORM));
                     data.extend_from_slice(bytemuck::bytes_of(&PathTag::PATH));
                 }
             }
@@ -285,6 +317,11 @@ impl Resolver {
                         if let Some((x, y)) = self.pending_images[*index].xy {
                             let xy = (x << 16) | y;
                             data.extend_from_slice(bytemuck::bytes_of(&xy));
+                            if self.pending_images[*index].live {
+                                // After this write, width_height then sample_alpha follow from the
+                                // stream. Record where sample_alpha will land so we can OR the live bit.
+                                self.live_sample_alpha_bytes.push(data.len() + 4);
+                            }
                             pos = *draw_data_offset + 1;
                         } else {
                             // If we get here, we failed to allocate a slot for this image in the atlas.
@@ -304,6 +341,12 @@ impl Resolver {
                 let clip = DrawBeginClip::clip();
                 data.extend_from_slice(bytemuck::cast_slice(bytemuck::bytes_of(&clip)));
             }
+            for &byte_off in &self.live_sample_alpha_bytes {
+                if byte_off + 4 <= data.len() {
+                    let word = u32::from_le_bytes(data[byte_off..byte_off + 4].try_into().unwrap());
+                    data[byte_off..byte_off + 4].copy_from_slice(&(word | LIVE_IMAGE_BIT).to_le_bytes());
+                }
+            }
         }
         // Transform stream
         layout.transform_base = size_to_words(data.len());
@@ -314,6 +357,7 @@ impl Resolver {
                 if let ResolvedPatch::GlyphRun {
                     index,
                     glyphs: _,
+                    paint_transform,
                     transform,
                     scale,
                     hint,
@@ -351,6 +395,7 @@ impl Resolver {
                             data.extend_from_slice(bytemuck::bytes_of(&xform));
                         }
                     }
+                    data.extend_from_slice(bytemuck::bytes_of(paint_transform));
                 }
             }
             if pos < stream.len() {
@@ -388,7 +433,7 @@ impl Resolver {
         self.ramp_cache.maintain();
         self.glyphs.clear();
         self.glyph_cache.maintain();
-        self.image_cache.clear();
+        self.image_cache.begin_resolve();
         self.pending_images.clear();
         self.patches.clear();
         let mut sizes = StreamOffsets::default();
@@ -399,8 +444,11 @@ impl Resolver {
                     draw_data_offset,
                     stops,
                     extend,
+                    interpolation_alpha_space,
                 } => {
-                    let ramp_id = self.ramp_cache.add(&resources.color_stops[stops.clone()]);
+                    let ramp_id = self
+                        .ramp_cache
+                        .add(*interpolation_alpha_space, &resources.color_stops[stops.clone()]);
                     self.patches.push(ResolvedPatch::Ramp {
                         draw_data_offset: *draw_data_offset + sizes.draw_data,
                         ramp_id,
@@ -412,6 +460,7 @@ impl Resolver {
                     let run = &resources.glyph_runs[*index];
                     let glyphs = &resources.glyphs[run.glyphs.clone()];
                     let coords = &resources.normalized_coords[run.normalized_coords.clone()];
+                    let paint_transform = run.transform * run.brush_transform.unwrap_or(Transform::IDENTITY);
                     let mut hint = run.hint;
                     let mut font_size = run.font_size;
                     let mut transform = run.transform;
@@ -431,10 +480,14 @@ impl Resolver {
                             hint = false;
                         }
                     }
-                    let Some(mut session) =
-                        self.glyph_cache
-                            .session(&run.font, bytemuck::cast_slice(coords), font_size, hint, &run.style)
-                    else {
+                    let Some(mut session) = self.glyph_cache.session(
+                        &run.font,
+                        bytemuck::cast_slice(coords),
+                        font_size,
+                        run.font_embolden,
+                        hint,
+                        &run.style,
+                    ) else {
                         continue;
                     };
                     let glyph_start = self.glyphs.len();
@@ -450,12 +503,13 @@ impl Resolver {
                         self.glyphs.push(encoding);
                     }
                     let glyph_end = self.glyphs.len();
-                    run_sizes.path_tags += glyphs.len() + 1;
-                    run_sizes.transforms += glyphs.len();
+                    run_sizes.path_tags += glyphs.len() + 2;
+                    run_sizes.transforms += glyphs.len() + 1;
                     sizes.add(&run_sizes);
                     self.patches.push(ResolvedPatch::GlyphRun {
                         index: *index,
                         glyphs: glyph_start..glyph_end,
+                        paint_transform,
                         transform,
                         scale,
                         hint,
@@ -469,6 +523,7 @@ impl Resolver {
                     self.pending_images.push(PendingImage {
                         image: image.clone(),
                         xy: None,
+                        live: false,
                     });
                     self.patches.push(ResolvedPatch::Image {
                         index,
@@ -481,13 +536,25 @@ impl Resolver {
     }
 
     fn resolve_pending_images(&mut self) {
-        self.image_cache.clear();
+        self.live_sample_alpha_bytes.clear();
         'outer: loop {
+            self.image_cache.restart_resolve_pass();
             // Loop over the images, attempting to allocate them all into the atlas.
             for pending_image in &mut self.pending_images {
-                if let Some(xy) = self.image_cache.get_or_insert(&pending_image.image) {
-                    pending_image.xy = Some(xy);
-                } else {
+                let blob_id = pending_image.image.data.id();
+                if let Some(&(x, y)) = self.live_placements.get(&blob_id) {
+                    pending_image.xy = Some((x, y));
+                    pending_image.live = true;
+                    continue;
+                }
+                pending_image.live = false;
+                pending_image.xy = loop {
+                    if let Some(xy) = self.image_cache.get_or_insert(&pending_image.image) {
+                        break Some(xy);
+                    }
+                    if self.image_cache.can_fit_image(&pending_image.image) && self.image_cache.evict_stale_entries() {
+                        continue;
+                    }
                     // We failed to allocate. Try to bump the atlas size.
                     if self.image_cache.bump_size() {
                         // We were able to increase the atlas size. Restart the outer loop.
@@ -496,9 +563,9 @@ impl Resolver {
                         // If the atlas is already maximum size, there's nothing we can do. Set
                         // the xy field to None so this image isn't rendered and then carry on--
                         // other images might still fit.
-                        pending_image.xy = None;
+                        break None;
                     }
-                }
+                };
             }
             // If we made it here, we've either successfully allocated all images or we reached
             // the maximum atlas size.
@@ -518,6 +585,8 @@ pub enum Patch {
         stops: Range<usize>,
         /// Extend mode for the gradient.
         extend: Extend,
+        /// Interpolation alpha space for the gradient.
+        interpolation_alpha_space: InterpolationAlphaSpace,
     },
     /// Glyph run resource.
     GlyphRun {
@@ -538,6 +607,8 @@ pub enum Patch {
 struct PendingImage {
     image: ImageData,
     xy: Option<(u32, u32)>,
+    /// When true, `xy` is a live-atlas origin (not CPU-interned).
+    live: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -555,6 +626,8 @@ enum ResolvedPatch {
         index: usize,
         /// Range into the glyphs encoding range buffer.
         glyphs: Range<usize>,
+        /// Transform used for the run brush.
+        paint_transform: Transform,
         /// Global transform.
         transform: Transform,
         /// Additional scale factor to apply to translation.

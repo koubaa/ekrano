@@ -641,10 +641,6 @@ dependencies = [
 [[package]]
 name = "ekrano_shaders"
 version = "0.7.0"
-dependencies = [
- "bytemuck",
- "ekrano_encoding",
-]
 
 [[package]]
 name = "ekrano_tests"

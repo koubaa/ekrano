@@ -63,6 +63,10 @@ name = "blend_modes"
 harness = false
 
 [[test]]
+name = "blurred_rounded_rect"
+harness = false
+
+[[test]]
 name = "emoji"
 harness = false
 
@@ -75,11 +79,19 @@ name = "heap_self_regulation"
 harness = false
 
 [[test]]
+name = "glyphs_decoration"
+harness = false
+
+[[test]]
 name = "hinting"
 harness = false
 
 [[test]]
 name = "known_issues"
+harness = false
+
+[[test]]
+name = "live_textures"
 harness = false
 
 [[test]]

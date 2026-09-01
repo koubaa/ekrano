@@ -107,6 +107,12 @@ fn snapshot_image_sampling() {
     snapshot_test_scene(test_scene, params);
 }
 
+fn snapshot_image_sampling_bicubic() {
+    let test_scene = test_scenes::image_sampling_bicubic();
+    let params = TestParams::new("image_sampling_bicubic", 520, 336);
+    snapshot_test_scene(test_scene, params);
+}
+
 fn snapshot_image_extend_modes_bilinear() {
     let test_scene = test_scenes::image_extend_modes_bilinear();
     let params = TestParams::new("image_extend_modes_bilinear", 400, 400);
@@ -236,6 +242,13 @@ fn main() {
     trials.push(
         libtest_mimic::Trial::test("snapshot_image_sampling", || {
             snapshot_image_sampling();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("snapshot_image_sampling_bicubic", || {
+            snapshot_image_sampling_bicubic();
             Ok(())
         })
         .with_ignored_flag(false),

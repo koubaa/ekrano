@@ -9,7 +9,7 @@ mod submission;
 use ekrano::{
     Scene,
     kurbo::{Affine, Circle, Rect},
-    peniko::{Brush, Fill, color::palette},
+    peniko::{Brush, Fill, Gradient, color::palette},
 };
 use ekrano_tests::{TestParams, shared_test_device, smoke_snapshot_test_sync};
 use scenes::SimpleText;
@@ -62,6 +62,47 @@ fn two_emoji() {
         .assert_mean_less_than(0.01);
 }
 
+fn glyph_gradient_brush_transform() {
+    let mut scene = Scene::new();
+    let mut text = SimpleText::new();
+    // The gradient starts to the right of the text. Without a brush transform,
+    // pad extension clamps the whole run to red; with the transform below, the
+    // gradient is translated over the glyphs and becomes visibly red-lime-blue.
+    let gradient = Gradient::new_linear((200.0, 0.0), (320.0, 0.0)).with_stops([
+        palette::css::RED,
+        palette::css::LIME,
+        palette::css::BLUE,
+    ]);
+
+    text.add_run(
+        &mut scene,
+        None,
+        40.0,
+        &gradient,
+        Affine::translate((8.0, 38.0)),
+        None,
+        None,
+        Fill::NonZero,
+        "GRAD",
+    );
+    text.add_run(
+        &mut scene,
+        None,
+        40.0,
+        &gradient,
+        Affine::translate((8.0, 82.0)),
+        None,
+        Some(Affine::translate((-200.0, 0.0))),
+        Fill::NonZero,
+        "GRAD",
+    );
+
+    let params = TestParams::new("glyph_gradient_brush_transform", 150, 92);
+    smoke_snapshot_test_sync(scene, &params)
+        .unwrap()
+        .assert_mean_less_than(0.01);
+}
+
 fn main() {
     let mut trials = Vec::new();
     trials.push(
@@ -81,6 +122,13 @@ fn main() {
     trials.push(
         libtest_mimic::Trial::test("two_emoji", || {
             two_emoji();
+            Ok(())
+        })
+        .with_ignored_flag(false),
+    );
+    trials.push(
+        libtest_mimic::Trial::test("glyph_gradient_brush_transform", || {
+            glyph_gradient_brush_transform();
             Ok(())
         })
         .with_ignored_flag(false),

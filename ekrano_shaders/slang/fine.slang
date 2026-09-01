@@ -11,10 +11,11 @@
 import goldy_exp;
 import ekrano_shared;
 
-// Slots: 0=config, 1=segments, 2=ptcl, 3=info, 4=blend_spill, 5=output, 6=gradients, 7=image_atlas, 8=mask_atlas
-// Non-MSAA: filter layer snapshots at 9–12. MSAA: mask_lut at 9, filter snapshots at 10–13.
+// Slots: 0=config, 1=segments, 2=ptcl, 3=info, 4=blend_spill, 5=output, 6=gradients, 7=image_atlas,
+// 8=mask_atlas, 9=live_atlas.
+// Non-MSAA: filter layer snapshots at 10–13. MSAA: mask_lut at 10, filter snapshots at 11–14.
 
-// When msaa is defined, bindings add mask_lut at slot 8. fill_path_ms provides true MSAA.
+// When msaa is defined, bindings add mask_lut after live_atlas. fill_path_ms provides true MSAA.
 #ifdef msaa
 #ifdef msaa8
 static const uint MASK_WIDTH = 32;
@@ -523,7 +524,10 @@ CmdBlurRect read_blur_rect(ReadOnlyBuffer<uint> ptcl, ReadOnlyBuffer<uint> info,
     r.width = asfloat(info[info_offset+6]);
     r.height = asfloat(info[info_offset+7]);
     r.radius = asfloat(info[info_offset+8]);
-    r.std_dev = asfloat(info[info_offset+9]);
+    // Invert is packed in the sign bit of `std_dev` (σ is otherwise non-negative).
+    uint std_dev_bits = info[info_offset+9];
+    r.std_dev = abs(asfloat(std_dev_bits));
+    r.invert = std_dev_bits >> 31;
     return r;
 }
 
@@ -577,14 +581,27 @@ CmdImage read_image_cmd(ReadOnlyBuffer<uint> ptcl, ReadOnlyBuffer<uint> info, ui
     uint width_height = info[info_offset+7];
     uint sample_alpha = info[info_offset+8];
     img.alpha = float(sample_alpha & 0xFF) / 255.0;
-    img.format = sample_alpha >> 15;
+    img.format = (sample_alpha >> 15) & 0x1;
     img.alpha_type = (sample_alpha >> 14) & 0x1;
     img.quality = (sample_alpha >> 12) & 0x3;
     img.x_extend_mode = (sample_alpha >> 10) & 0x3;
     img.y_extend_mode = (sample_alpha >> 8) & 0x3;
+    img.tint_mode = (sample_alpha >> 16) & 0x3;
+    img.is_live = sample_alpha >> 31;
     img.atlas_offset = float2(float(xy >> 16), float(xy & 0xFFFF));
     img.extents = float2(float(width_height >> 16), float(width_height & 0xFFFF));
     return img;
+}
+
+uint read_image_tint(ReadOnlyBuffer<uint> ptcl, ReadOnlyBuffer<uint> info, uint cmd_ix) {
+    uint info_offset = ptcl[cmd_ix + 1];
+    return info[info_offset + 9];
+}
+
+[ForceInline]
+float4 apply_image_tint(float4 source, uint packed_tint, uint tint_mode) {
+    float4 tint = unpackUnorm4x8ToFloat(packed_tint);
+    return tint_mode == TINT_MODE_ALPHA_MASK ? tint * source.a : source * tint;
 }
 
 CmdEndClip read_end_clip(ReadOnlyBuffer<uint> ptcl, uint cmd_ix) {
@@ -592,6 +609,62 @@ CmdEndClip read_end_clip(ReadOnlyBuffer<uint> ptcl, uint cmd_ix) {
     e.blend = ptcl[cmd_ix + 1];
     e.alpha = asfloat(ptcl[cmd_ix + 2]);
     return e;
+}
+
+// Mitchell–Netravali cubic (B=1/3, C=1/3), adapted from classic Vello #1557.
+// Atlas texels are CPU-premultiplied before upload, so taps are used as-is.
+float cubic_single_weight(float t, float a, float b, float c, float d) {
+    return t * (t * (t * d + c) + b) + a;
+}
+
+float4 cubic_weights(float fract) {
+    // MF rows: cubic polynomial coefficients for the four neighboring taps.
+    return float4(
+        cubic_single_weight(fract, (1.0 / 6.0) / 3.0, -(3.0 / 6.0) / 3.0 - 1.0 / 3.0, (3.0 / 6.0) / 3.0 + 2.0 * 1.0 / 3.0, -(1.0 / 6.0) / 3.0 - 1.0 / 3.0),
+        cubic_single_weight(fract, 1.0 - (2.0 / 6.0) / 3.0, 0.0, -3.0 + (12.0 / 6.0) / 3.0 + 1.0 / 3.0, 2.0 - (9.0 / 6.0) / 3.0 - 1.0 / 3.0),
+        cubic_single_weight(fract, (1.0 / 6.0) / 3.0, (3.0 / 6.0) / 3.0 + 1.0 / 3.0, 3.0 - (15.0 / 6.0) / 3.0 - 2.0 * 1.0 / 3.0, -2.0 + (9.0 / 6.0) / 3.0 + 1.0 / 3.0),
+        cubic_single_weight(fract, 0.0, 0.0, -1.0 / 3.0, (1.0 / 6.0) / 3.0 + 1.0 / 3.0)
+    );
+}
+
+float4 bicubic_atlas_tap(Interpolated<float4> atlas, float2 coords, float2 atlas_offset, float2 atlas_max) {
+    float2 p = clamp(coords, atlas_offset, atlas_max);
+    return atlas.Load(int3(int2(p), 0));
+}
+
+float4 bicubic_sample(Interpolated<float4> atlas, float2 coords, float2 atlas_offset, float2 atlas_max) {
+    float2 frac_coords = frac(coords + 0.5);
+    float4 cx = cubic_weights(frac_coords.x);
+    float4 cy = cubic_weights(frac_coords.y);
+
+    float4 s00 = bicubic_atlas_tap(atlas, coords + float2(-1.5, -1.5), atlas_offset, atlas_max);
+    float4 s10 = bicubic_atlas_tap(atlas, coords + float2(-0.5, -1.5), atlas_offset, atlas_max);
+    float4 s20 = bicubic_atlas_tap(atlas, coords + float2(0.5, -1.5), atlas_offset, atlas_max);
+    float4 s30 = bicubic_atlas_tap(atlas, coords + float2(1.5, -1.5), atlas_offset, atlas_max);
+
+    float4 s01 = bicubic_atlas_tap(atlas, coords + float2(-1.5, -0.5), atlas_offset, atlas_max);
+    float4 s11 = bicubic_atlas_tap(atlas, coords + float2(-0.5, -0.5), atlas_offset, atlas_max);
+    float4 s21 = bicubic_atlas_tap(atlas, coords + float2(0.5, -0.5), atlas_offset, atlas_max);
+    float4 s31 = bicubic_atlas_tap(atlas, coords + float2(1.5, -0.5), atlas_offset, atlas_max);
+
+    float4 s02 = bicubic_atlas_tap(atlas, coords + float2(-1.5, 0.5), atlas_offset, atlas_max);
+    float4 s12 = bicubic_atlas_tap(atlas, coords + float2(-0.5, 0.5), atlas_offset, atlas_max);
+    float4 s22 = bicubic_atlas_tap(atlas, coords + float2(0.5, 0.5), atlas_offset, atlas_max);
+    float4 s32 = bicubic_atlas_tap(atlas, coords + float2(1.5, 0.5), atlas_offset, atlas_max);
+
+    float4 s03 = bicubic_atlas_tap(atlas, coords + float2(-1.5, 1.5), atlas_offset, atlas_max);
+    float4 s13 = bicubic_atlas_tap(atlas, coords + float2(-0.5, 1.5), atlas_offset, atlas_max);
+    float4 s23 = bicubic_atlas_tap(atlas, coords + float2(0.5, 1.5), atlas_offset, atlas_max);
+    float4 s33 = bicubic_atlas_tap(atlas, coords + float2(1.5, 1.5), atlas_offset, atlas_max);
+
+    float4 row0 = cx.x * s00 + cx.y * s10 + cx.z * s20 + cx.w * s30;
+    float4 row1 = cx.x * s01 + cx.y * s11 + cx.z * s21 + cx.w * s31;
+    float4 row2 = cx.x * s02 + cx.y * s12 + cx.z * s22 + cx.w * s32;
+    float4 row3 = cx.x * s03 + cx.y * s13 + cx.z * s23 + cx.w * s33;
+    float4 result = cy.x * row0 + cy.y * row1 + cy.z * row2 + cy.w * row3;
+
+    float a = clamp(result.a, 0.0, 1.0);
+    return float4(clamp(result.rgb, float3(0.0, 0.0, 0.0), float3(a, a, a)), a);
 }
 
 float hypot_fine(float a, float b) {
@@ -614,9 +687,9 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
              BufRO<uint> ptcl, BufRO<uint> info,
              Scattered<uint> blend_spill, DirectSpatial<float4> output,
              Interpolated<float4> gradients, Interpolated<float4> image_atlas,
-             Interpolated<float4> mask_atlas,
-             // Slots 9-12 / 9-13: filter layer snapshots (or mask_lut + layers for MSAA)
-             // Slots 13-14 (non-MSAA) / 14-15 (MSAA): hardware samplers for gradients & images.
+             Interpolated<float4> mask_atlas, Interpolated<float4> live_atlas,
+             // Slots 10-13 / 11-14: filter layer snapshots (or mask_lut + layers for MSAA)
+             // Slots 14-15 (non-MSAA) / 15-16 (MSAA): hardware samplers for gradients & images.
 #ifdef msaa
              BufRO<uint> mask_lut, DirectSpatial<float4> filter_tex0, DirectSpatial<float4> filter_tex1,
              DirectSpatial<float4> filter_tex2, DirectSpatial<float4> filter_tex3,
@@ -832,7 +905,8 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
                 float d_pos = pow(pow(x1, exponent) + pow(y1, exponent), inv_exponent);
                 float d_neg = min(max(x0, y0), 0.0);
                 float d = d_pos + d_neg - r1;
-                float alpha = scale * (erf7(inv_std_dev * (min_edge + d)) - erf7(inv_std_dev * d));
+                float blur_coverage = scale * (erf7(inv_std_dev * (min_edge + d)) - erf7(inv_std_dev * d));
+                float alpha = (blur.invert != 0) ? (1.0 - blur_coverage) : blur_coverage;
                 float4 fg_rgba = blur_rgba * alpha;
                 float4 fg_i = fg_rgba * area[i] * mask_w[i];
                 float4 bg = rgba[i];
@@ -929,8 +1003,13 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
                     : blend_mix_compose(rgba[i], fg_i, draw_blend);
             }
             cmd_ix += 3;
-        } else if (tag == CMD_IMAGE) {
+        } else if (tag == CMD_IMAGE || tag == CMD_IMAGE_TINTED) {
+            bool is_tinted = tag == CMD_IMAGE_TINTED;
             CmdImage image = read_image_cmd(ptcl, info, cmd_ix);
+            uint packed_tint = 0;
+            if (is_tinted) {
+                packed_tint = read_image_tint(ptcl, info, cmd_ix);
+            }
             float2 atlas_max = image.atlas_offset + image.extents - 1.0;
             // Atlas texels are CPU-premultiplied before upload. Sample with explicit
             // texel Loads (not hardware bilinear): Metal vs lavapipe linear filtering
@@ -940,16 +1019,47 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
                 // Nearest neighbor (matches original Vello fine shader IMAGE_QUALITY_LOW)
                 for (uint i = 0; i < 4; i++) {
                     if (area[i] != 0.0) {
-                        float2 my_xy = float2(xy.x + float(i), xy.y);
+                        // Pixel centers, not corners (#1606).
+                        float2 my_xy = float2(xy.x + float(i) + 0.5, xy.y + 0.5);
                         float2 atlas_uv = image.xform * my_xy;
                         atlas_uv.x = extend_mode(atlas_uv.x, image.x_extend_mode, image.extents.x);
                         atlas_uv.y = extend_mode(atlas_uv.y, image.y_extend_mode, image.extents.y);
                         atlas_uv += image.atlas_offset;
                         float2 atlas_uv_clamped = clamp(atlas_uv, image.atlas_offset, atlas_max);
-                        float4 fg_rgba = image_atlas.Load(int3(int2(atlas_uv_clamped), 0));
-                        float4 fg_i = pixel_format(fg_rgba * area[i] * mask_w[i] * image.alpha, image.format);
+                        float4 fg_rgba = (image.is_live != 0u)
+                            ? live_atlas.Load(int3(int2(atlas_uv_clamped), 0))
+                            : image_atlas.Load(int3(int2(atlas_uv_clamped), 0));
+                        fg_rgba = pixel_format(fg_rgba, image.format);
+                        if (is_tinted) {
+                            fg_rgba = apply_image_tint(fg_rgba, packed_tint, image.tint_mode);
+                        }
+                        float4 fg_i = fg_rgba * area[i] * mask_w[i] * image.alpha;
                         uint BLEND_DEFAULT_IL = (MIX_NORMAL << 8) | COMPOSE_SRC_OVER;
                         rgba[i] = ((draw_blend & 0x7FFFu) == BLEND_DEFAULT_IL)
+                            ? premul_over(rgba[i], fg_i)
+                            : blend_mix_compose(rgba[i], fg_i, draw_blend);
+                    }
+                }
+            } else if (image.quality == IMAGE_QUALITY_HIGH) {
+                // Bicubic Mitchell–Netravali (classic Vello #1557). Pixel-center
+                // sample from #1606; atlas offset has no −0.5 (kernel uses fract(+0.5)).
+                for (uint i = 0; i < 4; i++) {
+                    if (area[i] != 0.0) {
+                        float2 my_xy = float2(xy.x + float(i) + 0.5, xy.y + 0.5);
+                        float2 atlas_uv = image.xform * my_xy;
+                        atlas_uv.x = extend_mode(atlas_uv.x, image.x_extend_mode, image.extents.x);
+                        atlas_uv.y = extend_mode(atlas_uv.y, image.y_extend_mode, image.extents.y);
+                        atlas_uv += image.atlas_offset;
+                        float4 fg_rgba = (image.is_live != 0u)
+                            ? bicubic_sample(live_atlas, atlas_uv, image.atlas_offset, atlas_max)
+                            : bicubic_sample(image_atlas, atlas_uv, image.atlas_offset, atlas_max);
+                        fg_rgba = pixel_format(fg_rgba, image.format);
+                        if (is_tinted) {
+                            fg_rgba = apply_image_tint(fg_rgba, packed_tint, image.tint_mode);
+                        }
+                        float4 fg_i = fg_rgba * area[i] * mask_w[i] * image.alpha;
+                        uint BLEND_DEFAULT_IH = (MIX_NORMAL << 8) | COMPOSE_SRC_OVER;
+                        rgba[i] = ((draw_blend & 0x7FFFu) == BLEND_DEFAULT_IH)
                             ? premul_over(rgba[i], fg_i)
                             : blend_mix_compose(rgba[i], fg_i, draw_blend);
                     }
@@ -958,7 +1068,9 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
                 // Bilinear (matches original Vello fine shader IMAGE_QUALITY_MEDIUM)
                 for (uint i = 0; i < 4; i++) {
                     if (area[i] != 0.0) {
-                        float2 my_xy = float2(xy.x + float(i), xy.y);
+                        // Pixel centers, not corners (#1606). Atlas −0.5 keeps
+                        // the bilinear kernel on texel centers.
+                        float2 my_xy = float2(xy.x + float(i) + 0.5, xy.y + 0.5);
                         float2 atlas_uv = image.xform * my_xy;
                         atlas_uv.x = extend_mode(atlas_uv.x, image.x_extend_mode, image.extents.x);
                         atlas_uv.y = extend_mode(atlas_uv.y, image.y_extend_mode, image.extents.y);
@@ -967,12 +1079,24 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
                         int2 uv00 = int2(floor(atlas_uv_clamped));
                         int2 uv11 = int2(ceil(atlas_uv_clamped));
                         float2 uv_frac = frac(atlas_uv);
-                        float4 a = image_atlas.Load(int3(uv00, 0));
-                        float4 b = image_atlas.Load(int3(uv00.x, uv11.y, 0));
-                        float4 c = image_atlas.Load(int3(uv11.x, uv00.y, 0));
-                        float4 d = image_atlas.Load(int3(uv11, 0));
+                        float4 a = (image.is_live != 0u)
+                            ? live_atlas.Load(int3(uv00, 0))
+                            : image_atlas.Load(int3(uv00, 0));
+                        float4 b = (image.is_live != 0u)
+                            ? live_atlas.Load(int3(uv00.x, uv11.y, 0))
+                            : image_atlas.Load(int3(uv00.x, uv11.y, 0));
+                        float4 c = (image.is_live != 0u)
+                            ? live_atlas.Load(int3(uv11.x, uv00.y, 0))
+                            : image_atlas.Load(int3(uv11.x, uv00.y, 0));
+                        float4 d = (image.is_live != 0u)
+                            ? live_atlas.Load(int3(uv11, 0))
+                            : image_atlas.Load(int3(uv11, 0));
                         float4 fg_rgba = lerp(lerp(a, b, uv_frac.y), lerp(c, d, uv_frac.y), uv_frac.x);
-                        float4 fg_i = pixel_format(fg_rgba * area[i] * mask_w[i] * image.alpha, image.format);
+                        fg_rgba = pixel_format(fg_rgba, image.format);
+                        if (is_tinted) {
+                            fg_rgba = apply_image_tint(fg_rgba, packed_tint, image.tint_mode);
+                        }
+                        float4 fg_i = fg_rgba * area[i] * mask_w[i] * image.alpha;
                         uint BLEND_DEFAULT_IM = (MIX_NORMAL << 8) | COMPOSE_SRC_OVER;
                         rgba[i] = ((draw_blend & 0x7FFFu) == BLEND_DEFAULT_IM)
                             ? premul_over(rgba[i], fg_i)

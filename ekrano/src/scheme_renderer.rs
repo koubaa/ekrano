@@ -24,6 +24,7 @@
 //!    [`SchemeRenderer::render_to_swapchain`], or async on `TID_PRESENT` via
 //!    [`SchemeRenderer::submit_to_swapchain`] + velato's `Presenter`.
 
+use std::collections::HashMap;
 use std::mem;
 use std::sync::Arc;
 
@@ -40,7 +41,7 @@ use crate::scheme_gpu_resources::record_upload_bytes_owned;
 #[cfg(debug_assertions)]
 use crate::worker_retention::{debug_assert_retained_worker_resources, worker_resource_handles};
 use crate::{
-    Error, RenderParams, Result, Scene,
+    Error, LiveTextureExchange, LiveTextureId, RenderParams, Result, Scene,
     goldy_renderer::{
         AllocatorStats, CacheScheduleOutcome, FRAME_COUNTER, FRAME_PIPELINE_DEPTH, FrameFinishOutcome, FrameStats,
         GoldyShader, MAX_BUMP_RETRIES, PersistentState, PreparedFrame, PresentToken, ResourcePoolStats,
@@ -92,15 +93,49 @@ pub struct SchemeRenderer {
     worker: Scheme,
     /// Persistent upload scheme: per-frame property writes without churning worker topology.
     upload: Scheme,
+    /// Dedicated atlas mutation scheme: dirty image deposits + multi-live GPU packs.
+    /// Submitted only when an update batch is non-empty; never fused into Metal frame upload.
+    atlas_update: Scheme,
     /// Standalone scheme for headless texture withdraw (topology-invisible to the worker).
     readback: Scheme,
+    /// Mailbox ring and stable sample mirrors for externally-updated textures.
+    live_textures: LiveTextureExchange,
+    /// Retained packed live atlas (single- and multi-live).
+    live_atlas: Option<Texture>,
+    /// Stable dummy sampled when no live textures are active for the frame.
+    dummy_live_atlas: Option<Texture>,
+    /// Stable packed-atlas placements: `blob_id` -> (x, y, width, height).
+    live_atlas_placements: HashMap<u64, (u32, u32, u32, u32)>,
+    /// Last sequence copied into the packed live atlas per blob.
+    live_atlas_committed_seq: HashMap<u64, u64>,
+    /// Horizontal strip cursor for new live-atlas allocations.
+    live_atlas_next_x: u32,
+    /// Pending sample->packed-atlas GPU copies for this frame (recorded onto `atlas_update`).
+    pending_live_atlas_copies: Vec<(LiveTextureId, u64, u32, u32, u32, u32)>,
+    /// `(blob_id, front_seq)` to commit after `atlas_update` submits successfully.
+    pending_live_atlas_commits: Vec<(u64, u64)>,
     /// Cumulative worker topology records across worker replacements (tests / diagnostics).
     #[cfg(test)]
     worker_record_epochs: u64,
     /// Cumulative upload scheme records across upload replacements (tests / diagnostics).
     #[cfg(test)]
     upload_record_epochs: u64,
+    /// Cumulative dirty image-atlas region deposits across frames.
+    #[cfg(test)]
+    deposited_image_regions_total: u64,
+    /// Cumulative frames that submitted a non-empty image-atlas update batch.
+    #[cfg(test)]
+    atlas_update_submissions_total: u64,
 }
+
+/// Live-atlas bind plan: optional single texture, optional packed CPU bytes, size, placements.
+type LiveAtlasPrepare = (
+    Option<LiveTextureId>,
+    Option<Vec<u8>>,
+    u32,
+    u32,
+    HashMap<u64, (u32, u32)>,
+);
 
 impl SchemeRenderer {
     /// Create a new Scheme renderer for the given device.
@@ -122,7 +157,9 @@ impl SchemeRenderer {
         let metal_fused_upload = device.backend_type() == BackendType::Metal;
         let worker = Scheme::new(&context);
         let upload = Scheme::new(&context);
+        let atlas_update = Scheme::new(&context);
         let readback = Scheme::new(&context);
+        let live_textures = LiveTextureExchange::new(Arc::new(device.clone()), context.clone());
         let mut renderer = Self {
             device: device.clone(),
             context,
@@ -137,11 +174,24 @@ impl SchemeRenderer {
             cleanup_frame_counter: 0,
             worker,
             upload,
+            atlas_update,
             readback,
+            live_textures,
+            live_atlas: None,
+            dummy_live_atlas: None,
+            live_atlas_placements: HashMap::new(),
+            live_atlas_committed_seq: HashMap::new(),
+            live_atlas_next_x: 0,
+            pending_live_atlas_copies: Vec::new(),
+            pending_live_atlas_commits: Vec::new(),
             #[cfg(test)]
             worker_record_epochs: 0,
             #[cfg(test)]
             upload_record_epochs: 0,
+            #[cfg(test)]
+            deposited_image_regions_total: 0,
+            #[cfg(test)]
+            atlas_update_submissions_total: 0,
         };
         let shaders = {
             let _tz = goldy::tracy_zone!("ekrano.SchemeRenderer::new.compile_shaders");
@@ -226,13 +276,205 @@ impl SchemeRenderer {
         p.lines = p.lines.max(bump.lines);
     }
 
-    // =======================================================================
+    fn acquire_retained_rgba_texture(
+        &mut self,
+        width: u32,
+        height: u32,
+        kind: TextureKind,
+        flags: TextureFlags,
+    ) -> Result<Texture> {
+        self.persistent
+            .retained_pool
+            .acquire_texture(width, height, TextureFormat::Rgba8Unorm, kind, flags, None)
+            .map_err(|e| Error::Gpu(format!("{e:#}")))
+    }
+
+    fn ensure_dummy_live_atlas(&mut self) -> Result<Texture> {
+        if self.dummy_live_atlas.is_none() {
+            let tex = self.acquire_retained_rgba_texture(
+                1,
+                1,
+                TextureKind::DirectInterpolated,
+                TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
+            )?;
+            #[allow(deprecated, reason = "write is the current Goldy CPU upload path")]
+            tex.write(&[0, 0, 0, 0]).map_err(|e| Error::Gpu(e.to_string()))?;
+            self.dummy_live_atlas = Some(tex);
+        }
+        Ok(self
+            .dummy_live_atlas
+            .as_ref()
+            .expect("dummy live atlas must be initialized")
+            .borrow())
+    }
+
+    fn ensure_packed_live_atlas(&mut self, width: u32, height: u32) -> Result<Texture> {
+        let reuse = self
+            .live_atlas
+            .as_ref()
+            .is_some_and(|atlas| atlas.width() == width && atlas.height() == height);
+        if !reuse {
+            if let Some(old) = self.live_atlas.take() {
+                self.persistent.retained_pool.release_texture(&self.context, old);
+            }
+            self.live_atlas = Some(self.acquire_retained_rgba_texture(
+                width,
+                height,
+                TextureKind::DirectInterpolated,
+                TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
+            )?);
+        }
+        Ok(self.live_atlas.as_ref().expect("live atlas must exist").borrow())
+    }
+
+    fn prepare_live_atlas(&mut self) -> Result<LiveAtlasPrepare> {
+        self.live_textures.poll_settlement();
+        self.pending_live_atlas_copies.clear();
+        self.pending_live_atlas_commits.clear();
+
+        let mut fronts = self.live_textures.settled_fronts();
+        fronts.sort_unstable_by_key(|(_, blob_id, _, _)| *blob_id);
+        for (id, _, _, _) in &fronts {
+            self.live_textures.sync_sample_mirror(*id)?;
+        }
+
+        match fronts.as_slice() {
+            [] => Ok((None, None, 1, 1, HashMap::new())),
+            [(id, blob_id, width, height)] => {
+                Ok((Some(*id), None, *width, *height, HashMap::from([(*blob_id, (0, 0))])))
+            }
+            _ => self.prepare_packed_live_atlas(&fronts),
+        }
+    }
+
+    fn migrate_packed_live_atlas(&mut self, old_tex: Texture, new_atlas: &Texture) -> Result<()> {
+        let mut x = 0_u32;
+        let mut new_placements = HashMap::new();
+        let mut ids: Vec<_> = self.live_atlas_placements.keys().copied().collect();
+        ids.sort_unstable();
+        let mut migrate = Scheme::new(&self.context);
+        for blob_id in ids {
+            let (ox, oy, w, h) = self.live_atlas_placements[&blob_id];
+            migrate
+                .copy_texture_region(&old_tex, ox, oy, new_atlas, x, 0, w, h)
+                .map_err(|e| Error::Gpu(e.to_string()))?;
+            new_placements.insert(blob_id, (x, 0, w, h));
+            x += w;
+        }
+        migrate.submit().map_err(|e| Error::Gpu(e.to_string()))?;
+        self.live_atlas_placements = new_placements;
+        self.live_atlas_next_x = x;
+        self.persistent.retained_pool.release_texture(&self.context, old_tex);
+        Ok(())
+    }
+
+    fn prepare_packed_live_atlas(&mut self, fronts: &[(LiveTextureId, u64, u32, u32)]) -> Result<LiveAtlasPrepare> {
+        let needed_w: u32 = fronts.iter().map(|(_, _, w, _)| *w).sum::<u32>().max(1);
+        let needed_h: u32 = fronts.iter().map(|(_, _, _, h)| *h).max().unwrap_or(1).max(1);
+
+        let reuse = self
+            .live_atlas
+            .as_ref()
+            .is_some_and(|a| a.width() >= needed_w && a.height() >= needed_h);
+        if !reuse {
+            let old = self.live_atlas.take();
+            let new_atlas = self.acquire_retained_rgba_texture(
+                needed_w,
+                needed_h,
+                TextureKind::DirectInterpolated,
+                TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
+            )?;
+            if let Some(old_tex) = old {
+                self.migrate_packed_live_atlas(old_tex, &new_atlas)?;
+            } else {
+                self.live_atlas_placements.clear();
+                self.live_atlas_committed_seq.clear();
+                self.live_atlas_next_x = 0;
+            }
+            self.live_atlas = Some(new_atlas);
+        }
+
+        let mut placements = HashMap::with_capacity(fronts.len());
+        for (id, blob_id, width, height) in fronts {
+            let (x, y) = if let Some(&(px, py, pw, ph)) = self.live_atlas_placements.get(blob_id) {
+                if pw == *width && ph == *height {
+                    (px, py)
+                } else {
+                    let x = self.live_atlas_next_x;
+                    self.live_atlas_placements.insert(*blob_id, (x, 0, *width, *height));
+                    self.live_atlas_next_x += *width;
+                    self.live_atlas_committed_seq.remove(blob_id);
+                    (x, 0)
+                }
+            } else {
+                let x = self.live_atlas_next_x;
+                self.live_atlas_placements.insert(*blob_id, (x, 0, *width, *height));
+                self.live_atlas_next_x += *width;
+                (x, 0)
+            };
+            placements.insert(*blob_id, (x, y));
+
+            let seq = self.live_textures.front_seq(*id).unwrap_or(0);
+            let committed = self.live_atlas_committed_seq.get(blob_id).copied().unwrap_or(0);
+            if seq > committed {
+                self.pending_live_atlas_copies
+                    .push((*id, *blob_id, x, y, *width, *height));
+                self.pending_live_atlas_commits.push((*blob_id, seq));
+            }
+        }
+
+        let atlas = self.live_atlas.as_ref().unwrap();
+        Ok((None, None, atlas.width(), atlas.height(), placements))
+    }
+
+    fn materialize_live_atlas(
+        &mut self,
+        live_single_id: Option<LiveTextureId>,
+        live_atlas_data: Option<&[u8]>,
+        live_atlas_width: u32,
+        live_atlas_height: u32,
+    ) -> Result<Texture> {
+        if let Some(id) = live_single_id {
+            return self
+                .live_textures
+                .sample_texture(id)
+                .map(Texture::borrow)
+                .ok_or_else(|| Error::Gpu(format!("missing sample mirror for live texture {id:?}")));
+        }
+        if let Some(atlas) = self.live_atlas.as_ref()
+            && live_atlas_data.is_none()
+            && atlas.width() == live_atlas_width
+            && atlas.height() == live_atlas_height
+        {
+            return Ok(atlas.borrow());
+        }
+        if live_atlas_data.is_some() {
+            return self.ensure_packed_live_atlas(live_atlas_width.max(1), live_atlas_height.max(1));
+        }
+        self.ensure_dummy_live_atlas()
+    }
+
     // Public API
     // =======================================================================
 
     /// Returns a clone of the renderer's submission [`goldy::Context`].
     pub fn submission_context(&self) -> Context {
         self.context.clone()
+    }
+
+    /// Allocate a live GPU texture mailbox and return the scene-facing image handle.
+    pub fn alloc_live_texture(&mut self, width: u32, height: u32) -> Result<(LiveTextureId, peniko::ImageData)> {
+        self.live_textures.alloc(width, height)
+    }
+
+    /// Mutable access to the renderer-owned live texture exchange.
+    pub fn live_textures_mut(&mut self) -> &mut LiveTextureExchange {
+        &mut self.live_textures
+    }
+
+    /// Copy `src` into the next live-texture back slot and publish it.
+    pub fn blit_live_texture(&mut self, id: LiveTextureId, src: &Texture) -> Result<bool> {
+        self.live_textures.blit_into(id, src)
     }
 
     /// Drain goldy signals and reclaim GPU resources tied to completed frames.
@@ -290,6 +532,9 @@ impl SchemeRenderer {
         }
 
         let mut resolver = mem::take(&mut self.resolver);
+        let (live_single_id, live_atlas_data, live_atlas_width, live_atlas_height, live_placements) =
+            self.prepare_live_atlas()?;
+        resolver.set_live_image_placements(live_placements);
         let mut packed = vec![];
         let (layout, ramps, images) = {
             let _rz = goldy::tracy_zone!("ekrano.resolve");
@@ -310,10 +555,15 @@ impl SchemeRenderer {
             ramps_height: ramps.height,
             images_width: images.width,
             images_height: images.height,
+            images_have_residents: images.has_residents,
             image_entries: images.images.to_vec(),
             config,
             params,
             resolver,
+            live_single_id,
+            live_atlas_data,
+            live_atlas_width,
+            live_atlas_height,
             coverage_mask: encoding.coverage_mask.clone(),
             layer_filter_effects: encoding.layer_filter_effects.clone(),
         })
@@ -393,6 +643,21 @@ impl SchemeRenderer {
     #[cfg(test)]
     pub(crate) fn upload_record_epochs(&self) -> u64 {
         self.upload_record_epochs
+    }
+
+    #[cfg(test)]
+    pub(crate) fn deposited_image_regions_total(&self) -> u64 {
+        self.deposited_image_regions_total
+    }
+
+    #[cfg(test)]
+    pub(crate) fn atlas_update_submissions_total(&self) -> u64 {
+        self.atlas_update_submissions_total
+    }
+
+    /// Mark a resident image atlas entry dirty so the next resolve re-uploads it.
+    pub fn mark_image_dirty(&mut self, image: &peniko::ImageData) {
+        self.resolver.mark_image_dirty(image);
     }
 
     #[cfg(test)]
@@ -632,10 +897,15 @@ impl SchemeRenderer {
         let ramps_height = prepared.ramps_height;
         let images_width = prepared.images_width;
         let images_height = prepared.images_height;
+        let images_have_residents = prepared.images_have_residents;
         let image_entries = prepared.image_entries;
         let mut config = prepared.config;
         let params = prepared.params;
         let resolver = prepared.resolver;
+        let live_single_id = prepared.live_single_id;
+        let live_atlas_data = prepared.live_atlas_data;
+        let live_atlas_width = prepared.live_atlas_width;
+        let live_atlas_height = prepared.live_atlas_height;
         let coverage_mask = prepared.coverage_mask;
         let layer_filter_effects = prepared.layer_filter_effects;
         let ramps = Ramps {
@@ -646,6 +916,8 @@ impl SchemeRenderer {
         let images = Images {
             width: images_width,
             height: images_height,
+            evicted: 0,
+            has_residents: images_have_residents,
             images: &image_entries,
         };
         let mut stats = FrameStats::default();
@@ -696,6 +968,12 @@ impl SchemeRenderer {
         let t_pool = t1.elapsed();
 
         let t2 = Instant::now();
+        let live_atlas = self.materialize_live_atlas(
+            live_single_id,
+            live_atlas_data.as_deref(),
+            live_atlas_width,
+            live_atlas_height,
+        )?;
         let scene_bucket = crate::worker_retention::scene_size_bucket(packed.len());
         note_scene_growth_frame(&mut self.persistent.scene_growth, packed.len(), scene_bucket);
         let coverage_mask_dims = coverage_mask.as_ref().map(|m| (m.width, m.height));
@@ -707,11 +985,14 @@ impl SchemeRenderer {
             scene_bucket,
             ramps_width,
             ramps_height,
-            image_entries.len(),
+            images_have_residents,
             images_width,
             images_height,
             coverage_mask_dims,
             &image_regions,
+            live_atlas.width(),
+            live_atlas.height(),
+            live_atlas_data.is_some(),
         );
         let topology = worker_topology(
             &params,
@@ -720,9 +1001,50 @@ impl SchemeRenderer {
             &dims,
             surface.is_some(),
             direct_present,
+            live_atlas.gpu_handle(),
         );
         let upload_key = upload_key_from(&dims);
         let upload_needs_record = crate::worker_retention::upload_stale(&self.persistent, &upload_key);
+
+        // Atlas-update topology: dirty CPU deposits + optional live packed-atlas copies.
+        let mut atlas_deposit_regions: Vec<(u32, u32, u32, u32)> = image_entries
+            .iter()
+            .map(|(img, x, y)| (*x, *y, img.width, img.height))
+            .collect();
+        atlas_deposit_regions.sort_unstable();
+        atlas_deposit_regions.dedup();
+        let atlas_has_work = !atlas_deposit_regions.is_empty() || !self.pending_live_atlas_copies.is_empty();
+        // Re-record atlas_update only when deposit/copy topology or atlas dims change.
+        // Clean frames keep the prior scheme dormant (no submit).
+        let atlas_update_key = if atlas_has_work {
+            let mut copy_regions = Vec::new();
+            for (id, _blob, dx, dy, w, h) in &self.pending_live_atlas_copies {
+                if let Some(sample) = self.live_textures.sample_texture(*id) {
+                    copy_regions.push((sample.gpu_handle(), 0, 0, *dx, *dy, *w, *h));
+                }
+            }
+            copy_regions.sort_unstable();
+            Some(crate::worker_retention::AtlasUpdateKey {
+                image_atlas_width: dims.image_atlas_width,
+                image_atlas_height: dims.image_atlas_height,
+                deposit_regions: atlas_deposit_regions.clone(),
+                copy_regions,
+            })
+        } else {
+            None
+        };
+        let atlas_update_needs_record = match atlas_update_key.as_ref() {
+            Some(key) => {
+                let stale = self.persistent.cached_atlas_update_key.as_ref() != Some(key);
+                if stale {
+                    self.atlas_update = Scheme::new(&self.context);
+                    self.persistent.clear_atlas_deposit_declarations();
+                }
+                stale
+            }
+            None => false,
+        };
+
         if upload_needs_record
             && let Some(old_key) = self.persistent.cached_upload_key.as_ref()
             && old_key.scene_bucket != upload_key.scene_bucket
@@ -785,7 +1107,9 @@ impl SchemeRenderer {
                 &self.context,
                 &mut self.worker,
                 &mut self.upload,
+                &mut self.atlas_update,
                 upload_needs_record || metal_fused_rerecord,
+                atlas_update_needs_record,
                 self.metal_fused_upload,
                 self.nonblocking_reuse,
                 &mut self.frame_pipeline,
@@ -800,6 +1124,8 @@ impl SchemeRenderer {
                     packed,
                     ramps,
                     images,
+                    &live_atlas,
+                    live_atlas_data.as_deref(),
                     &params,
                     &config,
                     out_image_format,
@@ -818,9 +1144,51 @@ impl SchemeRenderer {
                 .out_image
                 .as_ref()
                 .and_then(|t| t.handle(ResourceAccess::Write));
+            // Publish live samples into the packed live atlas via atlas_update.
+            if !self.pending_live_atlas_copies.is_empty() {
+                let live_atlas = self
+                    .live_atlas
+                    .as_ref()
+                    .ok_or_else(|| Error::Gpu("live atlas missing for pending copies".into()))?
+                    .borrow();
+                let pending = mem::take(&mut self.pending_live_atlas_copies);
+                for (id, _blob_id, dx, dy, w, h) in pending {
+                    let sample = self
+                        .live_textures
+                        .sample_texture(id)
+                        .ok_or_else(|| Error::Gpu("live sample missing".into()))?
+                        .borrow();
+                    if recorder.atlas_update_needs_record {
+                        recorder
+                            .atlas_update_scheme()
+                            .copy_texture_region(&sample, 0, 0, &live_atlas, dx, dy, w, h)
+                            .map_err(|e| Error::Gpu(e.to_string()))?;
+                    }
+                    recorder.atlas_update_has_work = true;
+                }
+            }
             recorder.dismiss();
             if upload_needs_record {
                 self.persistent.cached_upload_key = Some(upload_key);
+            }
+            if let Some(key) = atlas_update_key {
+                self.persistent.cached_atlas_update_key = Some(key);
+            }
+
+            // Dirty-list deposits only: clean resident frames report zero deposits.
+            let deposited_regions = image_entries.len() as u32;
+            let deposited_bytes: u64 = image_entries
+                .iter()
+                .map(|(img, _, _)| (img.width as u64) * (img.height as u64) * 4)
+                .sum();
+            stats.deposited_image_regions = deposited_regions;
+            stats.deposited_image_bytes = deposited_bytes;
+            // Count only when atlas_update will actually be submitted.
+            stats.atlas_update_submissions = u32::from(atlas_has_work);
+            #[cfg(test)]
+            {
+                self.deposited_image_regions_total += u64::from(deposited_regions);
+                self.atlas_update_submissions_total += u64::from(atlas_has_work);
             }
 
             let worker_stale = if replace_worker_before_prepare {
@@ -850,6 +1218,7 @@ impl SchemeRenderer {
                 &pipeline.gradient,
                 &pipeline.image_atlas,
                 &pipeline.mask_atlas,
+                &pipeline.live_atlas,
                 pipeline.out_image.as_ref(),
             );
             debug_assert_retained_worker_resources(recorded, &current);
@@ -885,7 +1254,9 @@ impl SchemeRenderer {
             &self.context,
             &mut self.worker,
             &mut self.upload,
+            &mut self.atlas_update,
             upload_needs_record || metal_fused_rerecord,
+            atlas_update_needs_record,
             self.metal_fused_upload,
             self.nonblocking_reuse,
             &mut self.frame_pipeline,
@@ -990,6 +1361,7 @@ impl SchemeRenderer {
                     &pipeline.gradient,
                     &pipeline.image_atlas,
                     &pipeline.mask_atlas,
+                    &pipeline.live_atlas,
                     pipeline.out_image.as_ref(),
                 ));
             }
@@ -1014,8 +1386,16 @@ impl SchemeRenderer {
             scheme_submission,
         } = {
             let _tz = goldy::tracy_zone!("ekrano.finish");
+            recorder.atlas_update_has_work = atlas_has_work;
             recorder.finish(surface.is_some(), pre_acquire, None)?
         };
+
+        if atlas_has_work {
+            self.resolver.acknowledge_image_uploads();
+            for (blob_id, seq) in mem::take(&mut self.pending_live_atlas_commits) {
+                self.live_atlas_committed_seq.insert(blob_id, seq);
+            }
+        }
 
         if let Some((present, bump, topology, filter_effects, out_image)) = worker_cache {
             self.persistent.cached_present_tx = present;
@@ -1194,10 +1574,16 @@ pub(crate) struct SchemeRecorder<'a> {
     pub(crate) scheme: &'a mut Scheme,
     /// Per-frame upload scheme (property writes only); unused on Metal fused path.
     upload: &'a mut Scheme,
+    /// Dedicated atlas mutation scheme (image deposits / multi-live packs).
+    atlas_update: &'a mut Scheme,
     /// When true (Metal), upload nodes are recorded on the worker scheme.
     metal_fused_upload: bool,
     /// When true, the upload scheme IR is empty and copy/upload nodes must be recorded this frame.
     pub(crate) upload_needs_record: bool,
+    /// When true, `atlas_update` IR must be (re)recorded this frame.
+    pub(crate) atlas_update_needs_record: bool,
+    /// Set when this frame wrote deposits or copies onto `atlas_update` (submit it).
+    pub(crate) atlas_update_has_work: bool,
     /// Nonblocking head-chases-tail path: deferred host writes + reuse epochs; no ring wait.
     pub(crate) nonblocking_reuse: bool,
     frame_pipeline: &'a mut FrameOrchestrator,
@@ -1237,6 +1623,11 @@ impl<'a> SchemeRecorder<'a> {
         }
     }
 
+    /// Atlas mutations always use the dedicated scheme (never Metal-fused into the worker).
+    pub(crate) fn atlas_update_scheme(&mut self) -> &mut Scheme {
+        self.atlas_update
+    }
+
     pub(crate) fn bind_surface(
         &mut self,
         surface: &goldy::SurfaceExchange,
@@ -1250,7 +1641,9 @@ impl<'a> SchemeRecorder<'a> {
         context: &'a Context,
         scheme: &'a mut Scheme,
         upload: &'a mut Scheme,
+        atlas_update: &'a mut Scheme,
         upload_needs_record: bool,
+        atlas_update_needs_record: bool,
         metal_fused_upload: bool,
         nonblocking_reuse: bool,
         frame_pipeline: &'a mut FrameOrchestrator,
@@ -1266,7 +1659,10 @@ impl<'a> SchemeRecorder<'a> {
             context,
             scheme,
             upload,
+            atlas_update,
             upload_needs_record,
+            atlas_update_needs_record,
+            atlas_update_has_work: false,
             metal_fused_upload,
             nonblocking_reuse,
             frame_pipeline,
@@ -1302,6 +1698,8 @@ impl<'a> SchemeRecorder<'a> {
         packed: Vec<u8>,
         ramps: Ramps<'_>,
         images: Images<'_>,
+        live_atlas: &Texture,
+        live_atlas_data: Option<&[u8]>,
         params: &RenderParams,
         config: &RenderConfig,
         out_image_format: TextureFormat,
@@ -1313,6 +1711,8 @@ impl<'a> SchemeRecorder<'a> {
             packed,
             ramps,
             images,
+            live_atlas,
+            live_atlas_data,
             params,
             config,
             out_image_format,
@@ -1338,6 +1738,7 @@ impl<'a> SchemeRecorder<'a> {
             gradient,
             image_atlas,
             mask_atlas,
+            live_atlas,
             scene,
             config,
             indirect,
@@ -1352,7 +1753,7 @@ impl<'a> SchemeRecorder<'a> {
             frame_height: _,
         } = pipeline;
 
-        let _ = (gradient, image_atlas, mask_atlas);
+        let _ = (gradient, image_atlas, mask_atlas, live_atlas);
         self.persistent.cached_scene = Some((scene.byte_size(), scene));
         self.persistent.cached_config_uniform = Some((config_uniform_value, config));
         if let Some((wg_counts_gpu, indirect_buf)) = indirect {
@@ -1551,6 +1952,13 @@ impl<'a> SchemeRecorder<'a> {
 
         let frame_handle = self.frame_handle;
 
+        // Atlas mutations must land before the worker reads the atlases. Keep this
+        // submission separate from Metal fused frame upload.
+        if self.atlas_update_has_work {
+            let _tz = goldy::tracy_zone!("ekrano.finish.atlas_update_submit");
+            self.atlas_update.submit().map_err(Error::from)?;
+        }
+
         if !self.metal_fused_upload {
             let _tz = goldy::tracy_zone!("ekrano.finish.upload_submit");
             self.upload.submit().map_err(Error::from)?;
@@ -1662,12 +2070,29 @@ mod tests {
             let mut upload = Scheme::new(&ctx);
             let mut frame_pipeline = FrameOrchestrator::new(&ctx, FRAME_PIPELINE_DEPTH);
             let frame_handle = frame_pipeline.begin_frame().expect("begin_frame");
+            let live_atlas = {
+                use goldy::RetainedPool;
+                use std::sync::Arc;
+                RetainedPool::new(Arc::new(gpu.clone()))
+                    .acquire_texture(
+                        1,
+                        1,
+                        TextureFormat::Rgba8Unorm,
+                        TextureKind::DirectInterpolated,
+                        TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
+                        None,
+                    )
+                    .expect("live_atlas")
+            };
             let pipeline = {
+                let mut atlas_update = Scheme::new(&ctx);
                 let mut recorder = SchemeRecorder::new(
                     &gpu,
                     &ctx,
                     &mut worker,
                     &mut upload,
+                    &mut atlas_update,
+                    true,
                     true,
                     false,
                     false,
@@ -1682,6 +2107,8 @@ mod tests {
                     packed,
                     ramps,
                     images,
+                    &live_atlas,
+                    None,
                     &params,
                     &config,
                     expected_format,
@@ -2050,15 +2477,11 @@ mod tests {
         );
     }
 
-    /// Image atlas region layout can change while atlas dimensions and image count stay
-    /// fixed (default atlas is 1024²). That dirties `UploadKey.image_regions` without
-    /// dirtying `WorkerTopology`.
-    ///
-    /// On the Metal fused path, upload copy nodes live on the worker scheme — without
-    /// forcing a worker replacement, new region deposits would be appended while old
-    /// deposit ids remain referenced but unwritten, poisoning submit permanently.
+    /// Image atlas region layout can change while atlas dimensions stay fixed.
+    /// Region deposits live on `atlas_update`, so the per-frame upload scheme / fused
+    /// worker must NOT re-record solely for dirty-region topology changes.
     #[test]
-    fn fused_worker_rerecords_on_image_region_layout_change() {
+    fn atlas_update_handles_image_region_layout_without_upload_rerecord() {
         let _cb = goldy::test_support::CbReuseOverride::force_enabled();
         let Some((gpu, _)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
             return;
@@ -2101,46 +2524,52 @@ mod tests {
             robust: false,
         };
 
-        for _ in 0..2 {
+        // Resident cache: frame0 deposits via atlas_update; subsequent clean frames are stable.
+        for _ in 0..3 {
             renderer
                 .render_to_buffer(&scene_a, &params)
                 .expect("render_to_buffer scene_a");
         }
         let worker_epochs = renderer.worker_record_epochs();
         let upload_epochs = renderer.upload_record_epochs();
+        let atlas_subs = renderer.atlas_update_submissions_total();
         assert_eq!(worker_epochs, 1);
-        assert_eq!(upload_epochs, 1);
+        assert_eq!(
+            upload_epochs, 1,
+            "upload records once; region deposits are on atlas_update"
+        );
 
-        // Must succeed (not poison the retained worker) and re-record upload topology.
+        // New dirty region topology: atlas_update submits; upload/worker stay put.
         renderer
             .render_to_buffer(&scene_b, &params)
             .expect("render_to_buffer after image region layout change");
 
-        assert!(
-            renderer.upload_record_epochs() > upload_epochs,
-            "upload topology must re-record when image region layout changes at fixed atlas dims"
+        assert_eq!(
+            renderer.upload_record_epochs(),
+            upload_epochs,
+            "upload must not re-record when only image region layout changes"
         );
-        if renderer.metal_fused_upload() {
-            assert!(
-                renderer.worker_record_epochs() > worker_epochs,
-                "fused Metal path: worker must be replaced when upload topology changes"
-            );
-        } else {
-            assert_eq!(
-                renderer.worker_record_epochs(),
-                worker_epochs,
-                "non-fused path: image region layout is upload-only; worker topology stays fresh"
-            );
-        }
+        assert_eq!(
+            renderer.worker_record_epochs(),
+            worker_epochs,
+            "worker topology unchanged when atlas dims/handle stay fixed"
+        );
+        assert!(
+            renderer.atlas_update_submissions_total() > atlas_subs,
+            "atlas_update must submit for the new dirty region"
+        );
 
-        // Stabilise: further frames with scene_b must not keep failing or re-recording.
-        let worker_stable = renderer.worker_record_epochs();
-        let upload_stable = renderer.upload_record_epochs();
+        // Stabilise past dirty→clean strip for scene_b, then assert retention.
         for _ in 0..2 {
             renderer
                 .render_to_buffer(&scene_b, &params)
-                .expect("render_to_buffer scene_b stable");
+                .expect("render_to_buffer scene_b settle");
         }
+        let worker_stable = renderer.worker_record_epochs();
+        let upload_stable = renderer.upload_record_epochs();
+        renderer
+            .render_to_buffer(&scene_b, &params)
+            .expect("render_to_buffer scene_b stable");
         assert_eq!(
             renderer.upload_record_epochs(),
             upload_stable,
@@ -2151,6 +2580,112 @@ mod tests {
             worker_stable,
             "worker must not re-record on repeated frames with stable region layout"
         );
+    }
+
+    #[test]
+    fn static_image_retains_atlas_without_redeposit() {
+        let _cb = goldy::test_support::CbReuseOverride::force_enabled();
+        let Some((gpu, _)) = crate::goldy_renderer::tests::make_device_and_persistent() else {
+            return;
+        };
+        let mut renderer = SchemeRenderer::new(&gpu).expect("SchemeRenderer::new");
+
+        fn solid_image(width: u32, height: u32, rgba: [u8; 4]) -> peniko::ImageBrush {
+            let data = rgba.repeat((width * height) as usize);
+            peniko::ImageBrush {
+                image: peniko::ImageData {
+                    data: data.into(),
+                    format: peniko::ImageFormat::Rgba8,
+                    width,
+                    height,
+                    alpha_type: peniko::ImageAlphaType::Alpha,
+                },
+                sampler: peniko::ImageSampler {
+                    quality: peniko::ImageQuality::Low,
+                    ..Default::default()
+                },
+            }
+        }
+
+        let image = solid_image(16, 16, [200, 100, 50, 255]);
+        let mut scene = Scene::new();
+        scene.draw_image(&image, peniko::kurbo::Affine::IDENTITY);
+        let params = RenderParams {
+            base_color: peniko::color::palette::css::BLACK,
+            width: 64,
+            height: 64,
+            antialiasing_method: crate::AaConfig::Area,
+            robust: false,
+        };
+
+        // Frame 0: dirty upload of the new resident onto atlas_update.
+        renderer.render_to_buffer(&scene, &params).expect("frame0");
+        assert!(
+            renderer.deposited_image_regions_total() >= 1,
+            "first frame deposits dirty image"
+        );
+        let upload_epochs_after_deposit = renderer.upload_record_epochs();
+        let atlas_subs_after_deposit = renderer.atlas_update_submissions_total();
+        assert!(atlas_subs_after_deposit >= 1);
+
+        // Frame 1: dirty list empty. atlas_update must NOT submit; upload must NOT re-record
+        // (region deposits live on atlas_update, not UploadKey).
+        renderer.render_to_buffer(&scene, &params).expect("frame1");
+        assert_eq!(
+            renderer.upload_record_epochs(),
+            upload_epochs_after_deposit,
+            "dirty→clean must not re-record frame upload scheme"
+        );
+        assert_eq!(
+            renderer.atlas_update_submissions_total(),
+            atlas_subs_after_deposit,
+            "clean frame must not submit atlas_update"
+        );
+
+        let upload_epochs = renderer.upload_record_epochs();
+        let worker_epochs = renderer.worker_record_epochs();
+        let deposited_total = renderer.deposited_image_regions_total();
+        let atlas_subs = renderer.atlas_update_submissions_total();
+
+        // Frame 2+: fully clean + resident — no further deposits or re-records.
+        renderer.render_to_buffer(&scene, &params).expect("frame2");
+        assert_eq!(
+            renderer.deposited_image_regions_total(),
+            deposited_total,
+            "clean resident frame deposits nothing"
+        );
+        assert_eq!(renderer.atlas_update_submissions_total(), atlas_subs);
+        assert_eq!(
+            renderer.upload_record_epochs(),
+            upload_epochs,
+            "upload epochs stable after dirty→clean settle"
+        );
+        assert_eq!(
+            renderer.worker_record_epochs(),
+            worker_epochs,
+            "worker epochs stable on clean resident frames"
+        );
+
+        let dims = renderer
+            .persistent
+            .cached_upload_key
+            .as_ref()
+            .expect("cached upload key");
+        assert!(
+            dims.image_atlas_width >= 1024 && dims.image_atlas_height >= 1024,
+            "resident atlas must not collapse to 1x1, got {}x{}",
+            dims.image_atlas_width,
+            dims.image_atlas_height
+        );
+
+        renderer.mark_image_dirty(&image.image);
+        renderer.render_to_buffer(&scene, &params).expect("dirty frame");
+        assert_eq!(
+            renderer.deposited_image_regions_total(),
+            deposited_total + 1,
+            "mark_image_dirty causes one deposit"
+        );
+        assert_eq!(renderer.atlas_update_submissions_total(), atlas_subs + 1);
     }
 
     #[test]

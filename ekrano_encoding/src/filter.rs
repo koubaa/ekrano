@@ -1,7 +1,7 @@
 // Copyright 2026 the Ekrano Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Filter primitives for multi-pass compositing (blur, shadow, etc.).
+//! Filter primitives for multi-pass compositing (blur, shadow, shadow-only, etc.).
 //!
 //! GPU scheduling applies [`crate::Encoding::layer_filter_effects`] after the fine rasterizer:
 //! each entry is processed in order on that layer’s snapshot texture, then composited back
@@ -36,6 +36,15 @@ pub enum FilterPrimitive {
         edge_mode: FilterEdgeMode,
     },
     DropShadow {
+        dx: f32,
+        dy: f32,
+        std_dev: f32,
+        color: PremulColor<peniko::color::Srgb>,
+        edge_mode: FilterEdgeMode,
+    },
+    /// Same as [`FilterPrimitive::DropShadow`], but the original layer is not
+    /// composited on top of the colored shadow (Skia `DropShadowOnly` / Vello #1763).
+    DropShadowOnly {
         dx: f32,
         dy: f32,
         std_dev: f32,

@@ -4,7 +4,7 @@
 //! Shader sources and helpers for the Ekrano renderer.
 //!
 //! GPU pipelines use [Slang](https://shader-slang.com/) sources under `slang/`, compiled at runtime
-//! by the Goldy backend. Optional CPU shader fallbacks live in [`cpu`].
+//! by the Goldy backend.
 
 // LINEBENDER LINT SET - lib.rs - v2
 // See https://linebender.org/wiki/canonical-lints/
@@ -21,7 +21,6 @@
 // Feel free to send a PR that solves one or more of these.
 // Need to allow instead of expect until Rust 1.83 https://github.com/rust-lang/rust/pull/130025
 #![allow(missing_docs, reason = "We have many as-yet undocumented items.")]
-#![expect(missing_debug_implementations, reason = "Deferred")]
 #![allow(
     unnameable_types,
     clippy::cast_possible_truncation,
@@ -30,9 +29,6 @@
     clippy::todo,
     reason = "Deferred, only apply in some feature sets so not expect"
 )]
-
-#[cfg(feature = "cpu")]
-pub mod cpu;
 
 /// Slang shader sources for the Goldy backend.
 pub mod slang;
