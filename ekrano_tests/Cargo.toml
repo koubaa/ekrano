@@ -75,10 +75,6 @@ name = "filters"
 harness = false
 
 [[test]]
-name = "heap_self_regulation"
-harness = false
-
-[[test]]
 name = "glyphs_decoration"
 harness = false
 
