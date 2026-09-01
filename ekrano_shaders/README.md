@@ -14,7 +14,7 @@
 
 </div>
 
-This crate ships **Slang** compute sources for the Ekrano/Goldy renderer (`slang/`), plus optional **CPU** fallbacks that mirror the GPU stages (`src/cpu/`).
+This crate ships **Slang** compute sources for the Ekrano/Goldy renderer (`slang/`).
 
 GPU pipelines compile Slang at runtime; there is no WGSL or naga build step in this crate.
 
@@ -57,7 +57,7 @@ Licensed under either of
 
 at your option.
 
-In addition, all files in the [`slang`](slang) and [`src/cpu`](src/cpu) directories and subdirectories thereof are alternatively licensed under the Unlicense (<http://unlicense.org/>), matching upstream Vello’s shader licensing intent.
+In addition, all files in the [`slang`](slang) directory and subdirectories thereof are alternatively licensed under the Unlicense (<http://unlicense.org/>), matching upstream Vello’s shader licensing intent.
 For clarity, these files are also licensed under either of the above licenses.
 The intent is for this research to be used in as broad a context as possible.
 

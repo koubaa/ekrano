@@ -21,8 +21,8 @@ Ideally, we'd like our documentation to be more structured; we may refactor it i
 
 ## Roadmap
 
-The [roadmap for 2023](roadmap_2023.md) is still largely applicable.
-The "Semi-stable encoding format" section and most of the "CPU fallback" section can be considered implemented.
+The [roadmap for 2023](roadmap_2023.md) is still largely applicable as historical Vello context.
+The "Semi-stable encoding format" section can be considered implemented. The handwritten CPU fallback stages were removed; CPU debug of the same Slang kernels is tracked in Goldy ([koubaa/goldy#292](https://github.com/koubaa/goldy/issues/292)).
 
 Our current priority is to fill in missing features and to fix rendering artifacts, so that Vello can reach feature parity with other 2D graphics engines.
 
@@ -37,7 +37,6 @@ The repository is structured as such:
 - `ekrano_encoding/` - Scene → GPU-friendly buffer layouts.
 - `ekrano_shaders/`
   - `slang/` - Slang compute sources; shared types live in `ekrano_shared.slang`. Compiled at runtime by Goldy.
-  - `src/cpu/` - Optional CPU fallbacks mirroring GPU stages (testing / debugging).
 - `ekrano_tests/` - Snapshot and regression tests.
 
 
@@ -59,10 +58,6 @@ There are multiple layers between “draw in `Scene`” and GPU work:
 - That becomes a `Recording` of GPU commands (uploads, dispatches, copies).
 - `GoldyRenderer` / `GoldyEngine` execute the recording on the Goldy device.
 
-
-### CPU rendering
-
-`ekrano_shaders/src/cpu/` still provides partial CPU-side stages for tests and debugging; coverage and wiring differ from upstream Vello.
 
 [direct2d]: https://docs.microsoft.com/en-us/windows/win32/direct2d/direct2d-portal
 [#488]: https://github.com/linebender/vello/issues/488

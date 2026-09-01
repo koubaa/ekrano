@@ -272,7 +272,6 @@ impl LineSoup {
     }
 }
 
-// TODO: The 32-bit Vec2 definition from cpu_shaders/util.rs could come in handy here.
 fn transform(t: &Transform, v: Vec2) -> Vec2 {
     Vec2::new(
         t.matrix[0] as f64 * v.x + t.matrix[2] as f64 * v.y,

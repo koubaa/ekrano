@@ -19,6 +19,10 @@ This release has an [MSRV][] of 1.92.
 
 - Image tinting with alpha-mask and component-wise multiply modes.
 
+### Removed
+
+- Handwritten CPU twins of GPU compute stages (`ekrano_shaders/src/cpu`). CPU debug of the same Slang kernels is tracked in Goldy ([#292](https://github.com/koubaa/goldy/issues/292)).
+
 ## [0.7.0][] - 2026-01-13
 
 This release has an [MSRV][] of 1.92.
