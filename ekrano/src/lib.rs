@@ -63,6 +63,7 @@
 )]
 
 mod debug;
+mod live_texture;
 mod resource_proxy;
 mod scene;
 mod shaders;
@@ -93,6 +94,7 @@ pub use peniko::kurbo;
 pub use goldy_renderer::{
     AllocatorStats, FrameStats, PreparedFrame, PresentToken, ResourcePoolStats, SceneGrowthStats,
 };
+pub use live_texture::{LIVE_IMAGE_BIT, LiveTextureExchange, LiveTextureId};
 pub use scheme_renderer::SchemeRenderer;
 /// Goldy-based 2D renderer (retained-`Scheme` frame loop).
 pub type GoldyRenderer = SchemeRenderer;

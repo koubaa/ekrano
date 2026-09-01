@@ -25,7 +25,7 @@ use goldy::{
 /// depth stays at 1 (see [`StablePipelineBuffers`](crate::scheme_gpu_resources::StablePipelineBuffers)).
 pub(crate) const FRAME_PIPELINE_DEPTH: usize = 1;
 
-use crate::{Error, RenderParams, Result, resource_proxy::BindType};
+use crate::{Error, LiveTextureId, RenderParams, Result, resource_proxy::BindType};
 use ekrano_encoding::{BumpAllocators, Layout, RenderConfig, Resolver};
 
 pub(crate) const MAX_BUMP_RETRIES: usize = 2;
@@ -225,6 +225,13 @@ pub struct PreparedFrame {
     pub(crate) config: RenderConfig,
     pub(crate) params: RenderParams,
     pub(crate) resolver: Resolver,
+    /// Single live image: bind this sample mirror directly as the live atlas.
+    pub(crate) live_single_id: Option<LiveTextureId>,
+    /// Multi-live path: CPU-packed RGBA atlas uploaded before fine.
+    pub(crate) live_atlas_data: Option<Vec<u8>>,
+    /// Logical live-atlas dimensions. `1x1` means the dummy texture.
+    pub(crate) live_atlas_width: u32,
+    pub(crate) live_atlas_height: u32,
     /// Owned copy of `Encoding::coverage_mask` — used by `PipelineResources::prepare`.
     pub(crate) coverage_mask: Option<ekrano_encoding::CoverageMask>,
     /// Owned copy of `Encoding::layer_filter_effects` — used by `record_fine` and
@@ -360,6 +367,8 @@ pub(crate) struct PersistentState {
     pub(crate) cached_gradient_deposit: Option<(u32, u32, u64, DepositTransaction)>,
     /// Destination-bound mask atlas deposit (width, height, capacity, transaction).
     pub(crate) cached_mask_deposit: Option<(u32, u32, u64, DepositTransaction)>,
+    /// Destination-bound live atlas deposit (width, height, capacity, transaction).
+    pub(crate) cached_live_atlas_deposit: Option<(u32, u32, u64, DepositTransaction)>,
     /// Destination-bound deposits for image atlas region uploads.
     pub(crate) cached_image_region_deposits: Vec<((u32, u32, u32, u32), DepositTransaction)>,
     /// Retained headless `out_image` withdraw (`TextureHandle` + transaction) for
@@ -406,6 +415,7 @@ impl PersistentState {
             cached_upload_key: None,
             cached_gradient_deposit: None,
             cached_mask_deposit: None,
+            cached_live_atlas_deposit: None,
             cached_image_region_deposits: Vec::new(),
             cached_out_image_withdraw: None,
             metal_heap_sensitive: device.backend_type() == BackendType::Metal,
@@ -422,6 +432,7 @@ impl PersistentState {
         self.cached_config_deposit = None;
         self.cached_gradient_deposit = None;
         self.cached_mask_deposit = None;
+        self.cached_live_atlas_deposit = None;
         self.cached_image_region_deposits.clear();
     }
 

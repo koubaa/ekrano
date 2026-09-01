@@ -846,6 +846,8 @@ public struct CmdImage {
 
     public uint tint_mode;
 
+    public uint is_live;
+
 };
 
 // === Blend functions ===

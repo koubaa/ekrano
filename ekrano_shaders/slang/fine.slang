@@ -11,10 +11,11 @@
 import goldy_exp;
 import ekrano_shared;
 
-// Slots: 0=config, 1=segments, 2=ptcl, 3=info, 4=blend_spill, 5=output, 6=gradients, 7=image_atlas, 8=mask_atlas
-// Non-MSAA: filter layer snapshots at 9–12. MSAA: mask_lut at 9, filter snapshots at 10–13.
+// Slots: 0=config, 1=segments, 2=ptcl, 3=info, 4=blend_spill, 5=output, 6=gradients, 7=image_atlas,
+// 8=mask_atlas, 9=live_atlas.
+// Non-MSAA: filter layer snapshots at 10–13. MSAA: mask_lut at 10, filter snapshots at 11–14.
 
-// When msaa is defined, bindings add mask_lut at slot 8. fill_path_ms provides true MSAA.
+// When msaa is defined, bindings add mask_lut after live_atlas. fill_path_ms provides true MSAA.
 #ifdef msaa
 #ifdef msaa8
 static const uint MASK_WIDTH = 32;
@@ -586,6 +587,7 @@ CmdImage read_image_cmd(ReadOnlyBuffer<uint> ptcl, ReadOnlyBuffer<uint> info, ui
     img.x_extend_mode = (sample_alpha >> 10) & 0x3;
     img.y_extend_mode = (sample_alpha >> 8) & 0x3;
     img.tint_mode = (sample_alpha >> 16) & 0x3;
+    img.is_live = sample_alpha >> 31;
     img.atlas_offset = float2(float(xy >> 16), float(xy & 0xFFFF));
     img.extents = float2(float(width_height >> 16), float(width_height & 0xFFFF));
     return img;
@@ -685,9 +687,9 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
              BufRO<uint> ptcl, BufRO<uint> info,
              Scattered<uint> blend_spill, DirectSpatial<float4> output,
              Interpolated<float4> gradients, Interpolated<float4> image_atlas,
-             Interpolated<float4> mask_atlas,
-             // Slots 9-12 / 9-13: filter layer snapshots (or mask_lut + layers for MSAA)
-             // Slots 13-14 (non-MSAA) / 14-15 (MSAA): hardware samplers for gradients & images.
+             Interpolated<float4> mask_atlas, Interpolated<float4> live_atlas,
+             // Slots 10-13 / 11-14: filter layer snapshots (or mask_lut + layers for MSAA)
+             // Slots 14-15 (non-MSAA) / 15-16 (MSAA): hardware samplers for gradients & images.
 #ifdef msaa
              BufRO<uint> mask_lut, DirectSpatial<float4> filter_tex0, DirectSpatial<float4> filter_tex1,
              DirectSpatial<float4> filter_tex2, DirectSpatial<float4> filter_tex3,
@@ -1024,7 +1026,9 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
                         atlas_uv.y = extend_mode(atlas_uv.y, image.y_extend_mode, image.extents.y);
                         atlas_uv += image.atlas_offset;
                         float2 atlas_uv_clamped = clamp(atlas_uv, image.atlas_offset, atlas_max);
-                        float4 fg_rgba = image_atlas.Load(int3(int2(atlas_uv_clamped), 0));
+                        float4 fg_rgba = (image.is_live != 0u)
+                            ? live_atlas.Load(int3(int2(atlas_uv_clamped), 0))
+                            : image_atlas.Load(int3(int2(atlas_uv_clamped), 0));
                         fg_rgba = pixel_format(fg_rgba, image.format);
                         if (is_tinted) {
                             fg_rgba = apply_image_tint(fg_rgba, packed_tint, image.tint_mode);
@@ -1046,7 +1050,9 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
                         atlas_uv.x = extend_mode(atlas_uv.x, image.x_extend_mode, image.extents.x);
                         atlas_uv.y = extend_mode(atlas_uv.y, image.y_extend_mode, image.extents.y);
                         atlas_uv += image.atlas_offset;
-                        float4 fg_rgba = bicubic_sample(image_atlas, atlas_uv, image.atlas_offset, atlas_max);
+                        float4 fg_rgba = (image.is_live != 0u)
+                            ? bicubic_sample(live_atlas, atlas_uv, image.atlas_offset, atlas_max)
+                            : bicubic_sample(image_atlas, atlas_uv, image.atlas_offset, atlas_max);
                         fg_rgba = pixel_format(fg_rgba, image.format);
                         if (is_tinted) {
                             fg_rgba = apply_image_tint(fg_rgba, packed_tint, image.tint_mode);
@@ -1073,10 +1079,18 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
                         int2 uv00 = int2(floor(atlas_uv_clamped));
                         int2 uv11 = int2(ceil(atlas_uv_clamped));
                         float2 uv_frac = frac(atlas_uv);
-                        float4 a = image_atlas.Load(int3(uv00, 0));
-                        float4 b = image_atlas.Load(int3(uv00.x, uv11.y, 0));
-                        float4 c = image_atlas.Load(int3(uv11.x, uv00.y, 0));
-                        float4 d = image_atlas.Load(int3(uv11, 0));
+                        float4 a = (image.is_live != 0u)
+                            ? live_atlas.Load(int3(uv00, 0))
+                            : image_atlas.Load(int3(uv00, 0));
+                        float4 b = (image.is_live != 0u)
+                            ? live_atlas.Load(int3(uv00.x, uv11.y, 0))
+                            : image_atlas.Load(int3(uv00.x, uv11.y, 0));
+                        float4 c = (image.is_live != 0u)
+                            ? live_atlas.Load(int3(uv11.x, uv00.y, 0))
+                            : image_atlas.Load(int3(uv11.x, uv00.y, 0));
+                        float4 d = (image.is_live != 0u)
+                            ? live_atlas.Load(int3(uv11, 0))
+                            : image_atlas.Load(int3(uv11, 0));
                         float4 fg_rgba = lerp(lerp(a, b, uv_frac.y), lerp(c, d, uv_frac.y), uv_frac.x);
                         fg_rgba = pixel_format(fg_rgba, image.format);
                         if (is_tinted) {

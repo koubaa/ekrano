@@ -87,6 +87,10 @@ name = "known_issues"
 harness = false
 
 [[test]]
+name = "live_textures"
+harness = false
+
+[[test]]
 name = "pipelined_memory"
 harness = false
 

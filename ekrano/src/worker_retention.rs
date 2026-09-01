@@ -42,6 +42,11 @@ pub(crate) struct WorkerTopology {
     /// Normalized mask atlas dims (1×1 when no coverage mask).
     pub mask_atlas_width: u32,
     pub mask_atlas_height: u32,
+    /// Live atlas dims (1×1 dummy when no live textures are active).
+    pub live_atlas_width: u32,
+    pub live_atlas_height: u32,
+    /// Actual bound live-atlas texture handle; distinguishes single-live bindings.
+    pub live_atlas_handle: goldy::TextureHandle,
 }
 
 /// Normalized atlas / scene dimensions shared by retention keys and prepare.
@@ -56,6 +61,9 @@ pub(crate) struct ResourceDims {
     pub image_atlas_height: u32,
     pub mask_atlas_width: u32,
     pub mask_atlas_height: u32,
+    pub live_atlas_width: u32,
+    pub live_atlas_height: u32,
+    pub has_live_atlas_upload: bool,
     pub image_count: usize,
     /// Sorted unique `(x, y, width, height)` region copy keys for the image atlas.
     pub image_regions: Vec<(u32, u32, u32, u32)>,
@@ -91,6 +99,9 @@ pub(crate) fn resource_dims(
     images_height: u32,
     coverage_mask_dims: Option<(u32, u32)>,
     image_regions: &[(u32, u32, u32, u32)],
+    live_atlas_width: u32,
+    live_atlas_height: u32,
+    has_live_atlas_upload: bool,
 ) -> ResourceDims {
     let (gradient_width, gradient_height) = normalize_gradient_atlas(ramps_width, ramps_height);
     let (image_atlas_width, image_atlas_height) = normalize_image_atlas(image_count, images_width, images_height);
@@ -106,6 +117,9 @@ pub(crate) fn resource_dims(
         image_atlas_height,
         mask_atlas_width,
         mask_atlas_height,
+        live_atlas_width,
+        live_atlas_height,
+        has_live_atlas_upload,
         image_count,
         image_regions,
         ramps_width,
@@ -123,6 +137,7 @@ pub(crate) fn worker_topology(
     dims: &ResourceDims,
     swapchain_present: bool,
     direct_present: bool,
+    live_atlas_handle: goldy::TextureHandle,
 ) -> WorkerTopology {
     WorkerTopology {
         aa: params.antialiasing_method,
@@ -142,6 +157,9 @@ pub(crate) fn worker_topology(
         scene_bucket: dims.scene_bucket,
         mask_atlas_width: dims.mask_atlas_width,
         mask_atlas_height: dims.mask_atlas_height,
+        live_atlas_width: dims.live_atlas_width,
+        live_atlas_height: dims.live_atlas_height,
+        live_atlas_handle,
     }
 }
 
@@ -164,6 +182,9 @@ pub(crate) struct UploadKey {
     pub image_atlas_height: u32,
     pub mask_atlas_width: u32,
     pub mask_atlas_height: u32,
+    pub live_atlas_width: u32,
+    pub live_atlas_height: u32,
+    pub has_live_atlas_upload: bool,
     /// Sorted unique `(x, y, width, height)` region copy keys for the image atlas.
     pub image_regions: Vec<(u32, u32, u32, u32)>,
 }
@@ -178,6 +199,9 @@ pub(crate) fn upload_key_from(dims: &ResourceDims) -> UploadKey {
         image_atlas_height: dims.image_atlas_height,
         mask_atlas_width: dims.mask_atlas_width,
         mask_atlas_height: dims.mask_atlas_height,
+        live_atlas_width: dims.live_atlas_width,
+        live_atlas_height: dims.live_atlas_height,
+        has_live_atlas_upload: dims.has_live_atlas_upload,
         image_regions: dims.image_regions.clone(),
     }
 }
@@ -191,6 +215,7 @@ pub(crate) struct WorkerResourceHandles {
     pub gradient: ResourceHandle,
     pub image_atlas: ResourceHandle,
     pub mask_atlas: ResourceHandle,
+    pub live_atlas: ResourceHandle,
     pub out_image: Option<ResourceHandle>,
 }
 
@@ -201,6 +226,7 @@ pub(crate) fn worker_resource_handles(
     gradient: &Texture,
     image_atlas: &Texture,
     mask_atlas: &Texture,
+    live_atlas: &Texture,
     out_image: Option<&Texture>,
 ) -> WorkerResourceHandles {
     WorkerResourceHandles {
@@ -209,6 +235,7 @@ pub(crate) fn worker_resource_handles(
         gradient: sampled_texture_handle(gradient),
         image_atlas: sampled_texture_handle(image_atlas),
         mask_atlas: sampled_texture_handle(mask_atlas),
+        live_atlas: sampled_texture_handle(live_atlas),
         out_image: out_image.and_then(|tex| tex.handle(ResourceAccess::Write)),
     }
 }
@@ -325,6 +352,10 @@ pub(crate) fn debug_assert_retained_worker_resources(
     debug_assert_eq!(
         recorded.mask_atlas, current.mask_atlas,
         "retained worker mask atlas handle changed without worker invalidation"
+    );
+    debug_assert_eq!(
+        recorded.live_atlas, current.live_atlas,
+        "retained worker live atlas handle changed without worker invalidation"
     );
     debug_assert_eq!(
         recorded.out_image, current.out_image,
@@ -512,6 +543,9 @@ mod tests {
             images_height,
             coverage_mask_dims,
             image_regions,
+            1,
+            1,
+            false,
         ))
     }
 
@@ -650,6 +684,15 @@ mod tests {
         assert!(upload_stale(&p, &k2));
     }
 
+    #[test]
+    fn upload_stale_true_when_live_atlas_upload_changes() {
+        let mut p = PersistentState::new_test_only();
+        let k1 = upload_key_from(&resource_dims(256, 8, 4, 0, 0, 0, None, &[], 1, 1, false));
+        let k2 = upload_key_from(&resource_dims(256, 8, 4, 0, 0, 0, None, &[], 16, 8, true));
+        p.cached_upload_key = Some(k1);
+        assert!(upload_stale(&p, &k2));
+    }
+
     // -----------------------------------------------------------------------
     // filter_primitive equality (retained from original tests)
     // -----------------------------------------------------------------------
@@ -741,6 +784,9 @@ mod tests {
             scene_bucket: 256,
             mask_atlas_width: 1,
             mask_atlas_height: 1,
+            live_atlas_width: 1,
+            live_atlas_height: 1,
+            live_atlas_handle: 1,
         }
     }
 
@@ -794,6 +840,18 @@ mod tests {
             64,
             TextureFormat::Rgba8Unorm,
         ));
+    }
+
+    #[test]
+    fn worker_stale_when_live_atlas_handle_changes() {
+        let mut p = PersistentState::new_test_only();
+        let topo = sample_topology(false);
+        p.cached_worker_topology = Some(topo.clone());
+        assert!(!worker_stale_reasons(&p, &topo, &[], None, None));
+
+        let mut changed = topo.clone();
+        changed.live_atlas_handle += 1;
+        assert!(worker_stale_reasons(&p, &changed, &[], None, None));
     }
 
     #[test]

@@ -267,6 +267,7 @@ pub(crate) fn goldy_full_shaders_scheme(
         ImageRead(ImageFormat::Rgba8),
         ImageRead(ImageFormat::Rgba8),
         ImageRead(ImageFormat::Rgba8), // mask_atlas
+        ImageRead(ImageFormat::Rgba8), // live_atlas
         Image(ImageFormat::Rgba8),
         Image(ImageFormat::Rgba8),
         Image(ImageFormat::Rgba8),
@@ -284,6 +285,7 @@ pub(crate) fn goldy_full_shaders_scheme(
         ImageRead(ImageFormat::Rgba8),
         ImageRead(ImageFormat::Rgba8),
         ImageRead(ImageFormat::Rgba8), // mask_atlas
+        ImageRead(ImageFormat::Rgba8), // live_atlas
         BufReadOnly,                   // mask_lut
         Image(ImageFormat::Rgba8),
         Image(ImageFormat::Rgba8),

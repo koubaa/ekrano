@@ -864,6 +864,7 @@ pub(crate) struct PipelineResources {
     pub gradient: Texture,
     pub image_atlas: Texture,
     pub mask_atlas: Texture,
+    pub live_atlas: Texture,
     pub scene: Buffer,
     pub config: Buffer,
     /// Composite indirect buffer (one ordinal `DispatchShape` parcel per stage).
@@ -891,6 +892,8 @@ impl PipelineResources {
         mut packed: Vec<u8>,
         ramps: Ramps<'_>,
         images: Images<'_>,
+        live_atlas: &Texture,
+        live_atlas_data: Option<&[u8]>,
         params: &RenderParams,
         config: &RenderConfig,
         out_image_format: TextureFormat,
@@ -968,6 +971,17 @@ impl PipelineResources {
                 }
             }
             recorder.persistent.cached_mask_deposit = deposit_slot;
+            tex
+        };
+
+        let live_atlas = {
+            let tex = live_atlas.borrow();
+            if let Some(bytes) = live_atlas_data {
+                let _tz = goldy::tracy_zone!("ekrano.prepare.live_atlas.upload");
+                let mut deposit_slot = std::mem::take(&mut recorder.persistent.cached_live_atlas_deposit);
+                upload_texture_full(recorder, &mut deposit_slot, &tex, bytes)?;
+                recorder.persistent.cached_live_atlas_deposit = deposit_slot;
+            }
             tex
         };
 
@@ -1144,6 +1158,7 @@ impl PipelineResources {
             gradient,
             image_atlas,
             mask_atlas,
+            live_atlas,
             scene,
             config,
             indirect: None,

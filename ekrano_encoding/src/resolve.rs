@@ -3,6 +3,7 @@
 
 use bytemuck::{Pod, Zeroable};
 use peniko::{Extend, ImageData, InterpolationAlphaSpace};
+use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -166,12 +167,27 @@ pub struct Resolver {
     image_cache: ImageCache,
     pending_images: Vec<PendingImage>,
     patches: Vec<ResolvedPatch>,
+    /// Blob id → atlas origin for live GPU textures (skip CPU intern).
+    live_placements: HashMap<u64, (u32, u32)>,
+    /// Packed-buffer byte offsets of `sample_alpha` words that need the live bit.
+    live_sample_alpha_bytes: Vec<usize>,
 }
+
+/// Bit 31 of [`crate::DrawImage::sample_alpha`]: sample from the live atlas.
+pub const LIVE_IMAGE_BIT: u32 = 1 << 31;
 
 impl Resolver {
     /// Creates a new resource cache.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Register live-texture atlas placements for the next [`Self::resolve`].
+    ///
+    /// Images whose blob id appears here are not uploaded into the CPU image atlas.
+    /// `sample_alpha` bit 31 ([`LIVE_IMAGE_BIT`]) is set so fine samples `live_atlas`.
+    pub fn set_live_image_placements(&mut self, placements: HashMap<u64, (u32, u32)>) {
+        self.live_placements = placements;
     }
 
     /// Resolves late bound resources and packs an encoding. Returns the packed
@@ -286,6 +302,11 @@ impl Resolver {
                         if let Some((x, y)) = self.pending_images[*index].xy {
                             let xy = (x << 16) | y;
                             data.extend_from_slice(bytemuck::bytes_of(&xy));
+                            if self.pending_images[*index].live {
+                                // After this write, width_height then sample_alpha follow from the
+                                // stream. Record where sample_alpha will land so we can OR the live bit.
+                                self.live_sample_alpha_bytes.push(data.len() + 4);
+                            }
                             pos = *draw_data_offset + 1;
                         } else {
                             // If we get here, we failed to allocate a slot for this image in the atlas.
@@ -304,6 +325,12 @@ impl Resolver {
             for _ in 0..encoding.n_open_clips {
                 let clip = DrawBeginClip::clip();
                 data.extend_from_slice(bytemuck::cast_slice(bytemuck::bytes_of(&clip)));
+            }
+            for &byte_off in &self.live_sample_alpha_bytes {
+                if byte_off + 4 <= data.len() {
+                    let word = u32::from_le_bytes(data[byte_off..byte_off + 4].try_into().unwrap());
+                    data[byte_off..byte_off + 4].copy_from_slice(&(word | LIVE_IMAGE_BIT).to_le_bytes());
+                }
             }
         }
         // Transform stream
@@ -481,6 +508,7 @@ impl Resolver {
                     self.pending_images.push(PendingImage {
                         image: image.clone(),
                         xy: None,
+                        live: false,
                     });
                     self.patches.push(ResolvedPatch::Image {
                         index,
@@ -494,11 +522,19 @@ impl Resolver {
 
     fn resolve_pending_images(&mut self) {
         self.image_cache.clear();
+        self.live_sample_alpha_bytes.clear();
         'outer: loop {
             // Loop over the images, attempting to allocate them all into the atlas.
             for pending_image in &mut self.pending_images {
+                let blob_id = pending_image.image.data.id();
+                if let Some(&(x, y)) = self.live_placements.get(&blob_id) {
+                    pending_image.xy = Some((x, y));
+                    pending_image.live = true;
+                    continue;
+                }
                 if let Some(xy) = self.image_cache.get_or_insert(&pending_image.image) {
                     pending_image.xy = Some(xy);
+                    pending_image.live = false;
                 } else {
                     // We failed to allocate. Try to bump the atlas size.
                     if self.image_cache.bump_size() {
@@ -509,6 +545,7 @@ impl Resolver {
                         // the xy field to None so this image isn't rendered and then carry on--
                         // other images might still fit.
                         pending_image.xy = None;
+                        pending_image.live = false;
                     }
                 }
             }
@@ -552,6 +589,8 @@ pub enum Patch {
 struct PendingImage {
     image: ImageData,
     xy: Option<(u32, u32)>,
+    /// When true, `xy` is a live-atlas origin (not CPU-interned).
+    live: bool,
 }
 
 #[derive(Clone, Debug)]

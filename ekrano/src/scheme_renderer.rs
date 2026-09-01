@@ -24,6 +24,7 @@
 //!    [`SchemeRenderer::render_to_swapchain`], or async on `TID_PRESENT` via
 //!    [`SchemeRenderer::submit_to_swapchain`] + velato's `Presenter`.
 
+use std::collections::HashMap;
 use std::mem;
 use std::sync::Arc;
 
@@ -40,7 +41,7 @@ use crate::scheme_gpu_resources::record_upload_bytes_owned;
 #[cfg(debug_assertions)]
 use crate::worker_retention::{debug_assert_retained_worker_resources, worker_resource_handles};
 use crate::{
-    Error, RenderParams, Result, Scene,
+    Error, LiveTextureExchange, LiveTextureId, RenderParams, Result, Scene,
     goldy_renderer::{
         AllocatorStats, CacheScheduleOutcome, FRAME_COUNTER, FRAME_PIPELINE_DEPTH, FrameFinishOutcome, FrameStats,
         GoldyShader, MAX_BUMP_RETRIES, PersistentState, PreparedFrame, PresentToken, ResourcePoolStats,
@@ -94,6 +95,12 @@ pub struct SchemeRenderer {
     upload: Scheme,
     /// Standalone scheme for headless texture withdraw (topology-invisible to the worker).
     readback: Scheme,
+    /// Mailbox ring and stable sample mirrors for externally-updated textures.
+    live_textures: LiveTextureExchange,
+    /// Packed atlas used when multiple live textures are referenced in one frame.
+    live_atlas: Option<Texture>,
+    /// Stable dummy sampled when no live textures are active for the frame.
+    dummy_live_atlas: Option<Texture>,
     /// Cumulative worker topology records across worker replacements (tests / diagnostics).
     #[cfg(test)]
     worker_record_epochs: u64,
@@ -123,6 +130,7 @@ impl SchemeRenderer {
         let worker = Scheme::new(&context);
         let upload = Scheme::new(&context);
         let readback = Scheme::new(&context);
+        let live_textures = LiveTextureExchange::new(Arc::new(device.clone()), context.clone());
         let mut renderer = Self {
             device: device.clone(),
             context,
@@ -138,6 +146,9 @@ impl SchemeRenderer {
             worker,
             upload,
             readback,
+            live_textures,
+            live_atlas: None,
+            dummy_live_atlas: None,
             #[cfg(test)]
             worker_record_epochs: 0,
             #[cfg(test)]
@@ -226,6 +237,157 @@ impl SchemeRenderer {
         p.lines = p.lines.max(bump.lines);
     }
 
+    fn acquire_retained_rgba_texture(
+        &mut self,
+        width: u32,
+        height: u32,
+        kind: TextureKind,
+        flags: TextureFlags,
+    ) -> Result<Texture> {
+        self.persistent
+            .retained_pool
+            .acquire_texture(width, height, TextureFormat::Rgba8Unorm, kind, flags, None)
+            .map_err(|e| Error::Gpu(format!("{e:#}")))
+    }
+
+    fn ensure_dummy_live_atlas(&mut self) -> Result<Texture> {
+        if self.dummy_live_atlas.is_none() {
+            let tex = self.acquire_retained_rgba_texture(
+                1,
+                1,
+                TextureKind::DirectInterpolated,
+                TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
+            )?;
+            #[allow(deprecated)]
+            tex.write(&[0, 0, 0, 0]).map_err(|e| Error::Gpu(e.to_string()))?;
+            self.dummy_live_atlas = Some(tex);
+        }
+        Ok(self
+            .dummy_live_atlas
+            .as_ref()
+            .expect("dummy live atlas must be initialized")
+            .borrow())
+    }
+
+    fn ensure_packed_live_atlas(&mut self, width: u32, height: u32) -> Result<Texture> {
+        let reuse = self
+            .live_atlas
+            .as_ref()
+            .is_some_and(|atlas| atlas.width() == width && atlas.height() == height);
+        if !reuse {
+            if let Some(old) = self.live_atlas.take() {
+                self.persistent.retained_pool.release_texture(&self.context, old);
+            }
+            self.live_atlas = Some(self.acquire_retained_rgba_texture(
+                width,
+                height,
+                TextureKind::DirectInterpolated,
+                TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
+            )?);
+        }
+        Ok(self.live_atlas.as_ref().expect("live atlas must exist").borrow())
+    }
+
+    fn read_texture_rgba(&self, texture: &Texture) -> Result<Vec<u8>> {
+        let mut scheme = Scheme::new(&self.context);
+        let withdraw = MemoryExchange::new(&self.context)
+            .bind_withdraw(&mut scheme, texture)
+            .map_err(|e| Error::Readback(e.to_string()))?;
+        let mut submission = scheme.submit().map_err(|e| Error::Readback(e.to_string()))?;
+        let bytes = withdraw
+            .claim(&mut submission)
+            .map_err(|e| Error::Readback(e.to_string()))?
+            .consume()
+            .map_err(|e| Error::Readback(e.to_string()))?;
+        Ok(match withdraw.texture_layout() {
+            Some(layout)
+                if bytes.len() as u64 == layout.staging_bytes && layout.row_pitch != layout.tight_row_bytes() =>
+            {
+                let row_bytes = layout.tight_row_bytes() as usize;
+                let pitch = layout.row_pitch as usize;
+                let mut output = vec![0_u8; layout.logical_bytes as usize];
+                for row in 0..layout.height as usize {
+                    let src_offset = layout.footprint_offset as usize + row * pitch;
+                    let dst_offset = row * row_bytes;
+                    output[dst_offset..dst_offset + row_bytes]
+                        .copy_from_slice(&bytes[src_offset..src_offset + row_bytes]);
+                }
+                output
+            }
+            _ => bytes.into_vec(),
+        })
+    }
+
+    fn prepare_live_atlas(&mut self) -> Result<(Option<LiveTextureId>, Option<Vec<u8>>, u32, u32, HashMap<u64, (u32, u32)>)> {
+        self.live_textures.poll_settlement();
+
+        let mut fronts = self.live_textures.settled_fronts();
+        fronts.sort_unstable_by_key(|(_, blob_id, _, _)| *blob_id);
+        for (id, _, _, _) in &fronts {
+            self.live_textures.sync_sample_mirror(*id)?;
+        }
+
+        match fronts.as_slice() {
+            [] => Ok((None, None, 1, 1, HashMap::new())),
+            [(id, blob_id, width, height)] => Ok((
+                Some(*id),
+                None,
+                *width,
+                *height,
+                HashMap::from([(*blob_id, (0, 0))]),
+            )),
+            _ => {
+                let atlas_width: u32 = fronts.iter().map(|(_, _, width, _)| *width).sum();
+                let atlas_height = fronts.iter().map(|(_, _, _, height)| *height).max().unwrap_or(1);
+                let mut atlas = vec![0_u8; (atlas_width * atlas_height * 4) as usize];
+                let mut placements = HashMap::with_capacity(fronts.len());
+                let mut x = 0_u32;
+                for (id, blob_id, width, height) in fronts {
+                    let sample = self
+                        .live_textures
+                        .sample_texture(id)
+                        .ok_or_else(|| Error::InvalidImage {
+                            id: blob_id,
+                            reason: "live sample mirror missing",
+                        })?
+                        .borrow();
+                    let bytes = self.read_texture_rgba(&sample)?;
+                    let row_bytes = (width * 4) as usize;
+                    let src_pitch = row_bytes;
+                    let dst_pitch = (atlas_width * 4) as usize;
+                    for row in 0..height as usize {
+                        let src_off = row * src_pitch;
+                        let dst_off = row * dst_pitch + x as usize * 4;
+                        atlas[dst_off..dst_off + row_bytes].copy_from_slice(&bytes[src_off..src_off + row_bytes]);
+                    }
+                    placements.insert(blob_id, (x, 0));
+                    x += width;
+                }
+                Ok((None, Some(atlas), atlas_width.max(1), atlas_height.max(1), placements))
+            }
+        }
+    }
+
+    fn materialize_live_atlas(
+        &mut self,
+        live_single_id: Option<LiveTextureId>,
+        live_atlas_data: Option<&[u8]>,
+        live_atlas_width: u32,
+        live_atlas_height: u32,
+    ) -> Result<Texture> {
+        if let Some(id) = live_single_id {
+            return self
+                .live_textures
+                .sample_texture(id)
+                .map(Texture::borrow)
+                .ok_or_else(|| Error::Gpu(format!("missing sample mirror for live texture {id:?}")));
+        }
+        if live_atlas_data.is_some() {
+            return self.ensure_packed_live_atlas(live_atlas_width.max(1), live_atlas_height.max(1));
+        }
+        self.ensure_dummy_live_atlas()
+    }
+
     // =======================================================================
     // Public API
     // =======================================================================
@@ -233,6 +395,21 @@ impl SchemeRenderer {
     /// Returns a clone of the renderer's submission [`goldy::Context`].
     pub fn submission_context(&self) -> Context {
         self.context.clone()
+    }
+
+    /// Allocate a live GPU texture mailbox and return the scene-facing image handle.
+    pub fn alloc_live_texture(&mut self, width: u32, height: u32) -> Result<(LiveTextureId, peniko::ImageData)> {
+        self.live_textures.alloc(width, height)
+    }
+
+    /// Mutable access to the renderer-owned live texture exchange.
+    pub fn live_textures_mut(&mut self) -> &mut LiveTextureExchange {
+        &mut self.live_textures
+    }
+
+    /// Copy `src` into the next live-texture back slot and publish it.
+    pub fn blit_live_texture(&mut self, id: LiveTextureId, src: &Texture) -> Result<bool> {
+        self.live_textures.blit_into(id, src)
     }
 
     /// Drain goldy signals and reclaim GPU resources tied to completed frames.
@@ -290,6 +467,9 @@ impl SchemeRenderer {
         }
 
         let mut resolver = mem::take(&mut self.resolver);
+        let (live_single_id, live_atlas_data, live_atlas_width, live_atlas_height, live_placements) =
+            self.prepare_live_atlas()?;
+        resolver.set_live_image_placements(live_placements);
         let mut packed = vec![];
         let (layout, ramps, images) = {
             let _rz = goldy::tracy_zone!("ekrano.resolve");
@@ -314,6 +494,10 @@ impl SchemeRenderer {
             config,
             params,
             resolver,
+            live_single_id,
+            live_atlas_data,
+            live_atlas_width,
+            live_atlas_height,
             coverage_mask: encoding.coverage_mask.clone(),
             layer_filter_effects: encoding.layer_filter_effects.clone(),
         })
@@ -636,6 +820,10 @@ impl SchemeRenderer {
         let mut config = prepared.config;
         let params = prepared.params;
         let resolver = prepared.resolver;
+        let live_single_id = prepared.live_single_id;
+        let live_atlas_data = prepared.live_atlas_data;
+        let live_atlas_width = prepared.live_atlas_width;
+        let live_atlas_height = prepared.live_atlas_height;
         let coverage_mask = prepared.coverage_mask;
         let layer_filter_effects = prepared.layer_filter_effects;
         let ramps = Ramps {
@@ -696,6 +884,12 @@ impl SchemeRenderer {
         let t_pool = t1.elapsed();
 
         let t2 = Instant::now();
+        let live_atlas = self.materialize_live_atlas(
+            live_single_id,
+            live_atlas_data.as_deref(),
+            live_atlas_width,
+            live_atlas_height,
+        )?;
         let scene_bucket = crate::worker_retention::scene_size_bucket(packed.len());
         note_scene_growth_frame(&mut self.persistent.scene_growth, packed.len(), scene_bucket);
         let coverage_mask_dims = coverage_mask.as_ref().map(|m| (m.width, m.height));
@@ -712,6 +906,9 @@ impl SchemeRenderer {
             images_height,
             coverage_mask_dims,
             &image_regions,
+            live_atlas.width(),
+            live_atlas.height(),
+            live_atlas_data.is_some(),
         );
         let topology = worker_topology(
             &params,
@@ -720,6 +917,7 @@ impl SchemeRenderer {
             &dims,
             surface.is_some(),
             direct_present,
+            live_atlas.gpu_handle(),
         );
         let upload_key = upload_key_from(&dims);
         let upload_needs_record = crate::worker_retention::upload_stale(&self.persistent, &upload_key);
@@ -800,6 +998,8 @@ impl SchemeRenderer {
                     packed,
                     ramps,
                     images,
+                    &live_atlas,
+                    live_atlas_data.as_deref(),
                     &params,
                     &config,
                     out_image_format,
@@ -850,6 +1050,7 @@ impl SchemeRenderer {
                 &pipeline.gradient,
                 &pipeline.image_atlas,
                 &pipeline.mask_atlas,
+                &pipeline.live_atlas,
                 pipeline.out_image.as_ref(),
             );
             debug_assert_retained_worker_resources(recorded, &current);
@@ -990,6 +1191,7 @@ impl SchemeRenderer {
                     &pipeline.gradient,
                     &pipeline.image_atlas,
                     &pipeline.mask_atlas,
+                    &pipeline.live_atlas,
                     pipeline.out_image.as_ref(),
                 ));
             }
@@ -1302,6 +1504,8 @@ impl<'a> SchemeRecorder<'a> {
         packed: Vec<u8>,
         ramps: Ramps<'_>,
         images: Images<'_>,
+        live_atlas: &Texture,
+        live_atlas_data: Option<&[u8]>,
         params: &RenderParams,
         config: &RenderConfig,
         out_image_format: TextureFormat,
@@ -1313,6 +1517,8 @@ impl<'a> SchemeRecorder<'a> {
             packed,
             ramps,
             images,
+            live_atlas,
+            live_atlas_data,
             params,
             config,
             out_image_format,
@@ -1338,6 +1544,7 @@ impl<'a> SchemeRecorder<'a> {
             gradient,
             image_atlas,
             mask_atlas,
+            live_atlas,
             scene,
             config,
             indirect,
@@ -1352,7 +1559,7 @@ impl<'a> SchemeRecorder<'a> {
             frame_height: _,
         } = pipeline;
 
-        let _ = (gradient, image_atlas, mask_atlas);
+        let _ = (gradient, image_atlas, mask_atlas, live_atlas);
         self.persistent.cached_scene = Some((scene.byte_size(), scene));
         self.persistent.cached_config_uniform = Some((config_uniform_value, config));
         if let Some((wg_counts_gpu, indirect_buf)) = indirect {
@@ -1662,6 +1869,20 @@ mod tests {
             let mut upload = Scheme::new(&ctx);
             let mut frame_pipeline = FrameOrchestrator::new(&ctx, FRAME_PIPELINE_DEPTH);
             let frame_handle = frame_pipeline.begin_frame().expect("begin_frame");
+            let live_atlas = {
+                use goldy::RetainedPool;
+                use std::sync::Arc;
+                RetainedPool::new(Arc::new(gpu.clone()))
+                    .acquire_texture(
+                        1,
+                        1,
+                        TextureFormat::Rgba8Unorm,
+                        TextureKind::DirectInterpolated,
+                        TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
+                        None,
+                    )
+                    .expect("live_atlas")
+            };
             let pipeline = {
                 let mut recorder = SchemeRecorder::new(
                     &gpu,
@@ -1682,6 +1903,8 @@ mod tests {
                     packed,
                     ramps,
                     images,
+                    &live_atlas,
+                    None,
                     &params,
                     &config,
                     expected_format,

@@ -72,7 +72,7 @@ pub use path::{
     Style, Tile,
 };
 pub use ramp_cache::Ramps;
-pub use resolve::{Layout, Patch, Resolver, resolve_solid_paths_only};
+pub use resolve::{LIVE_IMAGE_BIT, Layout, Patch, Resolver, resolve_solid_paths_only};
 
 #[cfg(feature = "bump_estimate")]
 pub use estimate::BumpEstimator;

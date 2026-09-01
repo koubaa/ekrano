@@ -533,6 +533,7 @@ impl Render {
             GpuBinding::Tex(&pipeline.gradient),
             GpuBinding::Tex(&pipeline.image_atlas),
             GpuBinding::Tex(&pipeline.mask_atlas),
+            GpuBinding::Tex(&pipeline.live_atlas),
         ];
         if uses_mask_lut {
             let lut = match self.aa_config {
@@ -547,7 +548,7 @@ impl Render {
         for fl in &pipeline.filter_layers {
             fine_resources.push(GpuBinding::Tex(fl));
         }
-        // Hardware samplers for gradient ramps (slots 13–14 / 14–15).
+        // Hardware samplers for gradient ramps (slots 14–15 / 15–16).
         // fine.slang only SampleLevel()s with nearest_clamp; image/mask use Load.
         // CUDA bakes Filter state into each CUtexObject and allows only one distinct
         // configuration per dispatch, so both slots bind nearest on that backend.
