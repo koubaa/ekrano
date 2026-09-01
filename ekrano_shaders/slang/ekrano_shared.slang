@@ -777,6 +777,9 @@ public struct CmdBlurRect {
 
     public float std_dev;
 
+    /// 1 if invert (`1 - alpha`) coverage is packed in the `std_dev` sign bit.
+    public uint invert;
+
 };
 
 public struct CmdLinGrad {

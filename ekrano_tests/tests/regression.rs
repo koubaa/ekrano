@@ -178,7 +178,9 @@ fn glyphs_emboldened() {
     );
     let mut params = TestParams::new("glyphs_emboldened", 760, 140);
     params.base_color = Some(palette::css::WHITE);
-    snapshot_test_sync(scene, &params).unwrap().assert_mean_less_than(0.0095);
+    snapshot_test_sync(scene, &params)
+        .unwrap()
+        .assert_mean_less_than(0.0095);
 }
 
 fn main() {

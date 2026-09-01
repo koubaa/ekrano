@@ -523,7 +523,10 @@ CmdBlurRect read_blur_rect(ReadOnlyBuffer<uint> ptcl, ReadOnlyBuffer<uint> info,
     r.width = asfloat(info[info_offset+6]);
     r.height = asfloat(info[info_offset+7]);
     r.radius = asfloat(info[info_offset+8]);
-    r.std_dev = asfloat(info[info_offset+9]);
+    // Invert is packed in the sign bit of `std_dev` (σ is otherwise non-negative).
+    uint std_dev_bits = info[info_offset+9];
+    r.std_dev = abs(asfloat(std_dev_bits));
+    r.invert = std_dev_bits >> 31;
     return r;
 }
 
@@ -900,7 +903,8 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
                 float d_pos = pow(pow(x1, exponent) + pow(y1, exponent), inv_exponent);
                 float d_neg = min(max(x0, y0), 0.0);
                 float d = d_pos + d_neg - r1;
-                float alpha = scale * (erf7(inv_std_dev * (min_edge + d)) - erf7(inv_std_dev * d));
+                float blur_coverage = scale * (erf7(inv_std_dev * (min_edge + d)) - erf7(inv_std_dev * d));
+                float alpha = (blur.invert != 0) ? (1.0 - blur_coverage) : blur_coverage;
                 float4 fg_rgba = blur_rgba * alpha;
                 float4 fg_i = fg_rgba * area[i] * mask_w[i];
                 float4 bg = rgba[i];

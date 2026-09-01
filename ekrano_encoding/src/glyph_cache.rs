@@ -279,10 +279,8 @@ impl OutlinePen for BezPathOutline<'_> {
     }
 
     fn quad_to(&mut self, cx0: f32, cy0: f32, x: f32, y: f32) {
-        self.0.quad_to(
-            Point::new(cx0.into(), cy0.into()),
-            Point::new(x.into(), y.into()),
-        );
+        self.0
+            .quad_to(Point::new(cx0.into(), cy0.into()), Point::new(x.into(), y.into()));
     }
 
     fn curve_to(&mut self, cx0: f32, cy0: f32, cx1: f32, cy1: f32, x: f32, y: f32) {

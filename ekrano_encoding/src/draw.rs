@@ -225,6 +225,9 @@ pub struct DrawBlurRoundedRect {
     /// Rectangle corner radius.
     pub radius: f32,
     /// Standard deviation of gaussian filter.
+    ///
+    /// The sign bit encodes invert (`1 - alpha` coverage) for inset box-shadows.
+    /// Magnitude is always the non-negative σ.
     pub std_dev: f32,
 }
 

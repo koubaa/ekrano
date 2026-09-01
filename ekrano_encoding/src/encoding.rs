@@ -515,7 +515,11 @@ impl Encoding {
         }
     }
 
-    // Encodes a blurred rounded rectangle brush.
+    /// Encodes a blurred rounded rectangle brush.
+    ///
+    /// When `invert` is `true`, the inverse (`1 - alpha`) of the blur coverage is painted.
+    /// The flag is packed into the sign bit of `std_dev`, which is otherwise always non-negative
+    /// (including `-0.0` for invert with zero blur).
     pub fn encode_blurred_rounded_rect(
         &mut self,
         color: impl Into<DrawColor>,
@@ -523,7 +527,9 @@ impl Encoding {
         height: f32,
         radius: f32,
         std_dev: f32,
+        invert: bool,
     ) {
+        let std_dev = if invert { -std_dev.max(0.0) } else { std_dev.max(0.0) };
         self.draw_tags.push(DrawTag::BLUR_RECT);
         self.draw_data
             .extend_from_slice(bytemuck::cast_slice(bytemuck::bytes_of(&DrawBlurRoundedRect {
@@ -786,5 +792,23 @@ mod tests {
         assert_eq!(tinted.draw_data.len(), 4);
         assert_eq!((tinted.draw_data[2] >> 16) & 0x3, TintMode::Multiply as u32);
         assert_eq!(tinted.draw_data[3], 0);
+    }
+
+    #[test]
+    fn blur_rect_packs_invert_in_std_dev_sign_bit() {
+        let mut encoding = Encoding::new();
+        encoding.encode_blurred_rounded_rect(palette::css::BLACK, 10.0, 20.0, 3.0, 1.5, false);
+        assert!(encoding.draw_tags == [DrawTag::BLUR_RECT]);
+        assert_eq!(*encoding.draw_data.last().unwrap(), 1.5f32.to_bits());
+
+        encoding.reset();
+        encoding.encode_blurred_rounded_rect(palette::css::BLACK, 10.0, 20.0, 3.0, 1.5, true);
+        assert_eq!(*encoding.draw_data.last().unwrap(), (-1.5f32).to_bits());
+
+        encoding.reset();
+        encoding.encode_blurred_rounded_rect(palette::css::BLACK, 10.0, 20.0, 3.0, 0.0, true);
+        let bits = *encoding.draw_data.last().unwrap();
+        assert_eq!(bits >> 31, 1);
+        assert_eq!(f32::from_bits(bits).abs(), 0.0);
     }
 }
