@@ -380,6 +380,22 @@ fn filter_primitive_eq(a: &FilterPrimitive, b: &FilterPrimitive) -> bool {
                 color: color_b,
                 edge_mode: edge_b,
             },
+        )
+        | (
+            DropShadowOnly {
+                dx: dx_a,
+                dy: dy_a,
+                std_dev: std_a,
+                color: color_a,
+                edge_mode: edge_a,
+            },
+            DropShadowOnly {
+                dx: dx_b,
+                dy: dy_b,
+                std_dev: std_b,
+                color: color_b,
+                edge_mode: edge_b,
+            },
         ) => {
             edge_a == edge_b
                 && (dx_a - dx_b).abs() <= f32::EPSILON
@@ -671,6 +687,39 @@ mod tests {
             *color = premul_srgb(css::BLUE);
         }
         assert!(!layer_filter_effects_eq(&[a], &[b]));
+    }
+
+    #[test]
+    fn filter_effects_eq_distinguishes_drop_shadow_only() {
+        let shadow = LayerFilterEffect {
+            primitive: FilterPrimitive::DropShadow {
+                dx: 4.0,
+                dy: 4.0,
+                std_dev: 2.0,
+                color: premul_srgb(css::BLACK),
+                edge_mode: FilterEdgeMode::None,
+            },
+            layer_blend: 1,
+            layer_alpha: 1.0,
+            layer_index: 0,
+            is_nested: false,
+        };
+        let only = LayerFilterEffect {
+            primitive: FilterPrimitive::DropShadowOnly {
+                dx: 4.0,
+                dy: 4.0,
+                std_dev: 2.0,
+                color: premul_srgb(css::BLACK),
+                edge_mode: FilterEdgeMode::None,
+            },
+            layer_blend: 1,
+            layer_alpha: 1.0,
+            layer_index: 0,
+            is_nested: false,
+        };
+        assert!(!layer_filter_effects_eq(&[shadow.clone()], &[only.clone()]));
+        assert!(layer_filter_effects_eq(&[only.clone()], &[only]));
+        assert!(layer_filter_effects_eq(&[shadow.clone()], &[shadow]));
     }
 
     fn sample_topology(direct_present: bool) -> WorkerTopology {

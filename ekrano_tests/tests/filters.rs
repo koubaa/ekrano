@@ -5,12 +5,14 @@
 //!
 //! Ported from `vello_sparse_tests/tests/filter.rs`, translating the stateful
 //! `vello_cpu::Renderer` API to ekrano's `Scene` API.
-//! Test names are shared with `vello_sparse_tests`, but the reference PNGs in
-//! `ekrano_tests/snapshots/` are **ekrano-specific** baselines rather than the
-//! `vello_sparse` golden images — the two renderers accumulate small numerical
-//! rounding differences (GPU vs CPU, different AA approaches, premul rounding)
-//! that make direct reuse impractical.  Divergence from `vello_sparse` is expected
-//! and acceptable; what matters is consistency across ekrano builds.
+//! Test names are shared with `vello_sparse_tests`. Most references in
+//! `ekrano_tests/snapshots/` are **ekrano-specific** baselines: GPU f32 vs
+//! `vello_cpu` u16 / AA / premul rounding make Linebender sparse goldens
+//! impractical at the usual 0.0095 FLIP gate.
+//!
+//! Exception: `filter_drop_shadow_only_*` is gated on Linebender `main` LFS
+//! (`sparse_strips/vello_sparse_tests/snapshots/`). Residual is ≤3 RGB units on
+//! blur rings (one-shot 2D Gaussian vs CPU decimated blur); FLIP mean up to ~0.018.
 //!
 //! Custom `libtest_mimic` harness clamps Vulkan concurrency to the shared-device
 //! compute-queue pool (see [`submission::clamp_test_threads`]).
@@ -388,6 +390,92 @@ fn filter_drop_shadow_zero_offset() {
         .assert_mean_less_than(0.0095);
 }
 
+/// Shadow without compositing the source (Vello #1763 / Skia DropShadowOnly).
+///
+/// Honesty gate: Linebender `main` sparse LFS PNGs (not self-rendered).
+/// `std_dev = 3` uses Ekrano's one-shot 2D Gaussian (`pass_kind` 8);
+/// `vello_cpu` uses one 2× decimation then a small kernel. Max channel error
+/// vs those goldens is 2–3 (blur rings only). FLIP 0.02 covers that; 0.0095
+/// is too tight once more of the frame is colored (`four_directions`).
+fn filter_drop_shadow_only_simple() {
+    let mut scene = Scene::new();
+    let filter = Filter(FilterPrimitive::DropShadowOnly {
+        dx: 20.0,
+        dy: 20.0,
+        std_dev: 3.0,
+        color: TOMATO.premultiply(),
+        edge_mode: FilterEdgeMode::None,
+    });
+    scene.push_filter_layer(filter, Fill::NonZero, Affine::IDENTITY, &vp(100.0, 100.0));
+    scene.fill(
+        Fill::NonZero,
+        Affine::IDENTITY,
+        ROYAL_BLUE,
+        None,
+        &Rect::new(20.0, 20.0, 60.0, 60.0),
+    );
+    scene.pop_layer();
+    let mut params = TestParams::new("filter_drop_shadow_only_simple", 100, 100);
+    params.base_color = Some(WHITE);
+    snapshot_test_sync(scene, &params)
+        .unwrap()
+        .assert_mean_less_than(0.02);
+}
+
+fn filter_drop_shadow_only_simple_with_opacity() {
+    let mut scene = Scene::new();
+    let filter = Filter(FilterPrimitive::DropShadowOnly {
+        dx: 20.0,
+        dy: 20.0,
+        std_dev: 3.0,
+        color: TOMATO.premultiply(),
+        edge_mode: FilterEdgeMode::None,
+    });
+    scene.push_filter_layer(filter, Fill::NonZero, Affine::IDENTITY, &vp(100.0, 100.0));
+    scene.fill(
+        Fill::NonZero,
+        Affine::IDENTITY,
+        ROYAL_BLUE.with_alpha(0.5),
+        None,
+        &Rect::new(20.0, 20.0, 60.0, 60.0),
+    );
+    scene.pop_layer();
+    let mut params = TestParams::new("filter_drop_shadow_only_simple_with_opacity", 100, 100);
+    params.base_color = Some(WHITE);
+    snapshot_test_sync(scene, &params)
+        .unwrap()
+        .assert_mean_less_than(0.02);
+}
+
+fn filter_drop_shadow_only_four_directions() {
+    let mut scene = Scene::new();
+    let rect = Rect::new(35.0, 35.0, 65.0, 65.0);
+    let shadows = [
+        (-20.0, -20.0, RED),
+        (20.0, -20.0, GREEN),
+        (-20.0, 20.0, BLUE),
+        (20.0, 20.0, YELLOW),
+    ];
+    for (dx, dy, color) in shadows {
+        let filter = Filter(FilterPrimitive::DropShadowOnly {
+            dx,
+            dy,
+            std_dev: 3.0,
+            color: color.premultiply(),
+            edge_mode: FilterEdgeMode::None,
+        });
+        scene.push_filter_layer(filter, Fill::NonZero, Affine::IDENTITY, &vp(100.0, 100.0));
+        // Source color is ignored; only alpha feeds the shadow.
+        scene.fill(Fill::NonZero, Affine::IDENTITY, BLUE, None, &rect);
+        scene.pop_layer();
+    }
+    let mut params = TestParams::new("filter_drop_shadow_only_four_directions", 100, 100);
+    params.base_color = Some(WHITE);
+    snapshot_test_sync(scene, &params)
+        .unwrap()
+        .assert_mean_less_than(0.02);
+}
+
 // ─── Offset filter ────────────────────────────────────────────────────────────
 
 /// Offset filter shifts content within a filter layer (no clipping to original bounds).
@@ -554,6 +642,18 @@ fn main() {
         filter_drop_shadow_fractional_offset()
     );
     case!("filter_drop_shadow_zero_offset", filter_drop_shadow_zero_offset());
+    case!(
+        "filter_drop_shadow_only_simple",
+        filter_drop_shadow_only_simple()
+    );
+    case!(
+        "filter_drop_shadow_only_simple_with_opacity",
+        filter_drop_shadow_only_simple_with_opacity()
+    );
+    case!(
+        "filter_drop_shadow_only_four_directions",
+        filter_drop_shadow_only_four_directions()
+    );
     case!("filter_offset", filter_offset());
     case!("filter_nested_layers", filter_nested_layers());
     case!("filter_empty_layers", filter_empty_layers());

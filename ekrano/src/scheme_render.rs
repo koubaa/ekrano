@@ -863,21 +863,35 @@ pub(crate) fn record_filter_effects(
                 std_dev,
                 color,
                 edge_mode,
+            }
+            | FilterPrimitive::DropShadowOnly {
+                dx,
+                dy,
+                std_dev,
+                color,
+                edge_mode,
             } => {
-                // For large radii use the pyramid path; small radii use the one-shot path.
+                let composite_original = matches!(effect.primitive, FilterPrimitive::DropShadow { .. });
+                // Nested DropShadow blurs the inner filter snapshot and must not bake
+                // that inner result into the outer texture (composited separately).
+                // DropShadowOnly never source-overs the current layer, nested or not.
+                // Reuses filter_pass kinds 8 / 14 (already used for nested shadows).
+                let skip_fg = effect.is_nested || !composite_original;
+                let shadow_src = if effect.is_nested {
+                    let inner_idx = (effect.layer_index as usize).saturating_sub(1).min(3);
+                    &filter_layers[inner_idx]
+                } else {
+                    ft
+                };
                 const PYRAMID_THRESHOLD: f32 = 16.0;
                 if *std_dev > PYRAMID_THRESHOLD {
-                    // Allocate a full-res DirectInterpolated scratch for the blurred alpha.
                     let blur_dst = recorder
                         .acquire_texture_rgba(width, height, TextureKind::DirectInterpolated, TextureFlags::empty())
                         .expect("pyramid blur_dst");
-
-                    if effect.is_nested {
-                        let inner_idx = (effect.layer_index as usize).saturating_sub(1).min(3);
-                        let inner_ft = &filter_layers[inner_idx];
-                        pyramid_blur(
-                            shader, recorder, inner_ft, &blur_dst, *std_dev, *edge_mode, width, height,
-                        );
+                    pyramid_blur(
+                        shader, recorder, shadow_src, &blur_dst, *std_dev, *edge_mode, width, height,
+                    );
+                    if skip_fg {
                         let u_comp = FilterUniform::shadow_composite_preblurred_nested(
                             width,
                             height,
@@ -885,9 +899,11 @@ pub(crate) fn record_filter_effects(
                             *dy,
                             premul_srgb_u32(*color),
                         );
-                        filter_dispatch_two_src(recorder, shader, &u_comp, wg, &blur_dst, inner_ft, ft);
+                        // Pass 14 does not read the UAV `src`; keep it distinct from `dst`
+                        // so standalone DropShadowOnly does not bind `ft` twice.
+                        let uav_unused = if effect.is_nested { shadow_src } else { &scratch };
+                        filter_dispatch_two_src(recorder, shader, &u_comp, wg, &blur_dst, uav_unused, ft);
                     } else {
-                        pyramid_blur(shader, recorder, ft, &blur_dst, *std_dev, *edge_mode, width, height);
                         let u_comp = FilterUniform::shadow_composite_preblurred(
                             width,
                             height,
@@ -900,9 +916,7 @@ pub(crate) fn record_filter_effects(
                         filter_dispatch(recorder, shader, &u_copy, wg, &scratch, ft);
                     }
                     recorder.defer_texture(blur_dst);
-                } else if effect.is_nested {
-                    let inner_idx = (effect.layer_index as usize).saturating_sub(1).min(3);
-                    let inner_ft = &filter_layers[inner_idx];
+                } else if skip_fg {
                     let u = FilterUniform::drop_shadow_nested(
                         width,
                         height,
@@ -912,10 +926,9 @@ pub(crate) fn record_filter_effects(
                         premul_srgb_u32(*color),
                         *edge_mode,
                     );
-                    filter_dispatch(recorder, shader, &u, wg, inner_ft, &scratch);
+                    filter_dispatch(recorder, shader, &u, wg, shadow_src, &scratch);
                     let u_copy = FilterUniform::copy(width, height);
                     filter_dispatch(recorder, shader, &u_copy, wg, &scratch, ft);
-                    continue;
                 } else {
                     let u = FilterUniform::drop_shadow(
                         width,
