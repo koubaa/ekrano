@@ -45,6 +45,8 @@ struct LiveEntry {
     slot_seq: Vec<u64>,
     /// Stable mirror sampled by fine (full-texture copy of the current front).
     sample: Texture,
+    /// `front_seq` last successfully copied into `sample` (skip unchanged mirrors).
+    sample_seq: u64,
 }
 
 /// CanvasExchange-shaped mailbox of live GPU textures for one renderer.
@@ -57,6 +59,8 @@ pub struct LiveTextureExchange {
     next_id: u64,
     /// Publishes dropped because every non-front slot was in flight.
     pub dropped_publishes: u64,
+    /// GPU sample-mirror copies performed (skipped when front seq unchanged).
+    pub live_sample_copies: u64,
 }
 
 impl LiveTextureExchange {
@@ -73,6 +77,7 @@ impl LiveTextureExchange {
             blob_to_id: HashMap::new(),
             next_id: 1,
             dropped_publishes: 0,
+            live_sample_copies: 0,
         }
     }
 
@@ -129,6 +134,7 @@ impl LiveTextureExchange {
                 front_seq: 0,
                 slot_seq: vec![0; self.depth],
                 sample,
+                sample_seq: 0,
             },
         );
         Ok((id, image))
@@ -276,6 +282,10 @@ impl LiveTextureExchange {
         self.entries.get(&id).map(|e| &e.sample)
     }
 
+    pub fn front_seq(&self, id: LiveTextureId) -> Option<u64> {
+        self.entries.get(&id).and_then(|e| e.front.map(|_| e.front_seq))
+    }
+
     /// GPU-copy the settled front into the stable sample mirror.
     pub fn sync_sample_mirror(&mut self, id: LiveTextureId) -> Result<(), Error> {
         self.poll_settlement();
@@ -285,6 +295,11 @@ impl LiveTextureExchange {
         let Some(front) = entry.front else {
             return Ok(());
         };
+        if entry.sample_seq == entry.front_seq {
+            // Front unchanged since last sample copy — retain the mirror.
+            return Ok(());
+        }
+        let front_seq = entry.front_seq;
         // Re-borrow mutably for copy.
         let entry = self.entries.get_mut(&id).unwrap();
         let mut scheme = Scheme::new(&self.ctx);
@@ -293,6 +308,8 @@ impl LiveTextureExchange {
             .map_err(|e| Error::Gpu(e.to_string()))?;
         let sub = scheme.submit().map_err(|e| Error::Gpu(e.to_string()))?;
         sub.wait_until_settled().map_err(|e| Error::Gpu(e.to_string()))?;
+        entry.sample_seq = front_seq;
+        self.live_sample_copies = self.live_sample_copies.saturating_add(1);
         Ok(())
     }
 

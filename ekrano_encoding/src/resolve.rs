@@ -190,6 +190,21 @@ impl Resolver {
         self.live_placements = placements;
     }
 
+    /// Marks the atlas entry for `image` as dirty.
+    ///
+    /// If `image` is already resident in the atlas and appears in a later resolve pass,
+    /// that pass will include it in the returned image uploads.
+    pub fn mark_image_dirty(&mut self, image: &ImageData) {
+        self.image_cache.mark_dirty(image);
+    }
+
+    /// Clear atlas dirty bits after this resolve's image deposits have submitted.
+    ///
+    /// Skipped on GPU failure so the next resolve re-uploads the same residents.
+    pub fn acknowledge_image_uploads(&mut self) {
+        self.image_cache.finish_resolve();
+    }
+
     /// Resolves late bound resources and packs an encoding. Returns the packed
     /// layout and computed ramp data.
     pub fn resolve<'a>(&'a mut self, encoding: &Encoding, packed: &mut Vec<u8>) -> (Layout, Ramps<'a>, Images<'a>) {
@@ -418,7 +433,7 @@ impl Resolver {
         self.ramp_cache.maintain();
         self.glyphs.clear();
         self.glyph_cache.maintain();
-        self.image_cache.clear();
+        self.image_cache.begin_resolve();
         self.pending_images.clear();
         self.patches.clear();
         let mut sizes = StreamOffsets::default();
@@ -521,9 +536,9 @@ impl Resolver {
     }
 
     fn resolve_pending_images(&mut self) {
-        self.image_cache.clear();
         self.live_sample_alpha_bytes.clear();
         'outer: loop {
+            self.image_cache.restart_resolve_pass();
             // Loop over the images, attempting to allocate them all into the atlas.
             for pending_image in &mut self.pending_images {
                 let blob_id = pending_image.image.data.id();
@@ -532,10 +547,16 @@ impl Resolver {
                     pending_image.live = true;
                     continue;
                 }
-                if let Some(xy) = self.image_cache.get_or_insert(&pending_image.image) {
-                    pending_image.xy = Some(xy);
-                    pending_image.live = false;
-                } else {
+                pending_image.live = false;
+                pending_image.xy = loop {
+                    if let Some(xy) = self.image_cache.get_or_insert(&pending_image.image) {
+                        break Some(xy);
+                    }
+                    if self.image_cache.can_fit_image(&pending_image.image)
+                        && self.image_cache.evict_stale_entries()
+                    {
+                        continue;
+                    }
                     // We failed to allocate. Try to bump the atlas size.
                     if self.image_cache.bump_size() {
                         // We were able to increase the atlas size. Restart the outer loop.
@@ -544,10 +565,9 @@ impl Resolver {
                         // If the atlas is already maximum size, there's nothing we can do. Set
                         // the xy field to None so this image isn't rendered and then carry on--
                         // other images might still fit.
-                        pending_image.xy = None;
-                        pending_image.live = false;
+                        break None;
                     }
-                }
+                };
             }
             // If we made it here, we've either successfully allocated all images or we reached
             // the maximum atlas size.
