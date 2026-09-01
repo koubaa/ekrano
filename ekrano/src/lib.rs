@@ -97,7 +97,7 @@ pub use scheme_renderer::SchemeRenderer;
 /// Goldy-based 2D renderer (retained-`Scheme` frame loop).
 pub type GoldyRenderer = SchemeRenderer;
 
-pub use ekrano_encoding::{Glyph, NormalizedCoord};
+pub use ekrano_encoding::{Glyph, NormalizedCoord, Tint, TintMode};
 pub use scene::{DrawGlyphs, Scene};
 
 use low_level::ShaderId;

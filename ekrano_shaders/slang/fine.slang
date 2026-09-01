@@ -577,14 +577,26 @@ CmdImage read_image_cmd(ReadOnlyBuffer<uint> ptcl, ReadOnlyBuffer<uint> info, ui
     uint width_height = info[info_offset+7];
     uint sample_alpha = info[info_offset+8];
     img.alpha = float(sample_alpha & 0xFF) / 255.0;
-    img.format = sample_alpha >> 15;
+    img.format = (sample_alpha >> 15) & 0x1;
     img.alpha_type = (sample_alpha >> 14) & 0x1;
     img.quality = (sample_alpha >> 12) & 0x3;
     img.x_extend_mode = (sample_alpha >> 10) & 0x3;
     img.y_extend_mode = (sample_alpha >> 8) & 0x3;
+    img.tint_mode = (sample_alpha >> 16) & 0x3;
     img.atlas_offset = float2(float(xy >> 16), float(xy & 0xFFFF));
     img.extents = float2(float(width_height >> 16), float(width_height & 0xFFFF));
     return img;
+}
+
+uint read_image_tint(ReadOnlyBuffer<uint> ptcl, ReadOnlyBuffer<uint> info, uint cmd_ix) {
+    uint info_offset = ptcl[cmd_ix + 1];
+    return info[info_offset + 9];
+}
+
+[ForceInline]
+float4 apply_image_tint(float4 source, uint packed_tint, uint tint_mode) {
+    float4 tint = unpackUnorm4x8ToFloat(packed_tint);
+    return tint_mode == TINT_MODE_ALPHA_MASK ? tint * source.a : source * tint;
 }
 
 CmdEndClip read_end_clip(ReadOnlyBuffer<uint> ptcl, uint cmd_ix) {
@@ -985,8 +997,13 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
                     : blend_mix_compose(rgba[i], fg_i, draw_blend);
             }
             cmd_ix += 3;
-        } else if (tag == CMD_IMAGE) {
+        } else if (tag == CMD_IMAGE || tag == CMD_IMAGE_TINTED) {
+            bool is_tinted = tag == CMD_IMAGE_TINTED;
             CmdImage image = read_image_cmd(ptcl, info, cmd_ix);
+            uint packed_tint = 0;
+            if (is_tinted) {
+                packed_tint = read_image_tint(ptcl, info, cmd_ix);
+            }
             float2 atlas_max = image.atlas_offset + image.extents - 1.0;
             // Atlas texels are CPU-premultiplied before upload. Sample with explicit
             // texel Loads (not hardware bilinear): Metal vs lavapipe linear filtering
@@ -1004,7 +1021,11 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
                         atlas_uv += image.atlas_offset;
                         float2 atlas_uv_clamped = clamp(atlas_uv, image.atlas_offset, atlas_max);
                         float4 fg_rgba = image_atlas.Load(int3(int2(atlas_uv_clamped), 0));
-                        float4 fg_i = pixel_format(fg_rgba * area[i] * mask_w[i] * image.alpha, image.format);
+                        fg_rgba = pixel_format(fg_rgba, image.format);
+                        if (is_tinted) {
+                            fg_rgba = apply_image_tint(fg_rgba, packed_tint, image.tint_mode);
+                        }
+                        float4 fg_i = fg_rgba * area[i] * mask_w[i] * image.alpha;
                         uint BLEND_DEFAULT_IL = (MIX_NORMAL << 8) | COMPOSE_SRC_OVER;
                         rgba[i] = ((draw_blend & 0x7FFFu) == BLEND_DEFAULT_IL)
                             ? premul_over(rgba[i], fg_i)
@@ -1022,7 +1043,11 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
                         atlas_uv.y = extend_mode(atlas_uv.y, image.y_extend_mode, image.extents.y);
                         atlas_uv += image.atlas_offset;
                         float4 fg_rgba = bicubic_sample(image_atlas, atlas_uv, image.atlas_offset, atlas_max);
-                        float4 fg_i = pixel_format(fg_rgba * area[i] * mask_w[i] * image.alpha, image.format);
+                        fg_rgba = pixel_format(fg_rgba, image.format);
+                        if (is_tinted) {
+                            fg_rgba = apply_image_tint(fg_rgba, packed_tint, image.tint_mode);
+                        }
+                        float4 fg_i = fg_rgba * area[i] * mask_w[i] * image.alpha;
                         uint BLEND_DEFAULT_IH = (MIX_NORMAL << 8) | COMPOSE_SRC_OVER;
                         rgba[i] = ((draw_blend & 0x7FFFu) == BLEND_DEFAULT_IH)
                             ? premul_over(rgba[i], fg_i)
@@ -1049,7 +1074,11 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
                         float4 c = image_atlas.Load(int3(uv11.x, uv00.y, 0));
                         float4 d = image_atlas.Load(int3(uv11, 0));
                         float4 fg_rgba = lerp(lerp(a, b, uv_frac.y), lerp(c, d, uv_frac.y), uv_frac.x);
-                        float4 fg_i = pixel_format(fg_rgba * area[i] * mask_w[i] * image.alpha, image.format);
+                        fg_rgba = pixel_format(fg_rgba, image.format);
+                        if (is_tinted) {
+                            fg_rgba = apply_image_tint(fg_rgba, packed_tint, image.tint_mode);
+                        }
+                        float4 fg_i = fg_rgba * area[i] * mask_w[i] * image.alpha;
                         uint BLEND_DEFAULT_IM = (MIX_NORMAL << 8) | COMPOSE_SRC_OVER;
                         rgba[i] = ((draw_blend & 0x7FFFu) == BLEND_DEFAULT_IM)
                             ? premul_over(rgba[i], fg_i)

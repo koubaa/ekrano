@@ -57,8 +57,8 @@ pub use config::{
 };
 pub use coverage_mask::CoverageMask;
 pub use draw::{
-    DRAW_INFO_FLAGS_FILL_RULE_BIT, DrawBbox, DrawBeginClip, DrawBlurRoundedRect, DrawColor, DrawImage,
-    DrawLinearGradient, DrawMonoid, DrawRadialGradient, DrawSweepGradient, DrawTag,
+    DRAW_INFO_FLAGS_FILL_RULE_BIT, DrawBbox, DrawBeginClip, DrawBlurRoundedRect, DrawColor, DrawImage, DrawImageTinted,
+    DrawLinearGradient, DrawMonoid, DrawRadialGradient, DrawSweepGradient, DrawTag, Tint, TintMode,
 };
 pub use encoding::{Encoding, Resources, StreamOffsets};
 pub use filter::{Filter, FilterEdgeMode, FilterPrimitive, FilterUniform, LayerFilterEffect};

@@ -3,7 +3,7 @@
 
 use bytemuck::{Pod, Zeroable};
 use peniko::{
-    BlendMode,
+    BlendMode, Color,
     color::{AlphaColor, ColorSpace, DynamicColor, OpaqueColor, PremulColor, Srgb},
 };
 
@@ -32,6 +32,9 @@ impl DrawTag {
 
     /// Image fill.
     pub const IMAGE: Self = Self(0x28C); // info: 10, scene: 3
+
+    /// Tinted image fill.
+    pub const IMAGE_TINTED: Self = Self(0x2D0); // info: 11, scene: 4
 
     /// Blurred rounded rectangle.
     pub const BLUR_RECT: Self = Self(0x2d4); // info: 11, scene: 5 (DrawBlurRoundedRect)
@@ -174,6 +177,39 @@ pub struct DrawImage {
     /// Packed quality, extend mode and 8-bit alpha (bits `qqxxyyaaaaaaaa`,
     /// 18 unused prefix bits).
     pub sample_alpha: u32,
+}
+
+/// Draw data for a tinted image.
+#[derive(Clone, Copy, Debug, Default, Zeroable, Pod)]
+#[repr(C)]
+pub struct DrawImageTinted {
+    /// Packed atlas coordinates.
+    pub xy: u32,
+    /// Packed image dimensions.
+    pub width_height: u32,
+    /// Packed quality, extend mode, tint mode and 8-bit alpha.
+    pub sample_alpha: u32,
+    /// Premultiplied tint color packed as RGBA8.
+    pub tint_rgba: u32,
+}
+
+/// How an image tint is applied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum TintMode {
+    /// Replace the source RGB with the tint and use source alpha as coverage.
+    AlphaMask = 1,
+    /// Component-wise multiply the premultiplied source and tint colors.
+    Multiply = 2,
+}
+
+/// A tint applied to image paints.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Tint {
+    /// The tint color.
+    pub color: Color,
+    /// How the tint is applied.
+    pub mode: TintMode,
 }
 
 /// Draw data for a blurred rounded rectangle.

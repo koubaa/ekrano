@@ -10,8 +10,8 @@ use ekrano_encoding::{
 
 use super::util::morton_encode_2d;
 use super::{
-    CMD_BEGIN_CLIP, CMD_BLUR_RECT, CMD_COLOR, CMD_END, CMD_END_CLIP, CMD_FILL, CMD_IMAGE, CMD_JUMP, CMD_LIN_GRAD,
-    CMD_RAD_GRAD, CMD_SET_BLEND_MODE, CMD_SOLID, CMD_SWEEP_GRAD, CpuBinding, PTCL_INITIAL_ALLOC,
+    CMD_BEGIN_CLIP, CMD_BLUR_RECT, CMD_COLOR, CMD_END, CMD_END_CLIP, CMD_FILL, CMD_IMAGE, CMD_IMAGE_TINTED, CMD_JUMP,
+    CMD_LIN_GRAD, CMD_RAD_GRAD, CMD_SET_BLEND_MODE, CMD_SOLID, CMD_SWEEP_GRAD, CpuBinding, PTCL_INITIAL_ALLOC,
 };
 
 // Tiles per bin
@@ -96,9 +96,16 @@ impl TileState {
         self.cmd_offset += 2;
     }
 
-    fn write_image(&mut self, config: &ConfigUniform, bump: &mut BumpAllocators, ptcl: &mut [u32], info_offset: u32) {
+    fn write_image(
+        &mut self,
+        config: &ConfigUniform,
+        bump: &mut BumpAllocators,
+        ptcl: &mut [u32],
+        command: u32,
+        info_offset: u32,
+    ) {
         self.alloc_cmd(2, config, bump, ptcl);
-        self.write(ptcl, 0, CMD_IMAGE);
+        self.write(ptcl, 0, command);
         self.write(ptcl, 1, info_offset);
         self.cmd_offset += 2;
     }
@@ -280,9 +287,14 @@ fn coarse_main(
                                 let rgba_color = scene[dd as usize];
                                 tile_state.write_color(config, bump, ptcl, rgba_color);
                             }
-                            DrawTag::IMAGE => {
+                            DrawTag::IMAGE | DrawTag::IMAGE_TINTED => {
                                 tile_state.write_path(config, bump, ptcl, tile, draw_flags);
-                                tile_state.write_image(config, bump, ptcl, di + 1);
+                                let command = if DrawTag(drawtag) == DrawTag::IMAGE_TINTED {
+                                    CMD_IMAGE_TINTED
+                                } else {
+                                    CMD_IMAGE
+                                };
+                                tile_state.write_image(config, bump, ptcl, command, di + 1);
                             }
                             DrawTag::LINEAR_GRADIENT => {
                                 tile_state.write_path(config, bump, ptcl, tile, draw_flags);

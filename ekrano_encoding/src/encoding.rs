@@ -4,8 +4,8 @@
 use crate::{DrawBeginClip, FilterPrimitive, LayerFilterEffect};
 
 use super::{
-    CoverageMask, DrawBlurRoundedRect, DrawColor, DrawImage, DrawLinearGradient, DrawRadialGradient, DrawSweepGradient,
-    DrawTag, Glyph, GlyphRun, NormalizedCoord, Patch, PathEncoder, PathTag, Style, Transform,
+    CoverageMask, DrawBlurRoundedRect, DrawColor, DrawImage, DrawImageTinted, DrawLinearGradient, DrawRadialGradient,
+    DrawSweepGradient, DrawTag, Glyph, GlyphRun, NormalizedCoord, Patch, PathEncoder, PathTag, Style, Tint, Transform,
 };
 
 use peniko::color::{DynamicColor, palette};
@@ -292,6 +292,11 @@ impl Encoding {
 
     /// Encodes a brush with an optional alpha modifier.
     pub fn encode_brush<'b>(&mut self, brush: impl Into<BrushRef<'b>>, alpha: f32) {
+        self.encode_brush_with_tint(brush, alpha, None);
+    }
+
+    /// Encodes a brush, applying `tint` when the brush is an image.
+    pub fn encode_brush_with_tint<'b>(&mut self, brush: impl Into<BrushRef<'b>>, alpha: f32, tint: Option<Tint>) {
         use super::math::point_to_f32;
         match brush.into() {
             BrushRef::Solid(color) => {
@@ -354,7 +359,7 @@ impl Encoding {
                 }
             },
             BrushRef::Image(image) => {
-                self.encode_image(image, alpha);
+                self.encode_image_with_tint(image, alpha, tint);
             }
         }
     }
@@ -455,6 +460,11 @@ impl Encoding {
 
     /// Encodes an image brush.
     pub fn encode_image<'b>(&mut self, brush: impl Into<ImageBrushRef<'b>>, alpha: f32) {
+        self.encode_image_with_tint(brush, alpha, None);
+    }
+
+    /// Encodes an image brush with an optional tint.
+    pub fn encode_image_with_tint<'b>(&mut self, brush: impl Into<ImageBrushRef<'b>>, alpha: f32, tint: Option<Tint>) {
         let brush: ImageBrushRef<'b> = brush.into();
         let ImageSampler {
             x_extend,
@@ -470,18 +480,31 @@ impl Encoding {
             image: brush.image.clone(),
             draw_data_offset: self.draw_data.len(),
         });
-        self.draw_tags.push(DrawTag::IMAGE);
-        self.draw_data
-            .extend_from_slice(bytemuck::cast_slice(bytemuck::bytes_of(&DrawImage {
-                xy: 0,
-                width_height: (brush.image.width << 16) | (brush.image.height & 0xFFFF),
-                sample_alpha: ((brush.image.format as u32) << 15
-                    | (brush.image.alpha_type as u32) << 14
-                    | (quality as u32) << 12
-                    | ((x_extend as u32) << 10)
-                    | ((y_extend as u32) << 8)
-                    | alpha as u32),
-            })));
+        let width_height = (brush.image.width << 16) | (brush.image.height & 0xFFFF);
+        let sample_alpha = (brush.image.format as u32) << 15
+            | (brush.image.alpha_type as u32) << 14
+            | (quality as u32) << 12
+            | (x_extend as u32) << 10
+            | (y_extend as u32) << 8
+            | alpha as u32;
+        if let Some(tint) = tint {
+            self.draw_tags.push(DrawTag::IMAGE_TINTED);
+            self.draw_data
+                .extend_from_slice(bytemuck::cast_slice(bytemuck::bytes_of(&DrawImageTinted {
+                    xy: 0,
+                    width_height,
+                    sample_alpha: sample_alpha | ((tint.mode as u32) << 16),
+                    tint_rgba: DrawColor::from(tint.color).rgba,
+                })));
+        } else {
+            self.draw_tags.push(DrawTag::IMAGE);
+            self.draw_data
+                .extend_from_slice(bytemuck::cast_slice(bytemuck::bytes_of(&DrawImage {
+                    xy: 0,
+                    width_height,
+                    sample_alpha,
+                })));
+        }
     }
 
     // Encodes a blurred rounded rectangle brush.
@@ -688,7 +711,12 @@ impl StreamOffsets {
 
 #[cfg(test)]
 mod tests {
-    use peniko::{Extend, ImageQuality};
+    use peniko::{
+        Extend, ImageAlphaType, ImageBrush, ImageData, ImageFormat, ImageQuality, ImageSampler, color::palette,
+    };
+
+    use super::Encoding;
+    use crate::{DrawTag, Tint, TintMode};
 
     #[test]
     fn ensure_image_quality_values() {
@@ -710,5 +738,38 @@ mod tests {
         match Extend::Pad {
             Extend::Pad | Extend::Repeat | Extend::Reflect => {}
         }
+    }
+
+    #[test]
+    fn image_tint_uses_distinct_payload_and_explicit_mode() {
+        let image = ImageBrush {
+            image: ImageData {
+                data: vec![255, 255, 255, 255].into(),
+                format: ImageFormat::Rgba8,
+                width: 1,
+                height: 1,
+                alpha_type: ImageAlphaType::Alpha,
+            },
+            sampler: ImageSampler::default(),
+        };
+
+        let mut plain = Encoding::new();
+        plain.encode_image(&image, 1.0);
+        assert!(plain.draw_tags == [DrawTag::IMAGE]);
+        assert_eq!(plain.draw_data.len(), 3);
+
+        let mut tinted = Encoding::new();
+        tinted.encode_image_with_tint(
+            &image,
+            1.0,
+            Some(Tint {
+                color: palette::css::TRANSPARENT,
+                mode: TintMode::Multiply,
+            }),
+        );
+        assert!(tinted.draw_tags == [DrawTag::IMAGE_TINTED]);
+        assert_eq!(tinted.draw_data.len(), 4);
+        assert_eq!((tinted.draw_data[2] >> 16) & 0x3, TintMode::Multiply as u32);
+        assert_eq!(tinted.draw_data[3], 0);
     }
 }

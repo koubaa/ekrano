@@ -73,7 +73,8 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
 
         if (tag_word == DRAWTAG_FILL_COLOR || tag_word == DRAWTAG_FILL_LIN_GRADIENT ||
             tag_word == DRAWTAG_FILL_RAD_GRADIENT || tag_word == DRAWTAG_FILL_SWEEP_GRADIENT ||
-            tag_word == DRAWTAG_FILL_IMAGE || tag_word == DRAWTAG_BEGIN_CLIP || tag_word == DRAWTAG_BLURRED_ROUNDED_RECT) {
+            tag_word == DRAWTAG_FILL_IMAGE || tag_word == DRAWTAG_FILL_IMAGE_TINTED ||
+            tag_word == DRAWTAG_BEGIN_CLIP || tag_word == DRAWTAG_BLURRED_ROUNDED_RECT) {
             PathBbox bbox = path_bbox[m.path_ix];
             Transform transform;
             transform.matrx = float4(0, 0, 0, 0);
@@ -81,7 +82,7 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
             uint draw_flags = bbox.draw_flags;
             if (tag_word == DRAWTAG_FILL_LIN_GRADIENT || tag_word == DRAWTAG_FILL_RAD_GRADIENT ||
                 tag_word == DRAWTAG_FILL_SWEEP_GRADIENT || tag_word == DRAWTAG_FILL_IMAGE ||
-                tag_word == DRAWTAG_BLURRED_ROUNDED_RECT) {
+                tag_word == DRAWTAG_FILL_IMAGE_TINTED || tag_word == DRAWTAG_BLURRED_ROUNDED_RECT) {
                 transform = read_transform(scene, config.transform_base, bbox.trans_ix);
             }
 
@@ -187,7 +188,7 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
                 info[di + 6] = asuint(inv.translate.y);
                 info[di + 7] = scene[dd + 3];
                 info[di + 8] = scene[dd + 4];
-            } else if (tag_word == DRAWTAG_FILL_IMAGE) {
+            } else if (tag_word == DRAWTAG_FILL_IMAGE || tag_word == DRAWTAG_FILL_IMAGE_TINTED) {
                 info[di] = draw_flags;
                 Transform inv = transform_inverse(transform);
                 info[di + 1] = asuint(inv.matrx.x);
@@ -199,6 +200,9 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
                 info[di + 7] = scene[dd];
                 info[di + 8] = scene[dd + 1];
                 info[di + 9] = scene[dd + 2];
+                if (tag_word == DRAWTAG_FILL_IMAGE_TINTED) {
+                    info[di + 10] = scene[dd + 3];
+                }
             } else if (tag_word == DRAWTAG_BLURRED_ROUNDED_RECT) {
                 info[di] = draw_flags;
                 Transform inv = transform_inverse(transform);

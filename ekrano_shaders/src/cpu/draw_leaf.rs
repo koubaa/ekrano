@@ -45,6 +45,7 @@ fn draw_leaf_main(
                 || tag_word == DrawTag::RADIAL_GRADIENT
                 || tag_word == DrawTag::SWEEP_GRADIENT
                 || tag_word == DrawTag::IMAGE
+                || tag_word == DrawTag::IMAGE_TINTED
                 || tag_word == DrawTag::BEGIN_CLIP
                 || tag_word == DrawTag::BLUR_RECT
             {
@@ -159,7 +160,7 @@ fn draw_leaf_main(
                         info[di + 7] = scene[dd as usize + 3];
                         info[di + 8] = scene[dd as usize + 4];
                     }
-                    DrawTag::IMAGE => {
+                    DrawTag::IMAGE | DrawTag::IMAGE_TINTED => {
                         info[di] = draw_flags;
                         let xform = transform.inverse();
                         info[di + 1] = f32::to_bits(xform.0[0]);
@@ -171,6 +172,9 @@ fn draw_leaf_main(
                         info[di + 7] = scene[dd as usize];
                         info[di + 8] = scene[dd as usize + 1];
                         info[di + 9] = scene[dd as usize + 2];
+                        if tag_word == DrawTag::IMAGE_TINTED {
+                            info[di + 10] = scene[dd as usize + 3];
+                        }
                     }
                     DrawTag::BLUR_RECT => {
                         info[di] = draw_flags;

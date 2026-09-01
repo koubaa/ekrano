@@ -82,10 +82,10 @@ void write_grad(uint ty, uint index, uint info_offset,
     cmd_offset += 3;
 }
 
-void write_image(uint info_offset, inout uint cmd_offset, inout uint cmd_limit,
+void write_image(uint cmd, uint info_offset, inout uint cmd_offset, inout uint cmd_limit,
     StorageBuffer<uint> ptcl, StorageBuffer<BumpAllocators> bump, Config config) {
     alloc_cmd(cmd_offset, cmd_limit, ptcl, bump, config, 2);
-    ptcl[cmd_offset] = CMD_IMAGE;
+    ptcl[cmd_offset] = cmd;
     ptcl[cmd_offset + 1] = info_offset;
     cmd_offset += 2;
 }
@@ -357,9 +357,10 @@ void cs_main(BufRO<Config> config_buf, BufRO<uint> scene,
                 } else if (drawtag == DRAWTAG_FILL_SWEEP_GRADIENT) {
                     write_path(tile_ix, draw_flags, cmd_offset, cmd_limit, ptcl, bump, tiles, config);
                     write_grad(CMD_SWEEP_GRAD, scene[dd], di + 1, cmd_offset, cmd_limit, ptcl, bump, config);
-                } else if (drawtag == DRAWTAG_FILL_IMAGE) {
+                } else if (drawtag == DRAWTAG_FILL_IMAGE || drawtag == DRAWTAG_FILL_IMAGE_TINTED) {
                     write_path(tile_ix, draw_flags, cmd_offset, cmd_limit, ptcl, bump, tiles, config);
-                    write_image(di + 1, cmd_offset, cmd_limit, ptcl, bump, config);
+                    uint cmd = drawtag == DRAWTAG_FILL_IMAGE_TINTED ? CMD_IMAGE_TINTED : CMD_IMAGE;
+                    write_image(cmd, di + 1, cmd_offset, cmd_limit, ptcl, bump, config);
                 } else if (drawtag == DRAWTAG_BEGIN_CLIP) {
                     bool even_odd = (draw_flags & DRAW_INFO_FLAGS_FILL_RULE_BIT) != 0;
                     int tile_backdrop = tiles[tile_ix].backdrop;

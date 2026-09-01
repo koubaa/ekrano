@@ -7,7 +7,7 @@ use std::sync::Arc;
 #[cfg(feature = "bump_estimate")]
 use ekrano_encoding::BumpAllocatorMemory;
 use ekrano_encoding::{
-    CoverageMask, DrawBeginClip, Encoding, Filter, Glyph, GlyphRun, NormalizedCoord, Patch, Transform,
+    CoverageMask, DrawBeginClip, Encoding, Filter, Glyph, GlyphRun, NormalizedCoord, Patch, Tint, Transform,
 };
 use peniko::{
     BlendMode, Blob, Brush, BrushRef, Color, ColorStop, ColorStops, ColorStopsSource, Compose, Extend, Fill, FontData,
@@ -44,6 +44,7 @@ use skrifa::{
 #[derive(Clone, Default)]
 pub struct Scene {
     encoding: Encoding,
+    image_tint: Option<Tint>,
     #[cfg(feature = "bump_estimate")]
     estimator: ekrano_encoding::BumpEstimator,
 }
@@ -58,6 +59,7 @@ impl Scene {
     /// Removes all content from the scene.
     pub fn reset(&mut self) {
         self.encoding.reset();
+        self.image_tint = None;
         #[cfg(feature = "bump_estimate")]
         self.estimator.reset();
     }
@@ -193,6 +195,16 @@ impl Scene {
     pub fn reset_draw_blend_mode(&mut self) {
         self.encoding
             .encode_set_blend_mode(BlendMode::new(Mix::Normal, Compose::SrcOver));
+    }
+
+    /// Sets the tint applied to subsequent image paint operations.
+    pub fn set_tint(&mut self, tint: Option<Tint>) {
+        self.image_tint = tint;
+    }
+
+    /// Clears the tint applied to subsequent image paint operations.
+    pub fn reset_tint(&mut self) {
+        self.image_tint = None;
     }
 
     /// Sets a full-frame coverage mask (`width` × `height` bytes, row-major).
@@ -407,7 +419,7 @@ impl Scene {
             {
                 self.encoding.swap_last_path_tags();
             }
-            self.encoding.encode_brush(brush, 1.0);
+            self.encoding.encode_brush_with_tint(brush, 1.0, self.image_tint);
             #[cfg(feature = "bump_estimate")]
             self.estimator.count_path(shape.path_elements(0.1), &t, None);
         }
@@ -450,7 +462,7 @@ impl Scene {
                 {
                     self.encoding.swap_last_path_tags();
                 }
-                self.encoding.encode_brush(brush, 1.0);
+                self.encoding.encode_brush_with_tint(brush, 1.0, self.image_tint);
             }
         } else {
             let stroked = peniko::kurbo::stroke(
@@ -529,6 +541,7 @@ impl From<Encoding> for Scene {
         // removed at some point - see https://github.com/linebender/vello/issues/541
         Self {
             encoding,
+            image_tint: None,
             #[cfg(feature = "bump_estimate")]
             estimator: ekrano_encoding::BumpEstimator::default(),
         }
@@ -683,7 +696,9 @@ impl<'a> DrawGlyphs<'a> {
         let index = resources.glyph_runs.len();
         resources.glyph_runs.push(self.run.clone());
         resources.patches.push(Patch::GlyphRun { index });
-        self.scene.encoding.encode_brush(self.brush, self.brush_alpha);
+        self.scene
+            .encoding
+            .encode_brush_with_tint(self.brush, self.brush_alpha, self.scene.image_tint);
         // Glyph run resolve step affects transform and style state in a way
         // that is opaque to the current encoding.
         // See <https://github.com/linebender/vello/issues/424>
