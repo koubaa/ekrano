@@ -164,15 +164,8 @@ impl SimpleText {
         let font_ref = to_font_ref(font).unwrap();
         let brush = brush.into();
         let style = style.into();
-        let axes = font_ref.axes();
-        let font_size = skrifa::instance::Size::new(size);
-        let var_loc = axes.location(variations.iter().copied());
-        let charmap = font_ref.charmap();
-        let metrics = font_ref.metrics(font_size, &var_loc);
-        let line_height = metrics.ascent - metrics.descent + metrics.leading;
-        let glyph_metrics = font_ref.glyph_metrics(font_size, &var_loc);
-        let mut pen_x = 0_f32;
-        let mut pen_y = 0_f32;
+        let var_loc = font_ref.axes().location(variations.iter().copied());
+        let glyphs = Self::layout_glyphs(font, size, variations, text);
         scene
             .draw_glyphs(font)
             .font_size(size)
@@ -183,25 +176,44 @@ impl SimpleText {
             .brush(brush)
             .hint(hint)
             .font_embolden(font_embolden)
-            .draw(
-                style,
-                text.chars().filter_map(|ch| {
-                    if ch == '\n' {
-                        pen_y += line_height;
-                        pen_x = 0.0;
-                        return None;
-                    }
-                    let gid = charmap.map(ch).unwrap_or_default();
-                    let advance = glyph_metrics.advance_width(gid).unwrap_or_default();
-                    let x = pen_x;
-                    pen_x += advance;
-                    Some(Glyph {
-                        id: gid.to_u32(),
-                        x,
-                        y: pen_y,
-                    })
-                }),
-            );
+            .draw(style, glyphs.into_iter());
+    }
+
+    /// Roboto Regular used by snapshot tests.
+    pub fn roboto(&self) -> &FontData {
+        &self.roboto
+    }
+
+    /// Layout `text` with the same simple advance-width placement as [`Self::add_var_run`].
+    pub fn layout_glyphs(font: &FontData, size: f32, variations: &[(&str, f32)], text: &str) -> Vec<Glyph> {
+        let font_ref = to_font_ref(font).unwrap();
+        let axes = font_ref.axes();
+        let font_size = skrifa::instance::Size::new(size);
+        let var_loc = axes.location(variations.iter().copied());
+        let charmap = font_ref.charmap();
+        let metrics = font_ref.metrics(font_size, &var_loc);
+        let line_height = metrics.ascent - metrics.descent + metrics.leading;
+        let glyph_metrics = font_ref.glyph_metrics(font_size, &var_loc);
+        let mut pen_x = 0_f32;
+        let mut pen_y = 0_f32;
+        text.chars()
+            .filter_map(|ch| {
+                if ch == '\n' {
+                    pen_y += line_height;
+                    pen_x = 0.0;
+                    return None;
+                }
+                let gid = charmap.map(ch).unwrap_or_default();
+                let advance = glyph_metrics.advance_width(gid).unwrap_or_default();
+                let x = pen_x;
+                pen_x += advance;
+                Some(Glyph {
+                    id: gid.to_u32(),
+                    x,
+                    y: pen_y,
+                })
+            })
+            .collect()
     }
 
     pub fn add(

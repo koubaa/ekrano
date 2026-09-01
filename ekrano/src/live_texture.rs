@@ -10,9 +10,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+pub use ekrano_encoding::LIVE_IMAGE_BIT;
 use goldy::types::{BackendType, TextureFlags, TextureFormat, TextureKind};
 use goldy::{Context, Device, RetainedPool, Scheme, Submission, Texture};
-pub use ekrano_encoding::LIVE_IMAGE_BIT;
 use peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
 
 use crate::Error;
@@ -169,11 +169,7 @@ impl LiveTextureExchange {
         for entry in self.entries.values_mut() {
             let mut newly: Vec<(usize, u64)> = Vec::new();
             for (idx, slot) in entry.slots.iter_mut().enumerate() {
-                let settled = slot
-                    .pending
-                    .as_ref()
-                    .map(|s| s.is_settled())
-                    .unwrap_or(false);
+                let settled = slot.pending.as_ref().map(|s| s.is_settled()).unwrap_or(false);
                 if settled {
                     slot.pending = None;
                     slot.reserved = false;
@@ -225,12 +221,7 @@ impl LiveTextureExchange {
     }
 
     /// Attach a GPU submission that wrote the reserved slot.
-    pub fn complete_publish(
-        &mut self,
-        id: LiveTextureId,
-        slot: usize,
-        submission: Submission,
-    ) -> Result<(), Error> {
+    pub fn complete_publish(&mut self, id: LiveTextureId, slot: usize, submission: Submission) -> Result<(), Error> {
         let Some(entry) = self.entries.get_mut(&id) else {
             let _ = submission.wait_until_settled();
             return Err(Error::Gpu(format!("LiveTextureExchange: unknown id {id:?}")));
@@ -347,13 +338,7 @@ impl LiveTextureExchange {
         let mut keys: Vec<_> = self
             .entries
             .values()
-            .map(|e| {
-                (
-                    e.width,
-                    e.height,
-                    e.sample.gpu_handle(),
-                )
-            })
+            .map(|e| (e.width, e.height, e.sample.gpu_handle()))
             .collect();
         keys.sort_unstable();
         keys

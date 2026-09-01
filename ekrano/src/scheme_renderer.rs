@@ -318,7 +318,15 @@ impl SchemeRenderer {
         })
     }
 
-    fn prepare_live_atlas(&mut self) -> Result<(Option<LiveTextureId>, Option<Vec<u8>>, u32, u32, HashMap<u64, (u32, u32)>)> {
+    fn prepare_live_atlas(
+        &mut self,
+    ) -> Result<(
+        Option<LiveTextureId>,
+        Option<Vec<u8>>,
+        u32,
+        u32,
+        HashMap<u64, (u32, u32)>,
+    )> {
         self.live_textures.poll_settlement();
 
         let mut fronts = self.live_textures.settled_fronts();
@@ -329,13 +337,9 @@ impl SchemeRenderer {
 
         match fronts.as_slice() {
             [] => Ok((None, None, 1, 1, HashMap::new())),
-            [(id, blob_id, width, height)] => Ok((
-                Some(*id),
-                None,
-                *width,
-                *height,
-                HashMap::from([(*blob_id, (0, 0))]),
-            )),
+            [(id, blob_id, width, height)] => {
+                Ok((Some(*id), None, *width, *height, HashMap::from([(*blob_id, (0, 0))])))
+            }
             _ => {
                 let atlas_width: u32 = fronts.iter().map(|(_, _, width, _)| *width).sum();
                 let atlas_height = fronts.iter().map(|(_, _, _, height)| *height).max().unwrap_or(1);

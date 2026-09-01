@@ -63,6 +63,7 @@
 )]
 
 mod debug;
+mod decoration;
 mod live_texture;
 mod resource_proxy;
 mod scene;

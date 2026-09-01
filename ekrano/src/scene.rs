@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use std::io::Cursor;
+use std::ops::RangeInclusive;
 use std::sync::Arc;
 
 #[cfg(feature = "bump_estimate")]
@@ -416,6 +417,18 @@ impl Scene {
         brush_transform: Option<Affine>,
         shape: &impl Shape,
     ) {
+        self.fill_with_alpha(style, transform, brush, 1.0, brush_transform, shape);
+    }
+
+    fn fill_with_alpha<'b>(
+        &mut self,
+        style: Fill,
+        transform: Affine,
+        brush: impl Into<BrushRef<'b>>,
+        brush_alpha: f32,
+        brush_transform: Option<Affine>,
+        shape: &impl Shape,
+    ) {
         let t = Transform::from_kurbo(&transform);
         self.encoding.encode_transform(t);
         self.encoding.encode_fill_style(style);
@@ -427,7 +440,8 @@ impl Scene {
             {
                 self.encoding.swap_last_path_tags();
             }
-            self.encoding.encode_brush_with_tint(brush, 1.0, self.image_tint);
+            self.encoding
+                .encode_brush_with_tint(brush, brush_alpha, self.image_tint);
             #[cfg(feature = "bump_estimate")]
             self.estimator.count_path(shape.path_elements(0.1), &t, None);
         }
@@ -685,6 +699,55 @@ impl<'a> DrawGlyphs<'a> {
     pub fn brush_alpha(mut self, alpha: f32) -> Self {
         self.brush_alpha = alpha;
         self
+    }
+
+    /// Render a decoration (underline, strikethrough) with skip-ink around glyph outlines.
+    ///
+    /// This is the classic analog of Glifo / Vello #1592 `render_decoration`.
+    /// COLR and bitmap glyphs are skipped for ink exclusion (same as Glifo).
+    ///
+    /// `offset` is positive above the baseline (Y-up font space). `size` is thickness.
+    /// `buffer` is extra horizontal padding around each descender gap.
+    pub fn render_decoration(
+        self,
+        glyphs: impl Iterator<Item = Glyph> + Clone,
+        x_range: RangeInclusive<f32>,
+        baseline_y: f32,
+        offset: f32,
+        size: f32,
+        buffer: f32,
+    ) {
+        let coords_start = self.run.normalized_coords.start;
+        let coords: Vec<NormalizedCoord> =
+            self.scene.encoding.resources.normalized_coords[self.run.normalized_coords.clone()].to_vec();
+        let glyph_transform = self.run.glyph_transform.map(|t| t.to_kurbo());
+        let rects = crate::decoration::decoration_rects(
+            &self.run.font,
+            self.run.font_size,
+            self.run.font_embolden,
+            glyph_transform,
+            self.run.hint,
+            self.run.transform,
+            &coords,
+            glyphs,
+            x_range,
+            baseline_y,
+            offset,
+            size,
+            buffer,
+        );
+        let transform = self.run.transform.to_kurbo();
+        let brush_transform = self.run.brush_transform.map(|t| t.to_kurbo());
+        let DrawGlyphs {
+            scene,
+            brush,
+            brush_alpha,
+            ..
+        } = self;
+        for rect in rects {
+            scene.fill_with_alpha(Fill::NonZero, transform, brush, brush_alpha, brush_transform, &rect);
+        }
+        scene.encoding.resources.normalized_coords.truncate(coords_start);
     }
 
     /// Encodes a fill or stroke for the given sequence of glyphs and consumes the builder.

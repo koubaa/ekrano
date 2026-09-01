@@ -79,6 +79,10 @@ name = "heap_self_regulation"
 harness = false
 
 [[test]]
+name = "glyphs_decoration"
+harness = false
+
+[[test]]
 name = "hinting"
 harness = false
 

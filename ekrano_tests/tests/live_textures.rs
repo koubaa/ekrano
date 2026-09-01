@@ -47,7 +47,9 @@ fn publish_live_texture(renderer: &mut GoldyRenderer, id: ekrano::LiveTextureId,
     let texture = exchange.slot_texture(id, slot).expect("slot texture").borrow();
     #[allow(deprecated)]
     texture.write(rgba).expect("write live texture bytes");
-    exchange.complete_publish_ready(id, slot).expect("complete_publish_ready");
+    exchange
+        .complete_publish_ready(id, slot)
+        .expect("complete_publish_ready");
     exchange.sync_sample_mirror(id).expect("sync_sample_mirror");
 }
 
@@ -111,10 +113,7 @@ fn multiple_live_textures_pack_linearly() {
 
     let mut cpu_scene = Scene::new();
     cpu_scene.draw_image(&image_brush(cpu_image(1, 1, left_rgba)), Affine::IDENTITY);
-    cpu_scene.draw_image(
-        &image_brush(cpu_image(1, 1, right_rgba)),
-        Affine::translate((1.0, 0.0)),
-    );
+    cpu_scene.draw_image(&image_brush(cpu_image(1, 1, right_rgba)), Affine::translate((1.0, 0.0)));
     let mut params = TestParams::new("multiple_live_textures_pack_linearly", 2, 1);
     params.base_color = Some(TRANSPARENT);
     let expected = render_then_debug_sync(&cpu_scene, &params).expect("render expected CPU scene");
