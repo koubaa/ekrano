@@ -7,7 +7,8 @@ use std::sync::Arc;
 #[cfg(feature = "bump_estimate")]
 use ekrano_encoding::BumpAllocatorMemory;
 use ekrano_encoding::{
-    CoverageMask, DrawBeginClip, Encoding, Filter, Glyph, GlyphRun, NormalizedCoord, Patch, Tint, Transform,
+    CoverageMask, DrawBeginClip, Encoding, Filter, FontEmbolden, Glyph, GlyphRun, NormalizedCoord, Patch, Tint,
+    Transform,
 };
 use peniko::{
     BlendMode, Blob, Brush, BrushRef, Color, ColorStop, ColorStops, ColorStopsSource, Compose, Extend, Fill, FontData,
@@ -571,7 +572,9 @@ impl<'a> DrawGlyphs<'a> {
                 font: font.clone(),
                 transform: Transform::IDENTITY,
                 glyph_transform: None,
+                brush_transform: None,
                 font_size: 16.0,
+                font_embolden: FontEmbolden::default(),
                 hint: false,
                 normalized_coords: coords_start..coords_start,
                 style: Fill::NonZero.into(),
@@ -604,12 +607,32 @@ impl<'a> DrawGlyphs<'a> {
         self
     }
 
+    /// Sets the transform applied to the brush contents.
+    ///
+    /// This is applied after the global run [transform](Self::transform) and is
+    /// encoded as the glyph run's paint transform. It affects transformed
+    /// brushes such as gradients and images; solid colors ignore it.
+    ///
+    /// The default value is `None`.
+    #[must_use]
+    pub fn brush_transform(mut self, transform: Option<Affine>) -> Self {
+        self.run.brush_transform = transform.map(|xform| Transform::from_kurbo(&xform));
+        self
+    }
+
     /// Sets the font size in pixels per em units.
     ///
     /// The default value is 16.0.
     #[must_use]
     pub fn font_size(mut self, size: f32) -> Self {
         self.run.font_size = size;
+        self
+    }
+
+    /// Sets synthetic embolden settings.
+    #[must_use]
+    pub fn font_embolden(mut self, embolden: FontEmbolden) -> Self {
+        self.run.font_embolden = embolden;
         self
     }
 

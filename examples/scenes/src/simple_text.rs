@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use ekrano::kurbo::Affine;
 use ekrano::peniko::{Blob, Brush, BrushRef, Fill, FontData, StyleRef, color::palette};
-use ekrano::{Glyph, Scene};
+use ekrano::{FontEmbolden, Glyph, Scene};
 use skrifa::{
     MetadataProvider,
     raw::{FileRef, FontRef},
@@ -66,9 +66,11 @@ impl SimpleText {
             &Brush::Solid(palette::css::WHITE),
             transform,
             glyph_transform,
+            None,
             style,
             text,
             false,
+            FontEmbolden::default(),
         );
     }
 
@@ -98,9 +100,11 @@ impl SimpleText {
             &Brush::Solid(palette::css::WHITE),
             transform,
             glyph_transform,
+            None,
             style,
             text,
             false,
+            FontEmbolden::default(),
         );
     }
 
@@ -112,6 +116,7 @@ impl SimpleText {
         brush: impl Into<BrushRef<'a>>,
         transform: Affine,
         glyph_transform: Option<Affine>,
+        brush_transform: Option<Affine>,
         style: impl Into<StyleRef<'a>>,
         text: &str,
     ) {
@@ -123,9 +128,11 @@ impl SimpleText {
             brush,
             transform,
             glyph_transform,
+            brush_transform,
             style,
             text,
             false,
+            FontEmbolden::default(),
         );
     }
 
@@ -142,9 +149,11 @@ impl SimpleText {
         brush: impl Into<BrushRef<'a>>,
         transform: Affine,
         glyph_transform: Option<Affine>,
+        brush_transform: Option<Affine>,
         style: impl Into<StyleRef<'a>>,
         text: &str,
         hint: bool,
+        font_embolden: FontEmbolden,
     ) {
         let default_font = if variations.is_empty() {
             &self.roboto
@@ -169,9 +178,11 @@ impl SimpleText {
             .font_size(size)
             .transform(transform)
             .glyph_transform(glyph_transform)
+            .brush_transform(brush_transform)
             .normalized_coords(bytemuck::cast_slice(var_loc.coords()))
             .brush(brush)
             .hint(hint)
+            .font_embolden(font_embolden)
             .draw(
                 style,
                 text.chars().filter_map(|ch| {
@@ -203,7 +214,7 @@ impl SimpleText {
         text: &str,
     ) {
         let brush = brush.unwrap_or(&Brush::Solid(palette::css::WHITE));
-        self.add_run(scene, font, size, brush, transform, None, Fill::NonZero, text);
+        self.add_run(scene, font, size, brush, transform, None, None, Fill::NonZero, text);
     }
 }
 

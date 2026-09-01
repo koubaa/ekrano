@@ -730,6 +730,7 @@ mod impls {
             Affine::translate((110.0, 700.0)),
             // Add a skew to simulate an oblique font.
             Some(Affine::skew(20_f64.to_radians().tan(), 0.0)),
+            None,
             &Stroke::new(1.0),
             s,
         );
@@ -745,9 +746,11 @@ mod impls {
             Affine::translate((110.0, 800.0)),
             // Add a skew to simulate an oblique font.
             None,
+            None,
             Fill::NonZero,
             "And some Vello\ntext with a newline",
             false, /* hint */
+            FontEmbolden::default(),
         );
         let th = params.time;
         let center = Point::new(500.0, 500.0);
