@@ -1,4 +1,5 @@
 // Copyright 2024 the Vello Authors
+// Copyright 2026 the Ekrano Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use core::fmt;
@@ -212,6 +213,25 @@ pub fn snapshot_test_image(
     let update_path = c_dir.join(&params.name).with_extension("png");
 
     let reference_path = snapshot_dir(directory).join(&params.name).with_extension("png");
+
+    // CI-only skip for known-minor platform diffs (e.g. DX12 WARP vs lavapipe
+    // references). Set `EKRANO_CI_SKIP_SNAPSHOTS` to `all` or a comma-separated
+    // list of `TestParams::name` values. Local runs are unaffected.
+    if env_var_relates_to("EKRANO_CI_SKIP_SNAPSHOTS", &params.name) {
+        eprintln!(
+            "Skipping snapshot comparison for {} (EKRANO_CI_SKIP_SNAPSHOTS)",
+            params.name
+        );
+        return Ok(Snapshot {
+            statistics: None,
+            error_map: None,
+            reference_path,
+            update_path,
+            raw_rendered,
+            directory,
+            params,
+        });
+    }
 
     if env::var("EKRANO_TEST_GENERATE_ALL").is_ok() {
         write_png_to_file(

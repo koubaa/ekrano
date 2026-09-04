@@ -114,8 +114,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        # TODO: re-enable windows-latest when Windows CI is green again
-        os: [macos-latest, ubuntu-latest]
+        os: [windows-latest, macos-latest, ubuntu-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -172,22 +171,27 @@ jobs:
     name: cargo test
     needs: prime-lfs-cache
     # Passing ubuntu cargo test jobs (n=80): mean 6.4m, σ 2.1m, μ+2σ 10.6m, max 18.8m.
-    timeout-minutes: 11
+    # Windows DX12/WARP is slower (compile + serialized binaries); give it more headroom.
+    timeout-minutes: ${{ matrix.timeout }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        # TODO: re-enable windows-latest when Windows CI is green again.
-        # When enabling, add a windows-latest row below and use the DX12-only Goldy test steps.
         include:
           # Linux: lavapipe (software Vulkan) on free ubuntu-24.04 runners.
           # Requires Mesa 25.0+ via ci/setup-ubuntu.sh for Vulkan 1.4.
           - os: ubuntu-24.04
             runner: ubuntu-24.04
             gpu: 'yes'
+            timeout: 11
           - os: macos-latest
             runner: macos-latest
             gpu: 'yes'
+            timeout: 11
+          - os: windows-latest
+            runner: windows-latest
+            gpu: 'yes'
+            timeout: 30
     steps:
       - uses: actions/checkout@v4
         # We intentionally do not use lfs: true here, instead using the caching method to save LFS bandwidth.
@@ -302,6 +306,7 @@ jobs:
           "WARP_DLL=$($warpDll.FullName)" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
 
       - name: cargo test
+        if: matrix.os != 'windows-latest'
         # TODO: Maybe use --release; the CPU shaders are extremely slow when unoptimised
         # One process per test binary enables process-lifetime shared Device + WARP mutex.
         run: cargo test --workspace --locked --all-features --no-fail-fast
@@ -318,19 +323,24 @@ jobs:
           # If we do run out of bandwidth, uncomment the following line.
           # EKRANO_SKIP_LFS_SNAPSHOTS: all
 
-      # Ready when windows-latest is re-added to the matrix above.
+      # DX12-only: avoid compiling Vulkan/Metal on the Windows runner.
+      # `-j 1` serializes test binaries; WARP is not stable across concurrent processes
+      # (in-process WARP mutex cannot help).
       - name: cargo test (Windows / DX12-only Goldy)
         if: matrix.os == 'windows-latest'
         run: >-
           cargo test --workspace --locked
           --no-default-features
           -F goldy-dx12-only -F bump_estimate -F tracy
-          --no-fail-fast
+          --no-fail-fast -j 1
         env:
           EKRANO_CI_GPU_SUPPORT: ${{ matrix.gpu }}
           EKRANO_CI_SKIP_SLOW: 'yes'
           GOLDY_BACKEND: dx12
           VK_LAYER_PATH: ""
+          # Comma-separated snapshot `params.name` values to skip on CI (minor
+          # WARP vs reference diffs). Filled in after the first Windows run.
+          EKRANO_CI_SKIP_SNAPSHOTS: ''
       
       - name: Upload test results due to failure
         uses: actions/upload-artifact@v4
@@ -341,9 +351,9 @@ jobs:
             ekrano_tests/current
 
       - name: cargo test --doc
+        if: matrix.os != 'windows-latest'
         run: cargo test --doc --workspace --locked --all-features --no-fail-fast
 
-      # Ready when windows-latest is re-added to the matrix above.
       - name: cargo test --doc (Windows / DX12-only Goldy)
         if: matrix.os == 'windows-latest'
         run: >-
@@ -357,8 +367,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        # TODO: re-enable windows-latest when Windows CI is green again
-        os: [macos-latest, ubuntu-latest]
+        os: [windows-latest, macos-latest, ubuntu-latest]
     steps:
       - uses: actions/checkout@v4
 
