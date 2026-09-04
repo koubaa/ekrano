@@ -338,9 +338,8 @@ jobs:
           EKRANO_CI_SKIP_SLOW: 'yes'
           GOLDY_BACKEND: dx12
           VK_LAYER_PATH: ""
-          # Comma-separated snapshot `params.name` values to skip on CI (minor
-          # WARP vs reference diffs). Filled in after the first Windows run.
-          EKRANO_CI_SKIP_SNAPSHOTS: ''
+          # DX12 WARP vs lavapipe/Metal snapshot refs. Skip CI-only (not local).
+          EKRANO_CI_SKIP_SNAPSHOTS: 'glyphs_decoration_offset_values,glyphs_decoration_size_values,glyphs_decoration_no_descenders,scaled_hinted,two_emoji,splash,fill_types,luminance_mask'
       
       - name: Upload test results due to failure
         uses: actions/upload-artifact@v4
