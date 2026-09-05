@@ -93,10 +93,7 @@ fn materialize_embedded_slang() -> PathBuf {
             EKRANO_SHARED.hash(&mut h);
             h.finish()
         };
-        let dir = env::temp_dir().join(format!(
-            "ekrano-slang-{}-{stamp:x}",
-            env!("CARGO_PKG_VERSION")
-        ));
+        let dir = env::temp_dir().join(format!("ekrano-slang-{}-{stamp:x}", env!("CARGO_PKG_VERSION")));
         let dest = dir.join("ekrano_shared.slang");
         if dest.is_file() {
             return dir;
