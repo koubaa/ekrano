@@ -49,6 +49,32 @@ fn backend_supports_rgba32float(device: &goldy::Device) -> bool {
         .contains(&TextureFormat::Rgba32Float)
 }
 
+/// Wait for GPU work by withdrawing the float RT. Dropping the renderer
+/// without this can TDR/AV WARP (`STATUS_ACCESS_VIOLATION` in CI).
+fn readback_rgba32float(renderer: &GoldyRenderer, texture: &goldy::Texture, width: u32, height: u32) -> Vec<u8> {
+    let ctx = renderer.submission_context();
+    let mut scheme = Scheme::new(&ctx);
+    let grant = MemoryExchange::new(scheme.context())
+        .bind_withdraw(&mut scheme, texture)
+        .expect("withdraw float RT");
+    let mut frame = scheme.submit().expect("submit readback");
+    let loan = grant.claim(&mut frame).expect("claim").consume().expect("read");
+    assert_eq!(
+        loan.len(),
+        (width * height * 4 * 4) as usize,
+        "Rgba32Float readback byte count"
+    );
+    loan.to_vec()
+}
+
+fn assert_rgba32float_has_coverage(bytes: &[u8], what: &str) {
+    let nonzero = bytes.as_chunks::<4>().0.iter().any(|b| {
+        let v = f32::from_le_bytes(*b);
+        v > 1e-3
+    });
+    assert!(nonzero, "Rgba32Float {what} produced an all-zero image");
+}
+
 fn blurred_circle_scene(width: f64, height: f64) -> Scene {
     let mut scene = Scene::new();
     let blur = Filter(FilterPrimitive::GaussianBlur {
@@ -118,25 +144,9 @@ fn render_to_rgba32float_with_filters() {
         .render_to_texture(&scene, &texture, &params)
         .unwrap_or_else(|e| panic!("float+filter second frame failed: {e:#}"));
 
-    let ctx = renderer.submission_context();
-    let mut scheme = Scheme::new(&ctx);
-    let grant = MemoryExchange::new(scheme.context())
-        .bind_withdraw(&mut scheme, &texture)
-        .expect("withdraw float RT");
-    let mut frame = scheme.submit().expect("submit readback");
-    let loan = grant.claim(&mut frame).expect("claim").consume().expect("read");
-    assert_eq!(
-        loan.len(),
-        (width * height * 4 * 4) as usize,
-        "Rgba32Float readback byte count"
-    );
-
     // Blurred orange circle over black: some texels must be non-zero.
-    let nonzero = loan.as_chunks::<4>().0.iter().any(|b| {
-        let v = f32::from_le_bytes(*b);
-        v > 1e-3
-    });
-    assert!(nonzero, "Rgba32Float filter render produced an all-zero image");
+    let bytes = readback_rgba32float(&renderer, &texture, width, height);
+    assert_rgba32float_has_coverage(&bytes, "filter render");
 }
 
 /// Plain (no filter) float target still works — identity specialization path.

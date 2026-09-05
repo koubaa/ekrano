@@ -206,6 +206,35 @@ impl SchemeRenderer {
     }
 }
 
+impl Drop for SchemeRenderer {
+    fn drop(&mut self) {
+        // DX12/Vulkan/WebGPU close frames with `end_frame_externally_ordered`, so the
+        // orchestrator ring is empty and `drain_all` does not fence the last submit.
+        // Wait that timeline while schemes, PSOs, and retained textures still exist.
+        let _ = self.context.wait_until_idle();
+        let _ = self.frame_pipeline.drain_all();
+        let _ = self.persistent.wait_and_drain_bump_readbacks(&self.context);
+        self.context.flush_deferred_deletions();
+
+        // Release retained graphs before PSOs/RTs. Declaration order drops
+        // `engine_shaders` and `persistent` before `worker`/`upload` `Scheme::drop`
+        // can wait the high-water and release graphs.
+        let ctx = self.context.clone();
+        drop(mem::replace(&mut self.worker, Scheme::new(&ctx)));
+        drop(mem::replace(&mut self.upload, Scheme::new(&ctx)));
+        drop(mem::replace(&mut self.atlas_update, Scheme::new(&ctx)));
+        drop(mem::replace(&mut self.readback, Scheme::new(&ctx)));
+        drop(mem::replace(&mut self.persistent, PersistentState::new(&self.device)));
+        drop(self.live_atlas.take());
+        drop(self.dummy_live_atlas.take());
+        drop(mem::replace(
+            &mut self.live_textures,
+            LiveTextureExchange::new(Arc::new(self.device.clone()), ctx),
+        ));
+        drop(mem::take(&mut self.engine_shaders));
+    }
+}
+
 impl SchemeRenderer {
     // =======================================================================
     // Internal helpers — pool sizing & bump persistence

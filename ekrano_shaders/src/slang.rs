@@ -5,13 +5,11 @@
 //!
 //! These are used when building with the `goldy` feature.
 
-use std::path::PathBuf;
-
-/// Path to the slang directory for Slang compiler search paths.
-/// Required for `__include "ekrano_shared"` to resolve.
-pub fn slang_search_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("slang")
-}
+use std::env;
+use std::fs;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 macro_rules! include_slang {
     ($name:ident, $file:literal) => {
@@ -45,3 +43,90 @@ include_slang!(PATH_TILING, "path_tiling.slang");
 include_slang!(FLATTEN, "flatten.slang");
 include_slang!(FINE, "fine.slang");
 include_slang!(FILTER_PASS, "filter_pass.slang");
+
+/// Directory the Slang compiler searches for `import ekrano_shared`.
+///
+/// Entry shaders are compiled from memory, but that import still needs a file
+/// on disk. Checkout builds use `ekrano_shaders/slang/`. Packaged binaries do
+/// not have `CARGO_MANIFEST_DIR` on the target machine, so this also honors
+/// `EKRANO_SLANG_DIR`, paths next to the executable, then a temp copy of the
+/// embedded [`EKRANO_SHARED`] source.
+pub fn slang_search_path() -> PathBuf {
+    if let Some(p) = env_search_dir() {
+        return p;
+    }
+    if let Some(p) = bundled_search_dir() {
+        return p;
+    }
+    let cargo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("slang");
+    if dir_has_shared(&cargo) {
+        return cargo;
+    }
+    materialize_embedded_slang()
+}
+
+fn env_search_dir() -> Option<PathBuf> {
+    let p = PathBuf::from(env::var_os("EKRANO_SLANG_DIR")?);
+    dir_has_shared(&p).then_some(p)
+}
+
+fn bundled_search_dir() -> Option<PathBuf> {
+    let exe = env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let candidates = [
+        dir.join("slang"),
+        dir.join("../Resources/ekrano/slang"),
+        dir.join("../Resources/slang"),
+    ];
+    candidates.into_iter().find(|p| dir_has_shared(p))
+}
+
+fn dir_has_shared(dir: &Path) -> bool {
+    dir.join("ekrano_shared.slang").is_file()
+}
+
+fn materialize_embedded_slang() -> PathBuf {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let stamp = {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            EKRANO_SHARED.hash(&mut h);
+            h.finish()
+        };
+        let dir = env::temp_dir().join(format!("ekrano-slang-{}-{stamp:x}", env!("CARGO_PKG_VERSION")));
+        let dest = dir.join("ekrano_shared.slang");
+        if dest.is_file() {
+            return dir;
+        }
+        if fs::create_dir_all(&dir).is_err() {
+            return dir;
+        }
+        let tmp = dir.join("ekrano_shared.slang.tmp");
+        if fs::write(&tmp, EKRANO_SHARED).is_ok() {
+            let _ = fs::rename(&tmp, &dest);
+        }
+        dir
+    })
+    .clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slang_search_path_has_ekrano_shared() {
+        let dir = slang_search_path();
+        let shared = dir.join("ekrano_shared.slang");
+        assert!(shared.is_file(), "missing {shared:?}");
+        let body = fs::read_to_string(&shared).unwrap();
+        assert!(body.contains("import goldy_exp"));
+    }
+
+    #[test]
+    fn materialize_writes_shared_module() {
+        let dir = materialize_embedded_slang();
+        let body = fs::read_to_string(dir.join("ekrano_shared.slang")).unwrap();
+        assert_eq!(body, EKRANO_SHARED);
+    }
+}
