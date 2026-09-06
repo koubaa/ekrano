@@ -137,6 +137,17 @@ type LiveAtlasPrepare = (
     HashMap<u64, (u32, u32)>,
 );
 
+/// Goldy's CPU device JITs compute kernels but has no textures or samplers.
+const CPU_GRAPHICS_UNSUPPORTED: &str = "Goldy CPU backend is compute-only (no textures, samplers, or fine raster). \
+     Fine rasterization stays GPU-only until Goldy host textures land.";
+
+fn reject_cpu_graphics(device: &Device) -> Result<()> {
+    if device.backend_type() == BackendType::Cpu {
+        return Err(Error::Gpu(CPU_GRAPHICS_UNSUPPORTED.into()));
+    }
+    Ok(())
+}
+
 impl SchemeRenderer {
     /// Create a new Scheme renderer for the given device.
     pub fn new(device: &Device) -> Result<Self> {
@@ -915,6 +926,7 @@ impl SchemeRenderer {
     where
         F: FnOnce() -> Result<()>,
     {
+        reject_cpu_graphics(&self.device)?;
         let _tz = goldy::tracy_zone!("ekrano.run_frame");
         use std::time::Instant;
         let frame_start = Instant::now();

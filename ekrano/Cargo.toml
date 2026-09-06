@@ -24,6 +24,11 @@ goldy-dx12-only = ["goldy/dx12"]
 goldy-cuda = ["goldy/cuda", "goldy/dx12", "goldy/instrumentation"]
 # Portable WebGPU (Goldy wgpu backend): GOLDY_BACKEND=webgpu cargo test --no-default-features -F goldy-webgpu -- ...
 goldy-webgpu = ["goldy/webgpu", "goldy/instrumentation"]
+# Goldy host-callable CPU compute (`GOLDY_BACKEND=cpu`). Always present in goldy;
+# this exclusive feature set skips native GPU backends. `graphics` is still
+# required so Ekrano's present/texture types exist; the CPU device itself
+# rejects textures. Fine raster stays GPU-only until Goldy CPU textures land.
+goldy-cpu = ["goldy/graphics", "goldy/instrumentation"]
 # Enables GPU memory usage estimation. This performs additional computations
 # in order to estimate the minimum required allocations for buffers backing
 # bump-allocated GPU memory.

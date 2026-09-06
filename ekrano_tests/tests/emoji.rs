@@ -19,7 +19,7 @@ use ekrano::peniko::color::palette;
 #[cfg(target_os = "macos")]
 use ekrano::peniko::{Blob, Brush, FontData};
 use ekrano::{Scene, kurbo::Affine, peniko::Fill};
-use ekrano_tests::{TestParams, shared_test_device, snapshot_test_sync};
+use ekrano_tests::{TestParams, snapshot_test_sync};
 use scenes::SimpleText;
 #[cfg(target_os = "macos")]
 use std::sync::Arc;
@@ -176,9 +176,6 @@ fn main() {
     case!("little_bitmap", little_bitmap());
     case!("bitmap_undef", bitmap_undef());
 
-    let mut args = libtest_mimic::Arguments::from_args();
-    if let Some(device) = shared_test_device() {
-        submission::clamp_test_threads(&mut args, device);
-    }
-    libtest_mimic::run(&args, trials).exit()
+    let args = libtest_mimic::Arguments::from_args();
+    submission::run_gpu_snapshot_trials(args, trials);
 }

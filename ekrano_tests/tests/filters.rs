@@ -37,7 +37,7 @@ use ekrano::{
     peniko::{Color, Fill, color::palette::css::*},
 };
 use ekrano_encoding::{Filter, FilterEdgeMode, FilterPrimitive};
-use ekrano_tests::{TestParams, shared_test_device, snapshot_test_sync};
+use ekrano_tests::{TestParams, snapshot_test_sync};
 
 /// Build a star polygon centered at `center` with `n` points, alternating
 /// between `inner` and `outer` radii.
@@ -649,9 +649,6 @@ fn main() {
     case!("filter_nested_layers", filter_nested_layers());
     case!("filter_empty_layers", filter_empty_layers());
 
-    let mut args = libtest_mimic::Arguments::from_args();
-    if let Some(device) = shared_test_device() {
-        submission::clamp_test_threads(&mut args, device);
-    }
-    libtest_mimic::run(&args, trials).exit()
+    let args = libtest_mimic::Arguments::from_args();
+    submission::run_gpu_snapshot_trials(args, trials);
 }

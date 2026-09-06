@@ -10,6 +10,24 @@
 
 use goldy::{Device, types::BackendType};
 
+/// Run GPU snapshot / render trials, ignoring them on Goldy's compute-only CPU backend.
+///
+/// Fine raster needs textures, which `GOLDY_BACKEND=cpu` does not provide. Buffer-only
+/// coverage lives in `cpu_backend.rs`.
+pub(crate) fn run_gpu_snapshot_trials(mut args: libtest_mimic::Arguments, trials: Vec<libtest_mimic::Trial>) -> ! {
+    let trials = match ekrano_tests::shared_test_device() {
+        Some(device) if device.backend_type() == BackendType::Cpu => {
+            trials.into_iter().map(|t| t.with_ignored_flag(true)).collect()
+        }
+        Some(device) => {
+            clamp_test_threads(&mut args, device);
+            trials
+        }
+        None => trials,
+    };
+    libtest_mimic::run(&args, trials).exit()
+}
+
 /// Clamp libtest parallelism for backends that share one process-lifetime [`Device`].
 ///
 /// Metal is intentionally untouched: isolation there is per-device via

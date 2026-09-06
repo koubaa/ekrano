@@ -19,7 +19,7 @@ use ekrano::{
     kurbo::{Affine, Point, Rect},
     peniko::color::palette::css::{REBECCA_PURPLE, WHITE},
 };
-use ekrano_tests::{TestParams, shared_test_device, snapshot_test_sync};
+use ekrano_tests::{TestParams, snapshot_test_sync};
 
 fn inverse_rect_with(radius: f64, std_dev: f64, affine: Affine, name: &str) {
     let rect = Rect::new(20.0, 20.0, 80.0, 80.0);
@@ -112,9 +112,6 @@ fn main() {
         inverse_blurred_rounded_rect_with_transform()
     );
 
-    let mut args = libtest_mimic::Arguments::from_args();
-    if let Some(device) = shared_test_device() {
-        submission::clamp_test_threads(&mut args, device);
-    }
-    libtest_mimic::run(&args, trials).exit()
+    let args = libtest_mimic::Arguments::from_args();
+    submission::run_gpu_snapshot_trials(args, trials);
 }

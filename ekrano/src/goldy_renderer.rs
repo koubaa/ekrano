@@ -721,6 +721,10 @@ pub(crate) mod tests {
 
     fn try_create_gpu_test_device() -> Option<GpuTestDevice> {
         let instance = Instance::new().ok()?;
+        if instance.backend_type() == BackendType::Cpu {
+            // Texture-using `--lib` tests skip; see `ekrano_tests` `cpu_backend`.
+            return None;
+        }
         let adapter = instance.request_adapter(&RequestAdapterOptions::default()).ok()?;
 
         // Lock before `request_device` when the selected adapter is WARP — adapter
