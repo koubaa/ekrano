@@ -152,6 +152,50 @@ fn reject_cpu_present(
     Ok(())
 }
 
+fn reject_cpu_missing_pipeline(shaders: &FullShaders) -> Result<()> {
+    let stages = [
+        ("pipeline_setup", shaders.pipeline_setup),
+        ("pathtag_reduce", shaders.pathtag_reduce),
+        ("pathtag_reduce2", shaders.pathtag_reduce2),
+        ("pathtag_scan1", shaders.pathtag_scan1),
+        ("pathtag_scan", shaders.pathtag_scan),
+        ("pathtag_scan_large", shaders.pathtag_scan_large),
+        ("bbox_clear", shaders.bbox_clear),
+        ("flatten", shaders.flatten),
+        ("draw_reduce", shaders.draw_reduce),
+        ("draw_leaf", shaders.draw_leaf),
+        ("clip_reduce", shaders.clip_reduce),
+        ("clip_leaf", shaders.clip_leaf),
+        ("binning", shaders.binning),
+        ("tile_alloc", shaders.tile_alloc),
+        ("backdrop", shaders.backdrop),
+        ("path_count_setup", shaders.path_count_setup),
+        ("path_count", shaders.path_count),
+        ("coarse", shaders.coarse),
+        ("path_tiling_setup", shaders.path_tiling_setup),
+        ("path_tiling", shaders.path_tiling),
+    ];
+    let mut missing: Vec<&str> = stages
+        .into_iter()
+        .filter(|(_, id)| id.is_cpu_unavailable())
+        .map(|(name, _)| name)
+        .collect();
+    match shaders.fine_area {
+        Some(id) if id.is_cpu_unavailable() => missing.push("fine_area"),
+        None => missing.push("fine_area"),
+        Some(_) => {}
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(Error::Shader(format!(
+        "Goldy CPU cannot compile workgroup-barrier stages ({}). \
+         Slang's host-callable target rejects GroupMemoryBarrierWithGroupSync. \
+         Isolated fine_cpu still writes a packed pixmap through PixelExchange.",
+        missing.join(", ")
+    )))
+}
+
 impl SchemeRenderer {
     /// Create a new Scheme renderer for the given device.
     pub fn new(device: &Device) -> Result<Self> {
@@ -1081,6 +1125,9 @@ impl SchemeRenderer {
                 "Goldy CPU fine raster supports Area anti-aliasing only (no MSAA)".into(),
             ));
         }
+        if cpu_compute {
+            reject_cpu_missing_pipeline(&self.shaders)?;
+        }
         if !cpu_compute {
             if self.persistent.linear_clamp_sampler.is_none() {
                 self.persistent.linear_clamp_sampler =
@@ -1685,31 +1732,41 @@ impl SchemeRenderer {
         defines: &[(&str, &str)],
         optimization_level: goldy::OptimizationLevel,
     ) -> Result<ShaderId> {
-        let shader_module = {
-            let _tz = goldy::tracy_zone!("ekrano.add_shader.slang", label);
-            ShaderModule::from_slang_with_options(
-                &self.device,
-                slang_source,
-                search_paths,
-                defines,
-                optimization_level,
-                &[],
-            )
-            .map_err(|e| Error::Shader(format!("{:#}", e)))?
-        };
-        let pipeline = {
-            let _tz = goldy::tracy_zone!("ekrano.add_shader.pipeline", label);
-            ComputePipeline::new_with_label(&self.device, &shader_module, Some(label))
+        let compiled = (|| -> Result<ShaderId> {
+            let shader_module = {
+                let _tz = goldy::tracy_zone!("ekrano.add_shader.slang", label);
+                ShaderModule::from_slang_with_options(
+                    &self.device,
+                    slang_source,
+                    search_paths,
+                    defines,
+                    optimization_level,
+                    &[],
+                )
                 .map_err(|e| Error::Shader(format!("{:#}", e)))?
-        };
+            };
+            let pipeline = {
+                let _tz = goldy::tracy_zone!("ekrano.add_shader.pipeline", label);
+                ComputePipeline::new_with_label(&self.device, &shader_module, Some(label))
+                    .map_err(|e| Error::Shader(format!("{:#}", e)))?
+            };
 
-        let id = ShaderId(self.engine_shaders.len());
-        self.engine_shaders.push(GoldyShader {
-            pipeline,
-            bindings: bindings.to_vec(),
-            label,
-        });
-        Ok(id)
+            let id = ShaderId(self.engine_shaders.len());
+            self.engine_shaders.push(GoldyShader {
+                pipeline,
+                bindings: bindings.to_vec(),
+                label,
+            });
+            Ok(id)
+        })();
+        match compiled {
+            Ok(id) => Ok(id),
+            Err(e) if self.device.backend_type() == BackendType::Cpu => {
+                log::warn!("Goldy CPU backend: skipping shader {label}: {}", e.detail());
+                Ok(ShaderId::CPU_UNAVAILABLE)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Like [`Self::add_compute_shader_with_options`] with the shader label in compile errors.
@@ -2011,6 +2068,10 @@ impl<'a> SchemeRecorder<'a> {
         bindings: &[GpuBinding<'_>],
         push_tail: &[u32],
     ) {
+        if shader_id.is_cpu_unavailable() {
+            log::error!("Skipping dispatch of a CPU shader that failed to compile");
+            return;
+        }
         if x == 0 || y == 0 || z == 0 {
             log::warn!(
                 "Skipping Dispatch for shader {} with zero grid dimension ({x}, {y}, {z}); \
