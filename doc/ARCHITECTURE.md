@@ -22,7 +22,7 @@ Ideally, we'd like our documentation to be more structured; we may refactor it i
 ## Roadmap
 
 The [roadmap for 2023](roadmap_2023.md) is still largely applicable as historical Vello context.
-The "Semi-stable encoding format" section can be considered implemented. The handwritten CPU fallback stages were removed; CPU debug of the same Slang kernels is tracked in Goldy ([koubaa/goldy#292](https://github.com/koubaa/goldy/issues/292)) and wired in Ekrano via `GOLDY_BACKEND=cpu` (buffer stages only; fine raster stays GPU-only until Goldy host textures land).
+The "Semi-stable encoding format" section can be considered implemented. The handwritten CPU fallback stages were removed; CPU debug of the same Slang kernels is tracked in Goldy ([koubaa/goldy#292](https://github.com/koubaa/goldy/issues/292)) and wired in Ekrano via `GOLDY_BACKEND=cpu` (buffer stages only; fine raster stays GPU-only until [Goldy PixelExchange](https://github.com/koubaa/goldy/pull/305) lands).
 
 Our current priority is to fill in missing features and to fix rendering artifacts, so that Vello can reach feature parity with other 2D graphics engines.
 
