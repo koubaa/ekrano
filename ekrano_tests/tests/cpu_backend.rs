@@ -3,17 +3,21 @@
 
 //! Goldy CPU compute backend (`GOLDY_BACKEND=cpu`, issue #114).
 //!
-//! Isolated binary so the env override cannot race GPU tests. Fine raster
-//! needs textures and stays GPU-only; this covers buffer-stage JIT.
+//! Isolated binary so the env override cannot race GPU tests. Area fine writes
+//! a packed RGBA8 pixmap; [`ekrano::GoldyRenderer::render_to_buffer`] withdraws
+//! it through [`goldy::PixelExchange`].
 
 use std::mem::size_of;
 use std::sync::Arc;
 
+use ekrano::kurbo::{Affine, Rect};
+use ekrano::peniko::color::palette;
+use ekrano::peniko::{Brush, Fill};
 use ekrano::{GoldyRenderer, RenderParams, Scene};
 use ekrano_encoding::{ConfigUniform, PathBbox};
 use goldy::{
-    BufferKind, ComputePipeline, DeviceDescriptor, Instance, MemoryExchange, NodeAccess, RequestAdapterOptions,
-    RetainedPool, Scheme, ShaderModule, types::BufferFlags,
+    BufferKind, ComputePipeline, DeviceDescriptor, HostPixelSink, Instance, MemoryExchange, NodeAccess,
+    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, TextureFormat, types::BufferFlags,
 };
 
 fn select_cpu_backend() {
@@ -33,6 +37,16 @@ fn cpu_device() -> goldy::Device {
         .expect("CPU adapter")
         .request_device(&DeviceDescriptor::default())
         .expect("CPU device")
+}
+
+fn area_params(width: u32, height: u32) -> RenderParams {
+    RenderParams {
+        base_color: palette::css::BLACK,
+        width,
+        height,
+        antialiasing_method: ekrano::AaConfig::Area,
+        robust: false,
+    }
 }
 
 /// Dispatch Ekrano `bbox_clear` on host parcels (Goldy #292 acceptance: one real stage).
@@ -96,9 +110,62 @@ fn bbox_clear_runs_on_cpu() {
     }
 }
 
-/// Buffer-only stages compile; full `render_to_buffer` still needs textures.
+/// Area fine writes packed RGBA8; PixelExchange copies it to a host sink.
 #[test]
-fn renderer_constructs_and_rejects_texture_render() {
+fn render_to_buffer_solid_rect() {
+    select_cpu_backend();
+    let device = cpu_device();
+    let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new on CPU");
+    let mut scene = Scene::new();
+    scene.fill(
+        Fill::NonZero,
+        Affine::IDENTITY,
+        &Brush::Solid(palette::css::RED),
+        None,
+        &Rect::new(4.0, 4.0, 12.0, 12.0),
+    );
+    let params = area_params(16, 16);
+    let bytes = renderer
+        .render_to_buffer(&scene, &params)
+        .expect("CPU render_to_buffer");
+    assert_eq!(bytes.len(), 16 * 16 * 4);
+    assert_eq!(&bytes[0..4], &[0, 0, 0, 255], "base color at (0,0)");
+    let interior = ((8 * 16) + 8) * 4;
+    assert_eq!(&bytes[interior..interior + 4], &[255, 0, 0, 255], "filled red at (8,8)");
+}
+
+/// Same pixmap path via an explicit [`HostPixelSink`].
+#[test]
+fn render_to_pixel_sink_solid_rect() {
+    select_cpu_backend();
+    let device = cpu_device();
+    let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new on CPU");
+    let mut scene = Scene::new();
+    scene.fill(
+        Fill::NonZero,
+        Affine::IDENTITY,
+        &Brush::Solid(palette::css::LIME),
+        None,
+        &Rect::new(2.0, 2.0, 6.0, 6.0),
+    );
+    let params = area_params(8, 8);
+    let sink = Arc::new(HostPixelSink::new(8, 8, TextureFormat::Rgba8Unorm).expect("sink"));
+    renderer
+        .render_to_pixel_sink(&scene, &params, sink.clone())
+        .expect("CPU render_to_pixel_sink");
+    let bytes = sink.pixels();
+    assert_eq!(bytes.len(), 8 * 8 * 4);
+    assert_eq!(&bytes[0..4], &[0, 0, 0, 255], "base color at (0,0)");
+    let interior = ((4 * 8) + 4) * 4;
+    assert_eq!(
+        &bytes[interior..interior + 4],
+        &[0, 255, 0, 255],
+        "filled lime at (4,4)"
+    );
+}
+
+#[test]
+fn cpu_fine_rejects_msaa() {
     select_cpu_backend();
     let device = cpu_device();
     let mut renderer = GoldyRenderer::new(&device).expect("GoldyRenderer::new on CPU");
@@ -106,17 +173,14 @@ fn renderer_constructs_and_rejects_texture_render() {
         .render_to_buffer(
             &Scene::new(),
             &RenderParams {
-                base_color: ekrano::peniko::color::palette::css::BLACK,
-                width: 16,
-                height: 16,
-                antialiasing_method: ekrano::AaConfig::Area,
+                base_color: palette::css::BLACK,
+                width: 8,
+                height: 8,
+                antialiasing_method: ekrano::AaConfig::Msaa8,
                 robust: false,
             },
         )
-        .expect_err("CPU backend cannot rasterize");
+        .expect_err("CPU fine is Area-only");
     let detail = err.detail();
-    assert!(
-        detail.contains("compute-only"),
-        "expected compute-only error, got {detail}"
-    );
+    assert!(detail.contains("Area"), "expected Area-only error, got {detail}");
 }

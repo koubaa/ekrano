@@ -258,14 +258,29 @@ pub(crate) fn goldy_full_shaders_scheme(
         &search_paths,
         &[],
     )?;
-    // Goldy's CPU device JITs the same Slang compute stages but has no textures,
-    // samplers, or graphics. Skip fine/filter so `GoldyRenderer::new` still
-    // compiles buffer-only stages (bbox_clear, flatten, …) for debugging.
+    // Goldy's CPU device JITs the same Slang compute stages but has no textures
+    // or samplers. Fine writes a packed RGBA8 buffer (`FINE_CPU`) for PixelExchange.
     let cpu_compute = renderer.device().backend_type() == goldy::types::BackendType::Cpu;
 
     let (fine_area, fine_msaa8, fine_msaa16, filter_pass) = if cpu_compute {
-        log::info!("Goldy CPU backend: skipping fine/filter shaders (no host textures yet)");
-        (None, None, None, None)
+        let fine_cpu_resources = [
+            BufReadOnly,
+            BufReadOnly,
+            BufReadOnly,
+            BufReadOnly,
+            Buffer,
+            Buffer, // packed RGBA8 pixmap
+        ];
+        let fine_area = Some(renderer.add_compute_shader_required(
+            "fine_area",
+            ekrano_shaders::slang::FINE_CPU,
+            &fine_cpu_resources,
+            &search_paths,
+            &[],
+            sw_opt,
+        )?);
+        log::info!("Goldy CPU backend: area fine writes a packed pixmap buffer (no MSAA/filter)");
+        (fine_area, None, None, None)
     } else {
         let fine_resources = [
             BufReadOnly,

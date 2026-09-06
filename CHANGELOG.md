@@ -19,7 +19,7 @@ This release has an [MSRV][] of 1.92.
 
 - Image tinting with alpha-mask and component-wise multiply modes.
 - Gradient interpolation in unpremultiplied alpha space (`InterpolationAlphaSpace::Unpremultiplied`). Premultiplied remains the default.
-- Goldy CPU compute backend (`GOLDY_BACKEND=cpu`, `--features goldy-cpu`): the same Slang buffer stages JIT on the host for debugging. Fine rasterization stays GPU-only until Goldy [`PixelExchange`](https://github.com/koubaa/goldy/pull/305) lands ([#114](https://github.com/koubaa/ekrano/issues/114)).
+- Goldy CPU compute backend (`GOLDY_BACKEND=cpu`, `--features goldy-cpu`): the same Slang kernels JIT on the host for debugging. Area fine (`fine_cpu.slang`) writes a packed RGBA8 buffer; [`GoldyRenderer::render_to_buffer`] and [`GoldyRenderer::render_to_pixel_sink`] withdraw it through Goldy [`PixelExchange`](https://github.com/koubaa/goldy/pull/305). MSAA, filter-layer UAVs, images, and gradient atlas samples are skipped ([#114](https://github.com/koubaa/ekrano/issues/114)).
 
 ### Removed
 

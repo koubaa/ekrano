@@ -309,6 +309,8 @@ pub(crate) struct PersistentState {
     /// Scheme-path render-target reuse: optional persistent `out_image` + filter layers
     /// (retained deeds; take/store across frames).
     pub(crate) cached_scheme_rt: Option<(Option<Texture>, [Texture; 4])>,
+    /// CPU packed pixmap (`width`, `height`, buffer).
+    pub(crate) cached_out_pixmap: Option<(u32, u32, Buffer)>,
     /// Cached pipeline buffers from the previous frame. At depth=1 only one
     /// entry exists at a time: take-then-install within a single `run_frame`.
     pub(crate) cached_pipeline: Option<crate::scheme_gpu_resources::CachedPipeline>,
@@ -399,6 +401,7 @@ impl PersistentState {
             linear_clamp_sampler: None,
             nearest_clamp_sampler: None,
             cached_scheme_rt: None,
+            cached_out_pixmap: None,
             cached_pipeline: None,
             deferred_textures_cap_hint: 0,
             stable_mask_lut_msaa8: None,

@@ -32,8 +32,8 @@ use std::sync::Arc;
 use goldy::Buffer;
 use goldy::types::{BackendType, ResourceAccess, TextureFlags, TextureFormat, TextureKind};
 use goldy::{
-    BudgetPolicy, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator, MemoryExchange, Scheme,
-    ShaderModule, Signal, Texture,
+    BudgetPolicy, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator, HostPixelSink, MemoryExchange,
+    PixelExchange, PixmapLayout, Scheme, ShaderModule, Signal, Texture,
 };
 
 #[cfg(feature = "debug_layers")]
@@ -137,12 +137,16 @@ type LiveAtlasPrepare = (
     HashMap<u64, (u32, u32)>,
 );
 
-/// Goldy's CPU device JITs compute kernels but has no textures or samplers.
-const CPU_GRAPHICS_UNSUPPORTED: &str = "Goldy CPU backend is compute-only (no textures, samplers, or fine raster). \
-     Fine rasterization stays GPU-only until Goldy host textures land.";
+/// Goldy's CPU device JITs compute kernels but has no textures, samplers, or surfaces.
+const CPU_GRAPHICS_UNSUPPORTED: &str = "Goldy CPU backend is compute-only (no textures, samplers, or surfaces). \
+     Use render_to_buffer / PixelExchange for the packed pixmap path.";
 
-fn reject_cpu_graphics(device: &Device) -> Result<()> {
-    if device.backend_type() == BackendType::Cpu {
+fn reject_cpu_present(
+    device: &Device,
+    output_texture: Option<&Texture>,
+    surface: Option<&goldy::SurfaceExchange>,
+) -> Result<()> {
+    if device.backend_type() == BackendType::Cpu && (output_texture.is_some() || surface.is_some()) {
         return Err(Error::Gpu(CPU_GRAPHICS_UNSUPPORTED.into()));
     }
     Ok(())
@@ -791,6 +795,7 @@ impl SchemeRenderer {
                     log::info!("Bump overflow in render_to_buffer (0x{:x}), retrying", bump.failed);
                     self.persistent.cached_scheme_rt = None;
                     self.persistent.cached_out_image_withdraw = None;
+                    self.persistent.cached_out_pixmap = None;
                 }
                 _ => break,
             }
@@ -805,6 +810,11 @@ impl SchemeRenderer {
                 bump.failed,
                 MAX_BUMP_RETRIES
             );
+        }
+
+        let cpu_pixmap = self.device.backend_type() == BackendType::Cpu;
+        if cpu_pixmap {
+            return self.consume_cpu_pixmap(params.width, params.height);
         }
 
         let out_handle = self
@@ -864,6 +874,74 @@ impl SchemeRenderer {
             }
             _ => bytes.into_vec(),
         })
+    }
+
+    /// Withdraw the CPU packed pixmap through [`goldy::PixelExchange`] into `sink`.
+    pub fn render_to_pixel_sink(
+        &mut self,
+        scene: &Scene,
+        params: &RenderParams,
+        sink: Arc<dyn goldy::PixelSink>,
+    ) -> Result<()> {
+        if self.device.backend_type() != BackendType::Cpu {
+            return Err(Error::Gpu(
+                "render_to_pixel_sink is the CPU pixmap path; GPU uses render_to_texture / render_to_buffer".into(),
+            ));
+        }
+        let (sw, sh) = sink.size();
+        if sw != params.width || sh != params.height {
+            return Err(Error::Gpu(format!(
+                "PixelSink is {sw}x{sh}, render is {}x{}",
+                params.width, params.height
+            )));
+        }
+        for _attempt in 0..=MAX_BUMP_RETRIES {
+            self.poll_and_reclaim();
+            self.run_frame(scene, params, None, None)?;
+            self.frame_pipeline.drain_all().map_err(Error::from)?;
+            self.persistent.wait_and_drain_bump_readbacks(&self.context)?;
+            self.context.flush_deferred_deletions();
+            match self.persistent.last_drained_bump() {
+                Some(bump) if bump.failed != 0 => {
+                    self.persistent.cached_out_pixmap = None;
+                    self.persistent.cached_out_image_withdraw = None;
+                }
+                _ => break,
+            }
+        }
+        self.consume_cpu_pixmap_into(sink)
+    }
+
+    fn consume_cpu_pixmap(&mut self, width: u32, height: u32) -> Result<Vec<u8>> {
+        let sink = Arc::new(HostPixelSink::new(width, height, TextureFormat::Rgba8Unorm).map_err(Error::from)?);
+        self.consume_cpu_pixmap_into(sink.clone())?;
+        Ok(sink.pixels())
+    }
+
+    fn consume_cpu_pixmap_into(&mut self, sink: Arc<dyn goldy::PixelSink>) -> Result<()> {
+        let pixmap = self
+            .persistent
+            .cached_out_pixmap
+            .as_ref()
+            .map(|(_, _, buf)| buf)
+            .ok_or_else(|| Error::Shader("render_to_buffer: missing CPU pixmap".into()))?;
+        let (width, height) = self
+            .persistent
+            .cached_out_pixmap
+            .as_ref()
+            .map(|(w, h, _)| (*w, *h))
+            .expect("pixmap dims");
+        let layout = PixmapLayout::tight(width, height, TextureFormat::Rgba8Unorm);
+        self.readback = Scheme::new(&self.context);
+        let exchange = PixelExchange::new(&self.context, sink);
+        let tx = exchange
+            .bind_source(&mut self.readback, pixmap.whole(), layout)
+            .map_err(|e| Error::Readback(e.to_string()))?;
+        let mut submission = self.readback.submit().map_err(|e| Error::Readback(e.to_string()))?;
+        tx.claim(&mut submission)
+            .map_err(|e| Error::Readback(e.to_string()))?
+            .consume()
+            .map_err(|e| Error::Readback(e.to_string()))
     }
 
     fn drain_ready_bump_readbacks(&mut self) -> Result<()> {
@@ -926,7 +1004,7 @@ impl SchemeRenderer {
     where
         F: FnOnce() -> Result<()>,
     {
-        reject_cpu_graphics(&self.device)?;
+        reject_cpu_present(&self.device, output_texture, surface)?;
         let _tz = goldy::tracy_zone!("ekrano.run_frame");
         use std::time::Instant;
         let frame_start = Instant::now();
@@ -997,24 +1075,36 @@ impl SchemeRenderer {
         self.apply_bump_feedback(prev_bump, &layout, &params, &mut config, &mut stats);
 
         let t1 = Instant::now();
-        if self.persistent.linear_clamp_sampler.is_none() {
-            self.persistent.linear_clamp_sampler =
-                Some(goldy::Sampler::linear(&self.device).map_err(|e| Error::Gpu(e.to_string()))?);
+        let cpu_compute = self.device.backend_type() == BackendType::Cpu;
+        if cpu_compute && params.antialiasing_method != crate::AaConfig::Area {
+            return Err(Error::Gpu(
+                "Goldy CPU fine raster supports Area anti-aliasing only (no MSAA)".into(),
+            ));
         }
-        if self.persistent.nearest_clamp_sampler.is_none() {
-            self.persistent.nearest_clamp_sampler =
-                Some(goldy::Sampler::nearest(&self.device).map_err(|e| Error::Gpu(e.to_string()))?);
+        if !cpu_compute {
+            if self.persistent.linear_clamp_sampler.is_none() {
+                self.persistent.linear_clamp_sampler =
+                    Some(goldy::Sampler::linear(&self.device).map_err(|e| Error::Gpu(e.to_string()))?);
+            }
+            if self.persistent.nearest_clamp_sampler.is_none() {
+                self.persistent.nearest_clamp_sampler =
+                    Some(goldy::Sampler::nearest(&self.device).map_err(|e| Error::Gpu(e.to_string()))?);
+            }
         }
         self.context.flush_deferred_deletions();
         let t_pool = t1.elapsed();
 
         let t2 = Instant::now();
-        let live_atlas = self.materialize_live_atlas(
-            live_single_id,
-            live_atlas_data.as_deref(),
-            live_atlas_width,
-            live_atlas_height,
-        )?;
+        let live_atlas = if cpu_compute {
+            None
+        } else {
+            Some(self.materialize_live_atlas(
+                live_single_id,
+                live_atlas_data.as_deref(),
+                live_atlas_width,
+                live_atlas_height,
+            )?)
+        };
         let scene_bucket = crate::worker_retention::scene_size_bucket(packed.len());
         note_scene_growth_frame(&mut self.persistent.scene_growth, packed.len(), scene_bucket);
         let coverage_mask_dims = coverage_mask.as_ref().map(|m| (m.width, m.height));
@@ -1031,8 +1121,8 @@ impl SchemeRenderer {
             images_height,
             coverage_mask_dims,
             &image_regions,
-            live_atlas.width(),
-            live_atlas.height(),
+            live_atlas.as_ref().map(|t| t.width()).unwrap_or(1),
+            live_atlas.as_ref().map(|t| t.height()).unwrap_or(1),
             live_atlas_data.is_some(),
         );
         let topology = worker_topology(
@@ -1042,7 +1132,7 @@ impl SchemeRenderer {
             &dims,
             surface.is_some(),
             direct_present,
-            live_atlas.gpu_handle(),
+            live_atlas.as_ref().map(|t| t.gpu_handle()).unwrap_or(0),
         );
         let upload_key = upload_key_from(&dims);
         let upload_needs_record = crate::worker_retention::upload_stale(&self.persistent, &upload_key);
@@ -1165,7 +1255,7 @@ impl SchemeRenderer {
                     packed,
                     ramps,
                     images,
-                    &live_atlas,
+                    live_atlas.as_ref(),
                     live_atlas_data.as_deref(),
                     &params,
                     &config,
@@ -1252,14 +1342,22 @@ impl SchemeRenderer {
         };
 
         #[cfg(debug_assertions)]
-        if !worker_stale && let Some(recorded) = self.persistent.cached_worker_resources.as_ref() {
+        if !worker_stale
+            && let (Some(gradient), Some(image_atlas), Some(mask_atlas), Some(live_atlas)) = (
+                pipeline.gradient.as_ref(),
+                pipeline.image_atlas.as_ref(),
+                pipeline.mask_atlas.as_ref(),
+                pipeline.live_atlas.as_ref(),
+            )
+            && let Some(recorded) = self.persistent.cached_worker_resources.as_ref()
+        {
             let current = worker_resource_handles(
                 &pipeline.scene,
                 &pipeline.bump,
-                &pipeline.gradient,
-                &pipeline.image_atlas,
-                &pipeline.mask_atlas,
-                &pipeline.live_atlas,
+                gradient,
+                image_atlas,
+                mask_atlas,
+                live_atlas,
                 pipeline.out_image.as_ref(),
             );
             debug_assert_retained_worker_resources(recorded, &current);
@@ -1396,15 +1494,25 @@ impl SchemeRenderer {
             ));
             #[cfg(debug_assertions)]
             {
-                debug_recorded_resources = Some(worker_resource_handles(
-                    &pipeline.scene,
-                    &pipeline.bump,
-                    &pipeline.gradient,
-                    &pipeline.image_atlas,
-                    &pipeline.mask_atlas,
-                    &pipeline.live_atlas,
-                    pipeline.out_image.as_ref(),
-                ));
+                debug_recorded_resources = match (
+                    pipeline.gradient.as_ref(),
+                    pipeline.image_atlas.as_ref(),
+                    pipeline.mask_atlas.as_ref(),
+                    pipeline.live_atlas.as_ref(),
+                ) {
+                    (Some(gradient), Some(image_atlas), Some(mask_atlas), Some(live_atlas)) => {
+                        Some(worker_resource_handles(
+                            &pipeline.scene,
+                            &pipeline.bump,
+                            gradient,
+                            image_atlas,
+                            mask_atlas,
+                            live_atlas,
+                            pipeline.out_image.as_ref(),
+                        ))
+                    }
+                    _ => None,
+                };
             }
             #[cfg(test)]
             {
@@ -1577,41 +1685,61 @@ impl SchemeRenderer {
         defines: &[(&str, &str)],
         optimization_level: goldy::OptimizationLevel,
     ) -> Result<ShaderId> {
-        let compiled = (|| -> Result<ShaderId> {
-            let shader_module = {
-                let _tz = goldy::tracy_zone!("ekrano.add_shader.slang", label);
-                ShaderModule::from_slang_with_options(
-                    &self.device,
-                    slang_source,
-                    search_paths,
-                    defines,
-                    optimization_level,
-                    &[],
-                )
+        let shader_module = {
+            let _tz = goldy::tracy_zone!("ekrano.add_shader.slang", label);
+            ShaderModule::from_slang_with_options(
+                &self.device,
+                slang_source,
+                search_paths,
+                defines,
+                optimization_level,
+                &[],
+            )
+            .map_err(|e| Error::Shader(format!("{:#}", e)))?
+        };
+        let pipeline = {
+            let _tz = goldy::tracy_zone!("ekrano.add_shader.pipeline", label);
+            ComputePipeline::new_with_label(&self.device, &shader_module, Some(label))
                 .map_err(|e| Error::Shader(format!("{:#}", e)))?
-            };
-            let pipeline = {
-                let _tz = goldy::tracy_zone!("ekrano.add_shader.pipeline", label);
-                ComputePipeline::new_with_label(&self.device, &shader_module, Some(label))
-                    .map_err(|e| Error::Shader(format!("{:#}", e)))?
-            };
+        };
 
-            let id = ShaderId(self.engine_shaders.len());
-            self.engine_shaders.push(GoldyShader {
-                pipeline,
-                bindings: bindings.to_vec(),
-                label,
-            });
-            Ok(id)
-        })();
-        match compiled {
-            Ok(id) => Ok(id),
-            Err(e) if self.device.backend_type() == BackendType::Cpu => {
-                log::warn!("Goldy CPU backend: skipping shader {label}: {}", e.detail());
-                Ok(ShaderId(0))
-            }
-            Err(e) => Err(e),
-        }
+        let id = ShaderId(self.engine_shaders.len());
+        self.engine_shaders.push(GoldyShader {
+            pipeline,
+            bindings: bindings.to_vec(),
+            label,
+        });
+        Ok(id)
+    }
+
+    /// Like [`Self::add_compute_shader_with_options`] with the shader label in compile errors.
+    pub(crate) fn add_compute_shader_required(
+        &mut self,
+        label: &'static str,
+        slang_source: &str,
+        bindings: &[BindType],
+        search_paths: &[&str],
+        defines: &[(&str, &str)],
+        optimization_level: goldy::OptimizationLevel,
+    ) -> Result<ShaderId> {
+        let shader_module = ShaderModule::from_slang_with_options(
+            &self.device,
+            slang_source,
+            search_paths,
+            defines,
+            optimization_level,
+            &[],
+        )
+        .map_err(|e| Error::Shader(format!("{label}: {e:#}")))?;
+        let pipeline = ComputePipeline::new_with_label(&self.device, &shader_module, Some(label))
+            .map_err(|e| Error::Shader(format!("{label}: {e:#}")))?;
+        let id = ShaderId(self.engine_shaders.len());
+        self.engine_shaders.push(GoldyShader {
+            pipeline,
+            bindings: bindings.to_vec(),
+            label,
+        });
+        Ok(id)
     }
 }
 // -----------------------------------------------------------------------
@@ -1749,7 +1877,7 @@ impl<'a> SchemeRecorder<'a> {
         packed: Vec<u8>,
         ramps: Ramps<'_>,
         images: Images<'_>,
-        live_atlas: &Texture,
+        live_atlas: Option<&Texture>,
         live_atlas_data: Option<&[u8]>,
         params: &RenderParams,
         config: &RenderConfig,
@@ -1797,11 +1925,12 @@ impl<'a> SchemeRecorder<'a> {
             scratch,
             bump,
             out_image,
+            out_pixmap,
             filter_layers,
             buffer_sizes,
             config_uniform_value,
-            frame_width: _,
-            frame_height: _,
+            frame_width,
+            frame_height,
         } = pipeline;
 
         let _ = (gradient, image_atlas, mask_atlas, live_atlas);
@@ -1822,9 +1951,14 @@ impl<'a> SchemeRecorder<'a> {
         );
         self.persistent.cached_pipeline = Some(pipeline_cache);
         log::debug!("[PIPE-CACHE] schedule: cached");
-        self.persistent.store_scheme_render_targets(out_image, filter_layers);
-        outcome.scheme_rt_stored = true;
-        log::debug!("[RT-CACHE] schedule: scheme render targets stored");
+        if let Some(pixmap) = out_pixmap {
+            self.persistent.cached_out_pixmap = Some((frame_width, frame_height, pixmap));
+        }
+        if let Some(layers) = filter_layers {
+            self.persistent.store_scheme_render_targets(out_image, layers);
+            outcome.scheme_rt_stored = true;
+            log::debug!("[RT-CACHE] schedule: scheme render targets stored");
+        }
         outcome
     }
 
@@ -2158,7 +2292,7 @@ mod tests {
                     packed,
                     ramps,
                     images,
-                    &live_atlas,
+                    Some(&live_atlas),
                     None,
                     &params,
                     &config,
