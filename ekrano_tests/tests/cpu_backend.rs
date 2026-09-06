@@ -23,7 +23,11 @@ fn select_cpu_backend() {
 
 fn cpu_device() -> goldy::Device {
     let instance = Instance::new().expect("CPU instance");
-    assert_eq!(instance.backend_type(), goldy::BackendType::Cpu);
+    assert_eq!(
+        instance.backend_type(),
+        goldy::BackendType::Cpu,
+        "GOLDY_BACKEND=cpu must select the host-callable device"
+    );
     instance
         .request_adapter(&RequestAdapterOptions::default())
         .expect("CPU adapter")
@@ -46,7 +50,7 @@ fn bbox_clear_runs_on_cpu() {
         .acquire_buffer(
             config_bytes.len() as u64,
             BufferKind::Scattered,
-            Some(size_of::<ConfigUniform>() as u32),
+            Some(u32::try_from(size_of::<ConfigUniform>()).expect("ConfigUniform stride fits u32")),
             BufferFlags::empty(),
             Some(config_bytes),
         )
@@ -58,7 +62,7 @@ fn bbox_clear_runs_on_cpu() {
         .acquire_buffer(
             bbox_bytes.len() as u64,
             BufferKind::Scattered,
-            Some(size_of::<PathBbox>() as u32),
+            Some(u32::try_from(size_of::<PathBbox>()).expect("PathBbox stride fits u32")),
             BufferFlags::empty(),
             Some(bbox_bytes),
         )
@@ -83,7 +87,7 @@ fn bbox_clear_runs_on_cpu() {
     let mut frame = scheme.submit().expect("submit");
     let bytes = grant.claim(&mut frame).expect("claim").consume().expect("consume");
     let out: &[PathBbox] = bytemuck::cast_slice(&bytes);
-    assert_eq!(out.len(), 2);
+    assert_eq!(out.len(), 2, "withdraw should return both path bboxes");
     for (i, bbox) in out.iter().enumerate() {
         assert_eq!(bbox.x0, i32::MAX, "x0[{i}]");
         assert_eq!(bbox.y0, i32::MAX, "y0[{i}]");

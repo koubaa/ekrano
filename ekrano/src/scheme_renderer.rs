@@ -1577,31 +1577,41 @@ impl SchemeRenderer {
         defines: &[(&str, &str)],
         optimization_level: goldy::OptimizationLevel,
     ) -> Result<ShaderId> {
-        let shader_module = {
-            let _tz = goldy::tracy_zone!("ekrano.add_shader.slang", label);
-            ShaderModule::from_slang_with_options(
-                &self.device,
-                slang_source,
-                search_paths,
-                defines,
-                optimization_level,
-                &[],
-            )
-            .map_err(|e| Error::Shader(format!("{:#}", e)))?
-        };
-        let pipeline = {
-            let _tz = goldy::tracy_zone!("ekrano.add_shader.pipeline", label);
-            ComputePipeline::new_with_label(&self.device, &shader_module, Some(label))
+        let compiled = (|| -> Result<ShaderId> {
+            let shader_module = {
+                let _tz = goldy::tracy_zone!("ekrano.add_shader.slang", label);
+                ShaderModule::from_slang_with_options(
+                    &self.device,
+                    slang_source,
+                    search_paths,
+                    defines,
+                    optimization_level,
+                    &[],
+                )
                 .map_err(|e| Error::Shader(format!("{:#}", e)))?
-        };
+            };
+            let pipeline = {
+                let _tz = goldy::tracy_zone!("ekrano.add_shader.pipeline", label);
+                ComputePipeline::new_with_label(&self.device, &shader_module, Some(label))
+                    .map_err(|e| Error::Shader(format!("{:#}", e)))?
+            };
 
-        let id = ShaderId(self.engine_shaders.len());
-        self.engine_shaders.push(GoldyShader {
-            pipeline,
-            bindings: bindings.to_vec(),
-            label,
-        });
-        Ok(id)
+            let id = ShaderId(self.engine_shaders.len());
+            self.engine_shaders.push(GoldyShader {
+                pipeline,
+                bindings: bindings.to_vec(),
+                label,
+            });
+            Ok(id)
+        })();
+        match compiled {
+            Ok(id) => Ok(id),
+            Err(e) if self.device.backend_type() == BackendType::Cpu => {
+                log::warn!("Goldy CPU backend: skipping shader {label}: {}", e.detail());
+                Ok(ShaderId(0))
+            }
+            Err(e) => Err(e),
+        }
     }
 }
 // -----------------------------------------------------------------------
