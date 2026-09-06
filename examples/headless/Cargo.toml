@@ -30,6 +30,7 @@ goldy-webgpu = [
     "goldy/webgpu",
     "goldy/instrumentation",
 ]
+goldy-cpu = ["ekrano/goldy-cpu", "scenes/goldy-cpu", "goldy/graphics", "goldy/instrumentation"]
 
 [lints]
 workspace = true

@@ -882,10 +882,10 @@ pub(crate) struct CachedPipeline {
 }
 
 pub(crate) struct PipelineResources {
-    pub gradient: Texture,
-    pub image_atlas: Texture,
-    pub mask_atlas: Texture,
-    pub live_atlas: Texture,
+    pub gradient: Option<Texture>,
+    pub image_atlas: Option<Texture>,
+    pub mask_atlas: Option<Texture>,
+    pub live_atlas: Option<Texture>,
     pub scene: Buffer,
     pub config: Buffer,
     /// Composite indirect buffer (one ordinal `DispatchShape` parcel per stage).
@@ -894,9 +894,12 @@ pub(crate) struct PipelineResources {
     pub stable: StablePipelineBuffers,
     pub scratch: ScratchPipelineBuffers,
     pub bump: Buffer,
-    /// Full-frame output texture. `None` when swapchain direct-present writes to the lease.
+    /// Full-frame output texture. `None` when swapchain direct-present writes to the lease
+    /// or when the CPU pixmap path writes [`Self::out_pixmap`].
     pub out_image: Option<Texture>,
-    pub filter_layers: [Texture; 4],
+    /// Packed RGBA8 pixmap (CPU fine). Tightly packed `width * height` `u32`s.
+    pub out_pixmap: Option<Buffer>,
+    pub filter_layers: Option<[Texture; 4]>,
     pub frame_width: u32,
     pub frame_height: u32,
     /// Buffer sizes used this frame, stored for cache-key comparison next frame.
@@ -913,13 +916,16 @@ impl PipelineResources {
         mut packed: Vec<u8>,
         ramps: Ramps<'_>,
         images: Images<'_>,
-        live_atlas: &Texture,
+        live_atlas: Option<&Texture>,
         live_atlas_data: Option<&[u8]>,
         params: &RenderParams,
         config: &RenderConfig,
         out_image_format: TextureFormat,
         direct_present: bool,
     ) -> Result<Self, Error> {
+        if recorder.device().backend_type() == goldy::types::BackendType::Cpu {
+            return Self::prepare_cpu(recorder, packed, params, config);
+        }
         if packed.is_empty() {
             packed.resize(size_of::<u32>(), u8::MAX);
         }
@@ -988,7 +994,7 @@ impl PipelineResources {
         };
 
         let live_atlas = {
-            let tex = live_atlas.borrow();
+            let tex = live_atlas.expect("GPU prepare requires a live atlas texture").borrow();
             if let Some(bytes) = live_atlas_data {
                 let _tz = goldy::tracy_zone!("ekrano.prepare.live_atlas.upload");
                 let mut deposit_slot = std::mem::take(&mut recorder.persistent.cached_live_atlas_deposit);
@@ -1168,10 +1174,10 @@ impl PipelineResources {
         };
 
         Ok(Self {
-            gradient,
-            image_atlas,
-            mask_atlas,
-            live_atlas,
+            gradient: Some(gradient),
+            image_atlas: Some(image_atlas),
+            mask_atlas: Some(mask_atlas),
+            live_atlas: Some(live_atlas),
             scene,
             config,
             indirect: None,
@@ -1179,7 +1185,149 @@ impl PipelineResources {
             scratch,
             bump,
             out_image,
-            filter_layers,
+            out_pixmap: None,
+            filter_layers: Some(filter_layers),
+            frame_width: params.width,
+            frame_height: params.height,
+            buffer_sizes,
+            config_uniform_value,
+        })
+    }
+
+    /// Buffer-only prepare for `GOLDY_BACKEND=cpu`. Fine writes [`Self::out_pixmap`].
+    fn prepare_cpu(
+        recorder: &mut SchemeRecorder<'_>,
+        mut packed: Vec<u8>,
+        params: &RenderParams,
+        config: &RenderConfig,
+    ) -> Result<Self, Error> {
+        if packed.is_empty() {
+            packed.resize(size_of::<u32>(), u8::MAX);
+        }
+        let cpu_config_owned = *config;
+        let scene = {
+            let scene_buf = alloc_or_reuse_scene(recorder, packed.len())?;
+            stage_scene_bytes(recorder, &scene_buf, &packed)?;
+            scene_buf
+        };
+        let config_uniform_value = cpu_config_owned.gpu;
+        let config = {
+            let config_buf = if let Some((_, buf)) = recorder.persistent.cached_config_uniform.take() {
+                record_buffer_reuse(recorder.upload_scheme(), &buf);
+                buf
+            } else {
+                recorder
+                    .persistent
+                    .retained_pool
+                    .acquire_buffer(
+                        size_of::<ekrano_encoding::ConfigUniform>() as u64,
+                        BufferKind::Scattered,
+                        Some(size_of::<ekrano_encoding::ConfigUniform>() as u32),
+                        BufferFlags::empty(),
+                        None,
+                    )
+                    .map_err(|e| Error::Gpu(e.to_string()))?
+            };
+            stage_config_bytes(recorder, &config_buf, bytemuck::bytes_of(&config_uniform_value))?;
+            config_buf
+        };
+        let buffer_sizes = cpu_config_owned.buffer_sizes;
+        let (cached_stable, cached_scratch) = {
+            match recorder.persistent.take_cached_pipeline() {
+                Some(c) if c.buffer_sizes == buffer_sizes => (Some(c.stable), Some(c.scratch)),
+                Some(c) => {
+                    let ctx = recorder.context();
+                    let pool = &mut recorder.persistent.retained_pool;
+                    for buffer in [
+                        c.stable.info_bin_data,
+                        c.stable.tile,
+                        c.stable.segments,
+                        c.stable.ptcl,
+                        c.stable.blend_spill,
+                        c.stable.lines,
+                        c.stable.seg_counts,
+                    ] {
+                        pool.release_buffer(ctx, buffer);
+                    }
+                    for buf in [
+                        c.scratch.reduced,
+                        c.scratch.reduced2,
+                        c.scratch.reduced_scan,
+                        c.scratch.tagmonoid,
+                        c.scratch.path_bbox,
+                        c.scratch.draw_reduced,
+                        c.scratch.draw_monoid,
+                        c.scratch.clip_inp,
+                        c.scratch.clip_el,
+                        c.scratch.clip_bic,
+                        c.scratch.clip_bbox,
+                        c.scratch.draw_bbox,
+                        c.scratch.bin_header,
+                        c.scratch.path,
+                    ] {
+                        ctx.return_transient_buffer(buf);
+                    }
+                    (None, None)
+                }
+                None => (None, None),
+            }
+        };
+        let stable = StablePipelineBuffers::alloc(recorder, cached_stable, &buffer_sizes)?;
+        let scratch = ScratchPipelineBuffers::alloc(recorder, cached_scratch, &buffer_sizes)?;
+        let bump_size = buffer_sizes.bump_alloc.size_in_bytes().into();
+        let bump = alloc_or_reuse_bump(recorder, bump_size)?;
+        clear_gpu_buf(recorder, &bump, 0, None)?;
+        let pixmap_bytes = u64::from(params.width) * u64::from(params.height) * 4;
+        let out_pixmap = {
+            if let Some((w, h, buf)) = recorder.persistent.cached_out_pixmap.take() {
+                if w == params.width && h == params.height && buf.byte_size() == pixmap_bytes {
+                    record_buffer_reuse(recorder.scheme(), &buf);
+                    buf
+                } else {
+                    recorder
+                        .persistent
+                        .retained_pool
+                        .release_buffer(recorder.context(), buf);
+                    recorder
+                        .persistent
+                        .retained_pool
+                        .acquire_buffer(
+                            pixmap_bytes.max(4),
+                            BufferKind::Scattered,
+                            Some(4),
+                            BufferFlags::empty(),
+                            None,
+                        )
+                        .map_err(|e| Error::Gpu(e.to_string()))?
+                }
+            } else {
+                recorder
+                    .persistent
+                    .retained_pool
+                    .acquire_buffer(
+                        pixmap_bytes.max(4),
+                        BufferKind::Scattered,
+                        Some(4),
+                        BufferFlags::empty(),
+                        None,
+                    )
+                    .map_err(|e| Error::Gpu(e.to_string()))?
+            }
+        };
+        Ok(Self {
+            gradient: None,
+            image_atlas: None,
+            mask_atlas: None,
+            live_atlas: None,
+            scene,
+            config,
+            indirect: None,
+            stable,
+            scratch,
+            bump,
+            out_image: None,
+            out_pixmap: Some(out_pixmap),
+            filter_layers: None,
             frame_width: params.width,
             frame_height: params.height,
             buffer_sizes,

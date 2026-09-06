@@ -59,6 +59,8 @@ EKRANO_TEST_UPDATE=all cargo test -p ekrano_tests     # update snapshot referenc
 EKRANO_TEST_CREATE=all cargo test -p ekrano_tests     # create new snapshots
 # Goldy WebGPU (wgpu): exclusive feature + runtime backend
 GOLDY_BACKEND=webgpu cargo test -p ekrano_tests --no-default-features -F goldy-webgpu --test smoke_snapshots
+# Goldy CPU compute (host-callable Slang; area fine writes a packed pixmap)
+GOLDY_BACKEND=cpu cargo test -p ekrano_tests --no-default-features -F goldy-cpu --test cpu_backend
 ```
 ## Linting (do at the end of each agent interaction after code changes)
 
