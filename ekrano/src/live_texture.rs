@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 pub use ekrano_encoding::LIVE_IMAGE_BIT;
 use goldy::types::{BackendType, TextureFlags, TextureFormat, TextureKind};
-use goldy::{Context, Device, RetainedPool, Scheme, Submission, Texture};
+use goldy::{Context, Device, Scheme, Submission, Texture};
 use peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
 
 use crate::Error;
@@ -51,7 +51,7 @@ struct LiveEntry {
 
 /// CanvasExchange-shaped mailbox of live GPU textures for one renderer.
 pub struct LiveTextureExchange {
-    pool: RetainedPool,
+    pool: Arc<Device>,
     ctx: Context,
     depth: usize,
     entries: HashMap<LiveTextureId, LiveEntry>,
@@ -70,7 +70,7 @@ impl LiveTextureExchange {
             _ => 3,
         };
         Self {
-            pool: RetainedPool::new(device),
+            pool: device,
             ctx,
             depth,
             entries: HashMap::new(),
