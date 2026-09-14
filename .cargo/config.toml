@@ -1,2 +1,8 @@
 [alias]
 xtask = "run --release --package xtask --"
+
+# wgpu debug create_shader_module (naga WGSL parse/validate) for Ekrano compute
+# shaders (fine_area, coarse, flatten, …) commits ~1.05 MiB of main-thread stack.
+# Windows defaults to 1 MiB, so debug test binaries overflow.
+[target.'cfg(windows)']
+rustflags = ["-C", "link-args=/STACK:2097152"]
