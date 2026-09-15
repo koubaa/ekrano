@@ -45,7 +45,7 @@ use ekrano::peniko::{Blob, Color, ImageFormat, color::palette};
 use ekrano::peniko::{ImageAlphaType, ImageData};
 use ekrano::{AaConfig, GoldyRenderer, Scene};
 use goldy::types::{TextureFlags, TextureFormat, TextureKind};
-use goldy::{BackendType, Device, DeviceDescriptor, Instance, RequestAdapterOptions, RetainedPool, Texture};
+use goldy::{BackendType, Device, DeviceDescriptor, Instance, RequestAdapterOptions, Texture};
 use image::RgbImage;
 use scenes::{ExampleScene, ImageCache, SceneParams, SimpleText};
 
@@ -58,7 +58,8 @@ pub fn test_alloc_texture(
     access: TextureKind,
     flags: TextureFlags,
 ) -> Texture {
-    RetainedPool::new(Arc::new(device.clone()))
+    device
+        .clone()
         .acquire_texture(width, height, format, access, flags, None)
         .expect("acquire texture")
 }

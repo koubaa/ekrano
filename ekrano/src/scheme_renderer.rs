@@ -713,7 +713,7 @@ impl SchemeRenderer {
 
     /// Query retained-pool accounting for diagnostics or test assertions.
     pub fn resource_pool_stats(&self) -> ResourcePoolStats {
-        let by_kind = self.persistent.retained_pool.bytes_by_kind();
+        let by_kind = self.persistent.retained_pool.retained_bytes_by_kind();
         ResourcePoolStats {
             retained_pool_buffer_bytes: by_kind.buffer,
             retained_pool_texture_bytes: by_kind.texture,
@@ -2100,9 +2100,7 @@ mod tests {
             let mut frame_pipeline = FrameOrchestrator::new(&ctx, FRAME_PIPELINE_DEPTH);
             let frame_handle = frame_pipeline.begin_frame().expect("begin_frame");
             let live_atlas = {
-                use goldy::RetainedPool;
-                use std::sync::Arc;
-                RetainedPool::new(Arc::new(gpu.clone()))
+                gpu.clone()
                     .acquire_texture(
                         1,
                         1,
@@ -2313,9 +2311,7 @@ mod tests {
         };
 
         let texture = {
-            use goldy::RetainedPool;
-            use std::sync::Arc;
-            RetainedPool::new(Arc::new(gpu.clone()))
+            gpu.clone()
                 .acquire_texture(
                     params.width,
                     params.height,
@@ -2842,9 +2838,7 @@ mod tests {
             robust: false,
         };
         let texture = {
-            use goldy::RetainedPool;
-            use std::sync::Arc;
-            RetainedPool::new(Arc::new(gpu.clone()))
+            gpu.clone()
                 .acquire_texture(
                     params.width,
                     params.height,
@@ -2912,9 +2906,7 @@ mod tests {
 
         let mut renderer = SchemeRenderer::new(&gpu).expect("SchemeRenderer::new");
         let texture = {
-            use goldy::RetainedPool;
-            use std::sync::Arc;
-            RetainedPool::new(Arc::new(gpu.clone()))
+            gpu.clone()
                 .acquire_texture(
                     64,
                     64,

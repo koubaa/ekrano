@@ -10,18 +10,14 @@
 //! Push constants carry bindless indices per dispatch via Slang `uniform`
 //! entry-point parameters.
 
-use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use goldy::types::TextureFormat;
-use goldy::{
-    BackendType, Buffer, ComputePipeline, Context, DepositTransaction, Device, RetainedPool, Texture,
-    WithdrawTransaction,
-};
+use goldy::{BackendType, Buffer, ComputePipeline, Context, DepositTransaction, Device, Texture, WithdrawTransaction};
 
 /// Ekrano uses a single-frame fire-and-forget model.
 ///
-/// Stable pipeline parcels live in [`RetainedPool`] deeds reused across frames only while
+/// Stable pipeline parcels live in [`Device`] deeds reused across frames only while
 /// depth stays at 1 (see [`StablePipelineBuffers`](crate::scheme_gpu_resources::StablePipelineBuffers)).
 pub(crate) const FRAME_PIPELINE_DEPTH: usize = 1;
 
@@ -297,7 +293,7 @@ pub(crate) struct PersistentState {
     /// Retained pool for the seven stable pipeline buffers (see
     /// [`StablePipelineBuffers`](crate::scheme_gpu_resources::StablePipelineBuffers)).
     /// Valid only at [`FRAME_PIPELINE_DEPTH`] = 1.
-    pub(crate) retained_pool: RetainedPool,
+    pub(crate) retained_pool: Device,
     /// Bump allocator counters from the most recently drained frame.
     /// `None` until the first GPU readback completes.
     last_drained_bump: Option<BumpAllocators>,
@@ -394,7 +390,7 @@ pub(crate) struct PersistentState {
 impl PersistentState {
     pub(crate) fn new(device: &Device) -> Self {
         Self {
-            retained_pool: RetainedPool::new(Arc::new(device.clone())),
+            retained_pool: device.clone(),
             last_drained_bump: None,
             linear_clamp_sampler: None,
             nearest_clamp_sampler: None,
@@ -883,11 +879,11 @@ pub(crate) mod tests {
             .expect("buf2");
         let dummy = ekrano_encoding::FilterUniform::clear_transparent(1, 1);
         p.cached_filter_uniforms = vec![Some((dummy, buf0)), Some((dummy, buf1)), Some((dummy, buf2))];
-        let bytes_before = p.retained_pool.bytes_by_kind().buffer;
+        let bytes_before = p.retained_pool.retained_bytes_by_kind().buffer;
         p.trim_filter_uniform_cache(&ctx, 1);
         assert_eq!(p.cached_filter_uniforms.len(), 1);
         assert!(
-            p.retained_pool.bytes_by_kind().buffer < bytes_before,
+            p.retained_pool.retained_bytes_by_kind().buffer < bytes_before,
             "trim must release retained filter-uniform deeds"
         );
     }

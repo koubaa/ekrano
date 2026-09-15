@@ -7,8 +7,8 @@ use std::mem::size_of;
 
 use goldy::types::{BufferFlags, TextureFlags, TextureKind};
 use goldy::{
-    Buffer, BufferKind, DepositTransaction, DispatchShape, Init, MemoryExchange, NodeAccess, Parcel, PresentLease,
-    Sampler, Texture, TextureFormat, ordinal,
+    Buffer, BufferKind, DepositTarget, DepositTransaction, DispatchShape, Init, MemoryExchange, NodeAccess, Parcel,
+    PresentLease, Sampler, Texture, TextureFormat, ordinal,
 };
 
 use crate::resource_proxy::BindType;
@@ -76,7 +76,7 @@ fn write_deposit(
     bytes: &[u8],
     what: &'static str,
 ) -> Result<(), Error> {
-    deposit.write(recorder.upload_scheme(), 0, bytes).map_err(|e| {
+    deposit.write(0, bytes).map_err(|e| {
         Error::Gpu(format!(
             "{e} (what={what}, deposit_id={}, bytes={}, needs_record={})",
             deposit.id(),
@@ -93,7 +93,7 @@ fn write_atlas_deposit(
     what: &'static str,
 ) -> Result<(), Error> {
     recorder.atlas_update_has_work = true;
-    deposit.write(recorder.atlas_update_scheme(), 0, bytes).map_err(|e| {
+    deposit.write(0, bytes).map_err(|e| {
         Error::Gpu(format!(
             "{e} (what={what}, deposit_id={}, bytes={}, atlas_needs_record={})",
             deposit.id(),
@@ -161,7 +161,7 @@ pub(crate) fn alloc_pipeline_buffer(
 
 /// Allocate or reuse a composite indirect buffer for the scheme path.
 ///
-/// One [`goldy::RetainedPool::acquire_record`] buffer holds `N_INDIRECT_STAGES` ordinal
+/// One [`goldy::Device::acquire_record`] buffer holds `N_INDIRECT_STAGES` ordinal
 /// [`goldy::DispatchShape`] parcels. CPU-known stages are initialised at allocation via
 /// [`Init::data`]; GPU-written stages ([`STAGE_PATH_COUNT`], [`STAGE_PATH_TILING`])
 /// use [`Init::reserve`] and are written each frame by setup shaders.
@@ -219,7 +219,10 @@ pub(crate) fn record_upload_bytes_owned(
         )
         .map_err(|e| Error::Gpu(e.to_string()))?;
     let deposit = MemoryExchange::new(recorder.context())
-        .bind_deposit_buffer(recorder.upload_scheme(), &buf, bytes.len() as u64)
+        .bind_deposit(
+            recorder.upload_scheme(),
+            DepositTarget::buffer(&buf, bytes.len() as u64),
+        )
         .map_err(Error::from)?;
     write_deposit(recorder, deposit, &bytes, "record_upload_bytes_owned")?;
     Ok(buf)
@@ -327,15 +330,15 @@ fn alloc_or_reuse_scene_deposit(
 ) -> Result<DepositTransaction, Error> {
     let bucket = scene_size_bucket(live_bytes);
     if !recorder.upload_needs_record
-        && let Some((cached_bucket, deposit)) = recorder.persistent.cached_scene_deposit
-        && cached_bucket >= bucket
+        && let Some((cached_bucket, deposit)) = recorder.persistent.cached_scene_deposit.as_ref()
+        && *cached_bucket >= bucket
     {
-        return Ok(deposit);
+        return Ok(deposit.clone());
     }
     let deposit = MemoryExchange::new(recorder.context())
-        .bind_deposit_buffer(recorder.upload_scheme(), scene.whole(), bucket)
+        .bind_deposit(recorder.upload_scheme(), DepositTarget::buffer(scene.whole(), bucket))
         .map_err(|e| Error::Gpu(e.to_string()))?;
-    recorder.persistent.cached_scene_deposit = Some((bucket, deposit));
+    recorder.persistent.cached_scene_deposit = Some((bucket, deposit.clone()));
     Ok(deposit)
 }
 
@@ -346,14 +349,14 @@ fn alloc_or_reuse_config_deposit(
 ) -> Result<DepositTransaction, Error> {
     let size = size_of::<ekrano_encoding::ConfigUniform>() as u64;
     if !recorder.upload_needs_record
-        && let Some(deposit) = recorder.persistent.cached_config_deposit
+        && let Some(deposit) = recorder.persistent.cached_config_deposit.as_ref()
     {
-        return Ok(deposit);
+        return Ok(deposit.clone());
     }
     let deposit = MemoryExchange::new(recorder.context())
-        .bind_deposit_buffer(recorder.upload_scheme(), config.whole(), size)
+        .bind_deposit(recorder.upload_scheme(), DepositTarget::buffer(config.whole(), size))
         .map_err(|e| Error::Gpu(e.to_string()))?;
-    recorder.persistent.cached_config_deposit = Some(deposit);
+    recorder.persistent.cached_config_deposit = Some(deposit.clone());
     Ok(deposit)
 }
 
@@ -453,26 +456,20 @@ fn alloc_or_reuse_full_texture_deposit(
 ) -> Result<DepositTransaction, Error> {
     let need = staging_bytes.max(4);
     if !recorder.upload_needs_record
-        && let Some((cw, ch, cap, deposit)) = *cached
-        && cw >= width
-        && ch >= height
-        && cap >= need
+        && let Some((cw, ch, cap, deposit)) = cached.as_ref()
+        && *cw >= width
+        && *ch >= height
+        && *cap >= need
     {
-        return Ok(deposit);
+        return Ok(deposit.clone());
     }
     let deposit = MemoryExchange::new(recorder.context())
-        .bind_deposit_texture(
+        .bind_deposit(
             recorder.upload_scheme(),
-            texture,
-            0,
-            0,
-            width,
-            height,
-            need,
-            src_row_pitch,
+            DepositTarget::texture(texture, 0, 0, width, height, need, src_row_pitch),
         )
         .map_err(|e| Error::Gpu(e.to_string()))?;
-    *cached = Some((width, height, need, deposit));
+    *cached = Some((width, height, need, deposit.clone()));
     Ok(deposit)
 }
 
@@ -488,7 +485,7 @@ fn take_region_texture_deposit(
         .cached_image_region_deposits
         .iter()
         .find(|(k, _)| *k == key)
-        .map(|(_, deposit)| *deposit)
+        .map(|(_, deposit)| deposit.clone())
 }
 
 fn alloc_or_reuse_region_texture_deposit(
@@ -507,18 +504,15 @@ fn alloc_or_reuse_region_texture_deposit(
     }
     let need = staging_bytes.max(4);
     let deposit = MemoryExchange::new(recorder.context())
-        .bind_deposit_texture(
+        .bind_deposit(
             recorder.atlas_update_scheme(),
-            texture,
-            x,
-            y,
-            width,
-            height,
-            need,
-            src_row_pitch,
+            DepositTarget::texture(texture, x, y, width, height, need, src_row_pitch),
         )
         .map_err(|e| Error::Gpu(e.to_string()))?;
-    recorder.persistent.cached_image_region_deposits.push((key, deposit));
+    recorder
+        .persistent
+        .cached_image_region_deposits
+        .push((key, deposit.clone()));
     Ok(deposit)
 }
 
