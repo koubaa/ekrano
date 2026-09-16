@@ -32,6 +32,7 @@ goldy-webgpu = [
     "goldy/webgpu",
     "goldy/instrumentation",
 ]
+goldy-cpu = ["ekrano/goldy-cpu", "scenes/goldy-cpu", "goldy/graphics", "goldy/instrumentation"]
 
 [lints]
 workspace = true
@@ -55,7 +56,9 @@ log = { workspace = true }
 # not by src/lib.rs; listed as a dev-dependency to avoid the
 # `unused_crate_dependencies` lint on the library compilation unit.
 [dev-dependencies]
+bytemuck = { workspace = true }
 ekrano_encoding = { workspace = true }
+ekrano_shaders = { workspace = true }
 libtest-mimic = "0.8"
 
 [[test]]

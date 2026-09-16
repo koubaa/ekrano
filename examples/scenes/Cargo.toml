@@ -12,6 +12,7 @@ goldy-default = ["ekrano/goldy-default"]
 goldy-dx12-only = ["ekrano/goldy-dx12-only"]
 goldy-cuda = ["ekrano/goldy-cuda"]
 goldy-webgpu = ["ekrano/goldy-webgpu"]
+goldy-cpu = ["ekrano/goldy-cpu"]
 
 [lints]
 workspace = true

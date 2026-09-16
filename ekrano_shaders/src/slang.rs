@@ -1,4 +1,5 @@
 // Copyright 2023 the Vello Authors
+// Copyright 2026 the Ekrano Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Slang shader sources for the Goldy backend.
@@ -42,6 +43,7 @@ include_slang!(COARSE, "coarse.slang");
 include_slang!(PATH_TILING, "path_tiling.slang");
 include_slang!(FLATTEN, "flatten.slang");
 include_slang!(FINE, "fine.slang");
+include_slang!(FINE_CPU, "fine_cpu.slang");
 include_slang!(FILTER_PASS, "filter_pass.slang");
 
 /// Directory the Slang compiler searches for `import ekrano_shared`.

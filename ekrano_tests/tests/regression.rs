@@ -11,7 +11,7 @@ use ekrano::{
     kurbo::{Affine, Diagonal2, Rect, RoundedRect, Stroke},
     peniko::{Color, ColorStop, Extend, Gradient, ImageQuality, InterpolationAlphaSpace, color::palette},
 };
-use ekrano_tests::{TestParams, shared_test_device, smoke_snapshot_test_sync, snapshot_test_sync};
+use ekrano_tests::{TestParams, smoke_snapshot_test_sync, snapshot_test_sync};
 use scenes::ImageCache;
 use scenes::SimpleText;
 
@@ -235,9 +235,6 @@ fn main() {
         .with_ignored_flag(false),
     );
 
-    let mut args = libtest_mimic::Arguments::from_args();
-    if let Some(device) = shared_test_device() {
-        submission::clamp_test_threads(&mut args, device);
-    }
-    libtest_mimic::run(&args, trials).exit()
+    let args = libtest_mimic::Arguments::from_args();
+    submission::run_gpu_snapshot_trials(args, trials);
 }

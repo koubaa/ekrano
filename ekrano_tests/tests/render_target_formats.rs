@@ -13,7 +13,7 @@ use ekrano::kurbo::{Affine, Circle, Rect};
 use ekrano::peniko::{Fill, color::palette};
 use ekrano::{AaConfig, GoldyRenderer, RenderParams, Scene};
 use ekrano_encoding::{Filter, FilterEdgeMode, FilterPrimitive};
-use ekrano_tests::{SharedTestDevice, shared_test_device, test_alloc_texture, test_device};
+use ekrano_tests::{SharedTestDevice, test_alloc_texture, test_device};
 use goldy::types::{TextureFlags, TextureFormat, TextureKind};
 use goldy::{MemoryExchange, Scheme};
 
@@ -211,9 +211,6 @@ fn main() {
         .with_ignored_flag(false),
     );
 
-    let mut args = libtest_mimic::Arguments::from_args();
-    if let Some(device) = shared_test_device() {
-        submission::clamp_test_threads(&mut args, device);
-    }
-    libtest_mimic::run(&args, trials).exit()
+    let args = libtest_mimic::Arguments::from_args();
+    submission::run_gpu_snapshot_trials(args, trials);
 }

@@ -19,7 +19,7 @@ use ekrano::{
     kurbo::Affine,
     peniko::{Fill, FontData, color::palette::css::REBECCA_PURPLE},
 };
-use ekrano_tests::{TestParams, shared_test_device, snapshot_test_sync};
+use ekrano_tests::{TestParams, snapshot_test_sync};
 use scenes::SimpleText;
 
 fn layout_roboto(text: &SimpleText, content: &str, font_size: f32) -> (FontData, Vec<Glyph>) {
@@ -179,9 +179,6 @@ fn main() {
     case!("glyphs_decoration_no_descenders", glyphs_decoration_no_descenders());
     case!("glyphs_decoration_transformed", glyphs_decoration_transformed());
 
-    let mut args = libtest_mimic::Arguments::from_args();
-    if let Some(device) = shared_test_device() {
-        submission::clamp_test_threads(&mut args, device);
-    }
-    libtest_mimic::run(&args, trials).exit()
+    let args = libtest_mimic::Arguments::from_args();
+    submission::run_gpu_snapshot_trials(args, trials);
 }

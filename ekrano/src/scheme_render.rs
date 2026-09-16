@@ -24,25 +24,27 @@ use ekrano_encoding::{
     STAGE_PATHTAG_SCAN, STAGE_PATHTAG_SCAN_LARGE, STAGE_PATHTAG_SCAN1, STAGE_TILE_ALLOC,
 };
 
-/// Fine/filter final destination: offscreen texture or swapchain present lease.
+/// Fine/filter final destination: offscreen texture, swapchain present lease, or CPU pixmap.
 #[derive(Clone, Copy)]
 pub(crate) enum RenderOutput<'a> {
     Texture(&'a Texture),
     Present(&'a PresentLease),
+    /// Packed buffer pixmap (CPU fine). Width/height come from the pipeline.
+    Pixmap,
 }
 
 impl<'a> RenderOutput<'a> {
     fn width(self, pipeline: &PipelineResources) -> u32 {
         match self {
             Self::Texture(tex) => tex.width(),
-            Self::Present(_) => pipeline.frame_width,
+            Self::Present(_) | Self::Pixmap => pipeline.frame_width,
         }
     }
 
     fn height(self, pipeline: &PipelineResources) -> u32 {
         match self {
             Self::Texture(tex) => tex.height(),
-            Self::Present(_) => pipeline.frame_height,
+            Self::Present(_) | Self::Pixmap => pipeline.frame_height,
         }
     }
 
@@ -50,6 +52,7 @@ impl<'a> RenderOutput<'a> {
         match self {
             Self::Texture(tex) => GpuBinding::Tex(tex),
             Self::Present(lease) => GpuBinding::Present(lease, NodeAccess::Write),
+            Self::Pixmap => unreachable!("CPU pixmap fine binds the buffer directly"),
         }
     }
 
@@ -57,6 +60,7 @@ impl<'a> RenderOutput<'a> {
         match self {
             Self::Texture(tex) => GpuBinding::Tex(tex),
             Self::Present(lease) => GpuBinding::Present(lease, NodeAccess::ReadWrite),
+            Self::Pixmap => unreachable!("CPU pixmap path has no filter pass"),
         }
     }
 }
@@ -71,12 +75,14 @@ pub(crate) fn resolve_render_output<'a>(
         RenderOutput::Texture(tex)
     } else if let Some(lease) = present_lease {
         RenderOutput::Present(lease)
+    } else if pipeline.out_pixmap.is_some() {
+        RenderOutput::Pixmap
     } else {
         RenderOutput::Texture(
             pipeline
                 .out_image
                 .as_ref()
-                .expect("render output requires out_image or present lease"),
+                .expect("render output requires out_image, pixmap, or present lease"),
         )
     }
 }
@@ -510,19 +516,48 @@ impl Render {
         let width_px = render_output.width(pipeline);
         let height_px = render_output.height(pipeline);
         if !layer_filter_effects.is_empty() && width_px > 0 && height_px > 0 {
-            if let Some(fs) = shaders.filter_pass {
-                let wg = (width_px.div_ceil(16), height_px.div_ceil(16), 1);
-                let u_clear = FilterUniform::clear_transparent(width_px, height_px);
-                let clear_src = pipeline.out_image.as_ref().unwrap_or(&pipeline.filter_layers[0]);
-                for fl in &pipeline.filter_layers {
-                    filter_dispatch(recorder, fs, &u_clear, wg, clear_src, fl);
+            match (shaders.filter_pass, pipeline.filter_layers.as_ref()) {
+                (Some(fs), Some(layers)) => {
+                    let wg = (width_px.div_ceil(16), height_px.div_ceil(16), 1);
+                    let u_clear = FilterUniform::clear_transparent(width_px, height_px);
+                    let clear_src = pipeline.out_image.as_ref().unwrap_or(&layers[0]);
+                    for fl in layers {
+                        filter_dispatch(recorder, fs, &u_clear, wg, clear_src, fl);
+                    }
                 }
-            } else {
-                log::warn!("filter_pass shader unavailable; cannot clear filter layer textures");
+                (None, Some(_)) => {
+                    log::warn!("filter_pass shader unavailable; cannot clear filter layer textures");
+                }
+                _ => {}
             }
         }
 
         let persistent = &*recorder.persistent;
+        let cpu_fine = recorder.device().backend_type() == goldy::types::BackendType::Cpu;
+        if cpu_fine {
+            let pixmap = pipeline
+                .out_pixmap
+                .as_ref()
+                .expect("CPU fine requires a packed pixmap buffer");
+            let fine_resources: Vec<GpuBinding<'_>> = vec![
+                pipeline.config.as_binding(),
+                pipeline.stable.segments.as_binding(),
+                pipeline.stable.ptcl.as_binding(),
+                pipeline.stable.info_bin_data.as_binding(),
+                pipeline.stable.blend_spill.as_binding(),
+                pixmap.as_binding(),
+            ];
+            SchemeRecorder::record_dispatch(
+                recorder.scheme,
+                recorder.shaders,
+                shader,
+                (width_in_tiles, height_in_tiles, 1),
+                &fine_resources,
+                &[],
+            );
+            return;
+        }
+
         let mut fine_resources: Vec<GpuBinding<'_>> = vec![
             pipeline.config.as_binding(),
             pipeline.stable.segments.as_binding(),
@@ -530,10 +565,10 @@ impl Render {
             pipeline.stable.info_bin_data.as_binding(),
             pipeline.stable.blend_spill.as_binding(),
             render_output.fine_binding(),
-            GpuBinding::Tex(&pipeline.gradient),
-            GpuBinding::Tex(&pipeline.image_atlas),
-            GpuBinding::Tex(&pipeline.mask_atlas),
-            GpuBinding::Tex(&pipeline.live_atlas),
+            GpuBinding::Tex(pipeline.gradient.as_ref().expect("GPU fine requires gradient atlas")),
+            GpuBinding::Tex(pipeline.image_atlas.as_ref().expect("GPU fine requires image atlas")),
+            GpuBinding::Tex(pipeline.mask_atlas.as_ref().expect("GPU fine requires mask atlas")),
+            GpuBinding::Tex(pipeline.live_atlas.as_ref().expect("GPU fine requires live atlas")),
         ];
         if uses_mask_lut {
             let lut = match self.aa_config {
@@ -545,8 +580,10 @@ impl Render {
                 fine_resources.push(GpuBinding::Buf(lut));
             }
         }
-        for fl in &pipeline.filter_layers {
-            fine_resources.push(GpuBinding::Tex(fl));
+        if let Some(layers) = pipeline.filter_layers.as_ref() {
+            for fl in layers {
+                fine_resources.push(GpuBinding::Tex(fl));
+            }
         }
         // Hardware samplers for gradient ramps (slots 14–15 / 15–16).
         // fine.slang only SampleLevel()s with nearest_clamp; image/mask use Load.
@@ -818,6 +855,9 @@ pub(crate) fn record_filter_effects(
     if layer_filter_effects.is_empty() {
         return;
     }
+    let Some(filter_layers) = pipeline.filter_layers.as_ref() else {
+        return;
+    };
     let Some(shader) = shaders.filter_pass else {
         log::warn!("filter_pass shader unavailable; skipping layer_filter_effects");
         return;
@@ -833,7 +873,6 @@ pub(crate) fn record_filter_effects(
         .expect("filter scratch texture");
 
     let wg = (width.div_ceil(16), height.div_ceil(16), 1);
-    let filter_layers = &pipeline.filter_layers;
 
     for effect in layer_filter_effects {
         let idx = (effect.layer_index as usize).min(3);

@@ -12,6 +12,16 @@
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct ShaderId(pub usize);
 
+impl ShaderId {
+    /// CPU host-callable compile failed (`GroupMemoryBarrierWithGroupSync`, …).
+    /// Never used as an `engine_shaders` index.
+    pub(crate) const CPU_UNAVAILABLE: Self = Self(usize::MAX);
+
+    pub(crate) fn is_cpu_unavailable(self) -> bool {
+        self == Self::CPU_UNAVAILABLE
+    }
+}
+
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub enum ImageFormat {
     Rgba8,

@@ -29,7 +29,7 @@ use ekrano::{
     kurbo::{Affine, Rect},
     peniko::{BlendMode, Color, Compose, Fill, Mix, color::palette::css::*},
 };
-use ekrano_tests::{TestParams, shared_test_device, snapshot_test_sync};
+use ekrano_tests::{TestParams, snapshot_test_sync};
 
 /// Helper: full-viewport rect for use as a layer clip.
 fn viewport(width: f64, height: f64) -> Rect {
@@ -240,9 +240,6 @@ fn main() {
         .with_ignored_flag(false),
     );
 
-    let mut args = libtest_mimic::Arguments::from_args();
-    if let Some(device) = shared_test_device() {
-        submission::clamp_test_threads(&mut args, device);
-    }
-    libtest_mimic::run(&args, trials).exit()
+    let args = libtest_mimic::Arguments::from_args();
+    submission::run_gpu_snapshot_trials(args, trials);
 }

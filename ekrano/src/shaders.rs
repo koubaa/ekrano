@@ -1,4 +1,5 @@
 // Copyright 2022 the Vello Authors
+// Copyright 2026 the Ekrano Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Load rendering shaders.
@@ -257,90 +258,116 @@ pub(crate) fn goldy_full_shaders_scheme(
         &search_paths,
         &[],
     )?;
-    let fine_resources = [
-        BufReadOnly,
-        BufReadOnly,
-        BufReadOnly,
-        BufReadOnly,
-        Buffer,
-        Image(ImageFormat::Rgba8),
-        ImageRead(ImageFormat::Rgba8),
-        ImageRead(ImageFormat::Rgba8),
-        ImageRead(ImageFormat::Rgba8), // mask_atlas
-        ImageRead(ImageFormat::Rgba8), // live_atlas
-        Image(ImageFormat::Rgba8),
-        Image(ImageFormat::Rgba8),
-        Image(ImageFormat::Rgba8),
-        Image(ImageFormat::Rgba8),
-        Sampler, // linear_clamp
-        Sampler, // nearest_clamp
-    ];
-    let fine_msaa_resources = [
-        BufReadOnly,
-        BufReadOnly,
-        BufReadOnly,
-        BufReadOnly,
-        Buffer,
-        Image(ImageFormat::Rgba8),
-        ImageRead(ImageFormat::Rgba8),
-        ImageRead(ImageFormat::Rgba8),
-        ImageRead(ImageFormat::Rgba8), // mask_atlas
-        ImageRead(ImageFormat::Rgba8), // live_atlas
-        BufReadOnly,                   // mask_lut
-        Image(ImageFormat::Rgba8),
-        Image(ImageFormat::Rgba8),
-        Image(ImageFormat::Rgba8),
-        Image(ImageFormat::Rgba8),
-        Sampler, // linear_clamp
-        Sampler, // nearest_clamp
-    ];
-    let fine_area = Some(renderer.add_compute_shader_with_options(
-        "fine_area",
-        ekrano_shaders::slang::FINE,
-        &fine_resources,
-        &search_paths,
-        &[],
-        sw_opt,
-    )?);
-    let fine_msaa8 = renderer
-        .add_compute_shader_with_options(
-            "fine_msaa8",
-            ekrano_shaders::slang::FINE,
-            &fine_msaa_resources,
-            &search_paths,
-            &[("msaa", "1"), ("msaa8", "1")],
-            sw_opt,
-        )
-        .ok();
-    let fine_msaa16 = renderer
-        .add_compute_shader_with_options(
-            "fine_msaa16",
-            ekrano_shaders::slang::FINE,
-            &fine_msaa_resources,
-            &search_paths,
-            &[("msaa", "1"), ("msaa16", "1")],
-            sw_opt,
-        )
-        .ok();
+    // Goldy's CPU device JITs the same Slang compute stages but has no textures
+    // or samplers. Fine writes a packed RGBA8 buffer (`FINE_CPU`) for PixelExchange.
+    let cpu_compute = renderer.device().backend_type() == goldy::types::BackendType::Cpu;
 
-    let filter_pass = match renderer.add_compute_shader(
-        "filter_pass",
-        ekrano_shaders::slang::FILTER_PASS,
-        &[
-            BufReadOnly,                   // uniforms_buf (BufRO<FilterUniform>)
-            ImageRead(ImageFormat::Rgba8), // src_sampled (Interpolated<float4>)
-            Image(ImageFormat::Rgba8),     // src (DirectSpatial<float4>)
-            Image(ImageFormat::Rgba8),     // dst (DirectSpatial<float4>)
-            Sampler,                       // linear_clamp (Filter)
-        ],
-        &search_paths,
-        &[],
-    ) {
-        Ok(id) => Some(id),
-        Err(e) => {
-            log::error!("filter_pass shader compilation failed: {e}");
-            None
-        }
+    let (fine_area, fine_msaa8, fine_msaa16, filter_pass) = if cpu_compute {
+        let fine_cpu_resources = [
+            BufReadOnly,
+            BufReadOnly,
+            BufReadOnly,
+            BufReadOnly,
+            Buffer,
+            Buffer, // packed RGBA8 pixmap
+        ];
+        let fine_area = Some(renderer.add_compute_shader_required(
+            "fine_area",
+            ekrano_shaders::slang::FINE_CPU,
+            &fine_cpu_resources,
+            &search_paths,
+            &[],
+            sw_opt,
+        )?);
+        log::info!("Goldy CPU backend: area fine writes a packed pixmap buffer (no MSAA/filter)");
+        (fine_area, None, None, None)
+    } else {
+        let fine_resources = [
+            BufReadOnly,
+            BufReadOnly,
+            BufReadOnly,
+            BufReadOnly,
+            Buffer,
+            Image(ImageFormat::Rgba8),
+            ImageRead(ImageFormat::Rgba8),
+            ImageRead(ImageFormat::Rgba8),
+            ImageRead(ImageFormat::Rgba8), // mask_atlas
+            ImageRead(ImageFormat::Rgba8), // live_atlas
+            Image(ImageFormat::Rgba8),
+            Image(ImageFormat::Rgba8),
+            Image(ImageFormat::Rgba8),
+            Image(ImageFormat::Rgba8),
+            Sampler, // linear_clamp
+            Sampler, // nearest_clamp
+        ];
+        let fine_msaa_resources = [
+            BufReadOnly,
+            BufReadOnly,
+            BufReadOnly,
+            BufReadOnly,
+            Buffer,
+            Image(ImageFormat::Rgba8),
+            ImageRead(ImageFormat::Rgba8),
+            ImageRead(ImageFormat::Rgba8),
+            ImageRead(ImageFormat::Rgba8), // mask_atlas
+            ImageRead(ImageFormat::Rgba8), // live_atlas
+            BufReadOnly,                   // mask_lut
+            Image(ImageFormat::Rgba8),
+            Image(ImageFormat::Rgba8),
+            Image(ImageFormat::Rgba8),
+            Image(ImageFormat::Rgba8),
+            Sampler, // linear_clamp
+            Sampler, // nearest_clamp
+        ];
+        let fine_area = Some(renderer.add_compute_shader_with_options(
+            "fine_area",
+            ekrano_shaders::slang::FINE,
+            &fine_resources,
+            &search_paths,
+            &[],
+            sw_opt,
+        )?);
+        let fine_msaa8 = renderer
+            .add_compute_shader_with_options(
+                "fine_msaa8",
+                ekrano_shaders::slang::FINE,
+                &fine_msaa_resources,
+                &search_paths,
+                &[("msaa", "1"), ("msaa8", "1")],
+                sw_opt,
+            )
+            .ok();
+        let fine_msaa16 = renderer
+            .add_compute_shader_with_options(
+                "fine_msaa16",
+                ekrano_shaders::slang::FINE,
+                &fine_msaa_resources,
+                &search_paths,
+                &[("msaa", "1"), ("msaa16", "1")],
+                sw_opt,
+            )
+            .ok();
+
+        let filter_pass = match renderer.add_compute_shader(
+            "filter_pass",
+            ekrano_shaders::slang::FILTER_PASS,
+            &[
+                BufReadOnly,                   // uniforms_buf (BufRO<FilterUniform>)
+                ImageRead(ImageFormat::Rgba8), // src_sampled (Interpolated<float4>)
+                Image(ImageFormat::Rgba8),     // src (DirectSpatial<float4>)
+                Image(ImageFormat::Rgba8),     // dst (DirectSpatial<float4>)
+                Sampler,                       // linear_clamp (Filter)
+            ],
+            &search_paths,
+            &[],
+        ) {
+            Ok(id) => Some(id),
+            Err(e) => {
+                log::error!("filter_pass shader compilation failed: {e}");
+                None
+            }
+        };
+        (fine_area, fine_msaa8, fine_msaa16, filter_pass)
     };
 
     Ok(FullShaders {
