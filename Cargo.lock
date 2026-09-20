@@ -926,7 +926,7 @@ dependencies = [
 
 [[package]]
 name = "goldy"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "ash",
@@ -964,7 +964,7 @@ dependencies = [
 
 [[package]]
 name = "goldy_derive"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "goldy_shader_ir",
  "proc-macro2",
@@ -974,7 +974,7 @@ dependencies = [
 
 [[package]]
 name = "goldy_shader_ir"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "gpu-allocator"

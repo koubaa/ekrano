@@ -612,10 +612,7 @@ fn take_or_refresh_filter_uniform(
     match cached {
         Some((ref val, buf)) if val == uniform => buf,
         Some((_, old_buf)) => {
-            recorder
-                .persistent
-                .retained_pool
-                .release_buffer(recorder.context(), old_buf);
+            recorder.context().release_buffer(old_buf);
             acquire_retained_filter_uniform(recorder, uniform)
         }
         None => acquire_retained_filter_uniform(recorder, uniform),

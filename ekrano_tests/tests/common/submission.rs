@@ -4,17 +4,17 @@
 //! Shared-device harness helpers for `libtest_mimic` integration tests.
 //!
 //! Thread-count policy here pairs with [`ekrano_tests::test_device`]:
-//! - **Metal**: no clamp — each trial gets a fresh [`Device`] (see `test_device`).
+//! - **Metal**: no clamp — each trial gets a fresh [`Runtime`] (see `test_device`).
 //! - **DX12 WARP / WebGPU**: single thread (also serialized inside `test_device`).
 //! - **Vulkan**: cap at the fixed per-device compute-queue pool size.
 
-use goldy::{Device, types::BackendType};
+use goldy::{Runtime, types::BackendType};
 
-/// Clamp libtest parallelism for backends that share one process-lifetime [`Device`].
+/// Clamp libtest parallelism for backends that share one process-lifetime [`Runtime`].
 ///
 /// Metal is intentionally untouched: isolation there is per-device via
 /// [`ekrano_tests::test_device`], not via thread count.
-pub(crate) fn clamp_test_threads(args: &mut libtest_mimic::Arguments, device: &Device) {
+pub(crate) fn clamp_test_threads(args: &mut libtest_mimic::Arguments, device: &Runtime) {
     // goldy::WARP_ADAPTER_ID is u32::MAX; ekrano does not gate on goldy's `dx12` feature.
     if device.backend_type() == BackendType::Dx12 && device.adapter_id() == u32::MAX {
         args.test_threads = Some(1);

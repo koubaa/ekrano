@@ -13,11 +13,11 @@
 use std::sync::atomic::AtomicU64;
 
 use goldy::types::TextureFormat;
-use goldy::{BackendType, Buffer, ComputePipeline, Context, DepositTransaction, Device, Texture, WithdrawTransaction};
+use goldy::{BackendType, Buffer, ComputePipeline, Context, DepositTransaction, Runtime, Texture, WithdrawTransaction};
 
 /// Ekrano uses a single-frame fire-and-forget model.
 ///
-/// Stable pipeline parcels live in [`Device`] deeds reused across frames only while
+/// Stable pipeline parcels live in [`Runtime`] deeds reused across frames only while
 /// depth stays at 1 (see [`StablePipelineBuffers`](crate::scheme_gpu_resources::StablePipelineBuffers)).
 pub(crate) const FRAME_PIPELINE_DEPTH: usize = 1;
 
@@ -127,7 +127,7 @@ pub(crate) static FRAME_COUNTER: AtomicU64 = AtomicU64::new(0);
 ///
 /// Prefers DXGI `CurrentUsage` (true process GPU residency) when available, and
 /// always includes Goldy's live tracked allocator bytes (allocations − frees).
-pub(crate) fn maybe_log_gpu_memory(device: &Device) {
+pub(crate) fn maybe_log_gpu_memory(device: &Runtime) {
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
 
@@ -293,7 +293,7 @@ pub(crate) struct PersistentState {
     /// Retained pool for the seven stable pipeline buffers (see
     /// [`StablePipelineBuffers`](crate::scheme_gpu_resources::StablePipelineBuffers)).
     /// Valid only at [`FRAME_PIPELINE_DEPTH`] = 1.
-    pub(crate) retained_pool: Device,
+    pub(crate) retained_pool: Runtime,
     /// Bump allocator counters from the most recently drained frame.
     /// `None` until the first GPU readback completes.
     last_drained_bump: Option<BumpAllocators>,
@@ -388,7 +388,7 @@ pub(crate) struct PersistentState {
 }
 
 impl PersistentState {
-    pub(crate) fn new(device: &Device) -> Self {
+    pub(crate) fn new(device: &Runtime) -> Self {
         Self {
             retained_pool: device.clone(),
             last_drained_bump: None,
@@ -458,7 +458,7 @@ impl PersistentState {
             return;
         }
         for (_, buf) in self.cached_filter_uniforms.drain(keep..).flatten() {
-            self.retained_pool.release_buffer(ctx, buf);
+            ctx.release_buffer(buf);
         }
     }
 
@@ -510,10 +510,10 @@ impl PersistentState {
         }
 
         if let Some(out) = out {
-            self.retained_pool.release_texture(ctx, out);
+            ctx.release_texture(out);
         }
         for l in layers {
-            self.retained_pool.release_texture(ctx, l);
+            ctx.release_texture(l);
         }
     }
 
@@ -526,8 +526,8 @@ impl PersistentState {
 impl PersistentState {
     /// Minimal stub for unit tests that only inspect plain fields (no GPU resources).
     pub(crate) fn new_test_only() -> Self {
-        let mock_device = goldy::test_support::mock_device();
-        Self::new(&mock_device)
+        let mock_runtime = goldy::test_support::mock_runtime();
+        Self::new(&mock_runtime)
     }
 }
 
@@ -682,7 +682,7 @@ fn read_bump_bytes(persistent: &mut PersistentState, bytes: &[u8]) {
 pub(crate) mod tests {
     use super::*;
     use goldy::types::BufferFlags;
-    use goldy::{Adapter, BackendType, BufferKind, Device, DeviceDescriptor, Instance, RequestAdapterOptions};
+    use goldy::{Adapter, BackendType, BufferKind, Instance, RequestAdapterOptions, Runtime, RuntimeDescriptor};
     use std::ops::Deref;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -700,17 +700,17 @@ pub(crate) mod tests {
     /// Fresh GPU device for ordinary `--lib` tests, with WARP serialization when needed.
     ///
     /// One device per test body via the public [`Instance`] / [`RequestAdapterOptions`] /
-    /// [`DeviceDescriptor`] APIs. On DX12 WARP, holds a process-wide lock for the guard's
+    /// [`RuntimeDescriptor`] APIs. On DX12 WARP, holds a process-wide lock for the guard's
     /// lifetime so parallel `cargo test --lib` trials do not interleave WARP work.
     pub(crate) struct GpuTestDevice {
-        device: Device,
+        device: Runtime,
         _warp_guard: Option<MutexGuard<'static, ()>>,
     }
 
     impl Deref for GpuTestDevice {
-        type Target = Device;
+        type Target = Runtime;
 
-        fn deref(&self) -> &Device {
+        fn deref(&self) -> &Runtime {
             &self.device
         }
     }
@@ -719,7 +719,7 @@ pub(crate) mod tests {
         let instance = Instance::new().ok()?;
         let adapter = instance.request_adapter(&RequestAdapterOptions::default()).ok()?;
 
-        // Lock before `request_device` when the selected adapter is WARP — adapter
+        // Lock before `request_runtime` when the selected adapter is WARP — adapter
         // selection is cheap/non-racy; device open is what must be serialized.
         let _warp_guard = if is_dx12_warp_adapter(&instance, &adapter) || instance.backend_type() == BackendType::WebGpu
         {
@@ -728,7 +728,7 @@ pub(crate) mod tests {
             None
         };
 
-        let device = adapter.request_device(&DeviceDescriptor::default()).ok()?;
+        let device = adapter.request_runtime(&RuntimeDescriptor::default()).ok()?;
         drop(instance);
 
         Some(GpuTestDevice { device, _warp_guard })
@@ -765,7 +765,7 @@ pub(crate) mod tests {
 
     #[test]
     fn scheme_rt_cache_reuses_none_out_image_in_direct_present_mode() {
-        let device = goldy::test_support::mock_device();
+        let device = goldy::test_support::mock_runtime();
         let mut p = PersistentState::new(&device);
         let layers = acquire_test_layers(&mut p, 8, 8);
         p.store_scheme_render_targets(None, layers);
@@ -778,7 +778,7 @@ pub(crate) mod tests {
 
     #[test]
     fn scheme_render_targets_compatible_matches_take_and_purge() {
-        let device = goldy::test_support::mock_device();
+        let device = goldy::test_support::mock_runtime();
         let mut p = PersistentState::new(&device);
         let layers = acquire_test_layers(&mut p, 16, 16);
         let out = p
@@ -838,7 +838,7 @@ pub(crate) mod tests {
 
     #[test]
     fn purge_uses_shared_compatibility_for_present_mode_mismatch() {
-        let device = goldy::test_support::mock_device();
+        let device = goldy::test_support::mock_runtime();
         let mut p = PersistentState::new(&device);
         let layers = acquire_test_layers(&mut p, 8, 8);
         // Cached as direct-present (no out_image).
@@ -851,7 +851,7 @@ pub(crate) mod tests {
 
     #[test]
     fn purge_noop_when_compatible() {
-        let device = goldy::test_support::mock_device();
+        let device = goldy::test_support::mock_runtime();
         let mut p = PersistentState::new(&device);
         let layers = acquire_test_layers(&mut p, 8, 8);
         p.store_scheme_render_targets(None, layers);
@@ -862,7 +862,7 @@ pub(crate) mod tests {
 
     #[test]
     fn trim_filter_uniform_cache_releases_tail() {
-        let device = goldy::test_support::mock_device();
+        let device = goldy::test_support::mock_runtime();
         let mut p = PersistentState::new(&device);
         let ctx = device.create_context().expect("ctx");
         let buf0 = p

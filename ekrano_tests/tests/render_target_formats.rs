@@ -42,7 +42,7 @@ fn make_device() -> SharedTestDevice {
     test_device()
 }
 
-fn backend_supports_rgba32float(device: &goldy::Device) -> bool {
+fn backend_supports_rgba32float(device: &goldy::Runtime) -> bool {
     device
         .capabilities()
         .supported_render_target_formats
