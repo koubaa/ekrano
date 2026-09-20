@@ -45,13 +45,13 @@ use ekrano::peniko::{Blob, Color, ImageFormat, color::palette};
 use ekrano::peniko::{ImageAlphaType, ImageData};
 use ekrano::{AaConfig, GoldyRenderer, Scene};
 use goldy::types::{TextureFlags, TextureFormat, TextureKind};
-use goldy::{BackendType, Device, DeviceDescriptor, Instance, RequestAdapterOptions, Texture};
+use goldy::{BackendType, Instance, RequestAdapterOptions, Runtime, RuntimeDescriptor, Texture};
 use image::RgbImage;
 use scenes::{ExampleScene, ImageCache, SceneParams, SimpleText};
 
 /// Allocate a standalone texture for integration tests.
 pub fn test_alloc_texture(
-    device: &Device,
+    device: &Runtime,
     width: u32,
     height: u32,
     format: TextureFormat,
@@ -65,27 +65,27 @@ pub fn test_alloc_texture(
 }
 
 enum SharedDeviceInit {
-    Ready(Device),
+    Ready(Runtime),
     Unavailable,
 }
 
 static SHARED_DEVICE: OnceLock<SharedDeviceInit> = OnceLock::new();
 static WARP_TEST_SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
 
-fn try_create_device() -> Option<Device> {
+fn try_create_device() -> Option<Runtime> {
     let instance = Instance::new().ok()?;
     instance
         .request_adapter(&RequestAdapterOptions::default())
-        .and_then(|a| a.request_device(&DeviceDescriptor::default()))
+        .and_then(|a| a.request_runtime(&RuntimeDescriptor::default()))
         .ok()
 }
 
-fn is_dx12_warp(device: &Device) -> bool {
+fn is_dx12_warp(device: &Runtime) -> bool {
     // goldy::WARP_ADAPTER_ID is u32::MAX.
     device.backend_type() == BackendType::Dx12 && device.adapter_id() == u32::MAX
 }
 
-fn needs_serial_gpu(device: &Device) -> bool {
+fn needs_serial_gpu(device: &Runtime) -> bool {
     // DX12 WARP is not parallel-safe. WebGPU serializes on the global backend
     // mutex and a single wgpu queue/poll path, so concurrent libtest_mimic
     // trials on one shared device contend.
@@ -100,22 +100,22 @@ fn needs_serial_gpu(device: &Device) -> bool {
 /// - **DX12 WARP / WebGPU / Vulkan / DX12 hardware**: clone of the process-shared
 ///   device. WARP and WebGPU also hold a serial mutex for the guard's lifetime.
 ///
-/// Hold this guard for the full test body. Device create/destroy lifetime tests must
-/// construct their own [`Device`] and must not use this helper.
+/// Hold this guard for the full test body. Runtime create/destroy lifetime tests must
+/// construct their own [`Runtime`] and must not use this helper.
 pub struct SharedTestDevice {
-    device: Device,
+    device: Runtime,
     _warp_guard: Option<MutexGuard<'static, ()>>,
 }
 
 impl Deref for SharedTestDevice {
-    type Target = Device;
+    type Target = Runtime;
 
-    fn deref(&self) -> &Device {
+    fn deref(&self) -> &Runtime {
         &self.device
     }
 }
 
-fn ensure_shared_device() -> Option<&'static Device> {
+fn ensure_shared_device() -> Option<&'static Runtime> {
     let init = SHARED_DEVICE.get_or_init(|| match try_create_device() {
         Some(device) => SharedDeviceInit::Ready(device),
         None => SharedDeviceInit::Unavailable,
@@ -131,11 +131,11 @@ fn ensure_shared_device() -> Option<&'static Device> {
 /// For custom harness setup (e.g. clamping `libtest_mimic` thread counts). Test bodies
 /// that render should use [`test_device`] so Metal gets a fresh device and WARP stays
 /// serialized.
-pub fn shared_test_device() -> Option<&'static Device> {
+pub fn shared_test_device() -> Option<&'static Runtime> {
     ensure_shared_device()
 }
 
-/// Device for one test body: fresh on Metal, process-shared (WARP-serialized) elsewhere.
+/// Runtime for one test body: fresh on Metal, process-shared (WARP-serialized) elsewhere.
 pub fn test_device() -> SharedTestDevice {
     let Some(shared) = ensure_shared_device() else {
         panic!("No Goldy device available");

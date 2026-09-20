@@ -32,7 +32,7 @@ use std::sync::Arc;
 use goldy::Buffer;
 use goldy::types::{BackendType, ResourceAccess, TextureFlags, TextureFormat, TextureKind};
 use goldy::{
-    BudgetPolicy, ComputePipeline, Context, Device, FrameHandle, FrameOrchestrator, MemoryExchange, Scheme,
+    BudgetPolicy, ComputePipeline, Context, FrameHandle, FrameOrchestrator, MemoryExchange, Runtime, Scheme,
     ShaderModule, Signal, Texture,
 };
 
@@ -68,7 +68,7 @@ use ekrano_encoding::{BumpAllocators, Images, Layout, Ramps, RenderConfig, Resol
 /// Surface presentation uses [`goldy::SurfaceExchange`] + [`goldy::Transaction`] /
 /// [`goldy::Claim`] (scheme-native present mechanism).
 pub struct SchemeRenderer {
-    device: Device,
+    device: Runtime,
     context: Context,
     shaders: FullShaders,
     resolver: Resolver,
@@ -139,7 +139,7 @@ type LiveAtlasPrepare = (
 
 impl SchemeRenderer {
     /// Create a new Scheme renderer for the given device.
-    pub fn new(device: &Device) -> Result<Self> {
+    pub fn new(device: &Runtime) -> Result<Self> {
         let _tz = goldy::tracy_zone!("ekrano.SchemeRenderer::new");
 
         let device = device.clone();
@@ -344,7 +344,7 @@ impl SchemeRenderer {
             .is_some_and(|atlas| atlas.width() == width && atlas.height() == height);
         if !reuse {
             if let Some(old) = self.live_atlas.take() {
-                self.persistent.retained_pool.release_texture(&self.context, old);
+                self.context.release_texture(old);
             }
             self.live_atlas = Some(self.acquire_retained_rgba_texture(
                 width,
@@ -393,7 +393,7 @@ impl SchemeRenderer {
         migrate.submit().map_err(|e| Error::Gpu(e.to_string()))?;
         self.live_atlas_placements = new_placements;
         self.live_atlas_next_x = x;
-        self.persistent.retained_pool.release_texture(&self.context, old_tex);
+        self.context.release_texture(old_tex);
         Ok(())
     }
 
@@ -707,7 +707,7 @@ impl SchemeRenderer {
     }
 
     /// GPU device handle shared by this renderer.
-    pub fn device(&self) -> &Device {
+    pub fn device(&self) -> &Runtime {
         &self.device
     }
 
@@ -1597,7 +1597,7 @@ impl SchemeRenderer {
 // -----------------------------------------------------------------------
 
 pub(crate) struct SchemeRecorder<'a> {
-    device: &'a Device,
+    device: &'a Runtime,
     pub(crate) context: &'a Context,
     /// Retained worker scheme (compute + present topology).
     pub(crate) scheme: &'a mut Scheme,
@@ -1632,7 +1632,7 @@ pub(crate) struct SchemeRecorder<'a> {
 }
 
 impl<'a> SchemeRecorder<'a> {
-    pub(crate) fn device(&self) -> &'a Device {
+    pub(crate) fn device(&self) -> &'a Runtime {
         self.device
     }
 
@@ -1666,7 +1666,7 @@ impl<'a> SchemeRecorder<'a> {
     }
 
     pub(crate) fn new(
-        device: &'a Device,
+        device: &'a Runtime,
         context: &'a Context,
         scheme: &'a mut Scheme,
         upload: &'a mut Scheme,
@@ -2716,7 +2716,7 @@ mod tests {
     #[test]
     fn non_metal_swapchain_uses_out_image_copy_path() {
         // MockBackend reports Vulkan; direct present is Metal-only.
-        let device = goldy::test_support::mock_device();
+        let device = goldy::test_support::mock_runtime();
         assert_ne!(
             device.backend_type(),
             BackendType::Metal,
@@ -2756,7 +2756,7 @@ mod tests {
     #[test]
     fn swapchain_retains_worker_and_present_transaction() {
         let _cb = goldy::test_support::CbReuseOverride::force_enabled();
-        let device = goldy::test_support::mock_device();
+        let device = goldy::test_support::mock_runtime();
         let (_ctx, surface) = goldy::test_support::mock_surface_exchange(&device);
         let mut renderer = SchemeRenderer::new(&device).expect("SchemeRenderer::new");
         let mut scene = Scene::new();

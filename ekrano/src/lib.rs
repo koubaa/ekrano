@@ -11,7 +11,7 @@
 //! ```ignore
 //! use ekrano::{GoldyRenderer, Scene, RenderParams, AaConfig};
 //!
-//! let device: goldy::Device = /* obtain from Goldy */;
+//! let device: goldy::Runtime = /* obtain from Goldy */;
 //! let mut renderer = GoldyRenderer::new(&device).expect("Failed to create renderer");
 //!
 //! let mut scene = Scene::new();

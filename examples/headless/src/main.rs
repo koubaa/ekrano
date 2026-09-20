@@ -71,13 +71,13 @@ fn main() -> Result<()> {
 
 fn render(mut scenes: SceneSet, index: usize, args: &Args) -> Result<()> {
     use ekrano::{GoldyRenderer, RenderParams};
-    use goldy::{DeviceDescriptor, Instance, RequestAdapterOptions};
+    use goldy::{Instance, RequestAdapterOptions, RuntimeDescriptor};
 
     let instance = Instance::new()?;
     let device = instance
         .request_adapter(&RequestAdapterOptions::default())
         .map_err(|e| anyhow!("No Goldy adapter: {e}"))?
-        .request_device(&DeviceDescriptor::default())
+        .request_runtime(&RuntimeDescriptor::default())
         .map_err(|e| anyhow!("No Goldy device: {e}"))?;
 
     let mut renderer = GoldyRenderer::new(&device)?;

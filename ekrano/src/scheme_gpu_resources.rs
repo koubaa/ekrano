@@ -63,10 +63,7 @@ fn acquire_retained_texture_rgba(
 
 /// Relinquish a sticky texture deed into the context transient pool (epoch-gated).
 fn release_retained_texture(recorder: &mut SchemeRecorder<'_>, tex: Texture) {
-    recorder
-        .persistent
-        .retained_pool
-        .release_texture(recorder.context(), tex);
+    recorder.context().release_texture(tex);
 }
 
 /// Host-visible staging write into a destination-bound [`DepositTransaction`] (never waits).
@@ -161,7 +158,7 @@ pub(crate) fn alloc_pipeline_buffer(
 
 /// Allocate or reuse a composite indirect buffer for the scheme path.
 ///
-/// One [`goldy::Device::acquire_record`] buffer holds `N_INDIRECT_STAGES` ordinal
+/// One [`goldy::Runtime::acquire_record`] buffer holds `N_INDIRECT_STAGES` ordinal
 /// [`goldy::DispatchShape`] parcels. CPU-known stages are initialised at allocation via
 /// [`Init::data`]; GPU-written stages ([`STAGE_PATH_COUNT`], [`STAGE_PATH_TILING`])
 /// use [`Init::reserve`] and are written each frame by setup shaders.
@@ -179,7 +176,7 @@ pub(crate) fn alloc_or_reuse_scheme_indirect(
         // Partitioned acquire_record buffer: not binneable via return_transient_buffer.
         // Release through the retained pool (epoch-gated drop); same as other stable buffers.
         let ctx = recorder.context();
-        recorder.persistent.retained_pool.release_buffer(ctx, buf);
+        ctx.release_buffer(buf);
     }
     let fields: Vec<_> = (0..N_INDIRECT_STAGES as usize)
         .map(|i| {
@@ -1049,7 +1046,6 @@ impl PipelineResources {
                     }
                     log::debug!("[PIPE-CACHE] buffer_sizes mismatch — releasing stable parcels");
                     let ctx = recorder.context();
-                    let pool = &mut recorder.persistent.retained_pool;
                     for buffer in [
                         c.stable.info_bin_data,
                         c.stable.tile,
@@ -1059,7 +1055,7 @@ impl PipelineResources {
                         c.stable.lines,
                         c.stable.seg_counts,
                     ] {
-                        pool.release_buffer(ctx, buffer);
+                        ctx.release_buffer(buffer);
                     }
                     let scratch_returns = [
                         c.scratch.reduced,

@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 pub use ekrano_encoding::LIVE_IMAGE_BIT;
 use goldy::types::{BackendType, TextureFlags, TextureFormat, TextureKind};
-use goldy::{Context, Device, Scheme, Submission, Texture};
+use goldy::{Context, Runtime, Scheme, Submission, Texture};
 use peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
 
 use crate::Error;
@@ -51,7 +51,7 @@ struct LiveEntry {
 
 /// CanvasExchange-shaped mailbox of live GPU textures for one renderer.
 pub struct LiveTextureExchange {
-    pool: Arc<Device>,
+    pool: Arc<Runtime>,
     ctx: Context,
     depth: usize,
     entries: HashMap<LiveTextureId, LiveEntry>,
@@ -64,7 +64,7 @@ pub struct LiveTextureExchange {
 }
 
 impl LiveTextureExchange {
-    pub fn new(device: Arc<Device>, ctx: Context) -> Self {
+    pub fn new(device: Arc<Runtime>, ctx: Context) -> Self {
         let depth = match device.backend_type() {
             BackendType::WebGpu => 2,
             _ => 3,
@@ -166,9 +166,9 @@ impl LiveTextureExchange {
             if let Some(sub) = slot.pending {
                 let _ = sub.wait_until_settled();
             }
-            self.pool.release_texture(&self.ctx, slot.texture);
+            self.ctx.release_texture(slot.texture);
         }
-        self.pool.release_texture(&self.ctx, entry.sample);
+        self.ctx.release_texture(entry.sample);
     }
 
     pub fn poll_settlement(&mut self) {
