@@ -13,6 +13,7 @@ use ekrano::peniko::color::palette::css::TRANSPARENT;
 use ekrano::peniko::{Blob, ImageAlphaType, ImageBrush, ImageData, ImageFormat, ImageQuality, ImageSampler};
 use ekrano::{AaConfig, GoldyRenderer, RenderParams, Scene};
 use ekrano_tests::{TestParams, render_then_debug_sync, shared_test_device};
+use goldy::{DepositTarget, MemoryExchange, Scheme};
 
 fn image_brush(data: ImageData) -> ImageBrush {
     ImageBrush {
@@ -39,17 +40,27 @@ fn cpu_image(width: u32, height: u32, rgba: Vec<u8>) -> ImageData {
 }
 
 fn publish_live_texture(renderer: &mut GoldyRenderer, id: ekrano::LiveTextureId, rgba: &[u8]) {
+    let ctx = renderer.submission_context();
     let exchange = renderer.live_textures_mut();
     let slot = exchange
         .begin_publish(id)
         .expect("begin_publish")
         .expect("available live slot");
     let texture = exchange.slot_texture(id, slot).expect("slot texture").borrow();
-    #[allow(deprecated, reason = "write is the current Goldy CPU upload path")]
-    texture.write(rgba).expect("write live texture bytes");
+    let width = texture.width();
+    let height = texture.height();
+    let mut scheme = Scheme::new(&ctx);
+    let deposit = MemoryExchange::new(&ctx)
+        .bind_deposit(
+            &mut scheme,
+            DepositTarget::texture(&texture, 0, 0, width, height, rgba.len() as u64, 0),
+        )
+        .expect("bind live texture deposit");
+    deposit.write(0, rgba).expect("write live texture bytes");
+    let submission = scheme.submit().expect("submit live texture deposit");
     exchange
-        .complete_publish_ready(id, slot)
-        .expect("complete_publish_ready");
+        .complete_publish(id, slot, submission)
+        .expect("complete_publish");
     exchange.sync_sample_mirror(id).expect("sync_sample_mirror");
 }
 
