@@ -320,14 +320,18 @@ impl SchemeRenderer {
 
     fn ensure_dummy_live_atlas(&mut self) -> Result<Texture> {
         if self.dummy_live_atlas.is_none() {
-            let tex = self.acquire_retained_rgba_texture(
-                1,
-                1,
-                TextureKind::DirectInterpolated,
-                TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
-            )?;
-            #[allow(deprecated, reason = "write is the current Goldy CPU upload path")]
-            tex.write(&[0, 0, 0, 0]).map_err(|e| Error::Gpu(e.to_string()))?;
+            let tex = self
+                .persistent
+                .retained_pool
+                .acquire_texture(
+                    1,
+                    1,
+                    TextureFormat::Rgba8Unorm,
+                    TextureKind::DirectInterpolated,
+                    TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
+                    Some(&[0, 0, 0, 0]),
+                )
+                .map_err(|e| Error::Gpu(format!("{e:#}")))?;
             self.dummy_live_atlas = Some(tex);
         }
         Ok(self
