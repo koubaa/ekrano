@@ -13,7 +13,7 @@
 use std::sync::atomic::AtomicU64;
 
 use goldy::types::TextureFormat;
-use goldy::{BackendType, Buffer, ComputePipeline, Context, DepositTransaction, Runtime, Texture, WithdrawTransaction};
+use goldy::{BackendType, Buffer, ComputePipeline, Context, DepositTransaction, Runtime, Texture};
 
 /// Ekrano uses a single-frame fire-and-forget model.
 ///
@@ -338,10 +338,10 @@ pub(crate) struct PersistentState {
     pub(crate) cached_scene_deposit: Option<(u64, DepositTransaction)>,
     /// Destination-bound config uniform deposit.
     pub(crate) cached_config_deposit: Option<DepositTransaction>,
-    /// Stable bump buffer keyed by byte size; read back via [`Self::cached_bump_withdraw`].
+    /// Stable bump buffer keyed by byte size. Read back when [`Self::bump_host_read`] is set.
     pub(crate) cached_bump: Option<(u64, Buffer)>,
-    /// Recorded once on the worker when `robust` is enabled.
-    pub(crate) cached_bump_withdraw: Option<WithdrawTransaction>,
+    /// Worker was recorded with robust bump feedback. Drain reads [`Self::cached_bump`].
+    pub(crate) bump_host_read: bool,
     /// Stable gradient atlas (width, height, texture).
     pub(crate) cached_gradient: Option<(u32, u32, Texture)>,
     /// Stable image atlas (width, height, texture).
@@ -363,7 +363,7 @@ pub(crate) struct PersistentState {
     pub(crate) cached_worker_topology: Option<crate::worker_retention::WorkerTopology>,
     /// Filter effects from the last worker record (topology comparison).
     pub(crate) cached_worker_filter_effects: Vec<ekrano_encoding::LayerFilterEffect>,
-    /// Worker submission from the prior frame, consumed via [`Self::cached_bump_withdraw`] at drain.
+    /// Worker submission from the prior frame, consumed via [`Self::bump_host_read`] at drain.
     pub(crate) pending_bump_submission: Option<goldy::Submission>,
     /// Upload key the upload scheme was recorded against (scene bucket + all atlas dims).
     pub(crate) cached_upload_key: Option<crate::worker_retention::UploadKey>,
@@ -377,9 +377,6 @@ pub(crate) struct PersistentState {
     pub(crate) cached_image_region_deposits: Vec<((u32, u32, u32, u32), DepositTransaction)>,
     /// Topology key for the retained `atlas_update` scheme (regions + atlas identity).
     pub(crate) cached_atlas_update_key: Option<crate::worker_retention::AtlasUpdateKey>,
-    /// Retained headless `out_image` withdraw (`TextureHandle` + transaction) for
-    /// [`crate::scheme_renderer::SchemeRenderer::render_to_buffer`].
-    pub(crate) cached_out_image_withdraw: Option<(goldy::TextureHandle, WithdrawTransaction)>,
     /// Metal overflow texture heaps stay pinned if mismatched-size RTs are pooled across
     /// resize. When set, reclaim/purge drop and clear aggressively instead of deferred pooling.
     pub(crate) metal_heap_sensitive: bool,
@@ -406,7 +403,7 @@ impl PersistentState {
             cached_scene_deposit: None,
             cached_config_deposit: None,
             cached_bump: None,
-            cached_bump_withdraw: None,
+            bump_host_read: false,
             cached_gradient: None,
             cached_image_atlas: None,
             cached_mask_atlas: None,
@@ -424,7 +421,6 @@ impl PersistentState {
             cached_live_atlas_deposit: None,
             cached_image_region_deposits: Vec::new(),
             cached_atlas_update_key: None,
-            cached_out_image_withdraw: None,
             metal_heap_sensitive: device.backend_type() == BackendType::Metal,
             scene_growth: SceneGrowthStats::default(),
         }
@@ -636,19 +632,20 @@ impl PersistentState {
         let Some(mut submission) = self.pending_bump_submission.take() else {
             return Ok(());
         };
-        if let Some(withdraw) = self.cached_bump_withdraw.as_ref() {
+        if self.bump_host_read {
             if wait {
                 submission.wait_until_settled().map_err(Error::from)?;
             } else if !submission.is_settled() {
                 self.pending_bump_submission = Some(submission);
                 return Ok(());
             }
-            let _tz = goldy::tracy_zone!("ekrano.drain_ready_bump_readbacks.withdraw");
-            let bytes = withdraw
-                .claim(&mut submission)
-                .map_err(Error::from)?
-                .consume()
-                .map_err(Error::from)?;
+            let Some((_, bump)) = self.cached_bump.as_ref() else {
+                return Err(Error::Readback(
+                    "robust bump read requested without a cached bump buffer".into(),
+                ));
+            };
+            let _tz = goldy::tracy_zone!("ekrano.drain_ready_bump_readbacks.host_read");
+            let bytes = (&mut submission >> bump).take_bytes().map_err(Error::from)?;
             read_bump_bytes(self, &bytes);
             return Ok(());
         }

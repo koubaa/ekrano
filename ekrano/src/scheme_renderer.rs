@@ -32,8 +32,8 @@ use std::sync::Arc;
 use goldy::Buffer;
 use goldy::types::{BackendType, ResourceAccess, TextureFlags, TextureFormat, TextureKind};
 use goldy::{
-    BudgetPolicy, ComputePipeline, Context, FrameHandle, FrameOrchestrator, MemoryExchange, Runtime, Scheme,
-    ShaderModule, Signal, Texture,
+    BudgetPolicy, ComputePipeline, Context, FrameHandle, FrameOrchestrator, Runtime, Scheme, ShaderModule, Signal,
+    Texture,
 };
 
 #[cfg(feature = "debug_layers")]
@@ -96,8 +96,6 @@ pub struct SchemeRenderer {
     /// Dedicated atlas mutation scheme: dirty image deposits + multi-live GPU packs.
     /// Submitted only when an update batch is non-empty; never fused into Metal frame upload.
     atlas_update: Scheme,
-    /// Standalone scheme for headless texture withdraw (topology-invisible to the worker).
-    readback: Scheme,
     /// Mailbox ring and stable sample mirrors for externally-updated textures.
     live_textures: LiveTextureExchange,
     /// Retained packed live atlas (single- and multi-live).
@@ -158,7 +156,6 @@ impl SchemeRenderer {
         let worker = Scheme::new(&context);
         let upload = Scheme::new(&context);
         let atlas_update = Scheme::new(&context);
-        let readback = Scheme::new(&context);
         let live_textures = LiveTextureExchange::new(Arc::new(device.clone()), context.clone());
         let mut renderer = Self {
             device: device.clone(),
@@ -175,7 +172,6 @@ impl SchemeRenderer {
             worker,
             upload,
             atlas_update,
-            readback,
             live_textures,
             live_atlas: None,
             dummy_live_atlas: None,
@@ -223,7 +219,6 @@ impl Drop for SchemeRenderer {
         drop(mem::replace(&mut self.worker, Scheme::new(&ctx)));
         drop(mem::replace(&mut self.upload, Scheme::new(&ctx)));
         drop(mem::replace(&mut self.atlas_update, Scheme::new(&ctx)));
-        drop(mem::replace(&mut self.readback, Scheme::new(&ctx)));
         drop(mem::replace(&mut self.persistent, PersistentState::new(&self.device)));
         drop(self.live_atlas.take());
         drop(self.dummy_live_atlas.take());
@@ -783,7 +778,6 @@ impl SchemeRenderer {
                 Some(bump) if bump.failed != 0 => {
                     log::info!("Bump overflow in render_to_buffer (0x{:x}), retrying", bump.failed);
                     self.persistent.cached_scheme_rt = None;
-                    self.persistent.cached_out_image_withdraw = None;
                 }
                 _ => break,
             }
@@ -800,63 +794,20 @@ impl SchemeRenderer {
             );
         }
 
-        let out_handle = self
+        let out_image = self
             .persistent
             .cached_scheme_rt
             .as_ref()
             .and_then(|(t, _)| t.as_ref())
-            .map(|t| t.gpu_handle())
             .ok_or_else(|| Error::Shader("render_to_buffer: missing scheme out_image".into()))?;
-        let needs_rebind = self
-            .persistent
-            .cached_out_image_withdraw
-            .as_ref()
-            .map(|(h, _)| *h != out_handle)
-            .unwrap_or(true);
-        if needs_rebind {
-            self.readback = Scheme::new(&self.context);
-            let out_image = self
-                .persistent
-                .cached_scheme_rt
-                .as_ref()
-                .and_then(|(t, _)| t.as_ref())
-                .expect("render_to_buffer: missing scheme out_image");
-            let withdraw = MemoryExchange::new(&self.context)
-                .bind_withdraw(&mut self.readback, out_image)
-                .map_err(|e| Error::Readback(e.to_string()))?;
-            self.persistent.cached_out_image_withdraw = Some((out_handle, withdraw));
-        }
-        let withdraw = self
-            .persistent
-            .cached_out_image_withdraw
-            .as_ref()
-            .map(|(_, w)| w.clone())
-            .expect("render_to_buffer: out_image withdraw must be bound");
-        let mut submission = self.readback.submit().map_err(|e| Error::Readback(e.to_string()))?;
-        let bytes = withdraw
-            .claim(&mut submission)
-            .map_err(|e| Error::Readback(e.to_string()))?
-            .consume()
+        // Host claim waits for this submission and the texture's last write, then returns
+        // tight logical rows (pitch unpacked inside Goldy).
+        let mut scheme = Scheme::new(&self.context);
+        let mut submission = scheme.submit().map_err(|e| Error::Readback(e.to_string()))?;
+        let bytes = (&mut submission >> out_image)
+            .take_bytes()
             .map_err(|e| Error::Readback(e.to_string()))?;
-        // Texture withdraws expose tight-row RGBA (`logical_bytes`). If Goldy ever returns
-        // pitched footprint bytes instead, unpack here using the bind-time layout.
-        Ok(match withdraw.texture_layout() {
-            Some(layout)
-                if bytes.len() as u64 == layout.staging_bytes && layout.row_pitch != layout.tight_row_bytes() =>
-            {
-                let row_bytes = layout.tight_row_bytes() as usize;
-                let pitch = layout.row_pitch as usize;
-                let mut output = vec![0_u8; layout.logical_bytes as usize];
-                for row in 0..layout.height as usize {
-                    let src_offset = layout.footprint_offset as usize + row * pitch;
-                    let dst_offset = row * row_bytes;
-                    output[dst_offset..dst_offset + row_bytes]
-                        .copy_from_slice(&bytes[src_offset..src_offset + row_bytes]);
-                }
-                output
-            }
-            _ => bytes.into_vec(),
-        })
+        Ok(bytes.into_vec())
     }
 
     fn drain_ready_bump_readbacks(&mut self) -> Result<()> {
@@ -879,7 +830,7 @@ impl SchemeRenderer {
         claim.consume().map_err(Error::from)?;
         if let Some(submission) = ring_note_submission {
             self.frame_pipeline.note_presented(&submission);
-            if self.persistent.cached_bump_withdraw.is_some() {
+            if self.persistent.bump_host_read {
                 self.persistent.queue_bump_submission(submission);
             }
         }
@@ -970,7 +921,6 @@ impl SchemeRenderer {
             out_image_format,
             direct_present,
         ) {
-            self.persistent.cached_out_image_withdraw = None;
             self.device.compact_overflow_heaps();
         }
 
@@ -1118,7 +1068,7 @@ impl SchemeRenderer {
         if replace_worker_before_prepare {
             let _tz = goldy::tracy_zone!("ekrano.worker_record");
             self.worker = Scheme::new(&self.context);
-            self.persistent.cached_bump_withdraw = None;
+            self.persistent.bump_host_read = false;
             self.persistent.cached_present_tx = None;
             #[cfg(debug_assertions)]
             {
@@ -1263,7 +1213,7 @@ impl SchemeRenderer {
         if worker_stale && !replace_worker_before_prepare {
             let _tz = goldy::tracy_zone!("ekrano.worker_record");
             self.worker = Scheme::new(&self.context);
-            self.persistent.cached_bump_withdraw = None;
+            self.persistent.bump_host_read = false;
             self.persistent.cached_present_tx = None;
             #[cfg(debug_assertions)]
             {
@@ -1363,15 +1313,7 @@ impl SchemeRenderer {
                 None
             };
 
-            let bump_withdraw = if params.robust {
-                Some(
-                    MemoryExchange::new(recorder.context())
-                        .bind_withdraw(recorder.scheme(), &pipeline.bump)
-                        .map_err(Error::from)?,
-                )
-            } else {
-                None
-            };
+            let bump_host_read = params.robust;
 
             // Sticky worker retention only when the recorded graph has no one-shot
             // filter scratches. Filter frames always re-record; publishing a full
@@ -1381,7 +1323,7 @@ impl SchemeRenderer {
             // do not mutate `persistent` while `recorder` still borrows it.
             worker_cache = Some((
                 present_tx,
-                bump_withdraw,
+                bump_host_read,
                 topology,
                 layer_filter_effects.clone(),
                 out_image_handle,
@@ -1432,7 +1374,7 @@ impl SchemeRenderer {
 
         if let Some((present, bump, topology, filter_effects, out_image)) = worker_cache {
             self.persistent.cached_present_tx = present;
-            self.persistent.cached_bump_withdraw = bump;
+            self.persistent.bump_host_read = bump;
             if filter_effects.is_empty() {
                 self.persistent.cached_worker_topology = Some(topology);
                 self.persistent.cached_worker_filter_effects = filter_effects;
@@ -1464,7 +1406,7 @@ impl SchemeRenderer {
         let present_token = match (present_tx, scheme_submission) {
             (Some(tx), Some(mut submission)) => {
                 let claim = tx.claim(&mut submission).map_err(Error::from)?;
-                let queue_bump = params.robust && self.persistent.cached_bump_withdraw.is_some();
+                let queue_bump = params.robust && self.persistent.bump_host_read;
                 let note_after_present = !self.nonblocking_reuse && surface.is_some();
                 let ring_note_submission = if note_after_present {
                     Some(submission)
@@ -1480,7 +1422,7 @@ impl SchemeRenderer {
                 })
             }
             (None, Some(submission)) => {
-                if params.robust && self.persistent.cached_bump_withdraw.is_some() {
+                if params.robust && self.persistent.bump_host_read {
                     self.persistent.queue_bump_submission(submission);
                 }
                 None
@@ -1497,7 +1439,8 @@ impl SchemeRenderer {
         // deeds — re-record must mint a fresh worker with new scratch identities.
         if !self.persistent.cached_worker_filter_effects.is_empty() {
             self.worker = Scheme::new(&self.context);
-            self.persistent.cached_bump_withdraw = None;
+            // Keep bump_host_read: the queued submission still wrote cached_bump, and the
+            // host read does not belong to the worker scheme.
             // Keep cached_present_tx: present claim for this frame may still be in flight.
             #[cfg(debug_assertions)]
             {
@@ -2164,8 +2107,8 @@ mod tests {
 
     /// Worker scheme records once and resubmits on subsequent frames with stable topology.
     ///
-    /// Headless `render_to_buffer` uses a topology-invisible texture withdraw on a separate
-    /// readback scheme, so the worker is not dirtied by a foreign reader and records once.
+    /// Headless `render_to_buffer` host-claims `out_image` after submit, so the worker
+    /// is not dirtied by a foreign reader and records once.
     /// The upload scheme may still record twice from cross-scheme topology discovery:
     /// upload registers writer edges first, then the worker registers reader edges on shared
     /// parcels and Goldy dirties the upload scheme. A second upload record on frame 2 is
@@ -2279,12 +2222,12 @@ mod tests {
         assert_eq!(
             renderer.worker_replay_stats().records,
             1,
-            "render_to_buffer at new resolution: worker records once (withdraw is topology-invisible)"
+            "render_to_buffer at new resolution: worker records once (host claim is topology-invisible)"
         );
         assert_eq!(
             renderer.worker_replay_stats().topology_records,
             0,
-            "texture withdraw must not dirty worker topology after resolution change"
+            "texture host claim must not dirty worker topology after resolution change"
         );
     }
 

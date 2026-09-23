@@ -15,7 +15,7 @@ use ekrano::{AaConfig, GoldyRenderer, RenderParams, Scene};
 use ekrano_encoding::{Filter, FilterEdgeMode, FilterPrimitive};
 use ekrano_tests::{SharedTestDevice, shared_test_device, test_alloc_texture, test_device};
 use goldy::types::{TextureFlags, TextureFormat, TextureKind};
-use goldy::{MemoryExchange, Scheme};
+use goldy::Scheme;
 
 /// Serialize GPU tests when the D3D12 debug layer is active.
 #[cfg(target_os = "windows")]
@@ -49,16 +49,13 @@ fn backend_supports_rgba32float(device: &goldy::Runtime) -> bool {
         .contains(&TextureFormat::Rgba32Float)
 }
 
-/// Wait for GPU work by withdrawing the float RT. Dropping the renderer
+/// Wait for GPU work by host-claiming the float RT. Dropping the renderer
 /// without this can TDR/AV WARP (`STATUS_ACCESS_VIOLATION` in CI).
 fn readback_rgba32float(renderer: &GoldyRenderer, texture: &goldy::Texture, width: u32, height: u32) -> Vec<u8> {
     let ctx = renderer.submission_context();
     let mut scheme = Scheme::new(&ctx);
-    let grant = MemoryExchange::new(scheme.context())
-        .bind_withdraw(&mut scheme, texture)
-        .expect("withdraw float RT");
     let mut frame = scheme.submit().expect("submit readback");
-    let loan = grant.claim(&mut frame).expect("claim").consume().expect("read");
+    let loan = (&mut frame >> texture).take_bytes().expect("read");
     assert_eq!(
         loan.len(),
         (width * height * 4 * 4) as usize,

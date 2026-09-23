@@ -388,7 +388,7 @@ pub(crate) fn alloc_or_reuse_bump(recorder: &mut SchemeRecorder<'_>, size: u64) 
             record_buffer_reuse(recorder.scheme(), &buf);
             return Ok(buf);
         }
-        recorder.persistent.cached_bump_withdraw = None;
+        recorder.persistent.bump_host_read = false;
         defer_buffer_until_retired(recorder.context(), buf);
     }
     recorder
