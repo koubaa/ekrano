@@ -594,7 +594,7 @@ impl SchemeRenderer {
             live_atlas_height,
             coverage_mask: encoding.coverage_mask.clone(),
             layer_filter_effects: encoding.layer_filter_effects.clone(),
-            image_bicubic: encoding.uses_bicubic_images(),
+            rich_images: encoding.uses_rich_images(),
         })
     }
 
@@ -893,7 +893,7 @@ impl SchemeRenderer {
         let live_atlas_height = prepared.live_atlas_height;
         let coverage_mask = prepared.coverage_mask;
         let layer_filter_effects = prepared.layer_filter_effects;
-        let image_bicubic = prepared.image_bicubic;
+        let rich_images = prepared.rich_images;
         let ramps = Ramps {
             data: &ramps_data,
             width: ramps_width,
@@ -987,7 +987,7 @@ impl SchemeRenderer {
             surface.is_some(),
             direct_present,
             live_atlas.gpu_handle(),
-            image_bicubic,
+            rich_images,
         );
         let upload_key = upload_key_from(&dims);
         let upload_needs_record = crate::worker_retention::upload_stale(&self.persistent, &upload_key);
@@ -1252,7 +1252,7 @@ impl SchemeRenderer {
         );
 
         let mut render = Render::new();
-        render.image_bicubic = image_bicubic;
+        render.rich_images = rich_images;
         let mut worker_cache = None;
 
         let (t_coarse, t_fine_record) = if worker_stale {

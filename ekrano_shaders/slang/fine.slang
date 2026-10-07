@@ -612,7 +612,7 @@ CmdEndClip read_end_clip(ReadOnlyBuffer<uint> ptcl, uint cmd_ix) {
 }
 
 #ifdef image_bicubic
-// Compiled only into the `*_bicubic` fine variants: the 16-tap kernel raises register
+// Compiled only into the `*_rich_images` fine variants: the 16-tap kernel raises register
 // pressure for the whole fine kernel even when no draw takes this path.
 // Mitchell–Netravali cubic (B=1/3, C=1/3), adapted from classic Vello #1557.
 // Atlas texels are CPU-premultiplied before upload, so taps are used as-is.
@@ -1008,12 +1008,18 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
             }
             cmd_ix += 3;
         } else if (tag == CMD_IMAGE || tag == CMD_IMAGE_TINTED) {
-            bool is_tinted = tag == CMD_IMAGE_TINTED;
             CmdImage image = read_image_cmd(ptcl, info, cmd_ix);
+#ifdef image_tint
+            bool is_tinted = tag == CMD_IMAGE_TINTED;
             uint packed_tint = 0;
             if (is_tinted) {
                 packed_tint = read_image_tint(ptcl, info, cmd_ix);
             }
+#else
+            // Tint state stays out of the lean variants; see the bicubic note above.
+            const bool is_tinted = false;
+            const uint packed_tint = 0;
+#endif
             float2 atlas_max = image.atlas_offset + image.extents - 1.0;
             // Atlas texels are CPU-premultiplied before upload. Sample with explicit
             // texel Loads (not hardware bilinear): Metal vs lavapipe linear filtering

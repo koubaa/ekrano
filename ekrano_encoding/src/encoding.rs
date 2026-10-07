@@ -88,13 +88,16 @@ impl Encoding {
         self.path_tags.is_empty()
     }
 
-    /// Returns `true` if any image draw requests [`ImageQuality::High`] (bicubic) sampling.
-    pub fn uses_bicubic_images(&self) -> bool {
+    /// Returns `true` if any image draw requests [`ImageQuality::High`] (bicubic) sampling
+    /// or carries a [`Tint`].
+    pub fn uses_rich_images(&self) -> bool {
         self.resources.patches.iter().any(|patch| match patch {
             Patch::Image { draw_data_offset, .. } => self
                 .draw_data
                 .get(draw_data_offset + core::mem::offset_of!(DrawImage, sample_alpha) / 4)
-                .is_some_and(|sample_alpha| (sample_alpha >> 12) & 0x3 == ImageQuality::High as u32),
+                .is_some_and(|sample_alpha| {
+                    (sample_alpha >> 12) & 0x3 == ImageQuality::High as u32 || (sample_alpha >> 16) & 0x3 != 0
+                }),
             _ => false,
         })
     }

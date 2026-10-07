@@ -85,8 +85,8 @@ pub(crate) fn resolve_render_output<'a>(
 pub struct Render {
     fine_wg_count: Option<WorkgroupSize>,
     aa_config: AaConfig,
-    /// Select the fine variant with the bicubic image path compiled in.
-    pub(crate) image_bicubic: bool,
+    /// Select the fine variant with the bicubic and image tint paths compiled in.
+    pub(crate) rich_images: bool,
 
     #[cfg(feature = "debug_layers")]
     captured_buffers: Option<CapturedBuffers>,
@@ -131,7 +131,7 @@ impl Render {
         Self {
             fine_wg_count: None,
             aa_config: AaConfig::Area,
-            image_bicubic: false,
+            rich_images: false,
             #[cfg(feature = "debug_layers")]
             captured_buffers: None,
         }
@@ -462,12 +462,12 @@ impl Render {
         let width_in_tiles = fine_wg_count.0;
         let height_in_tiles = fine_wg_count.1;
 
-        let (plain, bicubic) = match self.aa_config {
-            AaConfig::Area => (shaders.fine_area, shaders.fine_area_bicubic),
-            AaConfig::Msaa16 => (shaders.fine_msaa16, shaders.fine_msaa16_bicubic),
-            AaConfig::Msaa8 => (shaders.fine_msaa8, shaders.fine_msaa8_bicubic),
+        let (plain, rich) = match self.aa_config {
+            AaConfig::Area => (shaders.fine_area, shaders.fine_area_rich_images),
+            AaConfig::Msaa16 => (shaders.fine_msaa16, shaders.fine_msaa16_rich_images),
+            AaConfig::Msaa8 => (shaders.fine_msaa8, shaders.fine_msaa8_rich_images),
         };
-        let shader = if self.image_bicubic { bicubic } else { plain }
+        let shader = if self.rich_images { rich } else { plain }
             .unwrap_or_else(|| panic!("shaders not configured to support AA mode: {:?}", self.aa_config));
 
         // Obtain a persistent mask LUT buffer for MSAA modes. The LUT is static

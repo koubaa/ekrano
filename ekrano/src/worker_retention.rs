@@ -47,8 +47,8 @@ pub(crate) struct WorkerTopology {
     pub live_atlas_height: u32,
     /// Actual bound live-atlas texture handle; distinguishes single-live bindings.
     pub live_atlas_handle: goldy::TextureHandle,
-    /// Fine dispatch was recorded with the bicubic variant.
-    pub image_bicubic: bool,
+    /// Fine dispatch was recorded with the rich-images variant.
+    pub rich_images: bool,
 }
 
 /// Normalized atlas / scene dimensions shared by retention keys and prepare.
@@ -146,7 +146,7 @@ pub(crate) fn worker_topology(
     swapchain_present: bool,
     direct_present: bool,
     live_atlas_handle: goldy::TextureHandle,
-    image_bicubic: bool,
+    rich_images: bool,
 ) -> WorkerTopology {
     WorkerTopology {
         aa: params.antialiasing_method,
@@ -169,7 +169,7 @@ pub(crate) fn worker_topology(
         live_atlas_width: dims.live_atlas_width,
         live_atlas_height: dims.live_atlas_height,
         live_atlas_handle,
-        image_bicubic,
+        rich_images,
     }
 }
 
@@ -838,7 +838,7 @@ mod tests {
             live_atlas_width: 1,
             live_atlas_height: 1,
             live_atlas_handle: 1,
-            image_bicubic: false,
+            rich_images: false,
         }
     }
 
