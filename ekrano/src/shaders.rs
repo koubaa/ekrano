@@ -35,6 +35,11 @@ pub struct FullShaders {
     pub fine_area: Option<ShaderId>,
     pub fine_msaa8: Option<ShaderId>,
     pub fine_msaa16: Option<ShaderId>,
+    /// Fine variants with the bicubic (`ImageQuality::High`) image path compiled in.
+    /// Selected only for scenes that request it; the plain variants sample High as bilinear.
+    pub fine_area_bicubic: Option<ShaderId>,
+    pub fine_msaa8_bicubic: Option<ShaderId>,
+    pub fine_msaa16_bicubic: Option<ShaderId>,
     /// Full-frame filter chain after fine raster (optional).
     pub filter_pass: Option<ShaderId>,
 }
@@ -67,6 +72,9 @@ impl FullShaders {
             fine_area: None,
             fine_msaa8: None,
             fine_msaa16: None,
+            fine_area_bicubic: None,
+            fine_msaa8_bicubic: None,
+            fine_msaa16_bicubic: None,
             filter_pass: None,
         }
     }
@@ -322,6 +330,34 @@ pub(crate) fn goldy_full_shaders_scheme(
             sw_opt,
         )
         .ok();
+    let fine_area_bicubic = Some(renderer.add_compute_shader_with_options(
+        "fine_area_bicubic",
+        ekrano_shaders::slang::FINE,
+        &fine_resources,
+        &search_paths,
+        &[("image_bicubic", "1")],
+        sw_opt,
+    )?);
+    let fine_msaa8_bicubic = renderer
+        .add_compute_shader_with_options(
+            "fine_msaa8_bicubic",
+            ekrano_shaders::slang::FINE,
+            &fine_msaa_resources,
+            &search_paths,
+            &[("msaa", "1"), ("msaa8", "1"), ("image_bicubic", "1")],
+            sw_opt,
+        )
+        .ok();
+    let fine_msaa16_bicubic = renderer
+        .add_compute_shader_with_options(
+            "fine_msaa16_bicubic",
+            ekrano_shaders::slang::FINE,
+            &fine_msaa_resources,
+            &search_paths,
+            &[("msaa", "1"), ("msaa16", "1"), ("image_bicubic", "1")],
+            sw_opt,
+        )
+        .ok();
 
     let filter_pass = match renderer.add_compute_shader(
         "filter_pass",
@@ -367,6 +403,9 @@ pub(crate) fn goldy_full_shaders_scheme(
         fine_area,
         fine_msaa8,
         fine_msaa16,
+        fine_area_bicubic,
+        fine_msaa8_bicubic,
+        fine_msaa16_bicubic,
         filter_pass,
     })
 }

@@ -11,8 +11,8 @@ use super::{
 use peniko::color::{DynamicColor, palette};
 use peniko::kurbo::{Shape, Stroke};
 use peniko::{
-    BlendMode, BrushRef, ColorStop, Extend, Fill, GradientKind, ImageBrushRef, ImageSampler, InterpolationAlphaSpace,
-    LinearGradientPosition, RadialGradientPosition, SweepGradientPosition,
+    BlendMode, BrushRef, ColorStop, Extend, Fill, GradientKind, ImageBrushRef, ImageQuality, ImageSampler,
+    InterpolationAlphaSpace, LinearGradientPosition, RadialGradientPosition, SweepGradientPosition,
 };
 
 /// Encoded data streams for a scene.
@@ -86,6 +86,17 @@ impl Encoding {
     /// Returns `true` if the encoding is empty.
     pub fn is_empty(&self) -> bool {
         self.path_tags.is_empty()
+    }
+
+    /// Returns `true` if any image draw requests [`ImageQuality::High`] (bicubic) sampling.
+    pub fn uses_bicubic_images(&self) -> bool {
+        self.resources.patches.iter().any(|patch| match patch {
+            Patch::Image { draw_data_offset, .. } => self
+                .draw_data
+                .get(draw_data_offset + core::mem::offset_of!(DrawImage, sample_alpha) / 4)
+                .is_some_and(|sample_alpha| (sample_alpha >> 12) & 0x3 == ImageQuality::High as u32),
+            _ => false,
+        })
     }
 
     #[doc(alias = "clear")]

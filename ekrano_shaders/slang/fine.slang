@@ -611,6 +611,9 @@ CmdEndClip read_end_clip(ReadOnlyBuffer<uint> ptcl, uint cmd_ix) {
     return e;
 }
 
+#ifdef image_bicubic
+// Compiled only into the `*_bicubic` fine variants: the 16-tap kernel raises register
+// pressure for the whole fine kernel even when no draw takes this path.
 // Mitchell–Netravali cubic (B=1/3, C=1/3), adapted from classic Vello #1557.
 // Atlas texels are CPU-premultiplied before upload, so taps are used as-is.
 float cubic_single_weight(float t, float a, float b, float c, float d) {
@@ -666,6 +669,7 @@ float4 bicubic_sample(Interpolated<float4> atlas, float2 coords, float2 atlas_of
     float a = clamp(result.a, 0.0, 1.0);
     return float4(clamp(result.rgb, float3(0.0, 0.0, 0.0), float3(a, a, a)), a);
 }
+#endif
 
 float hypot_fine(float a, float b) {
     return sqrt(a * a + b * b);
@@ -1040,6 +1044,7 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
                             : blend_mix_compose(rgba[i], fg_i, draw_blend);
                     }
                 }
+#ifdef image_bicubic
             } else if (image.quality == IMAGE_QUALITY_HIGH) {
                 // Bicubic Mitchell–Netravali (classic Vello #1557). Pixel-center
                 // sample from #1606; atlas offset has no −0.5 (kernel uses fract(+0.5)).
@@ -1064,6 +1069,7 @@ void cs_main(BufRO<Config> config_buf, BufRO<Segment> segments,
                             : blend_mix_compose(rgba[i], fg_i, draw_blend);
                     }
                 }
+#endif
             } else {
                 // Bilinear (matches original Vello fine shader IMAGE_QUALITY_MEDIUM)
                 for (uint i = 0; i < 4; i++) {

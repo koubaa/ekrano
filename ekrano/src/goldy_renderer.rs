@@ -241,6 +241,8 @@ pub struct PreparedFrame {
     /// Owned copy of `Encoding::layer_filter_effects` — used by `record_fine` and
     /// `record_filter_effects`.
     pub(crate) layer_filter_effects: Vec<ekrano_encoding::LayerFilterEffect>,
+    /// Some image draw requests bicubic sampling; selects the `*_bicubic` fine variant.
+    pub(crate) image_bicubic: bool,
 }
 
 impl PreparedFrame {
