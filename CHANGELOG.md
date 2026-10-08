@@ -18,6 +18,7 @@ This release has an [MSRV][] of 1.92.
 ### Added
 
 - Image tinting with alpha-mask and component-wise multiply modes.
+- Fine rasterizer compiles bicubic sampling and image tinting into a `*_rich_images` shader variant, selected only when a scene uses those features.
 - Gradient interpolation in unpremultiplied alpha space (`InterpolationAlphaSpace::Unpremultiplied`). Premultiplied remains the default.
 
 ### Removed
