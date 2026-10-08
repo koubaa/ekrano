@@ -14,8 +14,8 @@ use ekrano::peniko::{Fill, color::palette};
 use ekrano::{AaConfig, GoldyRenderer, RenderParams, Scene};
 use ekrano_encoding::{Filter, FilterEdgeMode, FilterPrimitive};
 use ekrano_tests::{SharedTestDevice, shared_test_device, test_alloc_texture, test_device};
-use goldy::types::{TextureFlags, TextureFormat, TextureKind};
 use goldy::Scheme;
+use goldy::types::{TextureFlags, TextureFormat, TextureKind};
 
 /// Serialize GPU tests when the D3D12 debug layer is active.
 #[cfg(target_os = "windows")]
